@@ -83,7 +83,7 @@ creation and at restore.
 | `B:TimelineIdentity` | The line's own id. |
 | `B:BranchLifecycle` | Wait for the branch to be Active before resolving its role and writing. |
 | `S:TreeCommands` | `info` for the role and its lines; `head`, the crate-internal `turn_ends` and the parent's new-activity check for the parent block; `input` for every write. |
-| `S:GuideEntries` | Register the roster and message entries on every line, and the parent entry only on a line that has a parent, until this part unloads. |
+| `S:GuideEntries` | Register the roster and message entries on every line, until this part unloads. |
 
 ### Events and lifetime
 

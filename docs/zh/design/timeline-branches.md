@@ -209,7 +209,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - **检查方式。** 父线的事实通过唯一的事件查询读取（[ADR 019](../adr/019-event-query.md)）：该分支的 `input/message` 和 `step/tool-use` 事件，从新到旧分页，直到有一个符合条件，或读取到达 `from`。不折叠任何其他线的事件。
 - **写入。** 一条带 key 的 Append，key 为 `branch:parent`，经 `TreeCommands.input` 写在这条线自己身上，属性是父线的 id、`head` 和 `after`。同一 key 的后一个块会在带 key 的基线里取代前一个。写完之后折叠记下新头部和新输入，所以队列里的第二次决定不会再写。
 - **随后发生什么。** 运行中的线在下一次模型请求时拿到这个块。空闲的线不会被唤醒：这个块在它下一轮的第一个请求里、先于开启那一轮的输入被消费，这是有文档记录的 Append 规则（[session access](contracts/session-access.md)、[Loop](../../architecture/rust-agent/plugins/Loop.md)）。重载不写任何东西；重启最多写当时已经该写的那个块。`main` 拿不到块：它上面没有东西。
-- **记录。** 这条线把自己发送的 System 记为自己的配置：父线条目从线开启时就在生效，线的 `context/configured` 在第一次请求之前就带着组合后的 System。
+- **记录。** 这条线发送的是它自己配置里持有的 System。指南在每条线上都一样（§7.3），所以 System 没有相对继承来的那份发生移动的线，引用的是记录它的那份配置，无论记录在哪条线的链上；线的 System 移动时，它像任何分支一样写出自己的 `context/configured`。
 - **被否决的替代方案。**
   - 在线自己一轮结束时写，错过了这个变化存在的场景：线结束一轮，父线继续，随后用户或父线来找这条线。那一轮不携带块。
   - 在线一轮开始时或它的请求之间写，是在请求准备好之后才响应事件；一条已提交的 Append 可能落在它本该服务的那次请求之后，而且需要 Loop 里的钩子。
@@ -246,6 +246,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - 身份块是子分支自己的第一个事件，紧跟在继承的前缀之后。所以子分支的第一次请求能复用父分支到切点为止的前缀。
 - 名册更新是追加在 `main` 历史末尾的 Append。
 - 父线块是追加在这条线自己历史末尾的 Append，所以它们从不移动任何线继承的前缀。
+- 指南在每条线上都一样，包括父线块的条目。
 
 ### 7.4 Goal 与 Pursuit
 
@@ -439,7 +440,7 @@ WorkspaceTools 不变。
 - **通知的事实句。** "Line C's turn ended (<status>) without a message to you, and C is waiting." 与 "Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages"。
 - **branch 工具的动作与模式。** 动作 `create`、`message`、`read`、`end` 及各自做什么；`mode` 为 `append` 或 `steer` 及它对接收方的作用；每个动作接收的字段，`action` 必填且不接受别的字段；`read` 的目标规则及其游标规则（"With no after, a read continues after your last read of that line"）；以及陈述保证的句子："Returns the line's id"、"Pass after to read from another point"、"It is your last action"、"A line reads the line it was cut from; main reads the lines it opened. Messages pass only between main and the lines it opened."。
 - **结果与拒绝。** `Line created: C`、`Sent to C.`、页 `{items, nextCursor, done}`、`Line C is ending; your final message was sent to P.` 与 `Line C ends with this message.`；拒绝码 `branch_not_main`、`branch_not_kin`、`branch_not_tool_line`、`branch_ended`、`branch_cannot_end` 及各自的文本；`after A is past line T's head H; a read starts at or below H`，即读取在 `after` 超过目标头部时返回的错误结果，不带代码；以及 `Invalid branch arguments: …`。
-- **指南条目。** 每个条目标明它的标记是什么、承载谁的话或哪些事实，以及它是状态或信息、绝不是请求。`<dim-branch-line>` 的条目说明后出现的同名块会取代它，它归 TimelineTree——每段身份块都由它写——所以在任何执行配置下都在位。`<dim-branch-lines>`、`<dim-branch-idle>` 和 `<dim-branch-ended>` 的条目归 BranchLine，名册和两条通知都由它写；`<dim-branch-message>` 的条目与它们一起注册，因为 BranchLine 恰好在写消息的 BranchTool 所在之处加载。`<dim-branch-parent>` 的条目只在有父线的线上在位，因为只有这样的线收得到这个块：`main` 从不收到它，而组合一个永远不会出现的条目只会白白撑大 `main` 的指南。名册条目和消息条目在每条线上都在。
+- **指南条目。** 每个条目标明它的标记是什么、承载谁的话或哪些事实，以及它是状态或信息、绝不是请求。`<dim-branch-line>` 的条目说明后出现的同名块会取代它，它归 TimelineTree——每段身份块都由它写——所以在任何执行配置下都在位。`<dim-branch-lines>`、`<dim-branch-idle>` 和 `<dim-branch-ended>` 的条目归 BranchLine，名册和两条通知都由它写；`<dim-branch-message>` 的条目与它们一起注册，因为 BranchLine 恰好在写消息的 BranchTool 所在之处加载。`<dim-branch-parent>` 的条目与它一起归 TimelineTree，按 `session` 作用域注册，和 Goal 的一样（[Goal §A.5.1](plugins/Goal.md#a51-协议与策略)），因为一条线的 System 必须等于它父线的 System（§7.3）：它在 `main` 上同样在位，尽管 `main` 从不收到这个块。名册条目和消息条目在每条线上都在。
 
 **策略。**
 

@@ -2092,8 +2092,8 @@ async fn each_branch_keeps_its_own_entries() {
         "the line was cut from main, so its guide explains the parent block: {line:?}"
     );
     assert!(
-        !guide_of(&main).contains("<dim-branch-parent"),
-        "nothing is above main, so its guide carries no parent entry: {main:?}"
+        guide_of(&main).contains("<dim-branch-parent"),
+        "the parent entry registers for the Session, so main carries it too: {main:?}"
     );
 
     // Ending the line withdraws its entries and leaves main's unchanged.

@@ -3500,10 +3500,13 @@ async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
     let child = open_line(&session, "watch the tests").await;
     soon(session.idle("main")).await.unwrap();
 
-    // main writes the roster and sees it: its marker and its entry.
+    // main writes the roster and sees it: its marker and its entry. The
+    // entries registered for the whole Session are on main too.
     let main = last_system(&session, "main").await;
     assert_eq!(main.matches(IDENTITY_ENTRY).count(), 1, "{main:?}");
     assert_eq!(main.matches(ROSTER_ENTRY).count(), 1, "{main:?}");
+    assert_eq!(main.matches(MESSAGE_ENTRY).count(), 1, "{main:?}");
+    assert_eq!(main.matches(PARENT_ENTRY).count(), 1, "{main:?}");
     let roster = line_block(&chain_events(&session, "main", ..).await.unwrap());
     assert!(roster.is_some_and(|(text, _)| text.starts_with("<dim-branch-lines")));
 
@@ -3516,53 +3519,60 @@ async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
     )));
     let line = last_system(&session, &child).await;
     assert_eq!(line.matches(IDENTITY_ENTRY).count(), 1, "{line:?}");
+    assert_eq!(line.matches(PARENT_ENTRY).count(), 1, "{line:?}");
     soon(agent.close()).await.unwrap();
 }
 
-/// #987: composing an entry that can never appear grows the guide, so the
-/// parent entry is in force only on a line that has a parent: main's guide is
-/// unchanged, and the roster and message entries stay on every line.
+/// The system of a branch's first model call on the branch itself.
+async fn first_system(session: &Session, branch: &str) -> String {
+    local_events(session, branch)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.system.as_deref().map(system_text),
+            _ => None,
+        })
+        .expect("the first model call carries the system")
+}
+
+/// The system of a branch's last model call at or before `sequence`.
+async fn system_at(session: &Session, branch: &str, sequence: u64) -> String {
+    local_events(session, branch)
+        .await
+        .iter()
+        .filter(|event| event.sequence <= sequence)
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.system.as_deref().map(system_text),
+            _ => None,
+        })
+        .expect("a model call at the cut carries the system")
+}
+
+/// A child's first request reuses its parent's cached prefix: its System is
+/// the parent's System in the request that opened it, byte for byte
+/// ([§7.3](../../docs/design/timeline-branches.md#73-cache-prefix)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn main_carries_no_parent_entry_and_a_line_does() {
+async fn a_childs_first_system_is_its_parents_at_the_cut() {
     let probe = Arc::new(Probe::default());
     let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
-    // A session with no lines: main can never receive the block.
-    soon(session.submit("hello".into(), InputMode::Queue, "main"))
-        .await
+    let child = open_line(&session, "watch the tests").await;
+    let opened = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id == child)
+        .unwrap()
+        .create_anchor
         .unwrap();
-    soon(session.idle("main")).await.unwrap();
-    let main = last_system(&session, "main").await;
-    assert_eq!(main.matches(PARENT_ENTRY).count(), 0, "{main:?}");
-    assert_eq!(main.matches(ROSTER_ENTRY).count(), 1, "{main:?}");
-    assert_eq!(main.matches(MESSAGE_ENTRY).count(), 1, "{main:?}");
-
-    // A tool line and a host line both have a parent and carry the entry.
-    let tool = open_line(&session, "watch the tests").await;
-    soon(session.idle(&tool)).await.unwrap();
-    let line = last_system(&session, &tool).await;
-    assert_eq!(line.matches(PARENT_ENTRY).count(), 1, "{line:?}");
-
-    let at = {
-        soon(session.idle("main")).await.unwrap();
-        session.sequence("main").unwrap()
-    };
-    let host = soon(session.branch("main".into(), at, options("watch the tests")))
-        .await
-        .unwrap();
-    soon(session.idle(&host)).await.unwrap();
-    let line = last_system(&session, &host).await;
-    assert_eq!(line.matches(PARENT_ENTRY).count(), 1, "{line:?}");
-
-    // Main still carries none once lines exist.
-    soon(session.submit("hello again".into(), InputMode::Queue, "main"))
-        .await
-        .unwrap();
-    soon(session.idle("main")).await.unwrap();
-    let main = last_system(&session, "main").await;
-    assert_eq!(main.matches(PARENT_ENTRY).count(), 0, "{main:?}");
+    let parent = system_at(&session, "main", opened).await;
+    let first = first_system(&session, &child).await;
+    assert_eq!(
+        first, parent,
+        "the child's first System is its parent's at the cut"
+    );
     soon(agent.close()).await.unwrap();
 }
 

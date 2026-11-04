@@ -673,9 +673,10 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
         assert_eq!(
             first_call.configuration,
             Some(PromptReference {
-                timeline: child.clone(),
-                revision: child_configured.revision.clone(),
-            })
+                timeline: version_one.timeline.clone(),
+                revision: version_one.revision.clone(),
+            }),
+            "the prepared call keeps the configuration it was prepared with"
         );
         assert_eq!(first_call.prompt, version_one.prompt);
 
@@ -723,10 +724,10 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
     }
 }
 
-/// A line records the System it sends as its own configuration. The parent
-/// block reaches the line between two of its turns; each request sends the
-/// System its `configuration` reference holds, and each reference is on the
-/// line.
+/// A line sends the System its configuration holds. The parent block reaches
+/// the line between two of its turns; each request sends the System its
+/// `configuration` reference holds, and each reference resolves in the line's
+/// chain, which holds the configuration the line inherited.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_line_records_the_system_it_sends_across_a_parent_block() {
     let host = Arc::new(Prompts(Mutex::new(BTreeMap::new())));
@@ -785,6 +786,7 @@ async fn a_line_records_the_system_it_sends_across_a_parent_block() {
     session.idle(&child).await.unwrap();
 
     let events = branch_events(&session, &child, ..).await.unwrap();
+    let chain = chain_events(&session, &child, ..).await.unwrap();
     let calls: Vec<(u64, &ModelCallData)> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -815,11 +817,7 @@ async fn a_line_records_the_system_it_sends_across_a_parent_block() {
             .configuration
             .as_ref()
             .unwrap_or_else(|| panic!("the request at {sequence} references a configuration"));
-        assert_eq!(
-            reference.timeline, child,
-            "the request at {sequence} references a configuration on the line"
-        );
-        let configured = events
+        let configured = chain
             .iter()
             .find_map(|event| match &event.kind {
                 EventKind::ContextConfigured(data)

@@ -1772,6 +1772,15 @@ impl DynPlugin for TimelineTreePlugin {
                     text: IDENTITY_ENTRY.into(),
                 },
             )?;
+            guide.register(
+                ctx,
+                GuideScope::Session,
+                GuideEntry {
+                    markers: vec!["dim-branch-parent".into()],
+                    order: 45,
+                    text: PARENT_ENTRY.into(),
+                },
+            )?;
             let tree = TimelineTree::new(factory, store, identity.session_id.clone());
             let owner = tree.clone();
             ctx.effect(move || async move { owner.close().await.map_err(Into::into) })?;
@@ -1977,23 +1986,6 @@ impl DynPlugin for BranchLinePlugin {
                         markers: markers.into_iter().map(str::to_owned).collect(),
                         order,
                         text: text.into(),
-                    },
-                )?;
-            }
-            // Only a line with a parent can receive the parent block, and
-            // composing an entry that can never appear only grows the guide.
-            let parent = tree
-                .info(identity.branch_id.clone())
-                .ok()
-                .and_then(|info| info.parent);
-            if parent.is_some() {
-                guide.register(
-                    ctx,
-                    scope,
-                    GuideEntry {
-                        markers: vec!["dim-branch-parent".into()],
-                        order: 45,
-                        text: PARENT_ENTRY.into(),
                     },
                 )?;
             }

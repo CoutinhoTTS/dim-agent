@@ -22,7 +22,7 @@ block and the branch markers — with their classes are listed on
 | `S:TimelineFactory` | Build branch capability scopes. |
 | `S:SessionIdentity` | Identify the persisted Session. |
 | `S:dyn TimelineStore` | Persist/load branch directories and timeline facts. |
-| `S:GuideEntries` | Register the `<dim-branch-line>` entry, until this part unloads. |
+| `S:GuideEntries` | Register the `<dim-branch-line>` and `<dim-branch-parent>` entries for the Session, until this part unloads. |
 
 ### Events and lifetime
 
