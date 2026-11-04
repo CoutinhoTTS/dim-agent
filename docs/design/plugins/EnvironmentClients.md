@@ -2,189 +2,193 @@
 
 Status: Draft. Parent: [agent environment awareness](../agent-environment.md). Issue: [#1019](https://github.com/arcships/dim/issues/1019). Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §4 and §5, [ADR 002](../../adr/002-plugin-scope.md), [model-facing prompts](../model-prompts.md). Language: Rust.
 
-EnvironmentClients tells the model who is attached to its Session: how many clients, by channel, and (only if later promoted) whether anyone is viewing the current line. It is a read projection of the App Server's connection and UI registries; it owns no connection state. The Session and branch plugins are registered by the existing `ConnectionPlugin`; there is no separate process plugin for this projection.
+EnvironmentClients tells the model which client connections are attached to its Session. It is a read projection of the App Server's connection and UI registries; it owns no connection state. The snapshot is appended directly to the branch input. It is not a Prompt source and has no version, keyed state or compaction replay.
 
-## 1. Scope and non-goals
+## 1. Decisions
 
-Owns:
+- One snapshot at branch open, and one snapshot per observed connection change.
+- The snapshot is an `input/append` Raw block.
+- No `PromptRegistry`, `LoadPrompt`, `ConfigureControl`, version or replay.
+- The projection is Session-level. It does not say which branch a client views.
+- Per-message input origin is deferred; repeating an origin on every message is too redundant.
+- The body lists connections, not people. A claimed label is not an authenticated identity.
+- Only the matching Session receives the snapshot; no broadcast.
 
-- the process host contract `sessionClientsHost` that answers a per-Session client count;
-- the prompt source `dim/environment/clients` and its body;
-- the branch trigger that adopts the source when the operator's input arrives, and at branch open.
+## 2. Snapshot body
 
-Does not own:
-
-- connection lifecycle, attach/detach, UI leaf lifecycle or the `ui.*` methods; those stay in Connection and UiHost;
-- the client view (line); that is [ClientView](ClientView.md);
-- client capabilities; that is a later design;
-- approvals, questions, `interactive` or permission.
-
-## 2. Own contract
-
-### 2.1 The `sessionClientsHost` host
-
-| Element | Form |
-| --- | --- |
-| Service | `sessionClientsHost`, process scope, read-only |
-| Method | `counts {sessionId}` → `{total, byChannel}` |
-| `total` | Number of attached clients, one per client, not per connection |
-| `byChannel` | Map from channel name to count, sorted by channel |
-| Channels | `tui`, `cli`, `web`, `acp`, `remote`, `desktop`, `unknown` |
-| Errors | None for a read; an unloaded App Server means the service is absent |
-| Cancellation | None; the read is a snapshot of in-memory registries |
-
-A client is one attached connection, except that a UI leaf and the connection its `Tui` uses are one `tui` client. The count is computed on demand from the existing connection and UI registries; there is no second registry and no attach/detach bookkeeping.
-
-### 2.2 Channel mapping
-
-| Condition | Channel |
-| --- | --- |
-| The connection is the connection of a registered UI leaf (`UiHost` instance) | `tui` |
-| `hello.clientKind = cli` and no UI leaf | `cli` |
-| `hello.clientKind = web` | `web` |
-| `hello.clientKind = other` and the client name is the ACP gateway | `acp` |
-| `hello.clientKind = other` with a recognized desktop client name | `desktop` |
-| A paired remote device connection (P3) | `remote` |
-| Anything else | `unknown` |
-
-`hello.clientKind` and `hello.clientName` are stored on the connection at hello. They are informational; the channel is not an authorization and not a durable identity. A UI leaf wins over its connection's `cli` kind.
-
-### 2.3 The prompt source
-
-| Field | Value |
-| --- | --- |
-| Name | `dim/environment/clients` |
-| Delivery | `State` (`<dim-state>`) |
-| Order | `230`, after the date (`210`) and before Skills (`300`) |
-| Author | Connection owner; projection by EnvironmentClients |
-| Class | Fact |
-| Lifecycle | Registered by the Session part from `apply`, withdrawn with it |
-
-The body is one of:
+No connection:
 
 ```text
-No client is attached.
+<dim-state source="dim/environment/clients">No client connection is attached.</dim-state>
 ```
+
+One connection:
 
 ```text
-1 client attached: 1 tui.
+<dim-state source="dim/environment/clients">1 client connection attached:
+- tui "eric@laptop" (claimed)</dim-state>
 ```
+
+Several connections:
 
 ```text
-2 clients attached: 1 tui, 1 web.
+<dim-state source="dim/environment/clients">3 client connections attached:
+- tui "eric@laptop" (claimed)
+- tui
+- web "alice" (claimed)</dim-state>
 ```
 
-The count is by channel, sorted by channel name. The body carries no label, client name, connection id, `uiId`, attach time, revision or "last departure". If a client view is later promoted, the same body appends one sentence: `1 client is viewing this line.` or `No client is viewing this line.` ([ClientView](ClientView.md)).
+Rules:
 
-The body is final text. It is generated from the counts only; no external content is interpolated, so no escaping is needed today. If a client name is added later, the owner escapes it with `context_block` and bounds its length.
+- One line per connection. Do not collapse TUI connections into a channel count.
+- A missing label leaves the channel alone; no empty quotes.
+- `(claimed)` marks a self-declared `clientName`; it is not an identity.
+- Escape quotes, backslashes and control characters; cap a label at 64 characters.
+- The body states connections; it does not claim how many people are present.
+- No ids, device names, entry names, attach times or departure history.
 
-### 2.4 Adoption
+## 3. Data
 
-- The Session part registers the source; the initial configuration adopts it at branch open.
-- The branch part listens to the process-bus `ClientsChanged` fact for its Session. Each fact asks Prompt to adopt the source through `ConfigureControl::configure(targets([SOURCE]))`; the handler spawns a tracked task and returns.
-- App Server emits `ClientsChanged` when a client attaches, detaches, or a UI leaf changes. The branch part does not read the connection registry itself.
-- Prompt refuses an adoption after the branch closes, so no write follows close. The design accepts a one-request lag when a client changes and immediately sends.
+The App Server stores, per connection:
 
-## 3. Events and state
+```text
+ClientIdentity {
+  channel: ClientChannel,
+  label: Option<String>,
+}
+```
 
-No Timeline event is written or consumed. Presence is process state: connections, UI instances and their counts. It is read when the source is loaded and when a branch adopts; it is not persisted and not replayed.
+The process port returns the current list:
 
-A restored branch loads the source at `branch/resume`; the body is the current count, not the count at the cut. A closing branch adopts nothing.
+```text
+ClientPresence {
+  channel: ClientChannel,
+  label: Option<String>,
+}
 
-## 4. Dependencies
+SessionClientsHost::presences(session_id) -> Vec<ClientPresence>
+```
 
-| Service | Purpose |
+A UI leaf takes the label of the connection that hosts it; without one, only the channel is present.
+
+## 4. Channels
+
+| Channel | Source |
 | --- | --- |
-| `P:SessionClientsHost` | The App Server read-only counts |
-| `S:SessionIdentity` | The Session id the source reads |
-| `S:PromptRegistry` | Register the source |
-| process bus (`ClientsChanged`) | Wake on a client change |
-| `B:dyn ConfigureControl` | Adopt the source |
+| `tui` | A registered UI leaf |
+| `cli` | `hello.clientKind = cli` |
+| `web` | `hello.clientKind = web` |
+| `acp` | `other` + `clientName = AcpGateway` |
+| `desktop` | `other` + `clientName = Desktop` or `dim-desktop` |
+| `unknown` | Another `other`, or before `hello` |
+| `remote` | Reserved; no producer yet, not reported |
 
-The feature is installed only by an assembly that provides `SessionClientsHost` (the App Server daemon profile). A native/direct profile installs neither the host nor the parts; the model sees no presence block.
+A UI leaf is not counted again as `cli`. Its underlying line connection may also be attached and counted as `cli`; the two entries are kept, because the body counts connections.
 
-## 5. Absence, errors and empty
+An ACP gateway is one connection. Several logical clients behind the gateway are not distinguished; the label, if any, is the gateway's.
+
+## 5. Trigger and append
+
+### Branch open
+
+The branch part appends the current snapshot once after publication.
+
+### Connection change
+
+App Server emits:
+
+```text
+ClientsChanged { session_id }
+```
+
+The branch part:
+
+- ignores events for another Session;
+- reads the current presence list;
+- builds the body;
+- appends only when the body differs from the last appended body.
+
+No polling. No Timeline event. No broadcast.
+
+A change that arrives during a turn is appended when it arrives. The input-ordering consequence is tracked separately; this design does not work around it.
+
+## 6. Plugin structure
+
+- `ConnectionPlugin` provides `SessionClientsHost`.
+- `ConnectionPlugin` emits `ClientsChanged` on attach, detach, UI attach/close/replace and connection finish.
+- `ConnectionPlugin` registers one branch part: `EnvironmentClientsBranch`.
+- There is no Session part for this projection.
+- No new process plugin.
+
+## 7. Privacy
+
+- The model sees channel and an optional claimed label only.
+- No client id, device id, token, entry name or connection id.
+- A label is untrusted text: escaped and bounded.
+- Presence grants no permission and changes no approval.
+
+## 8. Errors and absence
 
 | Situation | Result |
 | --- | --- |
-| No `SessionClientsHost` | The feature is not installed; no source, no block |
-| Counts are zero | `No client is attached.` (a fact, not `cleared`) |
-| The host is being reloaded | No new block; the last adopted block stays |
-| The branch is closing | No adoption |
-| A leaf is `starting` and has not attached | Not counted as a viewer yet; the caller connection that opened it is counted under its own channel. Whether the caller remains a separate client after the leaf attaches is an open decision (§10) |
+| No connection | One snapshot saying so |
+| Presence read fails | Log; append nothing; the earlier snapshot stays |
+| Body unchanged | Append nothing |
+| Branch closing | Append nothing |
+| Label missing | Channel only |
+| Remote connection | Not reported until a producer exists |
 
-`cleared="true"` is never used for presence. It would say the state no longer applies; an empty client set is a real situation.
+## 9. Dependencies
 
-## 6. Noise and identity
+| Dependency | Purpose |
+| --- | --- |
+| `SessionClientsHost` | Read the current connections |
+| The branch's input path | Append the snapshot |
+| Process bus (`ClientsChanged`) | Wake on a connection change |
 
-- One block per change at most, and only when the count changed.
-- Per-branch local copies are expected: every open line has its own branch part and its own block.
-- No client roster, labels, ids, times or departure history in the model body. Management/UI may read more through its own surface.
-- No token, device id or device name. The remote channel is named only as `remote`.
-- A client's `hello` identity is not durable; after a daemon restart, reconnections are new clients.
+No Prompt registry, no configure control, no version.
 
-## 7. Cross-module requirements
-
-### 7.1 App Server
-
-- Store `hello.clientKind` and `hello.clientName` on the connection at hello.
-- Add a per-Session count query to the existing connection registry, using the UI registry to mark a leaf's connection as `tui`.
-- Provide `SessionClientsHost` from the process part that already owns the connection hub; no new plugin and no second registry.
-- Keep the count out of `SessionInfo`; the model-facing projection is the state source. A management read may reuse the same query later.
-
-### 7.2 RemoteGateway
-
-Its document says the model never sees device ids, names, tokens, entry names or diagnostics. A `remote` channel count violates none of that; the owner updates the sentence to allow the channel label and confirms it.
-
-### 7.3 Clients
-
-No client change is required for the count. Line view is [ClientView](ClientView.md).
-
-## 8. Rule check
+## 10. Rule check
 
 | Rule | How this design complies |
 | --- | --- |
-| §1 Parts bounded | Session part registers the source; branch part adopts; the App Server host is process state. No wiring module. |
-| §4 rule 1 Command events | No other module's state is changed. |
-| §4 rule 2 Handover | No handover; presence does not control a turn. |
-| §4 rule 3 Before callbacks | None. The Dispatcher handler spawns a tracked adoption and returns. |
-| §4 rule 4 Core carries no business meaning | The host returns generic counts; the source owns the wording. |
-| §4 rule 5 Batch | No new facts. |
-| §4 rule 6 Context from consumed events | The block is an adopted input; no second path. |
-| §4 rule 7 Public services | `sessionClientsHost` is a named process service; the source is a registered prompt source. |
+| §1 Parts bounded | The connection registries stay with the App Server; the branch part only appends a snapshot. |
+| §4 rule 1 Command events | Presence changes no state. |
+| §4 rule 2 Handover | No handover. |
+| §4 rule 3 Before callbacks | The branch part appends in its own task; the event handler only wakes it. |
+| §4 rule 4 Core carries no business meaning | The body is the App Server projection; no core branch. |
+| §4 rule 5 Batch | A snapshot is one branch input. |
+| §4 rule 6 Context from consumed events | The snapshot is an input; no second context path. |
+| §4 rule 7 Public services | `SessionClientsHost` is the public read port. |
 | §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. |
-| §4 rule 9 Timeline holds decision facts | Presence is process state; it does not enter the Timeline. |
-| §4 rule 10 Adopted inputs | The body reaches the model only through Prompt's state input. |
-| ADR 002 D1 | The fact belongs to the Session; the branch part only adopts. |
-| ADR 002 D2 | No adapter plugin; the App Server host is its own registry's read. |
-| ADR 002 D3 | The Session part depends on the process host; no core depends on the feature. |
-| ADR 002 D4 | No configuration is added. |
-| ADR 002 D5 | The service and count shape are data; Rust is a binding. |
+| §4 rule 9 Timeline holds decision facts | Presence is not a Timeline fact. |
+| §4 rule 10 Adopted inputs | The model reads the appended input directly. |
+| ADR 002 D1 | Connections stay with the App Server; the branch part only projects them. |
+| ADR 002 D2 | No adapter plugin; the projection is the capability's own purpose. |
+| ADR 002 D3 | The branch part depends on the process port; no core depends on the capability. |
+| ADR 002 D4 | No new configuration. |
+| ADR 002 D5 | The body is data; Rust is a binding. |
 
-## 9. Verification
+## 11. Verification
 
 | Scenario | Expected |
 | --- | --- |
-| Two TUI leaves attach the same Session | A block after each change; the latest says `2 clients attached: 2 tui.` |
-| A TUI leaf's underlying connection also attaches | It is one `tui`, not `tui` + `cli` |
-| A line client attaches | `cli` |
-| Web attaches | `web` |
-| ACP attaches | `acp` |
-| A paired remote device attaches | `remote`; no device id/name |
-| A leaf is `starting` | Not counted until it attaches |
-| One of two clients leaves | A new block says one |
-| Last client leaves | `No client is attached.` |
-| No provider | No block, no error |
-| Restore | Current count, not an old count |
-| Compaction | The latest presence block is replayed; old ones are gone |
-| Closing branch | No adoption, no write |
+| Branch open with one TUI | One snapshot with one `tui` entry |
+| Two TUI leaves | Two `tui` entries, not one count |
+| A TUI leaf and its line connection | Both entries; the body says connections |
+| Web attach then detach | Two snapshots: with and without the web entry |
+| Label with quotes/control characters | Escaped and bounded |
+| Same presence read twice | One snapshot; no duplicate |
+| Event for another Session | No append |
+| Idle Session | No polling block |
+| Remote connection | Not reported |
+| Compaction | The snapshot may be removed; no replay |
 
-## 10. Open decisions
+## 12. Open decisions
 
-1. The exact wording of the non-interactive case and whether a Collaboration member names its counterpart.
-2. Whether management/UI exposes the full per-client list or only the counts; the model body stays minimal either way.
-3. The `desktop` client-name convention and whether an unknown `other` client should be `desktop` or `unknown`.
-4. The remote channel's implementation when RemoteGateway P3 lands.
-5. Whether the count is read at the request boundary (#986) to remove the one-request lag.
-6. Whether the `ui.open` caller remains a separate client after its leaf attaches, or the two are one `tui`.
-7. Per-message input origin (which client sent a user message) is deferred: repeating an origin on every message is too redundant. Presence remains the connection snapshot only.
+1. Whether the body lists every connection or caps a long list.
+2. Whether a claimed label is shown by default or only when the client opts in.
+3. Whether the `ui.open` caller and its leaf are one connection or two.
+4. The `desktop` client-name convention and the `unknown` fallback.
+5. The `remote` channel when RemoteGateway P3 lands.
+6. Per-message input origin is deferred.

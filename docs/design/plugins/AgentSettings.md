@@ -14,7 +14,7 @@ AgentSettings exposes one `settings` tool. The tool lists, reads and changes use
 - `set` calls the setting module's typed write. A setting that cannot change returns `not_writable`.
 - A refusal is a tool result, not a missing tool.
 - Secrets and `writeOnly` fields never appear in `list`, `get`, `set`, results or logs.
-- No per-setting tool; no read/write classification; no tool-level security level.
+- No per-setting tool; no tool-level security level.
 
 ## 2. Tool contract
 
