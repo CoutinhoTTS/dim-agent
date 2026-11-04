@@ -34,18 +34,32 @@ async fn submit(client: &mut Client, id: &str) {
 }
 
 async fn result(session: &dim_agent_runtime::Session) -> ToolResult {
-    session
-        .history("main", None)
+    let reply = session
+        .query(
+            "main",
+            dim_agent_runtime::TimelineQuery {
+                scope: dim_agent_runtime::TimelineQueryScope::Branch,
+                from_event: None,
+                from_sequence: None,
+                order_by: Default::default(),
+                direction: dim_agent_runtime::TimelineQueryDirection::Descending,
+                include_publishing: false,
+                kinds: vec!["step/tool-result".to_owned()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: std::num::NonZeroU64::new(1).unwrap(),
+                offset: 0,
+            },
+        )
         .await
-        .unwrap()
-        .iter()
-        .rev()
-        .find_map(|event| {
-            if let EventKind::ToolResult(batch) = &event.kind {
-                batch.results.first().map(|entry| entry.result.clone())
-            } else {
-                None
-            }
+        .unwrap();
+    reply
+        .events
+        .first()
+        .and_then(|event| match &event.kind {
+            EventKind::ToolResult(batch) => batch.results.first().map(|entry| entry.result.clone()),
+            _ => None,
         })
         .expect("tool result")
 }
