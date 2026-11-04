@@ -513,10 +513,9 @@ projection and collaboration — now page through the branch's query, which
 rebuilds the requests of the rows it returns
 ([ADR 020](../adr/020-timeline-read-convergence.md) D6), and none of them reads
 stored facts without the Session that owns them
-([ADR 021](../adr/021-reads-follow-the-state-owner.md) D3). The port keeps
-`TimelineStore::read_page_without_request_bodies` for a caller that serves
-stored facts directly, with `read_page` as its default; the App Server no longer
-has such a caller. Every read that uses a request (`local`, `history`, `context`, `trace`,
+([ADR 021](../adr/021-reads-follow-the-state-owner.md) D3). The port keeps one page read, `TimelineStore::read_page`, which rebuilds the
+requests of the rows it returns; the body-less variant is gone, because no
+caller serves stored facts around a Session any more. Every read that uses a request (`local`, `history`, `context`, `trace`,
 `validate_session`, export) still rebuilds and checks each one as §7.1–§8 state.
 
 - The read still checks that each record and each draft of its trace has the references its kind requires, and no

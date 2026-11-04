@@ -764,9 +764,10 @@ impl AgentIndex {
     /// past `through`, ending on an atomic batch.
     ///
     /// The Session must already be loaded. An ended line is served by the tree
-    /// at its fixed head; otherwise the Session query serves the page. A line
-    /// that ends while the query reads it is retried against the tree: the
-    /// `ended_head` check is only a snapshot.
+    /// at its fixed head; otherwise the Session query serves the page. The
+    /// `ended_head` check is a snapshot: a line that ends while the query reads
+    /// it answers `BranchEnded`, and the client retries, which takes the tree
+    /// path.
     pub(crate) async fn history_page(
         &self,
         id: &str,

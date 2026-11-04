@@ -257,6 +257,7 @@ The method's error contract, including the new `history_too_large`:
 | `session_build_failed` | -32000 | acquiring the Session failed while restoring it | report it; a retry may succeed after the cause is fixed |
 | `service_reloading` | -32000 | the Agents index, or a capability the restore needs, is reloading | retry |
 | `session_invalid_input` | -32000 | the branch does not exist | correct the branch |
+| `branch_ended` | -32000 | the line ended while the read was running, after the read chose its owner | retry; the retry finds the line ended and reads it through the tree at its fixed head |
 | `history_too_large` | -32000 | the newest batch of a window page alone encodes to more than the transport frame minus 64 KiB, so the reply cannot be framed | read that turn with forward paging (§1.1); no retry of the same window helps |
 | none | -32603 | a storage failure or a reply encoding failure; opaque, with a server message | retry, and report if it repeats |
 
