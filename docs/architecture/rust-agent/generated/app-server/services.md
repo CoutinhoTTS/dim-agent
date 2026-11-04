@@ -8,7 +8,8 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p64["Attachments"]
+    p65["Attachments"]
+    p64["goal"]
     p63["Questions"]
     p62["PromptSuggestion"]
     p61["PrepareModelHost"]
@@ -71,7 +72,9 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
+  p40 -->|"dim_agent_runtime::parts::PartRegistry"| p65
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p64
+  p16 -->|"dim_app_server::settings::SettingsService"| p64
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p63
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p62
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p61
