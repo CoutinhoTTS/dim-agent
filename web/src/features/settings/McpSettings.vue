@@ -176,6 +176,15 @@ function validDraft(form: Draft): boolean {
     error.value = s('Secret field names must be nonempty and unique.', '机密字段名称不能为空且必须唯一。')
     return false
   }
+  // A reference is expanded by the daemon, which validates the expanded
+  // endpoint; only a literal endpoint is checked here.
+  const url = form.url.trim()
+  if (form.type !== "stdio" && !form.secretsInUserScope && url && !url.includes("${")) {
+    try { new URL(url) } catch {
+      error.value = s('The endpoint must be an absolute URL, or contain a variable reference the daemon expands.', '端点必须是绝对 URL，或包含由守护进程展开的变量引用。')
+      return false
+    }
+  }
   return editorForm.value?.reportValidity() ?? false
 }
 async function save(): Promise<void> {
@@ -351,7 +360,7 @@ onBeforeUnmount(() => {
       </template>
       <template v-else>
         <p v-if="editing">{{ s('Current endpoint', '当前端点') }}: {{ draft.endpoint }} — {{ s('Path and credentials are hidden.', '路径和凭据已隐藏。') }}</p>
-        <label v-if="!draft.secretsInUserScope"><span>{{ editing ? s('Replace URL (blank preserves the stored URL)', '替换 URL（留空保留已存储的 URL）') : 'URL' }}</span><input v-model="draft.url" class="ui-field" data-size="md" type="url" :required="!editing" autocomplete="off" /></label>
+        <label v-if="!draft.secretsInUserScope"><span>{{ editing ? s('Replace URL (blank preserves the stored URL)', '替换 URL（留空保留已存储的 URL）') : 'URL' }}</span><input v-model="draft.url" class="ui-field" data-size="md" type="text" inputmode="url" :required="!editing" autocomplete="off" /></label>
         <template v-if="!editing"><label class="checkbox-label"><input v-model="draft.oauth" type="checkbox" :disabled="!!draft.token" />{{ s('Configure OAuth', '配置 OAuth') }}</label><label v-if="!draft.oauth"><span>{{ s('Bearer token (optional, write-only)', 'Bearer 令牌（可选，只写）') }}</span><input v-model="draft.token" class="ui-field" data-size="md" type="password" autocomplete="new-password" /></label></template>
         <label v-if="editing && !staticCredentialWithheld"><span>{{ s('OAuth configuration', 'OAuth 配置') }}</span><select v-model="draft.oauthAction" class="ui-field" data-size="md"><option value="keep">{{ s('Preserve existing configuration', '保留现有配置') }}</option><option value="set">{{ s('Configure / edit OAuth', '配置 / 编辑 OAuth') }}</option><option value="remove">{{ s('Remove explicit configuration (automatic discovery remains)', '移除显式配置（仍可自动发现）') }}</option></select></label>
         <section v-if="(!editing && draft.oauth) || (editing && draft.oauthAction === 'set' && !staticCredentialWithheld)" class="settings-form">
