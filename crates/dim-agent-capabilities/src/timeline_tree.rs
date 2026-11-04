@@ -1879,6 +1879,20 @@ struct LineView {
     /// The line committed its own `branch/end`: it is ending.
     ending: bool,
 }
+impl LineView {
+    /// Whether input `id` is the parent block and is still held.
+    fn holds_parent(&self, id: &str) -> bool {
+        self.parent_input.as_deref() == Some(id) && self.held.contains_key(id)
+    }
+    /// Drops input `id` from what is held, and queues the parent decision when
+    /// the dropped input was the parent block (design §7.1.1).
+    fn release(&mut self, id: &str) -> Option<Decision> {
+        let released = self.holds_parent(id);
+        self.held.remove(id);
+        self.applied.remove(id);
+        released.then_some(Decision::Parent)
+    }
+}
 /// `<dim-branch-line>`, written by TimelineTree at the start of every child.
 const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
 
@@ -2170,21 +2184,19 @@ impl BranchLine {
                 None
             }
             EventKind::StopInterrupt(_) => {
+                let released = view
+                    .parent_input
+                    .clone()
+                    .filter(|id| view.held.contains_key(id));
                 let applied = &view.applied;
                 view.held
                     .retain(|id, _| applied.get(id).is_none_or(|at| *at > event.sequence));
-                None
+                released
+                    .filter(|id| !view.held.contains_key(id))
+                    .map(|_| Decision::Parent)
             }
-            EventKind::InputConsumed(data) => {
-                view.held.remove(&data.input_id);
-                view.applied.remove(&data.input_id);
-                None
-            }
-            EventKind::InputDeleted(data) => {
-                view.held.remove(&data.input_id);
-                view.applied.remove(&data.input_id);
-                None
-            }
+            EventKind::InputConsumed(data) => view.release(&data.input_id),
+            EventKind::InputDeleted(data) => view.release(&data.input_id),
             EventKind::ToolUse(data) => {
                 if let Some(parent) = view.parent.clone()
                     && steered_parent(&data.call, &parent)
@@ -2397,7 +2409,7 @@ impl BranchLine {
                 let opened = self.opened();
                 let (after, from) = {
                     let view = self.view.lock().unwrap();
-                    if !parent_due(&view) {
+                    if !parent_due(&view) || head <= view.parent_told {
                         return Ok(());
                     }
                     (
@@ -2547,10 +2559,8 @@ fn parent_head(text: &str) -> Option<u64> {
     let end = digits.find('"')?;
     digits[..end].parse().ok()
 }
-/// Whether the parent moved past both the line's read cursor and the block it
-/// was last told (design §7.1).
-/// The conditions a parent block needs besides new activity: the line is not
-/// ending and no earlier block is still held.
+/// Whether the line can be told about a parent move now: it is not ending and
+/// no earlier parent block is still held (design §7.1.1).
 fn parent_due(view: &LineView) -> bool {
     !view.ending
         && !view

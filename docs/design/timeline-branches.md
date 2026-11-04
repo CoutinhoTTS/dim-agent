@@ -200,7 +200,7 @@ The identity is part of the opening input, not an Append written at `branch/star
 
 A read is on demand, so a line must also know that the line it was cut from moved. BranchLine on that line watches its parent's turn ends and writes one keyed Append, `branch:parent`, on its own Timeline. It is the line's own fact and never the parent's: no part folds another line's events.
 
-- **The signal.** TimelineTree already routes every line's `turn/end`; the line's node publishes the sequence of its latest turn end. A child's BranchLine waits on its parent's signal and on its own write queue, and a change queues one decision. No part reads the parent's history for this.
+- **The signal.** TimelineTree already routes every line's `turn/end`; the line's node publishes the sequence of its latest turn end. A child's BranchLine waits on its parent's signal and on its own write queue, and a change queues one decision. The decision is the line's state, not the signal: whenever the line holds no `branch:parent` block and the parent's head is past the head the latest block told, it writes one. A move that arrived while a block was held is written when that block is consumed, deleted or interrupted, so no move is lost. No part reads the parent's history for this.
 - **The condition.** The block is written only when all of these hold:
   1. the line's role is a tool line or a host line, and the line is not ending;
   2. no earlier `branch:parent` input is still held on the line, meaning committed and not yet consumed;

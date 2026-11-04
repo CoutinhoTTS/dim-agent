@@ -4394,8 +4394,41 @@ async fn two_parent_turns_while_the_line_is_idle_write_one_block() {
     patient(agent.close()).await.unwrap();
 }
 
+/// A host line under `main`, opened at its current head and settled.
+async fn open_host_line(session: &Session, purpose: &str) -> String {
+    let at = session.sequence("main").unwrap();
+    let line = soon(session.branch("main".into(), at, options(purpose)))
+        .await
+        .unwrap();
+    quiet(session, &line).await;
+    line
+}
+
+/// The parent blocks on `branch` once one follows `after`, or a panic naming
+/// what was there instead.
+async fn second_parent_block(session: &Session, branch: &str, after: u64) -> Vec<(u64, String)> {
+    let mut events = Vec::new();
+    for _ in 0..300 {
+        events = local_events(session, branch).await;
+        if parent_block_events(&events)
+            .iter()
+            .any(|(sequence, _)| *sequence > after)
+        {
+            return parent_block_events(&events);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "no block was written after block {after}: {:#?}",
+        parent_block_events(&events)
+    );
+}
+
+/// A parent move that lands while a block is held is written once the line
+/// consumes that block, with no later parent turn
+/// ([§20.12](../../docs/design/timeline-branches.md#20-acceptance)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_new_block_after_the_last_is_consumed_names_the_new_head() {
+async fn a_move_while_a_block_is_held_is_written_after_the_block_is_consumed() {
     let probe = Arc::new(Probe::default());
     let gates = Arc::new(GateModel::default());
     let agent = MinimalHost::start(&builder_with_gates(&probe, &gates))
@@ -4404,30 +4437,132 @@ async fn a_new_block_after_the_last_is_consumed_names_the_new_head() {
     let session = patient(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
-    let child = open_line(&session, "watch the tests").await;
-    quiet(&session, &child).await;
+    // A host line writes no idle notice, so main's turn stays where the test
+    // holds it and cannot be the signal that writes the next block.
+    let line = open_host_line(&session, "watch the tests").await;
     move_main(&session).await;
-    let (first, first_text, _) = settle_line(&session, &child).await;
-    let (first_head, _) = parent_block(&first_text);
-    // hold main in a turn while the line consumes the first block, so the
-    // only parent movement after it is the turn end that follows.
+    let (first, _, first_head) = settle_line(&session, &line).await;
+    move_main(&session).await;
+    let moved = session.sequence("main").unwrap();
+    assert!(moved > first_head, "the parent moved past the held block");
+    let events = local_events(&session, &line).await;
+    assert!(block_held(&events, first), "the next move finds it held");
+    assert_eq!(
+        parent_block_events(&events)
+            .iter()
+            .filter(|(sequence, _)| *sequence > first)
+            .count(),
+        0,
+        "a held block is not written over"
+    );
     patient(session.submit("GATE-MAIN".into(), InputMode::Queue, "main"))
         .await
         .unwrap();
     patient(gates.main_entered.notified()).await;
-    patient(session.submit("consume".into(), InputMode::Queue, &child))
+    patient(session.submit("consume".into(), InputMode::Queue, &line))
         .await
         .unwrap();
-    patient(session.idle(&child)).await.unwrap();
+    patient(session.idle(&line)).await.unwrap();
+    let blocks = second_parent_block(&session, &line, first).await;
+    let (second_head, _) = parent_block(&blocks.last().unwrap().1);
+    assert!(
+        second_head >= moved,
+        "the block names the head the parent reached while the first was held: {blocks:?}"
+    );
     gates.main_release.notify_one();
     patient(session.idle("main")).await.unwrap();
-    let head = session.sequence("main").unwrap();
-    let (second, second_text, settled) = settle_line(&session, &child).await;
-    let (second_head, _) = parent_block(&second_text);
-    assert_eq!(second_head, settled);
-    assert!(second > first, "a new block was written");
-    assert!(second_head >= head, "the block names the new head");
-    assert!(second_head > first_head);
+    patient(agent.close()).await.unwrap();
+}
+
+/// A deleted parent block releases the move that arrived while it was held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_while_a_block_is_held_is_written_after_the_block_is_deleted() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_host_line(&session, "watch the tests").await;
+    move_main(&session).await;
+    let (first, _, first_head) = settle_line(&session, &line).await;
+    move_main(&session).await;
+    let moved = session.sequence("main").unwrap();
+    assert!(moved > first_head, "the parent moved past the held block");
+    let events = local_events(&session, &line).await;
+    let block = events
+        .iter()
+        .find(|event| event.sequence == first)
+        .expect("the held block");
+    let timeline = probe
+        .child_timeline
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the line's Timeline");
+    timeline
+        .append(
+            EventKind::InputDeleted(InputDeletedData {
+                input_id: block.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let blocks = second_parent_block(&session, &line, first).await;
+    let (second_head, _) = parent_block(&blocks.last().unwrap().1);
+    assert!(
+        second_head >= moved,
+        "the block names the head the parent reached while the first was held: {blocks:?}"
+    );
+    patient(agent.close()).await.unwrap();
+}
+
+/// A parent block whose turn is interrupted still reports the move the held
+/// block swallowed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_while_a_block_is_held_is_written_after_the_block_is_interrupted() {
+    let probe = Arc::new(Probe::default());
+    let gates = Arc::new(GateModel::default());
+    let agent = MinimalHost::start(&builder_with_gates(&probe, &gates))
+        .await
+        .unwrap();
+    let session = patient(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_host_line(&session, "watch the tests").await;
+    move_main(&session).await;
+    let (first, _, first_head) = settle_line(&session, &line).await;
+    move_main(&session).await;
+    let moved = session.sequence("main").unwrap();
+    assert!(moved > first_head, "the parent moved past the held block");
+    let events = local_events(&session, &line).await;
+    let block = events
+        .iter()
+        .find(|event| event.sequence == first)
+        .expect("the held block");
+    patient(session.submit("GATE-LINE".into(), InputMode::Queue, &line))
+        .await
+        .unwrap();
+    patient(gates.line_entered.notified()).await;
+    let stopped = session.interrupt(&line, "stop".into()).unwrap();
+    let applied = local_events(&session, &line)
+        .await
+        .iter()
+        .find(|event| {
+            matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == block.id)
+        })
+        .map(|event| event.sequence);
+    assert!(
+        applied.is_some_and(|at| at <= stopped),
+        "the turn held the block when it was interrupted"
+    );
+    gates.line_release.notify_one();
+    patient(session.idle(&line)).await.unwrap();
+    let blocks = second_parent_block(&session, &line, first).await;
+    let (second_head, _) = parent_block(&blocks.last().unwrap().1);
+    assert!(
+        second_head >= moved,
+        "the block names the head the parent reached while the first was held: {blocks:?}"
+    );
     patient(agent.close()).await.unwrap();
 }
 

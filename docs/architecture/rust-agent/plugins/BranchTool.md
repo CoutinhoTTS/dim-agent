@@ -101,8 +101,10 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
   the parent, that head and the cursor, and never carries the parent's
   content. The fold keeps the cursor of each successful read from the line's
   own `tool/use` and `tool/result`, so a replay rebuilds it. The block is
-  decided on the parent's turn-end signal, published by TimelineTree, and the
-  line's own write queue; an idle line is not woken, and `main` gets none
+  decided from the line's state rather than the parent's signal: the parent's
+  turn-end, published by TimelineTree, and the line's own write queue wake the
+  writer, and consuming, deleting or interrupting a held block queues the same
+  decision. An idle line is not woken, and `main` gets none
   (design [§7.1.1](../../../design/timeline-branches.md#711-the-parent-block-branchparent)).
 - **Idle notice.** On a tool line, one Steer to its parent at a `turn/end` that
   neither steered the parent in that turn, called `end`, nor left a driving
