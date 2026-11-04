@@ -223,25 +223,36 @@ async fn xai_responses_finishes_before_the_http_body_closes() {
     );
 }
 
-/// A missing usage object keeps the totals unknown; a present one fills
-/// missing counts with 0, except in the `x_groq` profile which leaves the
-/// details absent.
+/// A missing usage object keeps every count unknown; so does a present
+/// object whose count the provider did not report. A reported zero stays
+/// zero, on the compatible model and on the groq package (the tag's
+/// successor to the earlier integration's `x_groq` profile).
 #[tokio::test]
-async fn chat_usage_keeps_absent_objects_and_zero_fills_present_ones() {
+async fn chat_usage_keeps_unreported_counts_unknown() {
     let no_usage = sse(&[json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})]);
     let (base, _) = serve(no_usage, "text/event-stream").await;
     let parts = collect(&chat_model(&base, "openai"), CallOptions::new(vec![])).await;
     let usage = finish_usage(&parts).unwrap();
     assert_eq!(usage.input_tokens.total, None);
     assert_eq!(usage.output_tokens.total, None);
+    assert_eq!(usage.input_tokens.no_cache, None);
+    assert_eq!(usage.output_tokens.text, None);
     assert_eq!(usage.input_tokens.cache_read, None);
     assert_eq!(usage.output_tokens.reasoning, None);
 
-    for (raw, input, output) in [
-        (json!({}), Some(0), Some(0)),
-        (json!({"prompt_tokens": 2}), Some(2), Some(0)),
-        (json!({"completion_tokens": 0}), Some(0), Some(0)),
-    ] {
+    // usage, input total, no-cache total, output total, text total
+    let cases = [
+        (json!({}), None, None, None, None),
+        (json!({"prompt_tokens": 2}), Some(2), Some(2), None, None),
+        (
+            json!({"completion_tokens": 0}),
+            None,
+            None,
+            Some(0),
+            Some(0),
+        ),
+    ];
+    for (raw, input, no_cache, output, text) in cases.clone() {
         let body = sse(&[
             json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
             json!({"choices":[],"usage":raw}),
@@ -249,18 +260,15 @@ async fn chat_usage_keeps_absent_objects_and_zero_fills_present_ones() {
         let (base, _) = serve(body, "text/event-stream").await;
         let parts = collect(&chat_model(&base, "openai"), CallOptions::new(vec![])).await;
         let usage = finish_usage(&parts).unwrap();
-        assert_eq!(usage.input_tokens.total, input, "{raw}");
-        assert_eq!(usage.output_tokens.total, output, "{raw}");
-        assert_eq!(usage.input_tokens.cache_read, Some(0), "{raw}");
-        assert_eq!(usage.output_tokens.reasoning, Some(0), "{raw}");
-        assert_eq!(usage.output_tokens.text, Some(0), "{raw}");
+        assert_eq!(usage.input_tokens.total, input, "openai {raw}");
+        assert_eq!(usage.input_tokens.no_cache, no_cache, "openai {raw}");
+        assert_eq!(usage.output_tokens.total, output, "openai {raw}");
+        assert_eq!(usage.output_tokens.text, text, "openai {raw}");
+        assert_eq!(usage.input_tokens.cache_read, None, "openai {raw}");
+        assert_eq!(usage.output_tokens.reasoning, None, "openai {raw}");
     }
 
-    for (raw, input, output) in [
-        (json!({}), Some(0), Some(0)),
-        (json!({"prompt_tokens": 2}), Some(2), Some(0)),
-        (json!({"completion_tokens": 0}), Some(0), Some(0)),
-    ] {
+    for (raw, input, no_cache, output, text) in cases {
         let body = sse(&[
             json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
             json!({"choices":[],"x_groq":{"usage":raw}}),
@@ -280,7 +288,9 @@ async fn chat_usage_keeps_absent_objects_and_zero_fills_present_ones() {
         let parts = collect(model.as_ref(), CallOptions::new(vec![])).await;
         let usage = finish_usage(&parts).unwrap();
         assert_eq!(usage.input_tokens.total, input, "groq {raw}");
+        assert_eq!(usage.input_tokens.no_cache, no_cache, "groq {raw}");
         assert_eq!(usage.output_tokens.total, output, "groq {raw}");
+        assert_eq!(usage.output_tokens.text, text, "groq {raw}");
         assert_eq!(usage.input_tokens.cache_read, None, "groq {raw}");
         assert_eq!(usage.output_tokens.reasoning, None, "groq {raw}");
     }

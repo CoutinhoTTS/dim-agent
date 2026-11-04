@@ -129,6 +129,14 @@ async fn respond(
         (data, false)
     } else if prompt == "wait" {
         (frame(json!({"content":"started"}), Value::Null), true)
+    } else if prompt == "usage-nodetails" {
+        let mut data = frame(json!({"content":"hello"}), json!("stop"));
+        data += &format!(
+            "data: {}\n\n",
+            json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3}})
+        );
+        data += "data: [DONE]\n\n";
+        (data, false)
     } else if prompt == "truncated" {
         (frame(json!({"content":"partial"}), Value::Null), false)
     } else {
@@ -321,6 +329,35 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         assert!(requests[3].get("max_tokens").is_none());
         agent.close().await.unwrap(); server.close().await;
     }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_usage_without_details_records_cache_read_as_unknown() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let server = TestServer::start().await;
+        let agent = model_agent(server.models(), None).await;
+        let session = agent.create_session(session_config()).await.unwrap();
+        session
+            .submit("usage-nodetails".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        // The provider reported no prompt_tokens_details, so the cache read
+        // count is unknown; reporting 0 would claim a 0% cache hit rate.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::ModelUsage(data)
+            if data.usage.prompt_tokens == 10.
+                && data.usage.total_tokens == 13.
+                && data.usage.cache_read_tokens.is_none()))
+        );
+        agent.close().await.unwrap();
+        server.close().await;
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
