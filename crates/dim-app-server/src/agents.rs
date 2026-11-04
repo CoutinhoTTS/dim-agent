@@ -786,30 +786,23 @@ impl AgentIndex {
         limit: usize,
         through: u64,
     ) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
-        if let Some((_, session)) = self.session(id)
-            && !session.is_unloading()
-        {
-            if session.ended_head(branch).is_none() {
-                match session_history_page(&session, branch, after, limit, through).await {
-                    Err(AgentError::BranchEnded(_)) => {}
-                    result => return result,
-                }
-            } else if self.session_store.is_none() {
-                let page = session
-                    .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
-                    .page(branch.to_owned(), after, limit)
-                    .await?;
-                return Ok(page
-                    .into_iter()
-                    .filter(|event| event.sequence <= through)
-                    .collect());
-            }
+        let (_, session) = self
+            .session(id)
+            .ok_or_else(|| AgentError::Closed(id.into()))?;
+        if session.is_unloading() {
+            return Err(AgentError::Storage("Session is unloading".into()));
         }
-        self.session_store
-            .as_ref()
-            .ok_or_else(|| AgentError::Closed(id.into()))?
-            .read_page_without_request_bodies(id, branch, after, limit, through)
-            .await
+        if session.ended_head(branch).is_some() {
+            let page = session
+                .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
+                .page(branch.to_owned(), after, limit)
+                .await?;
+            return Ok(page
+                .into_iter()
+                .filter(|event| event.sequence <= through)
+                .collect());
+        }
+        session_history_page(&session, branch, after, limit, through).await
     }
     /// The stored events of `event_ids` in one read; ids the store does not
     /// hold are absent.
