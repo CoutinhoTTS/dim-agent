@@ -91,6 +91,17 @@ impl UiHost {
         self.generations.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    /// Whether `connection_id` is the connection a registered UI leaf uses.
+    /// Presence uses it to count that connection as `tui` rather than its
+    /// declared `cli` kind.
+    pub(crate) fn is_leaf_connection(&self, connection_id: &str) -> bool {
+        self.instances
+            .lock()
+            .expect("ui registry")
+            .values()
+            .any(|instance| instance.connection.as_deref() == Some(connection_id))
+    }
+
     /// Opens a session with the leaf at `address` and returns the token its
     /// `Tui` attaches with. With `replace`, the old interface is claimed
     /// first and closed once the new leaf attaches; a failed start, or a
@@ -304,6 +315,7 @@ impl UiHost {
                 leaf.replaces = None;
             }
         }
+        hub.notify_clients(session_id);
         Ok(attached)
     }
 
@@ -427,6 +439,7 @@ impl UiHost {
         let _ = self
             .close(hub, &params.ui_id, Some("replaced".to_owned()))
             .await;
+        hub.notify_clients(&params.session_id);
         Ok(attached)
     }
 
@@ -481,6 +494,7 @@ impl UiHost {
         reason: Option<String>,
     ) -> Result<(), RpcError> {
         let instance = self.forget(ui_id).ok_or_else(ui_unknown)?;
+        hub.notify_clients(&instance.session_id);
         if let Some(connection) = instance
             .connection
             .as_deref()

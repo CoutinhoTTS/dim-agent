@@ -34,6 +34,12 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 const MAX_REQUESTS: usize = 64;
 const CONTROL_RESERVE: usize = 8;
 
+/// The channel a connection declared at `hello`, for presence only.
+#[derive(Clone, Debug)]
+pub(crate) struct ClientIdentity {
+    pub channel: dim_agent_capabilities::environment_clients::ClientChannel,
+}
+
 /// The entry a connection was accepted on; it decides which methods Rpc serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Entry {
@@ -51,6 +57,8 @@ pub(crate) struct Connection {
     pub version: OnceLock<u32>,
     /// The protocol instance this connection completed hello with.
     pub instance: OnceLock<String>,
+    /// The channel declared by `hello`; informational, never durable.
+    pub client: OnceLock<ClientIdentity>,
     pub entry: Entry,
     hub: Arc<ConnectionHub>,
     pub closed: CancellationToken,
@@ -85,6 +93,7 @@ impl Connection {
             id: uuid::Uuid::new_v4().to_string(),
             version: OnceLock::new(),
             instance: OnceLock::new(),
+            client: OnceLock::new(),
             entry,
             closed,
             sender,
@@ -109,13 +118,31 @@ impl Connection {
             .expect("attachments")
             .contains_key(id)
     }
+    /// The channel `hello` declared; `unknown` before hello or for an
+    /// unrecognized `other` client.
+    pub fn channel(&self) -> dim_agent_capabilities::environment_clients::ClientChannel {
+        self.client.get().map_or(
+            dim_agent_capabilities::environment_clients::ClientChannel::Unknown,
+            |identity| identity.channel,
+        )
+    }
     pub async fn finish(&self) {
         self.closed.cancel();
         if self.entry == Entry::Local {
             self.hub.web.release(&self.hub, &self.id).await;
         }
         self.hub.ui.release(&self.id);
+        let sessions: Vec<String> = self
+            .attachments
+            .lock()
+            .expect("attachments")
+            .keys()
+            .cloned()
+            .collect();
         self.attachments.lock().expect("attachments").clear();
+        for session in sessions {
+            self.hub.notify_clients(&session);
+        }
         self.subscriptions.close();
         self.subscriptions.wait().await;
         self.hub
@@ -857,6 +884,7 @@ impl Connection {
                     .expect("attachments")
                     .remove(&params.session_id);
                 self.hub.ui.detach(&self.id, &params.session_id);
+                self.hub.notify_clients(&params.session_id);
                 Ok(Reply::empty())
             }
             Call::Submit(params) => self.submit(rpc, params).await,
@@ -1427,6 +1455,8 @@ pub(crate) struct ConnectionHub {
     config: Arc<ServerConfig>,
     pub control: Arc<ServerControl>,
     connections: Mutex<HashMap<String, Weak<Connection>>>,
+    /// Emits a client-change fact for a Session whose presence a branch observes.
+    client_emitter: Mutex<Option<rutis::Ctx>>,
     pub tasks: TaskTracker,
     pub shutdown_requests: TaskTracker,
     closing: CancellationToken,
@@ -1444,6 +1474,7 @@ impl ConnectionHub {
             web: crate::web_entry::WebEntry::new(config.web_assets.clone()),
             ui,
             connections: Mutex::new(HashMap::new()),
+            client_emitter: Mutex::new(None),
             tasks: TaskTracker::new(),
             shutdown_requests: TaskTracker::new(),
             closing: CancellationToken::new(),
@@ -1529,6 +1560,48 @@ impl ConnectionHub {
             .filter(|conn| conn.is_attached(session))
             .count()
     }
+    fn set_client_emitter(&self, ctx: rutis::Ctx) {
+        *self.client_emitter.lock().expect("client emitter") = Some(ctx);
+    }
+    /// Announces that `session`'s client counts may have changed.
+    pub(crate) fn notify_clients(&self, session: &str) {
+        let emitter = self.client_emitter.lock().expect("client emitter").clone();
+        let Some(ctx) = emitter else {
+            return;
+        };
+        let _ = ctx.emit(
+            dim_agent_capabilities::environment_clients::ClientsChanged {
+                name: dim_agent_capabilities::environment_clients::clients_changes(session),
+                session_id: session.to_owned(),
+            },
+        );
+    }
+    /// The attached clients of one Session by channel. A UI leaf's own
+    /// connection is `tui`; it is not counted again under its declared kind.
+    pub(crate) fn client_counts(
+        &self,
+        session: &str,
+    ) -> dim_agent_capabilities::environment_clients::ClientCounts {
+        use dim_agent_capabilities::environment_clients::{ClientChannel, ClientCounts};
+        let mut counts = ClientCounts::default();
+        let connections: Vec<_> = self
+            .connections
+            .lock()
+            .expect("connection index")
+            .values()
+            .filter_map(Weak::upgrade)
+            .filter(|conn| conn.is_attached(session))
+            .collect();
+        for connection in connections {
+            let channel = if self.ui.is_leaf_connection(&connection.id) {
+                ClientChannel::Tui
+            } else {
+                connection.channel()
+            };
+            counts.add(channel);
+        }
+        counts
+    }
     /// Asks every connection to close and waits for its reader and writer.
     /// Connections created after this call start already closed.
     pub async fn close(&self) {
@@ -1542,6 +1615,7 @@ pub(crate) struct ConnectionPlugin {
     config: Arc<ServerConfig>,
     control: Key<ServerControl>,
     ui: Key<crate::ui_host::UiHost>,
+    clients: Key<dim_agent_capabilities::environment_clients::SessionClientsHost>,
 }
 impl ConnectionPlugin {
     pub fn new(names: &Names<'_>, config: Arc<ServerConfig>) -> rutis::Result<Self> {
@@ -1549,7 +1623,18 @@ impl ConnectionPlugin {
             config,
             control: names.key()?,
             ui: names.key()?,
+            clients: names.key()?,
         })
+    }
+}
+/// The presence host over the connection and UI registries.
+struct HubClients(Arc<ConnectionHub>);
+impl dim_agent_capabilities::environment_clients::SessionClientsSource for HubClients {
+    fn counts(
+        &self,
+        session_id: &str,
+    ) -> dim_agent_capabilities::environment_clients::ClientCounts {
+        self.0.client_counts(session_id)
     }
 }
 impl DynPlugin for ConnectionPlugin {
@@ -1564,12 +1649,21 @@ impl DynPlugin for ConnectionPlugin {
             let control = ctx.require_at(&self.control)?;
             let ui = ctx.require_at(&self.ui)?;
             let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui));
+            hub.set_client_emitter(ctx.clone());
             let owner = hub.clone();
             ctx.effect(move || async move {
                 owner.close().await;
                 Ok(())
             })?;
-            ctx.provide_as::<ConnectionHub>(hub)?;
+            ctx.provide_as::<ConnectionHub>(hub.clone())?;
+            ctx.provide_at(
+                self.clients.clone(),
+                Arc::new(
+                    dim_agent_capabilities::environment_clients::SessionClientsHost(Arc::new(
+                        HubClients(hub),
+                    )),
+                ),
+            )?;
             Ok(Effect::Done)
         })
     }
