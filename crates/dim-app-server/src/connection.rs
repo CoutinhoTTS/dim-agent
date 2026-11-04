@@ -38,6 +38,7 @@ const CONTROL_RESERVE: usize = 8;
 #[derive(Clone, Debug)]
 pub(crate) struct ClientIdentity {
     pub channel: dim_agent_capabilities::environment_clients::ClientChannel,
+    pub label: Option<String>,
 }
 
 /// The entry a connection was accepted on; it decides which methods Rpc serves.
@@ -125,6 +126,9 @@ impl Connection {
             dim_agent_capabilities::environment_clients::ClientChannel::Unknown,
             |identity| identity.channel,
         )
+    }
+    pub fn label(&self) -> Option<String> {
+        self.client.get().and_then(|identity| identity.label.clone())
     }
     pub async fn finish(&self) {
         self.closed.cancel();
@@ -1576,14 +1580,13 @@ impl ConnectionHub {
             },
         );
     }
-    /// The attached clients of one Session by channel. A UI leaf's own
-    /// connection is `tui`; it is not counted again under its declared kind.
-    pub(crate) fn client_counts(
+    /// The attached connections of one Session. A UI leaf's own connection
+    /// is `tui`; it is not counted again under its declared kind.
+    pub(crate) fn client_presences(
         &self,
         session: &str,
-    ) -> dim_agent_capabilities::environment_clients::ClientCounts {
-        use dim_agent_capabilities::environment_clients::{ClientChannel, ClientCounts};
-        let mut counts = ClientCounts::default();
+    ) -> Vec<dim_agent_capabilities::environment_clients::ClientPresence> {
+        use dim_agent_capabilities::environment_clients::{ClientChannel, ClientPresence};
         let connections: Vec<_> = self
             .connections
             .lock()
@@ -1592,15 +1595,20 @@ impl ConnectionHub {
             .filter_map(Weak::upgrade)
             .filter(|conn| conn.is_attached(session))
             .collect();
-        for connection in connections {
-            let channel = if self.ui.is_leaf_connection(&connection.id) {
-                ClientChannel::Tui
-            } else {
-                connection.channel()
-            };
-            counts.add(channel);
-        }
-        counts
+        connections
+            .into_iter()
+            .map(|connection| {
+                let channel = if self.ui.is_leaf_connection(&connection.id) {
+                    ClientChannel::Tui
+                } else {
+                    connection.channel()
+                };
+                ClientPresence {
+                    channel,
+                    label: connection.label(),
+                }
+            })
+            .collect()
     }
     /// Asks every connection to close and waits for its reader and writer.
     /// Connections created after this call start already closed.
@@ -1632,11 +1640,11 @@ impl ConnectionPlugin {
 /// The presence host over the connection and UI registries.
 struct HubClients(Arc<ConnectionHub>);
 impl dim_agent_capabilities::environment_clients::SessionClientsSource for HubClients {
-    fn counts(
+    fn presences(
         &self,
         session_id: &str,
-    ) -> dim_agent_capabilities::environment_clients::ClientCounts {
-        self.0.client_counts(session_id)
+    ) -> Vec<dim_agent_capabilities::environment_clients::ClientPresence> {
+        self.0.client_presences(session_id)
     }
 }
 impl DynPlugin for ConnectionPlugin {

@@ -1,28 +1,31 @@
 mod local_support;
 
 use dim_agent_capabilities::environment_clients::{
-    ClientChannel, ClientCounts, ClientsChanged, SessionClientsSource, clients_changes,
+    ClientChannel, ClientPresence, ClientsChanged, SessionClientsSource, clients_changes,
 };
 use dim_agent_runtime::Session;
 use local_support::*;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// A mutable presence source: the test changes the counts, as another client
-/// would, and announces the change on the process bus.
-struct Presence(Mutex<ClientCounts>);
+/// A mutable presence source: the test changes the connections, as another
+/// client would, and announces the change on the process bus.
+struct Presence(Mutex<Vec<ClientPresence>>);
 impl Presence {
-    fn set(&self, channels: &[ClientChannel]) {
-        let mut counts = ClientCounts::default();
-        for channel in channels {
-            counts.add(*channel);
-        }
-        *self.0.lock().unwrap() = counts;
+    fn set(&self, presences: Vec<ClientPresence>) {
+        *self.0.lock().unwrap() = presences;
     }
 }
 impl SessionClientsSource for Presence {
-    fn counts(&self, _: &str) -> ClientCounts {
+    fn presences(&self, _: &str) -> Vec<ClientPresence> {
         self.0.lock().unwrap().clone()
+    }
+}
+
+fn connection(channel: ClientChannel, label: Option<&str>) -> ClientPresence {
+    ClientPresence {
+        channel,
+        label: label.map(str::to_owned),
     }
 }
 
@@ -53,15 +56,15 @@ async fn until_block(session: &Session, needle: &str) {
         }
     })
     .await
-    .expect("presence was adopted");
+    .expect("presence was appended");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn presence_is_adopted_and_unchanged_counts_do_not_duplicate() {
+async fn presence_is_appended_and_unchanged_counts_do_not_duplicate() {
     let dirs = Dirs::new();
     let cwd = dirs.dir("work");
-    let presence = Arc::new(Presence(Mutex::new(ClientCounts::default())));
-    presence.set(&[ClientChannel::Tui]);
+    let presence = Arc::new(Presence(Mutex::new(Vec::new())));
+    presence.set(vec![connection(ClientChannel::Tui, Some("eric@laptop"))]);
     let env = env(
         &dirs,
         Options {
@@ -74,40 +77,37 @@ async fn presence_is_adopted_and_unchanged_counts_do_not_duplicate() {
 
     run(&session, "hello").await;
     let text = request_text(requests(&session).await.last().unwrap());
-    assert!(
-        text.contains(
-            "<dim-state source=\"dim/environment/clients\">1 client attached: 1 tui.</dim-state>"
-        ),
-        "{text}"
-    );
+    assert!(text.contains("1 client connection attached:"), "{text}");
+    assert!(text.contains("- tui \"eric@laptop\" (claimed)"), "{text}");
 
-    presence.set(&[ClientChannel::Tui, ClientChannel::Tui, ClientChannel::Web]);
+    presence.set(vec![
+        connection(ClientChannel::Tui, Some("eric@laptop")),
+        connection(ClientChannel::Tui, None),
+        connection(ClientChannel::Web, Some("alice")),
+    ]);
     changed(&env, &session);
     run(&session, "again").await;
-    until_block(&session, "3 clients attached: 2 tui, 1 web.").await;
+    until_block(&session, "3 client connections attached:").await;
     run(&session, "third").await;
     let text = request_text(requests(&session).await.last().unwrap());
-    assert!(
-        text.contains(
-            "<dim-state source=\"dim/environment/clients\">3 clients attached: 2 tui, 1 web.</dim-state>"
-        ),
-        "{text}"
-    );
+    assert!(text.contains("- tui \"eric@laptop\" (claimed)"), "{text}");
+    assert!(text.contains("- tui\n"), "{text}");
+    assert!(text.contains("- web \"alice\" (claimed)"), "{text}");
     assert_eq!(
-        text.matches("3 clients attached: 2 tui, 1 web.").count(),
+        text.matches("3 client connections attached:").count(),
         1,
-        "an unchanged count must not write another block:\n{text}"
+        "an unchanged presence must not write another block:\n{text}"
     );
 
-    presence.set(&[]);
+    presence.set(Vec::new());
     changed(&env, &session);
     run(&session, "done").await;
-    until_block(&session, "No client is attached.").await;
+    until_block(&session, "No client connection is attached.").await;
     run(&session, "later").await;
     let text = request_text(requests(&session).await.last().unwrap());
     assert!(
         text.contains(
-            "<dim-state source=\"dim/environment/clients\">No client is attached.</dim-state>"
+            "<dim-state source=\"dim/environment/clients\">No client connection is attached.</dim-state>"
         ),
         "{text}"
     );

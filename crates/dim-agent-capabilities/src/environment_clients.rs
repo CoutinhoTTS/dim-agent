@@ -1,28 +1,19 @@
-//! Session client presence as model state: who is attached, by channel.
+//! Session client presence as a model-facing snapshot.
 //!
 //! The App Server owns the connection and UI registries and provides the
-//! read-only `SessionClientsHost`. This capability registers
-//! `dim/environment/clients`; each branch checks the current counts while no
-//! turn is open, so a change is adopted before the next input and idle churn
-//! does not become a block.
-use crate::{
-    host::{HostError, HostFuture, LoadPrompt},
-    prompt_registry::{PromptRegistry, targets},
-    prompt_sources::sha256_version,
-};
-use dim_agent_runtime::{
-    ConfigureControl, ConfigureUpdate, Names, PartRegistry, PartScope, PromptSourceTarget,
-    SessionIdentity,
-};
+//! read-only `SessionClientsHost`. This capability appends a snapshot of the
+//! attached connections at branch open and on every `ClientsChanged` fact.
+use crate::branch_input::append_own;
+use dim_agent_runtime::{Names, PartRegistry, PartScope, SessionIdentity, Timeline};
 use dim_agent_types::*;
-use rutis::{Ctx, Error};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
-use std::{collections::BTreeMap, sync::Arc};
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
+use rutis::{Ctx, Error};
+use std::sync::{Arc, Mutex};
 
-/// The prompt source of the attached-client counts.
+/// The snapshot source name.
 pub const CLIENTS: &str = "dim/environment/clients";
+/// The branch plugin name.
+pub const BRANCH_PART: &str = "EnvironmentClientsBranch";
 
 /// A client-attachment change of one Session, delivered on the process bus.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -90,183 +81,138 @@ pub enum DeclaredClientKind {
     Other,
 }
 
-/// Attached clients of one Session, by channel. Channels are sorted.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ClientCounts {
-    pub total: usize,
-    pub by_channel: BTreeMap<&'static str, usize>,
-}
-impl ClientCounts {
-    pub fn add(&mut self, channel: ClientChannel) {
-        self.total += 1;
-        *self.by_channel.entry(channel.as_str()).or_default() += 1;
-    }
+/// One attached connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientPresence {
+    pub channel: ClientChannel,
+    /// The client's self-declared `hello.clientName`; never an identity.
+    pub label: Option<String>,
 }
 
 /// The App Server's read-only presence view.
 pub trait SessionClientsSource: Send + Sync + 'static {
-    /// The clients attached to `session_id` now. An unknown Session is empty.
-    fn counts(&self, session_id: &str) -> ClientCounts;
+    /// The connections attached to `session_id` now. An unknown Session is empty.
+    fn presences(&self, session_id: &str) -> Vec<ClientPresence>;
 }
 
 /// The process port. The App Server provides it from its connection and UI
-/// registries; an assembly without it does not install this feature.
+/// registries; an assembly without it does not install this projection.
 pub struct SessionClientsHost(pub Arc<dyn SessionClientsSource>);
 
-/// The Session and branch plugins this capability registers.
-pub const SESSION_PART: &str = "EnvironmentClients";
-pub const BRANCH_PART: &str = "EnvironmentClientsBranch";
-
-/// Registers the presence plugins on behalf of the process plugin that owns
-/// `ctx` and provides `SessionClientsHost`.
+/// Registers the presence branch plugin on behalf of the process plugin that
+/// provides `SessionClientsHost`.
 pub fn register_parts(ctx: &Ctx, parts: &Arc<PartRegistry>) -> Result<(), Error> {
-    parts.register(ctx, PartScope::Session, SESSION_PART, |mount| {
-        Ok(Some(Box::new(ClientsPlugin::new(mount.names)?)))
-    })?;
     parts.register(ctx, PartScope::Branch, BRANCH_PART, |mount| {
         Ok(Some(Box::new(ClientsBranchPlugin::new(mount.names)?)))
     })
 }
 
-/// The body: counts only, no labels, ids, times or departure history.
-fn body(counts: &ClientCounts) -> String {
-    if counts.total == 0 {
-        return "No client is attached.".into();
+/// The body: one line per connection, no counts-only channel aggregation.
+fn body(presences: &[ClientPresence]) -> String {
+    if presences.is_empty() {
+        return "No client connection is attached.".into();
     }
-    let channels = counts
-        .by_channel
+    let lines = presences
         .iter()
-        .map(|(channel, count)| format!("{count} {channel}"))
+        .map(|presence| match presence.label.as_deref().map(label) {
+            Some(label) => format!("- {} \"{label}\" (claimed)", presence.channel.as_str()),
+            None => format!("- {}", presence.channel.as_str()),
+        })
         .collect::<Vec<_>>()
-        .join(", ");
+        .join("\n");
+    let total = presences.len();
     format!(
-        "{} {} attached: {channels}.",
-        counts.total,
-        if counts.total == 1 {
-            "client"
-        } else {
-            "clients"
-        }
+        "{total} client connection{} attached:\n{lines}",
+        if total == 1 { "" } else { "s" }
     )
 }
 
-struct ClientsSource {
-    host: Arc<SessionClientsHost>,
-    session_id: String,
-}
-impl LoadPrompt for ClientsSource {
-    fn load(
-        &self,
-        target: PromptSourceTarget,
-        cancel: CancellationToken,
-    ) -> HostFuture<'_, Option<PromptEntry>> {
-        Box::pin(async move {
-            if cancel.is_cancelled() {
-                return Err(HostError::Cancelled(
-                    "client presence load cancelled".into(),
-                ));
-            }
-            let body = body(&self.host.0.counts(&self.session_id));
-            Ok(Some(PromptEntry {
-                source: target.source,
-                version: sha256_version(&body),
-                body,
-                scope: target.scope,
-                delivery: PromptDelivery::State,
-                order: 230,
-            }))
-        })
-    }
+/// A label is untrusted text: quotes and control characters cannot break the
+/// body, and a long name is cut to 64 characters.
+fn label(label: &str) -> String {
+    label
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(64)
+        .collect::<String>()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
-struct ClientsPlugin {
-    identity: Key<SessionIdentity>,
-    clients: Key<SessionClientsHost>,
-    prompts: Key<PromptRegistry>,
+fn snapshot(presences: &[ClientPresence]) -> String {
+    format!(
+        "<dim-state source=\"{CLIENTS}\">{}</dim-state>",
+        body(presences)
+    )
 }
-impl ClientsPlugin {
-    fn new(names: &Names<'_>) -> rutis::Result<Self> {
-        Ok(Self {
-            identity: names.key()?,
-            clients: names.key()?,
-            prompts: names.key()?,
-        })
-    }
-}
-impl DynPlugin for ClientsPlugin {
-    fn name(&self) -> &str {
-        "EnvironmentClients"
-    }
-    fn injects(&self) -> Vec<TypeKey> {
-        vec![
-            self.identity.erase(),
-            self.clients.erase(),
-            self.prompts.erase(),
-        ]
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
-        Box::pin(async move {
-            let identity = ctx.require_at(&self.identity)?;
-            let clients = ctx.require_at(&self.clients)?;
-            let prompts = ctx.require_at(&self.prompts)?;
-            prompts.register(
-                ctx,
-                CLIENTS,
-                Arc::new(ClientsSource {
-                    host: clients,
-                    session_id: identity.session_id.clone(),
-                }),
-            )?;
-            Ok(Effect::Done)
-        })
-    }
+
+fn append(timeline: &Timeline, body: &str) -> dim_agent_runtime::Result<()> {
+    append_own(
+        timeline,
+        InputMessageData {
+            blocks: vec![InputBlock::Raw {
+                text: body.to_owned(),
+                key: None,
+                retire: false,
+            }],
+            ..InputMessageData::default()
+        },
+        Vec::new(),
+    )
+    .map(|_| ())
 }
 
 struct ClientsBranchPlugin {
+    clients: Key<SessionClientsHost>,
     identity: Key<SessionIdentity>,
-    configure: Key<dyn ConfigureControl>,
+    timeline: Key<Timeline>,
 }
 impl ClientsBranchPlugin {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
+            clients: names.key()?,
             identity: names.key()?,
-            configure: names.key()?,
+            timeline: names.key()?,
         })
     }
 }
 impl DynPlugin for ClientsBranchPlugin {
     fn name(&self) -> &str {
-        "EnvironmentClientsBranch"
+        BRANCH_PART
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.identity.erase(), self.configure.erase()]
+        vec![
+            self.clients.erase(),
+            self.identity.erase(),
+            self.timeline.erase(),
+        ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let clients = ctx.require_at(&self.clients)?;
             let identity = ctx.require_at(&self.identity)?;
-            let configure = ctx.require_at(&self.configure)?;
-            let tasks = TaskTracker::new();
-            let owned = tasks.clone();
+            let timeline = ctx.require_at(&self.timeline)?;
+            let last = Arc::new(Mutex::new(None));
+            let initial = snapshot(&clients.0.presences(&identity.session_id));
+            if let Err(error) = append(&timeline, &initial) {
+                tracing::warn!(%error, "client presence was not appended");
+            }
+            *last.lock().expect("presence body") = Some(initial);
+            let session = identity.session_id.clone();
+            let last = last.clone();
             ctx.listen::<ClientsChanged>()
-                .name(clients_changes(&identity.session_id))
+                .name(clients_changes(&session))
                 .on(move |_, _| {
-                    let configure = configure.clone();
-                    owned.spawn(async move {
-                        let update = ConfigureUpdate {
-                            sources: targets([CLIENTS]),
-                            model: None,
-                        };
-                        if let Err(error) = configure.configure(update).await {
-                            tracing::warn!(%error, "client presence was not adopted");
-                        }
-                    });
-                    async { Ok(None) }
+                    let current = snapshot(&clients.0.presences(&session));
+                    let mut last = last.lock().expect("presence body");
+                    if last.as_deref() == Some(current.as_str()) {
+                    } else if let Err(error) = append(&timeline, &current) {
+                        tracing::warn!(%error, "client presence was not appended");
+                    } else {
+                        *last = Some(current);
+                    }
+                    Box::pin(async { Ok(None) })
                 })?;
-            ctx.effect(move || async move {
-                tasks.close();
-                tasks.wait().await;
-                Ok(())
-            })?;
             Ok(Effect::Done)
         })
     }
@@ -278,38 +224,36 @@ mod tests {
 
     #[test]
     fn an_empty_session_is_stated_as_such() {
-        assert_eq!(body(&ClientCounts::default()), "No client is attached.");
+        assert_eq!(body(&[]), "No client connection is attached.");
     }
 
     #[test]
-    fn counts_are_sorted_and_pluralized() {
-        let mut counts = ClientCounts::default();
-        counts.add(ClientChannel::Web);
-        counts.add(ClientChannel::Tui);
-        counts.add(ClientChannel::Tui);
-        assert_eq!(body(&counts), "3 clients attached: 2 tui, 1 web.");
-        let mut one = ClientCounts::default();
-        one.add(ClientChannel::Tui);
-        assert_eq!(body(&one), "1 client attached: 1 tui.");
+    fn every_connection_is_listed() {
+        let presences = vec![
+            ClientPresence {
+                channel: ClientChannel::Tui,
+                label: Some("eric@laptop".into()),
+            },
+            ClientPresence {
+                channel: ClientChannel::Web,
+                label: None,
+            },
+        ];
+        assert_eq!(
+            body(&presences),
+            "2 client connections attached:\n- tui \"eric@laptop\" (claimed)\n- web"
+        );
     }
 
     #[test]
-    fn a_declared_other_client_is_named_or_unknown() {
+    fn a_label_cannot_break_the_body() {
+        let presences = vec![ClientPresence {
+            channel: ClientChannel::Cli,
+            label: Some("a\"b\nc".into()),
+        }];
         assert_eq!(
-            ClientChannel::declared(DeclaredClientKind::Other, Some("AcpGateway")),
-            ClientChannel::Acp
-        );
-        assert_eq!(
-            ClientChannel::declared(DeclaredClientKind::Other, Some("Desktop")),
-            ClientChannel::Desktop
-        );
-        assert_eq!(
-            ClientChannel::declared(DeclaredClientKind::Other, None),
-            ClientChannel::Unknown
-        );
-        assert_eq!(
-            ClientChannel::declared(DeclaredClientKind::Cli, None),
-            ClientChannel::Cli
+            body(&presences),
+            "1 client connection attached:\n- cli \"a\\\"bc\" (claimed)"
         );
     }
 }
