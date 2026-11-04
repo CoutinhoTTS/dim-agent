@@ -864,7 +864,7 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     config.session_typescript = Some(parts);
     let (server, _requests, _) = start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let defaults = ["goal", "workflow"];
+    let defaults = ["workflow"];
     let list = running(&mut client, &defaults).await;
     for name in defaults {
         assert_eq!(item(&list, name)["use"], "default", "{list}");
@@ -872,16 +872,16 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     assert_eq!(item(&list, "web")["use"], "builtin", "{list}");
     assert_eq!(item(&list, "Agents")["use"], "builtin", "{list}");
 
-    let read = json!({"source": "goal", "scope": "user"});
+    let read = json!({"source": "workflow", "scope": "user"});
     assert_ok(&call(&mut client, "settings.read", read.clone()).await);
-    assert_ok(&call(&mut client, "plugin.disable", json!({"name": "goal"})).await);
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name": "workflow"})).await);
     let gone = client.rpc("settings.read", read.clone()).await;
     assert_eq!(app_error(&gone), "settings_unknown_source", "{gone}");
-    assert_ok(&call(&mut client, "plugin.enable", json!({"name": "goal"})).await);
-    running(&mut client, &["goal"]).await;
+    assert_ok(&call(&mut client, "plugin.enable", json!({"name": "workflow"})).await);
+    running(&mut client, &["workflow"]).await;
     assert_ok(&call(&mut client, "settings.read", read).await);
 
-    // §6 `config`: goal's Settings source through the `plugin` tool.
+    // §6 `config`: the default plugin's Settings source through the `plugin` tool.
     select_fixture_model(&mut client).await;
     let tools = json!(["plugin"]);
     let mut params = create(tools.clone());
@@ -889,31 +889,34 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     let created = client.rpc("session.create", params).await;
     assert_ok(&created);
     let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    let shown = plugin_reply(&mut client, &server, &session, "config goal").await;
+    let shown = plugin_reply(&mut client, &server, &session, "config workflow").await;
     let source = &shown["sources"][0];
-    assert_eq!(source["source"], "goal", "{shown}");
-    assert_eq!(source["document"]["maxContinuations"], 20, "{shown}");
+    assert_eq!(source["source"], "workflow", "{shown}");
+    assert_eq!(source["document"]["max_concurrent_runs"], 4, "{shown}");
     assert_eq!(
-        source["schema"]["properties"]["maxContinuations"]["maximum"],
-        1000
+        source["schema"]["properties"]["max_concurrent_runs"]["maximum"],
+        9007199254740991
     );
-    let set = "config goal set maxContinuations 5";
+    let set = "config workflow set max_concurrent_runs 5";
     let updated = plugin_reply(&mut client, &server, &session, set).await;
-    assert_eq!(updated["document"]["maxContinuations"], 5, "{updated}");
-    let read = json!({"source": "goal", "scope": "user"});
+    assert_eq!(updated["document"]["max_concurrent_runs"], 5, "{updated}");
+    let read = json!({"source": "workflow", "scope": "user"});
     let stored = call(&mut client, "settings.read", read).await;
     assert_eq!(
-        stored["result"]["document"]["maxContinuations"], 5,
+        stored["result"]["document"]["max_concurrent_runs"], 5,
         "{stored}"
     );
     let (refused, error) = plugin(
         &mut client,
         &server,
         &session,
-        "config goal set maxContinuations 0",
+        "config workflow set max_concurrent_runs 0",
     )
     .await;
-    assert!(error && refused.contains("maxContinuations"), "{refused}");
+    assert!(
+        error && refused.contains("max_concurrent_runs"),
+        "{refused}"
+    );
 
     // A `writeOnly` member (web's search key and proxy) is a secret toward
     // the agent: never returned, never written through the tool.
