@@ -382,7 +382,8 @@ async fn node_configured_profile_runs_the_default_plugins() {
             .collect();
         let server = launch_configured(&directory, models, Some(parts), Some(defaults)).await;
         let mut client = Client::new_version(&server, false, 3).await;
-        let process = ["goal", "workflow"];
+        assert!(!names.iter().any(|name| name == "workflow"), "{names:?}");
+        let process = ["goal"];
         for name in process {
             assert!(
                 names.iter().any(|listed| listed == name),
