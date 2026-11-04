@@ -436,7 +436,8 @@
       "parent": "dim_agent_capabilities::environment_clients",
       "file": "crates/dim-agent-capabilities/src/environment_clients.rs",
       "unexpandedMacros": [
-        "assert_eq"
+        "assert_eq",
+        "vec"
       ]
     },
     {
@@ -8554,39 +8555,17 @@
     },
     {
       "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_capabilities::branch_input",
+      "references": [
+        "path append_own",
+        "use crate::branch_input::append_own"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
       "to": "dim_agent_capabilities::environment_clients::tests",
       "references": [
         "mod tests"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::environment_clients",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path HostError::Cancelled",
-        "path HostFuture",
-        "path LoadPrompt",
-        "use crate::host::HostError",
-        "use crate::host::HostFuture",
-        "use crate::host::LoadPrompt"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::environment_clients",
-      "to": "dim_agent_capabilities::prompt_registry",
-      "references": [
-        "path PromptRegistry",
-        "path targets",
-        "use crate::prompt_registry::PromptRegistry",
-        "use crate::prompt_registry::targets"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::environment_clients",
-      "to": "dim_agent_capabilities::prompt_sources",
-      "references": [
-        "path sha256_version",
-        "use crate::prompt_sources::sha256_version"
       ]
     },
     {
@@ -8599,14 +8578,17 @@
     },
     {
       "from": "dim_agent_capabilities::environment_clients",
-      "to": "dim_agent_runtime::contracts",
+      "to": "dim_agent_runtime::core::timeline",
       "references": [
-        "path ConfigureControl",
-        "path ConfigureUpdate",
-        "path PromptSourceTarget",
-        "use dim_agent_runtime::ConfigureControl",
-        "use dim_agent_runtime::ConfigureUpdate",
-        "use dim_agent_runtime::PromptSourceTarget"
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::environment_clients",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
       ]
     },
     {
@@ -8623,17 +8605,16 @@
       "references": [
         "path PartRegistry",
         "path PartScope::Branch",
-        "path PartScope::Session",
         "use dim_agent_runtime::PartRegistry",
         "use dim_agent_runtime::PartScope"
       ]
     },
     {
       "from": "dim_agent_capabilities::environment_clients",
-      "to": "dim_agent_types::prompt",
+      "to": "dim_agent_types::events",
       "references": [
-        "path PromptDelivery::State",
-        "path PromptEntry"
+        "path InputMessageData",
+        "path InputMessageData::default"
       ]
     },
     {
@@ -8641,15 +8622,6 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path kind"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::environment_clients::tests",
-      "to": "dim_agent_capabilities::environment_clients",
-      "references": [
-        "path ClientChannel::Tui",
-        "path ClientChannel::Web",
-        "path ClientCounts::default"
       ]
     },
     {
@@ -18581,7 +18553,7 @@
       "references": [
         "path dim_agent_capabilities::environment_clients::ClientChannel",
         "path dim_agent_capabilities::environment_clients::ClientChannel::Unknown",
-        "path dim_agent_capabilities::environment_clients::ClientCounts",
+        "path dim_agent_capabilities::environment_clients::ClientPresence",
         "path dim_agent_capabilities::environment_clients::ClientsChanged",
         "path dim_agent_capabilities::environment_clients::SessionClientsHost",
         "path dim_agent_capabilities::environment_clients::SessionClientsSource",
@@ -38984,10 +38956,6 @@
     {
       "module": "dim_app_server::connection",
       "path": "ClientChannel::Tui"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "ClientCounts::default"
     },
     {
       "module": "dim_app_server::managed_oauth",

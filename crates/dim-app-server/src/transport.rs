@@ -661,6 +661,7 @@ async fn run_connection(
                                 declared,
                                 params.client_name.as_deref(),
                             ),
+                            label: params.client_name.clone(),
                         })
                         .ok();
                     let instance = hub
