@@ -4,15 +4,12 @@ import { registerHooks, stripTypeScriptTypes } from "node:module"
 import test from "node:test"
 import { createPinia, setActivePinia } from "pinia"
 import { compileScript, parse } from "vue/compiler-sfc"
-import { createRenderer, nextTick } from "vue"
+import { createRenderer, markRaw, nextTick } from "vue"
 
 registerHooks({
   resolve(specifier, context, next) {
-    if (context.parentURL?.endsWith("/stores/connection.ts") && specifier === "../i18n") {
+    if (specifier === "../i18n") {
       return next(new URL("../src/i18n/index.ts", import.meta.url).href, context)
-    }
-    if (context.parentURL?.endsWith("/stores/connection.ts") && specifier === "./chat") {
-      return { url: "data:text/javascript,export const useChatStore=()=>({receive(){throw Error('Title notice reached chat')},resync(){}})", shortCircuit: true }
     }
     if (context.parentURL?.endsWith("SidebarWorkspaceGroup.vue")) {
       if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:key=>key})", shortCircuit: true }
@@ -33,6 +30,7 @@ registerHooks({
 
 const { useConnectionStore } = await import("../src/stores/connection.ts")
 const { useSessionsStore } = await import("../src/stores/sessions.ts")
+const { useChatStore } = await import("../src/stores/chat.ts")
 const { readSummaries, readNotification, ProtocolError } = await import("../src/rpc/read.ts")
 const { default: SidebarWorkspaceGroup } = await import("../src/components/SidebarWorkspaceGroup.vue")
 const summary = (fields = {}) => ({ sessionId: "session", cwd: "/workspace", model: { providerId: "p", modelId: "m" }, createdAt: 1, updatedAt: 2, sequence: 3, running: false, preview: "First message", title: null, titleSource: null, titleRevision: 0, ...fields })
@@ -135,4 +133,54 @@ test("owner notices update visible titles without letting delayed lists or dupli
   await flush()
   assert.match(text(label()), /sidebar.untitled/)
   assert.equal(sessions.byId.get("session").titleRevision, 5)
+})
+
+test("reconnect reads current titles after attaching so a rename without a listener is not lost", async t => {
+  setActivePinia(createPinia())
+  const NativeSocket = globalThis.WebSocket, nativeLocation = globalThis.location
+  const requests = []
+  let socket
+  globalThis.location = { protocol: "http:", host: "fixture" }
+  globalThis.WebSocket = class {
+    static OPEN = 1
+    readyState = 1
+    constructor() { socket = markRaw(this) }
+    send(value) { requests.push(JSON.parse(value)) }
+    close() { this.onclose() }
+  }
+  const connection = useConnectionStore(), sessions = useSessionsStore(), chat = useChatStore()
+  t.after(() => { connection.client.stop(); chat.$dispose(); globalThis.WebSocket = NativeSocket; globalThis.location = nativeLocation })
+  const reply = (method, result) => {
+    const index = requests.findIndex(request => request.method === method)
+    assert.notEqual(index, -1, `Expected ${method}`)
+    const [request] = requests.splice(index, 1)
+    socket.onmessage({ data: JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) })
+  }
+  const handshake = async () => {
+    connection.client.start()
+    socket.onopen()
+    reply("hello", { instanceId: "fixture", serverVersion: "test", protocolVersion: 3, features: ["session.summaries", "session.attach", "session.history"] })
+    await flush()
+  }
+  await handshake()
+  reply("session.summaries", [summary(title("Before reconnect", 1))])
+  await flush()
+  chat.open("session")
+  reply("session.attach", {})
+  await flush()
+  reply("session.history", { events: [], through: 0, nextAfter: 0, done: true })
+  await flush()
+  connection.client.stop()
+  await handshake()
+  if (requests.some(request => request.method === "session.summaries")) reply("session.summaries", [summary(title("Before reconnect", 1))])
+  await flush()
+  reply("session.attach", {})
+  await flush()
+  reply("session.history", { events: [], through: 0, nextAfter: 0, done: true })
+  await flush()
+  reply("session.summaries", [summary(title("Renamed before attach", 2))])
+  await flush()
+  assert.equal(sessions.byId.get("session").title, "Renamed before attach")
+  socket.onmessage({ data: JSON.stringify({ jsonrpc: "2.0", method: "session.notice", params: { sessionId: "session", source: "SessionStore", kind: "title", data: title("Renamed after attach", 3) } }) })
+  assert.equal(sessions.byId.get("session").title, "Renamed after attach")
 })

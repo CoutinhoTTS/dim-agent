@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { registerHooks, stripTypeScriptTypes } from "node:module"
 import test from "node:test"
@@ -16,7 +17,7 @@ registerHooks({
       return { url: `data:text/javascript,export const use${store[0].toUpperCase()}${store.slice(1)}Store=()=>globalThis.scheduleStores.${store}`, shortCircuit: true }
     }
     if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:key=>key,locale:{value:'en'}})", shortCircuit: true }
-    if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>globalThis.scheduleRoute;export const useRouter=()=>({replace:async to=>globalThis.scheduleNavigations.push(to)});export const RouterLink={inheritAttrs:false,props:['to'],setup:(props,{slots})=>()=>slots.default?.()}", shortCircuit: true }
+    if (specifier === "vue-router") return { url: `data:text/javascript,import{h}from'${import.meta.resolve("vue")}';export const useRoute=()=>globalThis.scheduleRoute;export const useRouter=()=>({replace:async to=>globalThis.scheduleNavigations.push(to)});export const RouterLink={props:['to'],setup:(props,{slots})=>()=>h('a',{to:props.to},slots.default?.())}`, shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
       if (specifier.startsWith(".") && !/\.(ts|vue)$/.test(specifier)) return next(`${specifier}.ts`, context)
       throw error
@@ -70,7 +71,7 @@ function mount(t, route, call, supports = () => true) {
   globalThis.scheduleNavigations = []
   globalThis.scheduleStores = {
     connection: reactive({ phase: "connected", supports, client: { call: async (method, params, read) => read(await call(method, params)) } }),
-    models: { available: false, providers: [] }, ui: { lastSessionId: "current" },
+    models: reactive({ available: false, providers: [] }), ui: { lastSessionId: "current" },
     sessions: { byId: new Map([["current", { cwd: "/current-project" }]]), workspaces: [{ cwd: "/current-project" }, { cwd: "/other-project" }] },
     toast: { push() {} },
   }
@@ -193,4 +194,94 @@ test("missing Web admission never falls back to Settings or file reads", async t
   await flush()
   assert.match(text(root), /not admitted for Web access/)
   assert.equal(button(root, "New task"), undefined)
+})
+
+test("reopening a searched model preserves the selected model on Enter", async t => {
+  let written
+  const root = mount(t, { name: "settings-scheduled-new", params: {} }, async (method, params) => {
+    if (method === "schedule.list") return { jobs: [job()] }
+    written = params.job
+    return saved(job(params.job))
+  })
+  globalThis.scheduleStores.models.providers = [{ providerId: "p", name: "Provider", models: [{ id: "a", name: "Alpha" }, { id: "b", name: "Beta" }] }]
+  await flush()
+  await select(root, "Model", "Provider / Beta")
+  const trigger = dropdown(root, "Model")
+  await trigger.props.onClick()
+  await flush()
+  const search = all(trigger.parent).find(el => el.type === "input" && el.props.type === "search")
+  await change(search, "Alpha", "onInput")
+  const key = key => trigger.props.onKeydown({ key, preventDefault() {}, stopPropagation() {} })
+  await key("Escape")
+  await trigger.props.onClick()
+  await flush()
+  await key("Enter")
+  await flush()
+  assert.equal(text(trigger), "Provider / Beta")
+  await change(field(root, "Name"), "Keep model", "onInput")
+  await submit(root)
+  assert.deepEqual(written.model, { providerId: "p", modelId: "b" })
+})
+
+test("one-off DST gaps and repeated minutes are explicit and do not leak into repeat plans", async t => {
+  if (process.env.TZ !== "America/New_York") {
+    const result = spawnSync(process.execPath, ["--test", "--test-name-pattern", "one-off DST", import.meta.filename], { env: { ...process.env, TZ: "America/New_York", NODE_TEST_CONTEXT: undefined }, encoding: "utf8", timeout: 10_000 })
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    return
+  }
+  for (const next of ["Once", "Repeat", "Every N minutes", "Custom Cron"]) {
+    let written
+    const root = mount(t, { name: "settings-scheduled-new", params: {} }, async (method, params) => {
+      if (method === "schedule.list") return { jobs: [] }
+      written = params.job
+      return saved(job(params.job))
+    })
+    await flush()
+    await change(field(root, "Name"), "DST", "onInput")
+    await button(root, "Once").props.onClick()
+    await flush()
+    await change(field(root, "Date and time"), "2027-03-14T02:30", "onInput")
+    await submit(root)
+    assert.equal(written, undefined)
+    assert.match(text(root), /local minute does not exist/)
+    await change(field(root, "Date and time"), "2026-11-01T01:30", "onInput")
+    await submit(root)
+    assert.equal(written, undefined)
+    assert.match(text(root), /minute occurs twice/)
+    await change(field(root, "Exact instant with UTC offset"), "2026-11-01T01:30:00-05:00")
+    if (next === "Repeat") await button(root, next).props.onClick()
+    else if (next !== "Once") await select(root, "Plan", next)
+    await flush()
+    if (next !== "Once") assert.equal(field(root, "Exact instant with UTC offset"), undefined)
+    await submit(root)
+    assert.deepEqual(written.schedule, next === "Once" ? { at: "2026-11-01T06:30:00.000Z" } : next === "Every N minutes" ? { every_minutes: 60 } : { cron: "0 9 * * *", tz: "America/New_York" })
+  }
+})
+
+test("history reads render owner outcomes and session links and retain entries across read failures", async t => {
+  const reads = []
+  let fail = false
+  const root = mount(t, { name: "settings-scheduled-detail" }, async (method, params) => {
+    if (method === "schedule.list") return { jobs: [job()] }
+    assert.equal(method, "schedule.history")
+    reads.push(params)
+    if (fail) throw new Error("History temporarily unavailable")
+    return { runs: [{ run_id: "run-2", job_id: "job-1", state: "skipped", created_at: "2026-11-05T05:27:00Z", detail: "disabled" }, { run_id: "run-1", job_id: "job-1", state: "completed", created_at: "2026-11-04T05:27:00Z", ended_at: "2026-11-04T05:28:00Z", detail: "Finished audit", session_id: "result-session", policy }] }
+  })
+  await flush()
+  await button(root, "Run history").props.onClick()
+  await flush()
+  assert.deepEqual(reads, [{ job_id: "job-1", limit: 20 }])
+  assert.match(text(root), /Skipped.*disabled.*Completed.*Finished audit/s)
+  assert.deepEqual(all(root).find(el => el.props.to?.name === "chat-session").props.to, { name: "chat-session", params: { sessionId: "result-session" } })
+  fail = true
+  await button(root, "Read latest 50 runs").props.onClick()
+  await flush()
+  assert.match(text(root), /History temporarily unavailable/)
+  assert.match(text(root), /Finished audit/)
+  fail = false
+  await button(root, "Read latest 50 runs").props.onClick()
+  await flush()
+  assert.equal(text(root).includes("History temporarily unavailable"), false)
+  assert.deepEqual(reads.slice(1), [{ job_id: "job-1", limit: 50 }, { job_id: "job-1", limit: 50 }])
 })

@@ -72,7 +72,7 @@ async function keydown(event: KeyboardEvent): Promise<void> {
   } else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); trigger.value?.focus() }
   else if (event.key === "Tab") close()
 }
-watch(query, async () => { active.value = choices.value[0] ?? 0; await nextTick(); await reposition() })
+watch(query, async () => { active.value = choices.value[0] ?? 0; await nextTick(); await reposition() }, { flush: "sync" })
 watch(() => props.disabled, value => { if (value) close() })
 onMounted(() => { window.addEventListener("resize", reposition); window.addEventListener("scroll", scrolled, true) })
 onBeforeUnmount(() => { close(); window.removeEventListener("resize", reposition); window.removeEventListener("scroll", scrolled, true) })

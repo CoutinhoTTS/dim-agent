@@ -248,7 +248,7 @@ async function submit(): Promise<void> {
     return
   }
   const message = text.value
-  if (/^\/schedule(?:d)?\s*$/i.test(message)) {
+  if (!dismissed.value && connection.supports("schedule.list") && /^\/schedule(?:d)?\s*$/i.test(message)) {
     await runCommand("scheduled")
     return
   }

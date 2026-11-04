@@ -157,6 +157,13 @@ The frontend directory is fixed when the daemon starts (§2.4); a daemon started
 | Lines | Right detail panel with a Lines tree and one tab per opened line; each tab folds that line's own history and sends, stops, approves and ends on its `branchId` (§4.1) |
 | i18n | `en` and `zh-CN` |
 
+Session labels in the sidebar, chat header, browser title and archived-session
+list prefer the owner's title, then `preview`, then the surface's untitled
+fallback. Title metadata from `session.summaries` and SessionStore title notices
+is reconciled by `titleRevision`, including explicit clears; an older directory
+reply cannot replace a newer title. After reconnect, re-attach before reading
+the directory, following the [Session notice window](appserver/session-notices.md#5-rpc-forwarding).
+
 Features outside the settings scope with no v3 backend are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, rename, goal, workflows, subagent panes, directory picker and git branch menu. Settings and saved-session management follow §4.3.
 
 ### 4.1 Lines and branch
@@ -221,6 +228,7 @@ commands are handled locally rather than submitted as model input.
 | `model` | `/permissions` | Open the composer's permission selector (below). Listed where the Session serves `session.permission.get` and `session.permission.update` |
 | `session` | `/lines` | Open the existing Session lines panel |
 | `session` | `/new` | Navigate to the existing new-Session page, seeded with the current Session's working directory |
+| `session` | `/scheduled` | Open Scheduled tasks when the connection admits `schedule.list`; `/schedule` is an alternate. The current Session's `cwd` seeds creation, not the list's workspace filter |
 
 `/compact`, `/usage`, `/fork`, `/goal` and `/effort` belong to the main Session composer; a line composer does not list them, because the Session-wide cut and compaction are decided on main. `/rename` is not listed: the App Server does not serve `session.rename` yet (the SessionTitle design).
 
@@ -311,6 +319,7 @@ authorization attempt rather than starting another login.
 │ Plugins              │ connection / login / models / preferences  │
 │ Skills               │                                            │
 │ Permissions          │                                            │
+│ Scheduled tasks      │                                            │
 │ Archived sessions    │                                            │
 │ Diagnostics          │                                            │
 └──────────────────────┴────────────────────────────────────────────┘
@@ -364,6 +373,24 @@ optional account feature must not prevent identity or usage from loading.
 Use the current owner's semantics when old terminology no longer describes the
 system, and document the mapping. Reuse existing Settings, MCP, PluginManager,
 Skills and Session owners rather than adding parallel browser-only state.
+
+#### Scheduled tasks interaction
+
+The list starts across all workspaces, with search, status and workspace filters.
+The `cwd` route parameter supplies only the new-task workspace default;
+`workspace` is the explicit list filter. Creation preselects the current workspace
+and offers paths from known Sessions and scheduled tasks, plus a typed host path.
+All Schedule selectors use the same custom keyboard-operated dropdown rather
+than system select styling; workspace and model choices also support search.
+
+The basic plan is Once or Repeat, with daily/weekly repetition and time to the
+minute. Advanced options distinguish enable-anchored intervals from wall-clock
+Cron; they are not duplicate frequency choices. A nonexistent browser-local
+minute is rejected; a repeated minute requires an explicit UTC offset. That
+disambiguation field belongs only to Once, never Repeat or an advanced plan.
+An unknown write outcome blocks resubmission; the operator checks the task list
+and run history before leaving or discarding the draft. Reloading a new-task
+form is not evidence that an interrupted create failed.
 
 #### Permissions: legacy rule kinds
 
@@ -574,6 +601,23 @@ Only `schedule.list`, `schedule.save`, `schedule.delete`, `schedule.set_enabled`
 `schedule.run_now` and `schedule.history` are admitted from `schedule`, and only
 when its owner registers them. Additional methods require a separate admission
 review; the `schedule` Settings source is not exposed through `settings.*`.
+
+The Scheduler read audit covers the complete owner replies, not just fields
+rendered by the page:
+
+| Reply | Data exposed and admission basis |
+| --- | --- |
+| `schedule.list` | Jobs: name, prompt, host cwd, schedule/time zone, enablement and anchor, mode, model/profile/Session ids, requested policy, captured cap, origin, revision, next window, schedule error and latest run. These are the authenticated operator's task definitions and owner-computed state, not Provider connection records or credentials |
+| `schedule.history` and `schedule.run_now` | Run/job ids, window, deadline and timestamps, state/detail, Session id and origin, effective policy, input-event/submission ids and report destination. These identify execution and authority, not authentication tokens; the run-now reply is acceptance, not completion |
+| `schedule.save` and `schedule.set_enabled` | The saved job above; save additionally returns old/new origin, cap, effective policy and report destination. These disclose the authority transition so the operator can judge future execution; they contain no credential-store fields |
+| `schedule.delete` | Deleted job id only |
+
+Names, prompts, paths and run details can contain sensitive user content; this
+admission does not declare arbitrary text public or automatically redact it.
+They remain within the authenticated Web entry and transient page state, not
+browser persistence or diagnostics. Model/profile ids are references, not reads
+of Provider secrets or profile contents. No reply exposes API keys, OAuth
+tokens, secret headers or a generic Settings document.
 
 Audit every added read for secret-bearing fields before enabling it. Return only
 owner-provided safe projections; any missing safe projection is a requirement for

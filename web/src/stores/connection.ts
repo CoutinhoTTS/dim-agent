@@ -17,11 +17,11 @@ export const useConnectionStore = defineStore("connection", () => {
     phase(next) {
       phase.value = next
     },
-    ready(result, reconnected) {
+    async ready(result, reconnected) {
       hello.value = result
       everConnected.value = true
+      if (reconnected) await useChatStore().resync()
       void useSessionsStore().refresh()
-      if (reconnected) useChatStore().resync()
     },
     notification(notification) {
       if (notification.method === "session.title") useSessionsStore().setTitle(notification.sessionId, notification.data)

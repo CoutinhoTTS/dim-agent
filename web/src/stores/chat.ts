@@ -151,10 +151,8 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** After a reconnect: attach again and fetch every line's history after its last applied event. */
-  function resync(): void {
-    for (const channel of channels.values()) {
-      if (channel.view.status !== "closed") void sync(channel)
-    }
+  async function resync(): Promise<void> {
+    await Promise.all([...channels.values()].filter(channel => channel.view.status !== "closed").map(sync))
   }
 
   async function sync(channel: Channel): Promise<void> {

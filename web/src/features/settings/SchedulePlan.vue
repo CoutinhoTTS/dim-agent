@@ -35,6 +35,7 @@ const summary = computed(() => {
 })
 function update(): void {
   error.value = ""
+  if (mode.value !== "once" || advanced.value !== "basic") ambiguous.value = false
   try {
     let value: Schedule
     if (advanced.value === "interval") {
