@@ -440,6 +440,156 @@ async fn bedrock_unreadable_tool_delta_fails_the_turn_without_a_call() {
 }
 
 #[tokio::test]
+async fn bedrock_finishes_at_metadata_while_the_body_stays_open() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for cancel in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (proceed, ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 8192];
+            loop {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let length = String::from_utf8_lossy(&request[..end])
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|s| s.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.amazon.eventstream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            let first = [
+                bedrock_frame("messageStart", json!({"role":"assistant"})),
+                bedrock_frame(
+                    "contentBlockDelta",
+                    json!({"contentBlockIndex":0,"delta":{"text":"early"}}),
+                ),
+            ]
+            .concat();
+            // A chunk ending exactly at a frame prelude exercises internal
+            // decoder state.
+            for bytes in [&first[..12], &first[12..]] {
+                socket
+                    .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(bytes).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            ready.await.unwrap();
+            if !cancel {
+                let final_bytes = [
+                    bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+                    bedrock_frame("messageStop", json!({"stopReason":"end_turn"})),
+                    bedrock_frame(
+                        "metadata",
+                        json!({"usage":{"inputTokens":17,"outputTokens":9,"totalTokens":26}}),
+                    ),
+                ]
+                .concat();
+                socket
+                    .write_all(format!("{:x}\r\n", final_bytes.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&final_bytes).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            std::future::pending::<()>().await;
+        });
+        let root = rutis::Ctx::root().unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        let request = ModelRequest::new(
+            "bedrock",
+            "anthropic.model",
+            vec![Message::text(Role::User, "hi")],
+        );
+        let connection = ModelConnection::Bedrock(BedrockModelConnection {
+            base_url: base,
+            network: Default::default(),
+            headers: Default::default(),
+            auth: BedrockAuth::Bearer("bearer".into()),
+        });
+        let cancel_token = CancellationToken::new();
+        let mut output = host
+            .0
+            .invoke(Arc::new(request), connection, cancel_token.clone())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if matches!(output.next().await.unwrap().unwrap(), ModelChunk::Text(text) if text == "early") {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if cancel {
+            cancel_token.cancel();
+        }
+        proceed.send(()).unwrap();
+        let mut usage = None;
+        let mut stopped = false;
+        let mut failure = false;
+        if cancel {
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(2), output.next()).await {
+                    Ok(Some(Ok(ModelChunk::MessageStop { .. }))) => {
+                        stopped = true;
+                        break;
+                    }
+                    Ok(Some(Ok(_))) => {}
+                    Ok(Some(Err(_))) => {
+                        failure = true;
+                        break;
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            assert!(failure, "an abort must end the flow with an error");
+            assert!(!stopped, "an abort must not deliver MessageStop");
+        } else {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while let Some(chunk) = output.next().await {
+                    match chunk.unwrap() {
+                        ModelChunk::Usage(value) => usage = Some(value),
+                        ModelChunk::MessageStop { .. } => {
+                            stopped = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("MessageStop must arrive while the body stays open");
+            assert!(stopped, "the terminal event must deliver MessageStop");
+            let usage = usage.expect("usage must arrive before the stop");
+            assert_eq!((usage.prompt_tokens, usage.completion_tokens), (17.0, 9.0));
+        }
+        server.abort();
+        let _ = server.await;
+        root.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

@@ -4,7 +4,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aimux_core::AbortSignal;
 use aimux_core::error::AiMuxError;
 use aimux_core::language_model::LanguageModel;
 use aimux_core::language_model_message::{FilePart, LanguageModelMessage, UserPart};
@@ -222,117 +221,6 @@ async fn xai_responses_finishes_before_the_http_body_closes() {
             if finish_reason.unified == FinishReasonUnified::Stop),
         "{parts:?}"
     );
-}
-
-/// A frame split across TCP chunks is decoded; the stream finishes once the
-/// body ends after `messageStop` plus `metadata` (the tag flushes at the body
-/// end, not at `metadata` like v0.5 did), and an abort ends it without a
-/// Finish.
-#[tokio::test]
-async fn converse_finishes_at_the_body_end_and_cancels_without_a_finish() {
-    for cancel in [false, true] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let (proceed, ready) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            read_request(&mut socket).await;
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.amazon.eventstream\r\nTransfer-Encoding: chunked\r\n\r\n")
-                .await
-                .unwrap();
-            let first = [
-                frame("messageStart", json!({"role":"assistant"})),
-                frame(
-                    "contentBlockStart",
-                    json!({"contentBlockIndex":0,"start":{}}),
-                ),
-                frame(
-                    "contentBlockDelta",
-                    json!({"contentBlockIndex":0,"delta":{"text":"early"}}),
-                ),
-            ]
-            .concat();
-            for bytes in [&first[..12], &first[12..]] {
-                socket
-                    .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
-                    .await
-                    .unwrap();
-                socket.write_all(bytes).await.unwrap();
-                socket.write_all(b"\r\n").await.unwrap();
-            }
-            ready.await.unwrap();
-            if !cancel {
-                let final_bytes = [
-                    frame("contentBlockStop", json!({"contentBlockIndex":0})),
-                    frame("messageStop", json!({"stopReason":"end_turn"})),
-                    frame(
-                        "metadata",
-                        json!({"usage":{"inputTokens":17,"outputTokens":9,"totalTokens":26}}),
-                    ),
-                ]
-                .concat();
-                socket
-                    .write_all(format!("{:x}\r\n", final_bytes.len()).as_bytes())
-                    .await
-                    .unwrap();
-                socket.write_all(&final_bytes).await.unwrap();
-                socket.write_all(b"\r\n").await.unwrap();
-                socket.write_all(b"0\r\n\r\n").await.unwrap();
-            }
-            std::future::pending::<()>().await;
-        });
-        let abort = AbortSignal::new();
-        let mut options = CallOptions::new(vec![]);
-        options.abort_signal = Some(abort.clone());
-        let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
-            api_key: Some(Resolvable::Value("test-key".into())),
-            region: Some("us-east-1".into()),
-            base_url: Some(base),
-            ..Default::default()
-        })
-        .unwrap();
-        let model = provider.chat("anthropic.test");
-        let mut stream = tokio::time::timeout(Duration::from_secs(2), model.do_stream(&options))
-            .await
-            .unwrap()
-            .unwrap()
-            .stream;
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if matches!(stream.next().await.unwrap().unwrap(), StreamPart::TextDelta { delta, .. } if delta == "early") {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        if cancel {
-            abort.abort();
-        }
-        proceed.send(()).unwrap();
-        let rest: Vec<Outcome> = tokio::time::timeout(Duration::from_secs(2), stream.collect())
-            .await
-            .unwrap();
-        if cancel {
-            assert!(rest.iter().any(Result::is_err), "{rest:?}");
-            assert!(
-                !rest
-                    .iter()
-                    .any(|part| matches!(part, Ok(StreamPart::Finish { .. }))),
-                "{rest:?}"
-            );
-        } else {
-            assert!(rest.iter().all(Result::is_ok), "{rest:?}");
-            assert!(
-                rest.iter()
-                    .any(|part| matches!(part, Ok(StreamPart::Finish { .. }))),
-                "{rest:?}"
-            );
-        }
-        server.abort();
-        let _ = server.await;
-    }
 }
 
 /// A missing usage object keeps the totals unknown; a present one fills
