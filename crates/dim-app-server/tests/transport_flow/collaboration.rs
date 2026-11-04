@@ -2197,8 +2197,18 @@ impl ToolDriver for EffectTools {
 /// returns the last turn's output. `read` pages through a Timeline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn member_work_absorbs_messages_and_spans_turns() {
+    member_work(ServerConfig::default()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_member_work_absorbs_messages_and_spans_turns() {
+    let store = Store::new();
+    member_work(store.config()).await;
+}
+
+async fn member_work(mut config: ServerConfig) {
+    let native = config.database_path.is_some();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    let mut config = ServerConfig::default();
     config
         .session_defaults
         .tools
@@ -2511,7 +2521,21 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     assert_eq!(after, end);
     assert_eq!(&paged, full["events"].as_array().unwrap());
 
+    if native {
+        unload(&agent, &member).await;
+        assert!(agent.get_session(&member).is_none());
+        say(&mut client, &lead, read(0, 200), "queue").await;
+        idle(&mut client, &lead).await;
+        let restored = agent
+            .get_session(&member)
+            .expect("the authorized read acquires its peer");
+        let read = last_ok(&events(&lead_session).await);
+        assert_eq!(read["events"], full["events"]);
+        assert_eq!(read["nextCursor"], restored.sequence("main").unwrap());
+    }
+
     assert_pairing(&events(&lead_session).await);
+    let member_session = agent.get_session(&member).unwrap();
     assert_no_collaboration_facts(&member_session).await;
     server.shutdown();
     server.join().await.unwrap();
@@ -2784,7 +2808,7 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
             started.extend((0..calls).map(|at| {
                 Ok(ModelChunk::ToolStart {
                     id: format!("unfinished-{at}"),
-                    name: "echo".into(),
+                    name: if calls == MANY_CALLS { "wait" } else { "echo" }.into(),
                 })
             }));
             let started = futures_util::stream::iter(started);
@@ -2965,11 +2989,12 @@ async fn undispatched_results_name_calls_from_their_starts() {
     say(
         &mut client,
         &lead,
-        tool(json!({"action": "request", "agentId": holder, "prompt": "many-calls"})),
+        tool(json!({"action": "request", "agentId": holder, "sessionId": member, "prompt": "many-calls"})),
         "queue",
     )
     .await;
     let many = next_member(&lead_session, 1).await;
+    assert_eq!(many, member);
     let many_session = agent.get_session(&many).unwrap();
     poll("every started call", async || {
         let events = events(&many_session).await;
@@ -2981,7 +3006,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .iter()
             .filter(|event| matches!(event.kind, EventKind::ModelUsage(_)))
             .count() as u64;
-        (started == MANY_CALLS && usage == PARTIAL_USAGE).then_some(())
+        (started == MANY_CALLS + UNFINISHED_CALLS && usage == PARTIAL_USAGE * 2).then_some(())
     })
     .await;
     assert_ok(
@@ -2997,7 +3022,9 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .await
             .iter()
             .find_map(|event| match &event.kind {
-                EventKind::ToolResult(data) if data.call_event_id.is_none() => {
+                EventKind::ToolResult(data)
+                    if data.call_event_id.is_none() && data.results.len() == MANY_CALLS =>
+                {
                     Some((event.sequence, data.results.len()))
                 }
                 _ => None,
@@ -3032,12 +3059,33 @@ async fn undispatched_results_name_calls_from_their_starts() {
     assert_eq!(named.len(), MANY_CALLS, "{page}");
     for (at, item) in named.iter().enumerate() {
         assert_eq!(item["callId"], format!("unfinished-{at}"));
-        assert_eq!(item["name"], "echo", "{item}");
+        assert_eq!(item["name"], "wait", "{item}");
     }
     assert_eq!(
         collaboration.take_reads(),
         2,
         "one page and one read of the starts"
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"read","agentId":holder,
+        "sessionId":member,"after":after,"limit":200})),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    let earlier = last_ok(&events(&lead_session).await);
+    let earlier: Vec<_> = earlier["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "tool_result")
+        .collect();
+    assert_eq!(earlier.len(), UNFINISHED_CALLS);
+    assert!(
+        earlier.iter().all(|event| event["name"] == "echo"),
+        "reused call ids in a later request must not rename earlier results"
     );
     server.shutdown();
     server.join().await.unwrap();
@@ -3212,7 +3260,7 @@ async fn collaboration_facts_publish_to_tree_protocols_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
+async fn stored_member_read_acquires_it_and_it_can_unload_and_work_again() {
     let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
     let (server, agent) = launch_with_agent(
         Arc::new(MockTools),
@@ -3287,8 +3335,8 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
     let read = last_ok(&events(&session).await);
     assert!(!read["events"].as_array().unwrap().is_empty());
     assert!(
-        agent.get_session(&member).is_none(),
-        "history reads do not load a member"
+        agent.get_session(&member).is_some(),
+        "history reads acquire the member"
     );
     say(
         &mut client,
@@ -4065,8 +4113,8 @@ async fn passes(client: &mut Client, agent: &Agent) {
 /// grace; when the member ends its work the result is recorded as
 /// completed, the woken leader turn runs, and both Sessions unload. The
 /// relation outlives the unload: the leader's next request to the member
-/// restores both and reaches the same member. The leader's `read` of the
-/// member, repeated while the Sessions unload, never fails or omits an event.
+/// restores both and reaches the same member. Each peer read acquires the
+/// member; after reads stop it unloads, and the next read restores its facts.
 /// Nothing keeps a released instance of either alive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
@@ -4131,27 +4179,38 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
 
     let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
     let mut reads = vec![];
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let gone = agent.get_session(&member).is_none();
-            say(&mut client, &lead, read.clone(), "queue").await;
-            let lead_session = agent.get_session(&lead).unwrap();
-            idle(&mut client, &lead).await;
-            reads.push(last_ok(&events(&lead_session).await));
-            if gone {
-                break;
-            }
-        }
+    for _ in 0..3 {
+        say(&mut client, &lead, read.clone(), "queue").await;
+        let lead_session = agent.get_session(&lead).unwrap();
+        idle(&mut client, &lead).await;
+        reads.push(last_ok(&events(&lead_session).await));
+    }
+    super::deletion::eventually("the member unloads after peer reads", || {
+        agent.get_session(&member).is_none()
     })
-    .await
-    .expect("deadline: the member unloads");
+    .await;
+    let loaded_before_read = loads.of(&member).0;
+    say(&mut client, &lead, read, "queue").await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    idle(&mut client, &lead).await;
+    reads.push(last_ok(&events(&lead_session).await));
+    drop(lead_session);
+    assert_eq!(
+        loads.of(&member),
+        (loaded_before_read + 1, true),
+        "the read restores the member"
+    );
     let first = &reads[0];
     assert!(
         first.to_string().contains("Echo: again"),
         "the read holds the second request: {first}"
     );
+    // Every read acquires the member, and it may unload and restore between
+    // reads: `branch/resume` then advances `nextCursor` legitimately, so only
+    // the visible events must stay the same.
     for read in &reads {
-        assert_eq!(read, first);
+        assert_eq!(read["events"], first["events"]);
+        assert!(read["nextCursor"].as_u64().unwrap() >= first["nextCursor"].as_u64().unwrap());
     }
     loads.released(&member).await;
     super::deletion::eventually("the leader unloads", || agent.get_session(&lead).is_none()).await;
