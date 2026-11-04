@@ -123,6 +123,15 @@ fn emit(wire: &mut Wire, branch: &str, sequence: u64, kind: &str, name: &str, da
     );
 }
 
+/// A change input Goal wrote, live: a line whose history is done folds it
+/// through the live stream, not a history page.
+fn change_notice(wire: &mut Wire, branch: &str, change: Value) {
+    wire.notice(
+        "session.event",
+        json!({"sessionId":"session","branchId":branch,"event":change}),
+    );
+}
+
 /// Answers what the terminal UI reads while it starts and returns the
 /// request for `method`.
 fn until_request(wire: &mut Wire, method: &str) -> Value {
@@ -445,61 +454,44 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
         wire.reply(&history, page(8, vec![]));
         started(wire);
 
-        let history = wire.read("session.history");
-        wire.reply(&history, page(8, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(
             write["params"],
             json!({"sessionId":"session","branchId":"main","objective":"Ship it"})
         );
         wire.reply(&write, json!({"sequence":9}));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(9, vec![set(9, "Ship it")]));
+        change_notice(wire, "main", set(9, "Ship it"));
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(9, vec![]));
         let write = wire.read("session.goal.edit");
         assert_eq!(
             write["params"],
             json!({"sessionId":"session","branchId":"main","objective":"Ship it fully"})
         );
         wire.reply(&write, json!({"sequence":12}));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(12, vec![edit(12, "Ship it fully")]));
+        change_notice(wire, "main", edit(12, "Ship it fully"));
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(12, vec![]));
         let write = wire.read("session.goal.pause");
         wire.reply(&write, json!({"sequence":15}));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(15, vec![paused(15)]));
+        change_notice(wire, "main", paused(15));
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(15, vec![]));
         let write = wire.read("session.goal.resume");
         wire.reply(&write, json!({"sequence":18}));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(18, vec![resumed(18)]));
+        change_notice(wire, "main", resumed(18));
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(18, vec![]));
         let write = wire.read("session.goal.clear");
         wire.reply(&write, json!({"sequence":21}));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(21, vec![cleared(21)]));
+        change_notice(wire, "main", cleared(21));
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(21, vec![]));
         drained(wire);
     });
     let mut command = home.command();
@@ -556,13 +548,10 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
         wire.reply(&history, page(8, vec![]));
         started(wire);
 
-        let history = wire.read("session.history");
-        wire.reply(&history, page(8, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(write["params"]["branchId"], "main");
         wire.reply(&write, json!({"sequence":9}));
-        let history = wire.read("session.history");
-        wire.reply(&history, page(9, vec![set(9, "Ship it")]));
+        change_notice(wire, "main", set(9, "Ship it"));
 
         // A line opens from main; its own history starts at its branch/start.
         emit(
@@ -587,30 +576,20 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
-        let history = wire.read("session.history");
-        assert_eq!(history["params"]["branchId"], "line-1");
-        wire.reply(&history, page(11, vec![]));
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
-        let history = wire.read("session.history");
-        assert_eq!(history["params"]["branchId"], "line-1");
-        wire.reply(&history, page(11, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(
             write["params"],
             json!({"sessionId":"session","branchId":"line-1","objective":"Child goal"})
         );
         wire.reply(&write, json!({"sequence":12}));
-        let history = wire.read("session.history");
-        assert_eq!(history["params"]["branchId"], "line-1");
-        wire.reply(
-            &history,
-            page(
+        change_notice(
+            wire,
+            "line-1",
+            change(
                 12,
-                vec![change(
-                    12,
-                    vec![objective("line-1", "set", "Child goal"), active("line-1")],
-                )],
+                vec![objective("line-1", "set", "Child goal"), active("line-1")],
             ),
         );
         drained(wire);
@@ -644,9 +623,9 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
     daemon.join().unwrap();
 }
 
-/// A line whose discovery page has not landed yet. `/goal OBJECTIVE` reads
-/// the line to its head before it picks `set` or `edit`, so an active goal
-/// the interface has not folded yet still gets `edit`.
+/// A line whose discovery page has not landed yet. `/goal OBJECTIVE` waits
+/// for the reader to finish the line before it picks `set` or `edit`, so an
+/// active goal the interface has not folded yet still gets `edit`.
 #[test]
 fn tui_goal_reads_the_line_before_it_picks_set_or_edit() {
     let home = Home::new();
@@ -675,9 +654,10 @@ fn tui_goal_reads_the_line_before_it_picks_set_or_edit() {
 
         let read = until_request(wire, "session.methods");
         wire.reply(&read, methods(true));
-        let read = until_request(wire, "session.history");
-        assert_eq!(read["params"]["branchId"], "line-1");
-        assert_eq!(read["params"]["after"], 0);
+        wire.quiet(Duration::from_millis(150));
+
+        // The discovery page lands with the active goal the interface had not
+        // folded: only now may the command choose `edit`.
         let events = vec![
             json!({"id":"start-line-1","sequence":11,"create_at":1,
                 "type":"branch","name":"start","data":{"parent":"main"}}),
@@ -686,27 +666,18 @@ fn tui_goal_reads_the_line_before_it_picks_set_or_edit() {
                 vec![objective("line-1", "set", "Old goal"), active("line-1")],
             ),
         ];
-        wire.reply(&read, page(12, events.clone()));
+        wire.reply(&delayed, page(12, events));
         let write = wire.read("session.goal.edit");
         assert_eq!(
             write["params"],
             json!({"sessionId":"session","branchId":"line-1","objective":"New objective"})
         );
         wire.reply(&write, json!({"sequence":13}));
-        let read = wire.read("session.history");
-        wire.reply(
-            &read,
-            page(
-                13,
-                vec![change(
-                    13,
-                    vec![objective("line-1", "edit", "New objective")],
-                )],
-            ),
+        change_notice(
+            wire,
+            "line-1",
+            change(13, vec![objective("line-1", "edit", "New objective")]),
         );
-
-        // The discovery page lands late; its events predate the edit.
-        wire.reply(&delayed, page(12, events));
         drained(wire);
     });
     let mut command = home.command();
@@ -764,9 +735,6 @@ fn tui_goal_reports_a_failed_read_and_sends_nothing() {
 
         let read = until_request(wire, "session.methods");
         wire.reply(&read, methods(true));
-        let read = until_request(wire, "session.history");
-        assert_eq!(read["params"]["branchId"], "line-1");
-        failed(wire, &read);
 
         // No goal method is sent before the client leaves.
         let mut line = String::new();
@@ -796,6 +764,78 @@ fn tui_goal_reports_a_failed_read_and_sends_nothing() {
         "no goal method ran: {}",
         terminal.transcript
     );
+
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// `/goal` while the shown line's initial history is still loading: the
+/// command waits for the task-history reader, so exactly one
+/// `session.history` page is outstanding for the line, the fold it decides on
+/// is the reader's whole fixed window, and it repeats no page from zero. A
+/// second `/goal` while the first waits is reported and changes nothing.
+#[test]
+fn tui_goal_during_the_initial_history_read_opens_no_second_pager() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.methods"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let table = wire.read("session.methods");
+        wire.reply(&table, methods(true));
+
+        // main's first history page is outstanding when `/goal` arrives.
+        let held = wire.read("session.history");
+        assert_eq!(held["params"]["after"], 0);
+
+        let read = until_request(wire, "session.methods");
+        wire.reply(&read, methods(true));
+        // Only one reader: while that page is outstanding, no second history
+        // request for the line and no goal method travels.
+        wire.quiet(Duration::from_millis(500));
+
+        // The first page fixes the window, and the active goal is on the
+        // second: only a command that waits for the reader's `done` folds it,
+        // so `edit` proves the wait.
+        wire.reply(
+            &held,
+            json!({"events":[],"through":9,"nextAfter":4,"done":false}),
+        );
+        let second = wire.read("session.history");
+        assert_eq!(second["params"]["after"], 4);
+        assert_eq!(second["params"]["through"], 9);
+        wire.reply(&second, page(9, vec![set(9, "Old goal")]));
+
+        let write = wire.read("session.goal.edit");
+        assert_eq!(
+            write["params"],
+            json!({"sessionId":"session","branchId":"main","objective":"New objective"})
+        );
+        wire.reply(&write, json!({"sequence":10}));
+        change_notice(wire, "main", edit(10, "New objective"));
+
+        // The queue sends no page after the one that finished the line: the
+        // only frames left are what the interface reads while it exits.
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_ne!(request["method"], json!("session.history"), "{request}");
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    sized(&mut command, 100, 32);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+
+    terminal.write(b"/goal New objective\r");
+    terminal.write(b"/goal Another objective\r");
+    terminal.until("Goal: a /goal is still in progress on this line");
+    terminal.until("Goal edited on main · active");
+    terminal.until("  New objective");
 
     terminal.write(b"/exit\r");
     terminal.until("Bye!");

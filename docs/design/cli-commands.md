@@ -292,10 +292,11 @@ A `/pursue` form is Pursuit's later option (§10) and is not part of this contra
 A.3's rule: the latest live `goal:objective` block is the objective, the latest live `goal:status`
 block is the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue
 deleted leaves the fold. It adds no query method and asks Goal no question. `/goal` with no
-arguments prints usage before that fold. Before it picks between `set` and `edit` the client reads the line up
-to its published head, and after a write it reads again before printing: the state shown and the
-method chosen come from the events, never from a guess taken from the reply. The fold starts over
-at the line's own opening — its
+arguments prints usage before that fold. Before it picks between `set` and `edit` the client reads the line
+up to its published head. After a write, it folds the events that write produced before printing: the
+line prompt reads them again, and the terminal UI waits for them among the line's live events. The
+state shown and the method chosen come from the events, never from a guess taken from the reply. The
+fold starts over at the line's own opening — its
 `branch/start`, or the `session/forked` a fork writes after the facts it copied — so a new line has
 no goal and a forked Session's `main` never shows the copied one (Goal §2, A11). A v3 client
 receives that opening, so a fork reads the same here as it does in Goal.

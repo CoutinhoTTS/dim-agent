@@ -250,6 +250,9 @@ struct Worker {
     task_history_queue: std::collections::VecDeque<String>,
     /// A stale request still occupies this slot until its reply arrives.
     task_history_request: Option<HistoryRequest>,
+    /// A `/goal` waiting for its line's history or for the event its write
+    /// produced, advanced by [`Worker::poll_goal`].
+    goal_pending: Option<PendingGoal>,
     task_stops: Option<StopBatch>,
     workflow: WorkflowReads,
     members: Members,
@@ -310,6 +313,20 @@ struct MemberDetailRead {
     branch_id: String,
     request_id: String,
     allow: bool,
+}
+
+/// A `/goal` waiting on the shown line: the reader must finish the line's
+/// history before the call is chosen, and the event a write produced must be
+/// folded before the report prints. Both waits resume from the loop, so the
+/// command never holds the branch reader while it waits.
+struct PendingGoal {
+    request: crate::goal::Request,
+    branch: String,
+    /// The attachment this command was issued on; a switch drops the wait.
+    projection_id: u64,
+    /// The call sent, and the sequence of the event it wrote, once the reply
+    /// arrived.
+    written: Option<(crate::goal::Call, u64)>,
 }
 
 struct OutputWatch {
@@ -388,6 +405,7 @@ async fn run(
         task_history: Default::default(),
         task_history_queue: Default::default(),
         task_history_request: None,
+        goal_pending: None,
         task_stops: None,
         workflow: WorkflowReads::default(),
         members: Members::default(),
@@ -435,6 +453,7 @@ async fn run(
             worker.send(Update::Failed(error.to_string()));
             break;
         }
+        worker.poll_goal().await;
         worker.poll_task_stops().await;
         worker.poll_workflow().await;
         worker.poll_context().await;
@@ -2074,67 +2093,113 @@ impl Worker {
     }
 
     /// `/goal`: the shown line's goal, written by the method the request
-    /// names. The line is read before the call is chosen, so a fold the
-    /// interface has not caught up with cannot pick the wrong method; a
-    /// write is followed by the events it produced, so the report shows the
-    /// state after it.
+    /// names. The call is chosen only once the reader has finished the line's
+    /// history, so a fold the interface has not caught up with cannot pick
+    /// the wrong method; the report waits for the event a write produced, so
+    /// it shows the state after it.
     async fn goal(&mut self, request: crate::goal::Request) {
-        let branch = self.focus.clone();
+        if self.goal_pending.is_some() {
+            self.report(
+                "Goal: a /goal is still in progress on this line".into(),
+                true,
+            );
+            return;
+        }
         if !crate::goal::available(&mut self.client, &self.session_id).await {
             self.report(crate::goal::NOT_AVAILABLE.into(), true);
             return;
         }
-        if let Err(error) = self.read_branch(&branch).await {
+        if self.session_id.is_empty() {
+            self.report(format!("Goal: {NO_SESSION}"), true);
+            return;
+        }
+        self.goal_pending = Some(PendingGoal {
+            request,
+            branch: self.focus.clone(),
+            projection_id: self.projection_id,
+            written: None,
+        });
+        self.poll_goal().await;
+    }
+
+    /// Advances the parked `/goal` from the loop: the task-history reader's
+    /// `done` releases the call, and the write's own event releases the
+    /// report. A line that is still loading or has no reply leaves it parked;
+    /// the reader's reply or its failure resumes it.
+    async fn poll_goal(&mut self) {
+        let Some(pending) = &self.goal_pending else {
+            return;
+        };
+        if pending.projection_id != self.projection_id {
+            self.goal_pending = None;
+            return;
+        }
+        let branch = pending.branch.clone();
+        if let Some((call, sequence)) = pending.written {
+            if self.cursors.get(&branch).copied().unwrap_or(0) >= sequence {
+                self.finish_goal(&branch, Some(call));
+            }
+            return;
+        }
+        let history = self
+            .task_history
+            .get(&branch)
+            .expect("the shown line is discovered");
+        if let Some(error) = history.error.clone() {
+            self.goal_pending = None;
             self.report(format!("Goal: {error}"), true);
             return;
         }
-        let call = crate::goal::call(&request, self.shown().goal().as_ref());
-        if let Some(call) = call {
-            let mut params = json!({"sessionId": self.session_id, "branchId": branch});
-            if let Some(objective) = crate::goal::objective(&request) {
-                params["objective"] = json!(objective);
+        if !history.done {
+            return;
+        }
+        let request = self
+            .goal_pending
+            .as_ref()
+            .expect("parked goal")
+            .request
+            .clone();
+        let Some(call) = crate::goal::call(&request, self.goal_on(&branch).as_ref()) else {
+            self.finish_goal(&branch, None);
+            return;
+        };
+        let mut params = json!({"sessionId": self.session_id, "branchId": branch});
+        if let Some(objective) = crate::goal::objective(&request) {
+            params["objective"] = json!(objective);
+        }
+        #[derive(Deserialize)]
+        struct Written {
+            sequence: u64,
+        }
+        match self.client.typed::<Written>(call.method(), params).await {
+            Ok(written) => {
+                self.goal_pending.as_mut().expect("parked goal").written =
+                    Some((call, written.sequence));
             }
-            if let Err(error) = self.client.rpc(call.method(), params).await {
+            Err(error) => {
+                self.goal_pending = None;
                 let text = match crate::client::app_error(&error) {
                     Some("unknown_method") => crate::goal::NOT_AVAILABLE.to_owned(),
                     _ => format!("Goal: {error}"),
                 };
                 self.report(text, true);
-                return;
-            }
-            if let Err(error) = self.read_branch(&branch).await {
-                self.report(format!("Goal: {error}"), true);
-                return;
             }
         }
-        let text = crate::goal::report(&branch, call, self.shown().goal().as_ref()).join("\n");
-        self.report(text, false);
     }
 
-    /// Applies the portion of `branch` the interface has not folded yet, from
-    /// its applied sequence to the published head.
-    async fn read_branch(&mut self, branch: &str) -> crate::Result<()> {
-        let mut after = self.cursors.get(branch).copied().unwrap_or(0);
-        let mut through = None;
-        loop {
-            let mut params = json!({
-                "sessionId": self.session_id, "branchId": branch,
-                "after": after, "limit": HISTORY_PAGE,
-            });
-            if let Some(through) = through {
-                params["through"] = json!(through);
-            }
-            let page: crate::wire::History = self.client.typed("session.history", params).await?;
-            through = Some(page.through);
-            let next = page.next(after, through)?;
-            for value in page.events {
-                self.apply(branch, serde_json::from_value(value)?);
-            }
-            match next {
-                Some(next) => after = next,
-                None => return Ok(()),
-            }
-        }
+    /// Reports the parked `/goal` with the fold it now holds.
+    fn finish_goal(&mut self, branch: &str, call: Option<crate::goal::Call>) {
+        self.goal_pending = None;
+        let goal = self.goal_on(branch);
+        self.report(
+            crate::goal::report(branch, call, goal.as_ref()).join("\n"),
+            false,
+        );
+    }
+
+    /// The goal folded on `branch`, from the projection that draws it.
+    fn goal_on(&self, branch: &str) -> Option<crate::goal::Goal> {
+        self.projection_on(branch).goal()
     }
 
     /// Whether a request made from a snapshot still addresses this
@@ -4122,9 +4187,14 @@ impl Worker {
 
     /// The transcript the screen shows: the focused line's, or `main`'s.
     fn shown(&self) -> &Projection {
+        self.projection_on(&self.focus)
+    }
+
+    /// The projection that draws `branch`, when the interface opened it.
+    fn projection_on(&self, branch: &str) -> &Projection {
         self.lines
-            .get(&self.focus)
-            .filter(|_| self.focus != "main")
+            .get(branch)
+            .filter(|_| branch != "main")
             .map_or(&self.projection, |line| &line.projection)
     }
 
