@@ -216,11 +216,20 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
                 assert_eq!(sent[1].headers["authorization"], "Bearer bearer-asymmetric")
             }
             BedrockAuth::SigV4 { .. } => {
+                let authorization = sent[1].headers["authorization"].to_str().unwrap();
+                assert!(authorization.contains("Credential=access-asymmetric/"));
+                // aws4fetch 1.0.20, the signer of the AI SDK's AWS providers,
+                // sends `content-type` but leaves it out of `SignedHeaders`;
+                // the tag's signer carries that list, not a patch.
+                let signed_headers = authorization
+                    .split_once("SignedHeaders=")
+                    .and_then(|(_, rest)| rest.split(',').next())
+                    .expect("the Authorization header names its signed headers");
                 assert!(
-                    sent[1].headers["authorization"]
-                        .to_str()
-                        .unwrap()
-                        .contains("Credential=access-asymmetric/")
+                    !signed_headers
+                        .split(';')
+                        .any(|name| name.eq_ignore_ascii_case("content-type")),
+                    "content-type must not be signed: {signed_headers}"
                 );
                 assert_eq!(
                     sent[1].headers["x-amz-security-token"],
