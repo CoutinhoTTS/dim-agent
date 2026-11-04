@@ -3848,16 +3848,23 @@ impl App {
                     WriteTarget::Create => ManagementAction::Add { document },
                     WriteTarget::Area { revision } => ManagementAction::Save {
                         id: None,
+                        source: None,
                         expected_revision: revision.clone(),
                         document,
                     },
-                    WriteTarget::Entry { id, revision } => ManagementAction::Save {
+                    WriteTarget::Entry {
+                        id,
+                        source,
+                        revision,
+                    } => ManagementAction::Save {
                         id: Some(id.clone()),
+                        source: source.clone(),
                         expected_revision: revision.clone(),
                         document,
                     },
-                    WriteTarget::Run { id } => ManagementAction::Run {
+                    WriteTarget::Run { id, source } => ManagementAction::Run {
                         id: id.clone(),
+                        source: source.clone(),
                         document: Some(document),
                         seed: seed.clone(),
                     },
@@ -6549,6 +6556,7 @@ mod tests {
                             heading: "user".into(),
                             entries: vec![ManagementEntry {
                                 id: "cleanup".into(),
+                                source: None,
                                 label: "cleanup".into(),
                                 detail: vec!["Runs first.".into()],
                                 enabled: Some(true),
@@ -6845,6 +6853,7 @@ mod tests {
                 heading: "user".into(),
                 entries: vec![ManagementEntry {
                     id: "review-and-fix".into(),
+                    source: None,
                     label: "review-and-fix".into(),
                     detail: vec!["Runs the review first.".into()],
                     enabled: Some(true),
@@ -10800,6 +10809,7 @@ mod tests {
                     area: Area::Hooks,
                     action: ManagementAction::Save {
                         id: None,
+                        source: None,
                         expected_revision: "user:1".into(),
                         document: serde_json::json!({}),
                     },
@@ -10893,6 +10903,7 @@ mod tests {
                 area: Area::Scheduled,
                 action: ManagementAction::Run {
                     id: "job-1".into(),
+                    source: None,
                     document: None,
                     seed: None,
                 },
@@ -10968,6 +10979,7 @@ mod tests {
                         heading: "user".into(),
                         entries: vec![ManagementEntry {
                             id: "user:commit".into(),
+                            source: None,
                             label: "commit".into(),
                             detail: Vec::new(),
                             enabled: Some(true),
@@ -10988,6 +11000,7 @@ mod tests {
             area: Area::Skills,
             action: ManagementAction::Toggle {
                 id: "user:commit".into(),
+                source: None,
                 enabled: false,
             },
         };
@@ -11026,6 +11039,7 @@ mod tests {
         );
         let row = |id: &str, label: &str| ManagementEntry {
             id: id.into(),
+            source: None,
             label: label.into(),
             detail: Vec::new(),
             enabled: Some(true),
@@ -11063,6 +11077,7 @@ mod tests {
                 },
                 action: ManagementAction::Toggle {
                     id: "other".into(),
+                    source: None,
                     enabled: false,
                 },
             },
@@ -11106,6 +11121,7 @@ mod tests {
                 area: Area::Scheduled,
                 action: ManagementAction::Run {
                     id: "job-1".into(),
+                    source: None,
                     document: None,
                     seed: None,
                 },
@@ -11265,6 +11281,7 @@ mod tests {
                     area: Area::Skills,
                     action: ManagementAction::Run {
                         id: "job-1".into(),
+                        source: None,
                         document: Some(serde_json::json!({"target": "edited"})),
                         seed: Some(serde_json::json!({"target": "src"})),
                     },
@@ -11293,7 +11310,10 @@ mod tests {
             app.write_draft(
                 ManagementDraft {
                     area: Area::Skills,
-                    target: WriteTarget::Run { id: "job-1".into() },
+                    target: WriteTarget::Run {
+                        id: "job-1".into(),
+                        source: None,
+                    },
                     draft,
                     seed: Some(serde_json::json!({"target": "src"})),
                 },
@@ -11311,6 +11331,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::Run {
                     id,
+                    source,
                     document: Some(document),
                     seed: Some(seed),
                 },
@@ -11342,6 +11363,7 @@ mod tests {
                 &Area::Skills,
                 &WriteTarget::Entry {
                     id: "job-1".into(),
+                    source: None,
                     revision: "1".into(),
                 },
             )
@@ -11349,9 +11371,21 @@ mod tests {
             "an edit never reopens a run's draft"
         );
         let (target, kept, seed) = app
-            .kept_draft(&Area::Skills, &WriteTarget::Run { id: "job-1".into() })
+            .kept_draft(
+                &Area::Skills,
+                &WriteTarget::Run {
+                    id: "job-1".into(),
+                    source: None,
+                },
+            )
             .expect("the run key reopens the draft");
-        assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+        assert_eq!(
+            target,
+            WriteTarget::Run {
+                id: "job-1".into(),
+                source: None,
+            }
+        );
         assert_eq!(
             seed,
             Some(serde_json::json!({"target": "src"})),

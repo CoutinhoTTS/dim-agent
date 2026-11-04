@@ -10,40 +10,42 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 
 ## 命令菜单
 
-scrollback 与 fullscreen TUI 都按固定的任务顺序分组：会话、模型与权限、扩展与自动化、界面、应用。
-分类内也使用以下固定顺序，不按字母或最近使用顺序排列：
+scrollback 与 fullscreen TUI 都按同一个固定的、经过整理的顺序列出 slash 命令，不按字母或最近使用顺序排列。
+菜单不画分类列：
 
-| 分类 | 命令顺序 |
-| --- | --- |
-| `session` | `/new`、`/resume`、`/timeline`、`/goal`、`/tasks`、`/lines`、`/branch`、`/fork`、`/compact`、`/usage`、`/rename`、`/web` |
-| `model` | `/models`、`/agent`、`/effort`、`/fast`、`/permissions`、`/connect`、`/login` |
-| `extensions` | `/skills`、`/mcp`、`/plugins`、`/hooks`、`/scheduled`、`/workflow`、`/workflow:save`、`/reload-skills`、`/runtime` |
-| `view` | `/theme`、`/language`、`/tools`、`/tui` |
-| `app` | `/settings`、`/keys`、`/exit` |
+```text
+/new /resume /models /compact /usage
+/effort /fast /agent /permissions /settings
+/branch /fork /lines /timeline /goal
+/tasks /rename /web /connect /login
+/skills /reload-skills /mcp /plugins /runtime
+/hooks /scheduled /workflow /workflow:save
+/tools /tui /theme /language /keys /exit
+```
 
-`/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述任务顺序。
+`/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述顺序。
 排序不受界面语言影响；打开 `/` 默认选中 `/new`，Enter 会新建会话。未筛选列表中的 `/exit` 始终在最后。
 退出必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
 菜单选择即使完整匹配命令名，也可能只补全：带行内参数的命令和 `/goal` 会填入输入框，等待另一次提交。
 `Tab` 只补全选中行，从不执行也不发送：命令补全为其名称，带参数的命令同时补全名称后的空格，
-Skill 行补全 `$skill: <name> ` 标记。分类标题行或没有匹配项时草稿保持不变。
+Skill 行补全 `$skill: <name> ` 标记。没有匹配项时草稿保持不变。
 不带参数的命令只在 `Enter` 时执行。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
 菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单列出斜杠命令与 Skill：选择较早消息、滚动到顶部或底部等视图操作也不列出；
 `Tab`、`Home`、`End` 在菜单之外保留各自的 fullscreen 消息选择和滚动绑定。
 
-Skill 行读作 `$name`，带其描述，分类为 `skill`。只列出已启用且没有被其他来源遮蔽的 Skill；名称含空白的 Skill 无法被引用，因此也不列出。列表跟随会话的目录：
+Skill 行读作 `$name`，带其描述。只列出已启用且没有被其他来源遮蔽的 Skill；名称含空白的 Skill 无法被引用，因此也不列出。列表跟随会话的目录：
 客户端在挂载、切换会话、`/reload-skills` 之后以及 `/skills` 中的改动之后重新读取。不提供 `skills.catalog` 的守护进程只显示命令，不报错。
 用 `Enter` 或 `Tab` 选择 Skill 行只填入 `$skill: <name> `，绝不发送；该标记随消息文本一起提交。Skill 排在命令之后；
 只有当查询是某个 Skill 名称的前缀、且不是任何命令名或别名的前缀时，Skill 才排在前面；因此与命令同名的 Skill 两行都保留，命令在前。
 `/` 是唯一的触发器：`@` 仍是文件选择器。
 
-两种模式下，菜单都适应终端可用的列数和行数。命令名优先于分类标签、描述和快捷键标签；必要时缩短
-分类标签以保留完整命令名。快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
+两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签。
+快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
 短屏幕少显示一些命令，可见窗口跟随选择。
 Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
-命令面板查询行和选中项。分类分组和排序不随终端尺寸变化。
+命令面板查询行和选中项。顺序不随终端尺寸变化。
 
 当通常的历史保留空间使实时区域不足八行时，实时控件优先：两种渲染器都可为实时区域使用最多八行，
 但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
@@ -72,14 +74,13 @@ Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页
 
 ```text
 Commands
-  session /new         start a new session
-  session /resume      resume a previous session
-  session /timeline    jump to a message of the shown line
-  session /goal        follow or change the shown line's goal
-  session /tasks       view command output or interrupt a member
-  session /lines       follow, talk to and end this session's lines
-  model   /permissions permission preset and command rules
-  skill   $commit      write a commit message for the staged changes
+  /new         start a new session
+  /resume      resume a previous session
+  /models      select a model
+  /compact     compact the context of the shown line
+  /usage       show the context window usage
+  /effort      show or set the reasoning effort
+  $commit      write a commit message for the staged changes
 
 / + Enter          -> start a new session
 /ex + Enter        -> /exit (completion only)
@@ -91,10 +92,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| session /new            |   | > /                     |
+| /new                    |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | session /new            |
++- input -----------------+   | /new                    |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -166,7 +167,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 `/goal` 读取当前显示线的目标，并通过 Goal 注册的方法写入它。方法、标记块和读取目标的规则属于
 [Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
-本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
+本节规定原生客户端用它们做什么。该命令与 `/compact` 一样列在命令菜单里。
 
 两种 TUI 模式中，用 Enter 或 Tab 选择 `/goal` 只会把 `/goal ` 填入输入框并关闭命令面板，
 不会执行。用户再次提交空参数草稿时，先打印 Dim 支持的用法，再显示当前目标及状态，或该线没有目标的提示。
@@ -372,7 +373,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 
 ### 菜单项
 
-`/runtime` 是 `extensions` 类的 slash 命令，位置遵循[命令菜单顺序](#命令菜单)；它不需要 Session
+`/runtime` 是 slash 命令，位置遵循[命令菜单顺序](#命令菜单)；它不需要 Session
 （`Needs::Nothing`），也不接受内联参数，因为动作都在面板里。下面打字的子形态只在输入时接受，不作为
 菜单补全列出。
 
@@ -521,6 +522,8 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 ### 动作
 
 客户端有一组封闭的动作种类。每种在每个面板里都只有一个键，键提示按表格顺序列出该领域提供的种类，加上所选条目提供的种类。
+
+针对单个条目的动作同时携带条目 id 和其所在行报告的来源。同一个 id 出现在不同来源时是两行，各自可以被选中和操作；适配器按动作携带的来源执行，不在目录里按 id 找来源。所有者不报告来源的领域不带来源，其 id 本身唯一。
 
 | 种类 | 键 | 做什么 |
 | --- | --- | --- |
@@ -715,6 +718,8 @@ inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名
 
 MCP 不新增种类。它的条目就是生效目录——各服务器按 id 合并，project 最后——按 `user`、`project`、`plugin` 的顺序分组，组内按 id 排列；条目的标签和 id 都是服务器的 id。面板与 `dimcode mcp` 用 toggle、edit、reload、add、remove、run 与 inspect，经 `mcp.catalog`、`mcp.configuration`、`mcp.update`、`mcp.save`、`mcp.remove`、`mcp.set_enabled`、`mcp.test` 与 `mcp.inspect`（[MCP 管理](appserver/mcp-management.md)）。
 
+每个按 `ID` 点名一个已存条目的 `dimcode mcp` 命令都接受可选的 `--source SOURCE`，取值就是 `mcp list` 打印的来源名：`user`、`project`、`plugin`。同一个解析函数把 `(catalog, id, source)` 解析成唯一一个条目，有效或损坏的都算。给了来源时就是该来源的条目，没有则拒绝并指出该来源；不给来源时，只有一个来源列出该 id 才是那个条目，多个来源列出则拒绝，并指出这些来源和该选项。客户端从不自己挑一个。面板用同一个解析函数，来源取动作所在行的来源；`mcp list` 本就打印每个 id 所在的来源。
+
 toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用状态，所以比较并交换只覆盖这段窗口；它只作用于一个 id，不会覆盖来源中别处的改动。用户条目的启用状态是本地记录；项目条目一开始是停用的，只有 toggle 或 `dimcode mcp enable|disable` 会启用它。edit 先读 `mcp.configuration` 取得条目的 revision 与文档，再写 `mcp.update`，绝不用 `mcp.save`：save 接收完整配置，而读取会隐藏机密，往返一次就会把它们抹掉。
 
 编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
@@ -861,15 +866,15 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `/workflow:save` | 在新建编辑器中打开 Workflow 面板。 |
 | `dimcode mcp list` | 经 `mcp.catalog` 列出生效目录（[MCP 领域](#mcp-领域)）：每个条目的 id、来源、transport、启用状态与授权，然后是各来源 application 的错误。 |
 | `dimcode mcp add PATH` | 以面板的新建文档（`-` 表示 stdin）经 `mcp.save` 创建条目，带 `mcp.catalog` 报告的来源 revision；目录已列出的 id 会被拒绝。 |
-| `dimcode mcp edit ID` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开条目的 `mcp.update` patch，并以 `mcp.configuration` 报告的 revision 写回；内容没有变化时不写入。 |
-| `dimcode mcp set ID PATH` | 从 `PATH`（`-` 表示 stdin）读取 patch 并写入，用写入前紧邻读到的 revision。 |
-| `dimcode mcp remove ID` | 不经确认，经 `mcp.remove` 以来源 revision 删除单个条目：命令行上的 id 就是意图。 |
-| `dimcode mcp test ID` | 经 `mcp.test` 运行已存条目一次，并打印临时连接发现的工具；不保存任何内容。 |
-| `dimcode mcp inspect ID` | 经 `mcp.inspect` 打印生效配置与会话连接，不联系服务器。 |
-| `dimcode mcp disconnect ID` | 经 `mcp.disconnect` 关闭条目的活动连接；它不写配置，条目下次使用时重新连接。 |
-| `dimcode mcp login\|logout\|enable\|disable ID` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
+| `dimcode mcp edit ID [--source SOURCE]` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开条目的 `mcp.update` patch，并以 `mcp.configuration` 报告的 revision 写回；内容没有变化时不写入。 |
+| `dimcode mcp set ID [--source SOURCE] PATH` | 从 `PATH`（`-` 表示 stdin）读取 patch 并写入，用写入前紧邻读到的 revision。 |
+| `dimcode mcp remove ID [--source SOURCE]` | 不经确认，经 `mcp.remove` 以来源 revision 删除单个条目：命令行上的 id 就是意图。 |
+| `dimcode mcp test ID [--source SOURCE]` | 经 `mcp.test` 运行已存条目一次，并打印临时连接发现的工具；不保存任何内容。 |
+| `dimcode mcp inspect ID [--source SOURCE]` | 经 `mcp.inspect` 打印生效配置与会话连接，不联系服务器。 |
+| `dimcode mcp disconnect ID [--source SOURCE]` | 经 `mcp.disconnect` 关闭条目的活动连接；它不写配置，条目下次使用时重新连接。 |
+| `dimcode mcp login\|logout\|enable\|disable ID [--source SOURCE]` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
 | `/mcp` | 打开会话所在工作区的 MCP 面板（[管理界面](#管理界面)）：每个服务器一个条目，按 `user`、`project`、`plugin` 分组，带 toggle、edit、add、remove、test 与 inspect 种类。 |
-| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令，行为不变：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。 |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。凡是按 ID 指名一个已存条目的命令（`login`、`logout`、`disconnect`、`enable`、`disable`）都接受可选的 `--source SOURCE`，与 `dimcode mcp` 相同；多个 source 列出同一 id 时必须指定。 |
 
 | `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
 | `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |

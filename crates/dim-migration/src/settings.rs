@@ -348,7 +348,34 @@ pub(crate) async fn import(
     if let Some(mcp) = crate::engine::document(owner, task, source, "mcp.json").await?
         && let Some(servers) = mcp.get("mcpServers")
     {
-        fill(owner, task, client, "mcp", json!({"mcpServers":servers})).await?;
+        match servers.as_object() {
+            Some(entries) => {
+                let mut valid = Map::new();
+                for (id, value) in entries {
+                    match dim_app_server::mcp::config::decode_entry(id, value) {
+                        Ok(_) => {
+                            valid.insert(id.clone(), value.clone());
+                        }
+                        // The legacy home keeps this entry; the native store
+                        // receives only entries that decode.
+                        Err(error) => {
+                            record(
+                                owner,
+                                task,
+                                format!("mcpServers.{id}"),
+                                Outcome::Unsupported,
+                                Some(error.to_string()),
+                            )
+                            .await?
+                        }
+                    }
+                }
+                if !valid.is_empty() {
+                    fill(owner, task, client, "mcp", json!({"mcpServers": valid})).await?;
+                }
+            }
+            None => fill(owner, task, client, "mcp", json!({"mcpServers": servers})).await?,
+        }
     }
     if let Some(shell) = crate::engine::document(owner, task, source, "exec-shell.json").await? {
         let valid = shell.get("version") == Some(&json!(1))

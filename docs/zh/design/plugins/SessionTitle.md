@@ -346,7 +346,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 第一条之后的 Steer/Queue/Append 输入 | — | 从不进入摘录 | SessionTitle |
 | 工具批次、压缩 | — | 无关：只读取输入事实 | — |
 | 子分支输入 | 分支过滤 | 从不触发 | SessionTitle |
-| 成员、阶段、定时或 ACP Session | `SessionConfig` | 从不生成 | SessionTitle |
+| 成员、阶段或定时 Session | `SessionConfig` | 从不生成 | SessionTitle |
 | 生成期间关闭 Session | — | 存储交接前取消；已接纳修改仍由 SessionStore 持有 | Lifecycle / SessionStore |
 | Session fork | 不复制元数据（A7） | fork 无标题；`main` 上下一条被采用的操作者输入触发生成，取其前缀中第一条被采用的操作者输入 | SessionTitle |
 | SessionTitle、模型选择所有者、SessionStore 或 Settings 重载 | — | 交接前取消生成，已接纳存储修改遵循 S5b 结算（D3） | Lifecycle / SessionStore |

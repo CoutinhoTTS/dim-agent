@@ -199,7 +199,7 @@ enum Answered {
 pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Answer, Failure> {
     let answered = match action {
         ManagementAction::List | ManagementAction::Reload => Answered::Nothing,
-        ManagementAction::Toggle { id, enabled } => {
+        ManagementAction::Toggle { id, enabled, .. } => {
             let written = client
                 .rpc(
                     "schedule.set_enabled",
@@ -231,6 +231,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
             id,
             expected_revision,
             document,
+            ..
         } => {
             let Some(id) = id else {
                 return Err(Failure::Refused(
@@ -239,7 +240,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
             };
             save(client, id, expected_revision, document).await?
         }
-        ManagementAction::Remove { id } => {
+        ManagementAction::Remove { id, .. } => {
             let deleted = client.rpc("schedule.delete", json!({"job_id": id})).await;
             if let Err(error) = deleted {
                 return Err(conflict(client, &error, ConflictKind::Remove).await);
@@ -268,7 +269,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
                 run,
             }
         }
-        ManagementAction::Inspect { id } => return detail(client, id).await,
+        ManagementAction::Inspect { id, .. } => return detail(client, id).await,
     };
     // Every action that gets here but a read called a method its owner
     // declares mutating; `schedule.history` is the other read, and it
@@ -458,6 +459,7 @@ pub(super) fn view(
             t("jobs"),
             ManagementEntry {
                 id: job.id.clone(),
+                source: None,
                 label: job.name.clone(),
                 detail: detail_lines(job),
                 enabled: Some(job.enabled),

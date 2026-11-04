@@ -692,7 +692,7 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
     terminal.raw(b"\x12");
     terminal.until("Refreshed the models.");
     terminal.until("management read failed");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -875,7 +875,7 @@ fn tui_models_area_opens_and_toggles_a_model() {
     terminal.raw(b"\x1b");
     terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -968,7 +968,7 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
     terminal.until("Disabled Tuned.");
     terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -1050,7 +1050,7 @@ fn tui_models_area_keeps_the_panel_on_a_refused_write() {
     // The panel still has its list: the next key moves within it.
     terminal.raw(b"\x1b[A");
     terminal.until("tuned");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -1174,7 +1174,7 @@ fn tui_models_area_rereads_after_a_conflict() {
     terminal.until("Your text is kept in");
     terminal.raw(b"\x05");
     terminal.until("Saved Flash v4.");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     // The second editor was handed the current document, not the stale
@@ -1309,7 +1309,7 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
     terminal.until("Flash v4");
     terminal.raw(b"\x05");
     terminal.until("Saved Flash v4.");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     // The next editor was handed the current document, not the stale draft.

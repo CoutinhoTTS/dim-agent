@@ -411,7 +411,6 @@ impl ListPanel {
                 } else {
                     item.detail.clone()
                 },
-                category: String::new(),
                 key: None,
                 unavailable: false,
             })

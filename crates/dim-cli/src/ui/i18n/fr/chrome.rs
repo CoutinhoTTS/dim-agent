@@ -307,14 +307,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C pour arrêter l'espace Web.",
         "To resume this session:" => "Pour reprendre la session:",
 
-        // composer/commands.rs: categories
-        "session" => "session",
-        "run" => "exécution",
-        "view" => "affichage",
-        "model" => "modèle",
-        "extensions" => "extensions",
-        "app" => "app",
-        "skill" => "skill",
         // composer/commands.rs: descriptions
         "start a new session" => "démarrer une session",
         "show or set the reasoning effort" => "voir ou régler l'effort de raisonnement",

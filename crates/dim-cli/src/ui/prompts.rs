@@ -27,22 +27,42 @@ pub enum WriteTarget {
     Create,
     /// The area's own document, at the revision it was read at.
     Area { revision: String },
-    /// One entry's document, at the revision it was read at.
-    Entry { id: String, revision: String },
+    /// One entry's document, at the revision it was read at, in the source
+    /// its row reports.
+    Entry {
+        id: String,
+        source: Option<String>,
+        revision: String,
+    },
     /// The input document of one entry's operation. A run always sends it,
     /// so it has no revision and is never unchanged.
-    Run { id: String },
+    Run { id: String, source: Option<String> },
 }
 
 impl WriteTarget {
     /// Whether this target and `other` are the same write target. The
     /// revision a draft was read at is not part of what it is for: a kept
     /// draft reopens at its own revision, whatever the area reports now.
+    /// The source is: two sources may list one id, and their drafts are not
+    /// each other's.
     pub fn same_target(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Create, Self::Create) | (Self::Area { .. }, Self::Area { .. }) => true,
-            (Self::Entry { id, .. }, Self::Entry { id: other, .. }) => id == other,
-            (Self::Run { id }, Self::Run { id: other }) => id == other,
+            (
+                Self::Entry { id, source, .. },
+                Self::Entry {
+                    id: other,
+                    source: other_source,
+                    ..
+                },
+            ) => id == other && source == other_source,
+            (
+                Self::Run { id, source },
+                Self::Run {
+                    id: other,
+                    source: other_source,
+                },
+            ) => id == other && source == other_source,
             _ => false,
         }
     }
@@ -54,12 +74,21 @@ impl WriteTarget {
             (Self::Create, ManagementAction::Add { .. }) => true,
             (Self::Area { .. }, ManagementAction::Save { id: None, .. }) => true,
             (
-                Self::Entry { id, .. },
+                Self::Entry { id, source, .. },
                 ManagementAction::Save {
-                    id: Some(written), ..
+                    id: Some(written),
+                    source: written_source,
+                    ..
                 },
-            ) => id == written,
-            (Self::Run { id }, ManagementAction::Run { id: written, .. }) => id == written,
+            ) => id == written && source == written_source,
+            (
+                Self::Run { id, source },
+                ManagementAction::Run {
+                    id: written,
+                    source: written_source,
+                    ..
+                },
+            ) => id == written && source == written_source,
             _ => false,
         }
     }

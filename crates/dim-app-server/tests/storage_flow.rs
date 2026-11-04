@@ -7540,7 +7540,7 @@ async fn the_derived_indexes_are_created_at_open_without_a_format_step() {
     assert_eq!(
         columns,
         ["session_id", "branch_id", "kind", "sequence", "event_id"],
-        "the policy read takes event_id from the index"
+        "the retained policy index keeps the columns a reader would need"
     );
     let plan: Vec<String> = connection
         .prepare(
@@ -7556,7 +7556,7 @@ async fn the_derived_indexes_are_created_at_open_without_a_format_step() {
     assert!(
         plan.iter()
             .any(|step| step.contains("COVERING INDEX timeline_policy_turns")),
-        "the policy read does not touch the table: {plan:?}"
+        "the policy index covers the columns it holds: {plan:?}"
     );
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     connection

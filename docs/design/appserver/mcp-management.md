@@ -311,6 +311,50 @@ has changed `.mcp.json`, the save's own revision check fails instead. `mcp.remov
 project source and id deletes the leftover record (D15) and the caller saves again. An unreadable
 overlay or project document fails the save instead of passing the guard.
 
+### D18. Entries decode one by one, and a write keeps the entries it did not change
+
+A `mcpServers` document is decoded entry by entry. An entry that does not decode is not a server:
+it stays in the document exactly as written, every other entry loads, and the catalog reports it
+in an `invalid` list beside `servers`, so a client that predates the list still reads every valid
+row and shows nothing about the broken ones. A broken entry shadows nothing: when a
+lower-precedence source holds a valid entry for the same id, the catalog lists that entry as the
+server with its own source, beside the broken row. The entry's error names its id and field and
+states the expected kind; it never repeats a value, because a wrongly typed header or argument can
+hold a credential. `ws` and an entry with a `url` but no `type` say the transport must be `http` or
+`sse`; `streamable-http` decodes as `http`. An optional member set to `null` is absent, as it was
+before this rule; the required `command` and `url` are not optional and reject `null`. A non-JSON
+file and a non-object `mcpServers` still fail the whole document, with the decoder's line and
+column and no value. An entry id that is empty or only whitespace fails the whole document too,
+because no management call can name it; the error says an entry id is empty and quotes no value.
+Every broken entry is its own row in its own source; two sources that hold a broken entry for one
+id list two rows and no server.
+
+The write rule follows from the same value: each entry is held as read beside the entry decoded
+from it, and a write serialises from typed values only the entry it changed. Every other entry,
+decoded or broken, goes back as the file wrote it, including member order and unknown fields.
+The file keeps the order of its ids: a new id is appended, and a removed id leaves its place.
+Only the edited entry may change its spelling, so an untouched `streamable-http` entry keeps that
+name and a saved one is written as `http`.
+
+A broken entry takes no `mcp-secrets` overlay, and its overlay record is kept. `mcp.remove`
+deletes it, `mcp.save` replaces it with a valid definition, and `mcp.update`, `mcp.set_enabled`,
+`mcp.test`, `mcp.inspect` and `mcp.configuration` refuse it with its error
+(`mcp_invalid_config`). The replacement ends the broken entry's record: a successful project save
+deletes the record at the generation it read, so withheld values written for the old entry cannot
+enter the new one; a record that changed after that read is kept. A move reads its source entry as
+usual: a broken source id answers its error, and a broken destination id is `mcp_move_conflict`.
+Plugin content keeps its existing contract: a plugin registers its MCP document as one unit, and
+a document with a broken entry is refused for that plugin with the entry's error, because dim
+does not manage a plugin entry on its own.
+
+Rejected: refuse the whole document on one broken entry, the behavior this design replaces. One
+typo then hides every server and makes every edit fail, and the client offers no way to correct
+the file. Silently dropping or coercing the broken entry was rejected too: it would lose the
+user's text and could hide a credential-bearing value the user meant to fix.
+
+Stored documents decode the same way. A read leaves bytes, version and revision unchanged; a
+write that changes one entry still writes every other entry as read.
+
 ## 4. Contract
 
 Namespace `mcp`, process scope, served on local connections
@@ -336,6 +380,10 @@ listed in §6 and keep their references: `mcp.catalog`, `mcp.inspect`, `mcp.remo
 `mcp.auth.*` in [MCP OAuth §9.1](mcp-oauth.md#91-management-methods-namespace-mcp-local-transports-only),
 and `mcp.temporary.capabilities` in [TemporaryMcp](../plugins/TemporaryMcp.md). §3 D5 states the
 revision every write takes.
+
+`mcp.catalog` returns `invalid: [{id, source, error}]` beside `servers` (D18). `mcp.configuration`,
+`mcp.inspect`, `mcp.test` and `mcp.set_enabled` answer a broken entry with its error and
+`mcp_invalid_config`; `mcp.save` replaces it, and `mcp.remove` deletes it.
 
 ### 4.1 Entry read (`mcp.configuration`)
 
@@ -426,8 +474,8 @@ skeleton only; the overlay-held fields stay in `mcp-secrets` and are never copie
 
 | `appError` | When |
 | --- | --- |
-| `mcp_unknown_server` | The target source holds no entry with that id, for a read or a write; a move whose source lacks the id |
-| `mcp_invalid_config` | The patched or saved document, an empty `id`, or an unauthorized workspace is refused |
+| `mcp_unknown_server` | The target source holds no entry with that id, for a read or a write; a move whose source lacks the id. A broken entry answers its own error instead |
+| `mcp_invalid_config` | The patched or saved document, an empty `id`, an unauthorized workspace, or an operation on a broken entry is refused; a broken entry's error names its id and field |
 | `mcp_settings_conflict` | `expectedVersion` is not the source's current revision (D5), or an overlay/enablement compare-and-set lost |
 | `mcp_settings_read` | The source could not be read |
 | `mcp_move_conflict` | The destination source already holds an entry with that id; nothing is written |
@@ -691,6 +739,10 @@ name or adds a version rather than silently reusing this one.
   report in `dimcode mcp test`; every other client sees the wrapper replace the old reply.
 - The edit flow is `mcp.configuration` then `mcp.update` with the returned `revision`; creating an
   entry takes the token from `mcp.catalog`'s source revision (D1).
+- `mcp.catalog` gains an additive `invalid` list of entries that did not decode. A client shows
+  them apart from the servers with their error, offers removal, and offers replacement through
+  the add flow; it does not offer toggle, edit, test or inspect for them. A client that ignores
+  the list still reads every valid `servers` row.
 - A client renders `command`, `cwd` and `endpoint`, the name lists and the counts, and offers
   replace-or-keep for `args`, environment values, header values, the bearer token, the URL and
   the metadata URL. It shows `argsCount`, `envNames` and `headerNames` as the fields that a
@@ -719,7 +771,8 @@ name or adds a version rather than silently reusing this one.
 
 ## 6. What does not change
 
-- `mcp.catalog`, `mcp.inspect`, `mcp.save`, `mcp.remove`, `mcp.set_enabled` and
+- `mcp.catalog` keeps its `servers` rows and source revisions and gains the additive `invalid`
+  list (D18); `mcp.inspect`, `mcp.save`, `mcp.remove`, `mcp.set_enabled` and
   `mcp.disconnect` keep their requests and replies, including `mcp.inspect`'s effective
   configuration and its connection generations. `mcp.configuration` gains the
   `secretsInUserScope` field (§4.1); `mcp.update` keeps its request and reply, but a moved
@@ -778,6 +831,8 @@ Flow level, reusing the existing MCP flows:
 | `crates/dim-app-server/tests/transport_flow/web_entry.rs` | The authenticated Web entry advertises and reaches the MCP namespace including `mcp.move`, and a bare connection is refused |
 | `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd` (`editing_reads_the_declared_entry_while_running_resolves_it`); `scope_move_partial_is_recoverable_and_remove_cleans_the_overlay` and `scope_move_back_to_user_keeps_the_merged_entry_and_its_enablement` cover a move in each direction, the withheld part, the destination's enablement, the overlay deletion and the cleared record; `scope_move_checks_the_destination_id_and_both_revisions` covers `mcp_move_conflict` and a stale revision on either side; `a_conflicting_remove_keeps_the_project_entry_and_its_overlay` covers the same-revision race and the removal order; `remove_keeps_a_replacement_moves_overlay` captures a removal's record, commits the removal, lets a replacement move with the same id and identical withheld values write a new generation, and proves the earlier cleanup keeps the replacement's record while a later removal deletes it; `a_save_racing_a_move_keeps_the_moves_overlay` walks the reads a racing save makes — the id absent with no record, a move into the project, the record read returning the move's record, and the entry read returning the entry with `secretsInUserScope`, the state D17 requires `mcp_credentials_are_user_scoped` for rather than the stale refusal — and asserts the move's overlay and credential survive and the racing save's revision-checked write loses; the handler's re-read itself has no injection point in a flow test, and the scoped answer is asserted through `mcp.save` on an overlay entry in `mcp_scope_move_preserves_withheld_values_and_enablement`; `an_into_project_partial_is_finished_after_a_restart` restarts on the same home after an injected overlay write failure and finishes the move by the documented recovery without credential loss |
 | `crates/dim-app-server/tests/mcp_oauth_flow.rs` | `scope_moves_keep_the_oauth_record_and_the_sign_in_state` moves a signed-in OAuth entry in each direction: the `mcp-oauth.json` record and the `authorized` state survive, no token appears in `.mcp.json`, and `mcp.configuration`, `mcp.inspect` and `mcp.update` keep their replies for the moved entry; a probe of an unauthorized entry reports `authRequired`, with `expired` where Dim's stored credential was rejected and `missingScopes` where the server answered `403 insufficient_scope` |
+| `crates/dim-app-server/src/mcp/config.rs` (unit) | An entry that does not decode is held out of `mcp_servers` and reported with its field and expected kind while the rest load; an error never repeats a token-like value; an untouched entry, including `streamable-http` and unknown members, is written back in the order it was read, and only an edited entry is serialised from its typed value; only a non-JSON file or a non-object `mcpServers` fails the document |
+| `crates/dim-migration/tests/migration_flow.rs` | Legacy `mcpServers` import entry by entry: decodable entries are written as the legacy file had them, a broken entry is recorded `Unsupported` as `mcpServers.<id>` with its error and never reaches the native store, and a fully valid file imports exactly as before |
 
 The redaction assertions of
 `mcp_editor_preserves_redacts_and_removes_credentials_with_source_cas` extend to the new reply

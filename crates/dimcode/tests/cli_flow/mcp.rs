@@ -408,7 +408,7 @@ fn tui_mcp_panel_seeds_a_remote_patch_without_stored_values() {
         "{}",
         &terminal.transcript[header..]
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -444,7 +444,7 @@ fn tui_mcp_panel_shows_one_entries_failed_configuration_read() {
     // The entry after it kept the detail its own read supplied.
     terminal.raw(b"\x1b[B");
     terminal.until("Endpoint: https://metrics.example.com");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -506,7 +506,7 @@ fn tui_mcp_panel_lists_entries_when_the_read_is_absent() {
         "a detail appeared without a read: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -667,7 +667,7 @@ fn tui_mcp_panel_draws_tool_text_sanitized() {
         "the escape sequence reaches the screen: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -701,7 +701,7 @@ fn tui_mcp_panel_shows_a_failed_catalog_read() {
         "a failed read was reported as an applied reload: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -1752,7 +1752,7 @@ fn mcp_disconnect_closes_the_entry_connections() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("No matching MCP server"),
+        String::from_utf8_lossy(&output.stderr).contains("No MCP server has that id."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1776,7 +1776,7 @@ fn mcp_disconnect_closes_the_entry_connections() {
     terminal.until("test / model");
     terminal.write(b"/mcp disconnect docs\r");
     terminal.until("Disconnected docs.");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -1987,4 +1987,490 @@ fn mcp_entries_round_trip_through_the_real_app_server() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+/// The catalog with one entry that did not decode beside its valid entries.
+fn broken_catalog() -> Value {
+    let mut listed = catalog(true, None);
+    listed["invalid"] = json!([{
+        "id": "broken",
+        "source": "user",
+        "error": "MCP server broken: field type must be http or sse; ws is not a supported transport",
+    }]);
+    listed
+}
+
+/// `mcp list` prints a broken entry on its own row, with its source and its
+/// error, after the valid rows.
+#[test]
+fn mcp_list_prints_a_broken_entry_with_its_error() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+    });
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let broken = stdout
+        .lines()
+        .find(|line| line.contains("\"broken\""))
+        .unwrap_or_else(|| panic!("no broken row in {stdout:?}"));
+    assert!(broken.contains("user"), "{broken:?}");
+    assert!(broken.contains("invalid"), "{broken:?}");
+    assert!(broken.contains("must be http or sse"), "{broken:?}");
+    assert!(
+        stdout.lines().any(|line| line.contains("\"docs\"")),
+        "{stdout:?}"
+    );
+}
+
+/// `mcp remove` removes a broken entry at its source revision.
+#[test]
+fn mcp_remove_removes_a_broken_entry_at_its_sources_revision() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+        let request = wire.read("mcp.remove");
+        assert_eq!(request["params"]["id"], "broken");
+        assert_eq!(request["params"]["source"], "user");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "broken"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Removed broken.\n"
+    );
+}
+
+/// An add whose id names a broken entry of the same source replaces it and
+/// says so; it is not refused as a duplicate.
+#[test]
+fn mcp_add_replaces_a_broken_entry() {
+    let home = Home::new();
+    let path = home.0.join("entry.json");
+    let mut document = new_entry("user");
+    document["id"] = json!("broken");
+    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+    let saved = document.clone();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+        let request = wire.read("mcp.save");
+        assert_eq!(request["params"]["id"], "broken");
+        assert_eq!(request["params"]["source"], "user");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert_eq!(request["params"]["configuration"], saved["configuration"]);
+        wire.reply(&request, json!({}));
+        area(wire, broken_catalog(), docs(true));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "add"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Replaced broken.\n"
+    );
+}
+
+/// A broken entry is not enableable: the command refuses it with its own
+/// error before any write.
+#[test]
+fn mcp_enable_refuses_a_broken_entry_with_its_error() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                assert_ne!(
+                    value["method"], "mcp.set_enabled",
+                    "a broken entry was toggled"
+                );
+            }
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "enable", "broken"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("field type must be http or sse"),
+        "{stderr:?}"
+    );
+}
+
+/// `/mcp` marks a broken entry invalid, shows its error, and offers only
+/// removal: Enter and Ctrl+T send nothing, and Ctrl+X removes it.
+#[test]
+fn tui_mcp_panel_marks_a_broken_entry_invalid_and_offers_removal() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        started(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        area(wire, broken_catalog(), docs(true));
+        // The removal reads the entry's source, then writes at its revision
+        // and reports the area again.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, broken_catalog());
+        let request = wire.read("mcp.remove");
+        assert_eq!(
+            request["params"],
+            json!({"cwd": "/workspace", "id": "broken", "source": "user",
+                   "expectedVersion": "user:1"})
+        );
+        wire.reply(&request, json!({}));
+        area(wire, catalog(true, None), docs(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp\r");
+    terminal.until("user · stdio · signed in (missing scopes: repo)");
+    // The broken row follows the valid user entry.
+    terminal.raw(b"\x1b[B");
+    terminal.until("broken");
+    terminal.until("user · invalid");
+    terminal.until("must be http or sse");
+    // Enter and Ctrl+T are not offered; removal is.
+    terminal.raw(b"\r");
+    thread::sleep(Duration::from_millis(200));
+    terminal.raw(b"\x14");
+    thread::sleep(Duration::from_millis(200));
+    terminal.raw(b"\x18");
+    terminal.until("broken? Enter confirm");
+    terminal.raw(b"\r");
+    terminal.until("Removed broken.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// The catalog of the reviewer's scenario: a valid user entry and a broken
+/// project entry of one id.
+fn two_sources_catalog() -> Value {
+    let mut listed = catalog(true, None);
+    listed["servers"] = json!([
+        {"id": "docs", "source": "user", "enabled": true, "transport": "stdio",
+         "auth": {"status": "authorized", "missingScopes": []}},
+    ]);
+    listed["invalid"] = json!([{
+        "id": "docs",
+        "source": "project",
+        "error": "MCP server docs: field type must be http or sse; ws is not a supported transport",
+    }]);
+    listed
+}
+
+/// Two sources' valid entries of one id: the user entry enabled, the project
+/// entry disabled.
+fn two_valid_sources_catalog() -> Value {
+    let mut listed = catalog(true, None);
+    listed["servers"] = json!([
+        {"id": "docs", "source": "user", "enabled": true, "transport": "stdio",
+         "auth": {"status": "authorized", "missingScopes": []}},
+        {"id": "docs", "source": "project", "enabled": false, "transport": "http",
+         "auth": {"status": "required"}},
+    ]);
+    listed
+}
+
+/// A valid plugin entry and a broken project entry of one id: the plugin
+/// first in catalog order, as the catalog reports it.
+fn plugin_and_broken_catalog() -> Value {
+    let mut listed = catalog(true, None);
+    listed["servers"] = json!([
+        {"id": "docs", "source": "plugin", "enabled": true, "transport": "stdio"},
+    ]);
+    listed["invalid"] = json!([{
+        "id": "docs",
+        "source": "project",
+        "error": "MCP server docs: field type must be http or sse; ws is not a supported transport",
+    }]);
+    listed
+}
+
+/// `/mcp` lists two sources' entries of one id as two rows, and removing the
+/// broken project row removes the project entry: the user entry of the same
+/// id is untouched.
+#[test]
+fn tui_mcp_panel_removes_the_row_of_the_source_it_names() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        started(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        // The area read: the catalog, then the valid entry's configuration.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, two_sources_catalog());
+        configuration(wire, "docs", "user", docs(true));
+        // The removal resolves the selected row's source, then writes at the
+        // project revision: the user entry is not the one it names.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, two_sources_catalog());
+        let request = wire.read("mcp.remove");
+        assert_eq!(
+            request["params"],
+            json!({"cwd": "/workspace", "id": "docs", "source": "project",
+                   "expectedVersion": "project:1"})
+        );
+        wire.reply(&request, json!({}));
+        // The area after it keeps the user entry, which the panel reads.
+        area(wire, catalog(true, None), docs(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                assert_ne!(value["method"], "mcp.remove", "a second remove was sent");
+            }
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp\r");
+    terminal.until("user · stdio · signed in");
+    terminal.until("Environment names: DOCS_TOKEN");
+    // The broken project row is the second row of the id.
+    terminal.raw(b"\x1b[B");
+    terminal.until("project · invalid");
+    terminal.until("must be http or sse");
+    terminal.raw(b"\x18");
+    terminal.until("docs? Enter confirm");
+    terminal.raw(b"\r");
+    terminal.until("Removed docs.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// `mcp remove` refuses an id more than one source lists, naming every
+/// source and the flag that settles one, and writes nothing.
+#[test]
+fn mcp_remove_refuses_an_id_that_more_than_one_source_lists() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, two_sources_catalog());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                assert_ne!(
+                    value["method"], "mcp.remove",
+                    "an ambiguous id was removed: {line:?}"
+                );
+            }
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"docs\" is in more than one MCP source: user, project."),
+        "{stderr:?}"
+    );
+    assert!(stderr.contains("--source"), "{stderr:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+/// `mcp remove ID --source SOURCE` removes that source's entry and leaves
+/// the other source's entry of the id alone.
+#[test]
+fn mcp_remove_takes_the_source_that_picks_the_entry() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, two_sources_catalog());
+        let request = wire.read("mcp.remove");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "project");
+        assert_eq!(request["params"]["expectedVersion"], "project:1");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, two_sources_catalog());
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "docs", "--source", "project"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"Removed docs.\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+/// `--source` picks one source: an id that source does not list is refused
+/// with the source named, and nothing is written.
+#[test]
+fn mcp_remove_refuses_a_source_that_does_not_list_the_id() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                assert_ne!(value["method"], "mcp.remove", "an unlisted source wrote");
+            }
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "docs", "--source", "project"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No MCP server \"docs\" is in source \"project\"."),
+        "{stderr:?}"
+    );
+}
+
+/// The in-session `/mcp` commands take the source their refusal asks for: an
+/// id more than one source lists is refused without it, and with it the
+/// named source's entry is the one written.
+#[test]
+fn tui_mcp_line_commands_take_the_source_that_picks_the_entry() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        started(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        // `/mcp disable docs` reads the catalog and refuses: two sources list it.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, two_valid_sources_catalog());
+        // `/mcp enable docs --source project` resolves the project entry and
+        // writes at the project revision.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, two_valid_sources_catalog());
+        let set = wire.read("mcp.set_enabled");
+        assert_eq!(
+            (
+                &set["params"]["id"],
+                &set["params"]["source"],
+                &set["params"]["expectedVersion"],
+                &set["params"]["enabled"]
+            ),
+            (
+                &json!("docs"),
+                &json!("project"),
+                &json!("project:1"),
+                &json!(true)
+            )
+        );
+        assert!(set["params"]["cwd"].is_string());
+        wire.reply(&set, json!({}));
+        wire.hold();
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp disable docs\r");
+    terminal.until("\"docs\" is in more than one MCP source: user, project.");
+    terminal.write(b"/mcp enable docs --source project\r");
+    terminal.until("Enabled \"docs\" (project).");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// A valid plugin entry and a broken project entry of one id: the broken
+/// row is removable by its source. The id-first lookup found the plugin
+/// first and refused the write, so this row could not be removed at all.
+#[test]
+fn mcp_remove_reaches_a_broken_row_beside_a_valid_plugin_entry() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, plugin_and_broken_catalog());
+        let request = wire.read("mcp.remove");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "project");
+        assert_eq!(request["params"]["expectedVersion"], "project:1");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, plugin_and_broken_catalog());
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "docs", "--source", "project"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"Removed docs.\n");
 }

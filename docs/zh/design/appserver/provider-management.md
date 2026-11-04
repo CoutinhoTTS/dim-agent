@@ -41,7 +41,7 @@ Provider 拥有进程配置、目录、覆盖、偏好、校验、安全投影�
 | --- | --- |
 | `managementMethods`，process，命名空间 `provider` | 本地 v3 Desktop/CLI 和受信任进程调用者；§3 沿既有命名空间扩展 |
 | Provider 模块边界 `stored_selection`（Rust） | Migration 等原生数据边界消费方；§3.7 增加一个基于已准入记录的无副作用函数，不是 RPC、host 端口或管理方法 |
-| Provider host 端口 `SelectableModelsHost`（core `dim-agent-capabilities`），由 Provider 提供 | 按模型能力路由的进程内 owner（Modality）；§3.6 增加一次读取，不是管理方法或 RPC 方法 |
+| Provider host 端口 `SelectableModelsHost`（core `dim-agent-capabilities`），由 Provider 提供 | 按模型能力路由的进程内 owner（Modality）与 `agent` 工具的 `models` 动作；§3.6 增加一次读取，不是管理方法或 RPC 方法 |
 | `account`、`account.codex`、`account.grok` | 复用账号调用，不新增账号方法、事件或 managed host capability |
 | `ProviderConnectionResolver`、`ModelSelectionHost` | Provider 沿现有类型处理目录和路由，不增加 core 端口 |
 | `auxiliaryModel.complete` | S4 由调用者显式选模型的合同不变 |
@@ -332,7 +332,7 @@ host 端口，不是管理方法：不在 `provider` 命名空间上，不经 RP
 **为什么是端口而不是 `ProviderService` 上的方法。** 消费方插件在自己的 crate 中，
 `xtask check` 拒绝依赖装配层 `dim-app-server`，因此消费方无法命名 `ProviderService`。
 端口及其数据类型放在 Provider 与消费方都依赖的 `dim-agent-capabilities`；注册为进程名后，
-消费方声明 `Keyed<SelectableModelsHost>`，由 catalog 解析。依赖从扩展指向 core，符合
+消费方可以命名该端口并由 catalog 解析。依赖从扩展指向 core，符合
 [ADR 002 D3](../../adr/002-plugin-scope.md)，实现、目录和规则仍留在 Provider。
 
 **合同（语言中立）。** 进程 host 端口，无实例键，由 Provider 提供：操作 `selectableModels`，
@@ -376,7 +376,8 @@ provider，读取也不返回逐项错误列表。需要该 provider 诊断的�
 它不调用 `provider.catalog`，也不自留可用性谓词。回复只带 ID 和能力，不带显示名：渲染选项
 的客户端用 `provider.catalog` 或 `provider.management` 的模型列表按 ID join，Modality 不复制
 名称。Provider 不增加逐消费方的键、配置或过滤器：读取没有输入，需要单个 provider 的调用方
-自行筛选回复。
+自行筛选回复。Collaboration 的 `agent` 工具用同一次读取实现 `models` 动作，把其中的 ID 交给
+leader 的模型，同样不自留规则（[Collaboration](../plugins/Collaboration.md#7-成员能运行的模型)）。
 
 **不变的部分。** `provider.catalog`、`provider.management`、`provider.select`、模型选择、
 采用、偏好及其错误；客户端协议与 `PROTOCOL_VERSION`；持久化及其格式；Timeline、
@@ -397,8 +398,10 @@ pub trait SelectableModels: Send + Sync + 'static {
 pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
 ```
 
-owner 实现是 `ProviderService::selectable_models`，`ProductResolver` 转调它。消费方在 `Deps`
-中声明 `Keyed<SelectableModelsHost>`；消费方不直接读取 `ProviderService`。非 Rust 消费方在
+owner 实现是 `ProviderService::selectable_models`，`ProductResolver` 转调它。需要这次读取的
+消费方在 `Deps` 中声明 `Keyed<SelectableModelsHost>` 并以它作为加载门槛（Modality）；必须在没有
+Provider 时也能加载的消费方在提供时按名读取、不设门槛（Collaboration 的 `models` 动作），并在
+加载时取得快照，因此 Provider 重载不会重载它。消费方不直接读取 `ProviderService`。非 Rust 消费方在
 运行时按名暴露服务的要求（[#4](https://github.com/arcships/dim/issues/4)）交付后按名访问；
 该要求已在 [Modality §9](../plugins/Modality.md#9-向机制所有者提出的需求) 提出，这里不重复提出。
 
