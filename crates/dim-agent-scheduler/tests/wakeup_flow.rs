@@ -442,7 +442,11 @@ async fn a_restart_fires_a_window_still_inside_the_grace() {
     let server = start(home.path(), model.clone()).await;
     let mut client = connect(&server).await;
     let session = create_session(&mut client, home.path(), &[], true).await;
-    let at = instant_after(120);
+    // Ten seconds ahead: far enough that stopping the first daemon always
+    // wins the race, and the restart below lands inside the window's 60 s
+    // grace. The first daemon must not fire it; the fresh model of the
+    // second daemon is the evidence that the restart did.
+    let at = instant_after(10);
     let created: Value = client
         .rpc(
             "session.wakeup.create",
@@ -456,16 +460,14 @@ async fn a_restart_fires_a_window_still_inside_the_grace() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // The daemon was down when the window arrived; the restart lands inside
-    // the 60 s grace, so the wakeup fires once.
-    edit_wakeups(home.path(), |wakeups| {
-        wakeups[0]["at"] = json!(instant_after(-10));
-    });
+    // The daemon stays down past the window; the restart at ~12 s after the
+    // instant is still inside the 60 s grace, so the wakeup fires once.
+    tokio::time::sleep(Duration::from_secs(12)).await;
     let model = Arc::new(Script::default());
     let server = start(home.path(), model.clone()).await;
     let mut client = connect(&server).await;
     wait_state(home.path(), &wakeup_id, "fired").await;
-    wait_for("the restored Session's turn", || model.count() >= 1).await;
+    wait_for("the restarted daemon's turn", || model.count() >= 1).await;
     let events = history(&mut client, &session).await;
     assert_eq!(wakeup_inputs(&events).len(), 1, "{events:?}");
 
@@ -494,6 +496,11 @@ async fn a_restart_expires_a_window_past_the_grace_and_never_replays() {
     server.shutdown();
     server.join().await.unwrap();
 
+    // The 60 s grace makes a real-clock version sleep a minute before the
+    // restart; the edit stands in for the elapsed time. The classifier at
+    // the restart sees exactly what it would after downtime of that length:
+    // a `scheduled` record whose instant is past the grace. The within-grace
+    // restart above exercises the real clock.
     edit_wakeups(home.path(), |wakeups| {
         wakeups[0]["at"] = json!(instant_after(-120));
     });
@@ -504,6 +511,105 @@ async fn a_restart_expires_a_window_past_the_grace_and_never_replays() {
     tokio::time::sleep(Duration::from_millis(2500)).await;
     assert_eq!(model.count(), 0, "an expired wakeup is never replayed");
     assert!(wakeup_inputs(&history(&mut client, &session).await).is_empty());
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_at_the_grace_boundary_is_expired_once() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &[], true).await;
+    let created: Value = client
+        .rpc(
+            "session.wakeup.create",
+            json!({"sessionId": session, "branchId": "main", "at": instant_after(120),
+                "prompt": "On the boundary."}),
+        )
+        .await
+        .unwrap();
+    let wakeup_id = created["wakeupId"].as_str().unwrap().to_owned();
+
+    // Exactly `now - grace` (the pass's own clock reading is later, so the
+    // record lands on the stale side of the one boundary per pass).
+    let at = (chrono::Utc::now() - chrono::Duration::seconds(60))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    edit_wakeups(home.path(), |wakeups| {
+        wakeups[0]["at"] = json!(at);
+    });
+    wait_state(home.path(), &wakeup_id, "expired").await;
+    let settled_at = stored_wakeups(home.path())[0]["settled_at"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(model.count(), 0, "the boundary record never fires");
+    assert!(wakeup_inputs(&history(&mut client, &session).await).is_empty());
+
+    // Exactly one terminal state: a later pass does not re-settle or fire it.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let stored = stored_wakeups(home.path());
+    assert_eq!(stored[0]["state"], json!("expired"), "{stored:?}");
+    assert_eq!(
+        stored[0]["settled_at"].as_str().unwrap(),
+        settled_at,
+        "the settle happened exactly once: {stored:?}"
+    );
+    assert_eq!(model.count(), 0);
+    assert!(wakeup_inputs(&history(&mut client, &session).await).is_empty());
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_records_are_pruned_after_their_retention_age() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &[], true).await;
+    for prompt in ["Old.", "Recent."] {
+        client
+            .rpc(
+                "session.wakeup.create",
+                json!({"sessionId": session, "branchId": "main", "at": instant_after(120),
+                    "prompt": prompt}),
+            )
+            .await
+            .unwrap();
+    }
+    // The timer edits stand in for the two terminal ages: the first record
+    // has been terminal for eight days, the second for one.
+    let days = |days: i64| {
+        (chrono::Utc::now() - chrono::Duration::days(days))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    edit_wakeups(home.path(), |wakeups| {
+        wakeups[0]["state"] = json!("fired");
+        wakeups[0]["settled_at"] = json!(days(8));
+        wakeups[1]["state"] = json!("cancelled");
+        wakeups[1]["settled_at"] = json!(days(1));
+    });
+    wait_for("the old terminal record to be pruned", || {
+        stored_wakeups(home.path()).len() == 1
+    })
+    .await;
+    let stored = stored_wakeups(home.path());
+    assert_eq!(stored[0]["state"], json!("cancelled"), "{stored:?}");
+    assert_eq!(stored[0]["prompt"], json!("Recent."), "{stored:?}");
+    // `list` reads what is stored: it shows the surviving record only.
+    let listed: Value = client
+        .rpc("session.wakeup.list", json!({"sessionId": session}))
+        .await
+        .unwrap();
+    let records = listed["wakeups"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "{listed}");
+    assert_eq!(records[0]["state"], json!("cancelled"), "{listed}");
 
     drop(client);
     server.shutdown();

@@ -180,9 +180,9 @@ pub(crate) struct Shared {
     pub(crate) texts: Arc<crate::SchedulerTexts>,
     /// Serializes retention passes, so a pass never deletes what another reads.
     pub(crate) pruning: tokio::sync::Mutex<()>,
-    /// Serializes wakeup create/cancel/evaluate, so a cancel and a fire are
-    /// one transition and the fire's settle cannot overwrite a cancel
-    /// (design §10).
+    /// Serializes a wakeup cancel and the timer pass's settle batch, so the
+    /// two transitions order at the record level; the pass never holds it
+    /// across a `sessions` call (design §10).
     pub(crate) wakeups: tokio::sync::Mutex<()>,
     /// Cancelled when this generation starts to unload.
     pub(crate) stop: CancellationToken,

@@ -18,6 +18,10 @@ use std::sync::Arc;
 /// The file inside the host-authorized `scheduler/` directory (A.7's scope).
 pub const WAKEUPS_FILE: &str = "scheduler/wakeups.json";
 const FORMAT_VERSION: u32 = 1;
+/// A terminal record is removed once it has been terminal for this long
+/// (§10.4): its only reader is `list`, and a record nobody listed is already
+/// unrecoverable, so the bound costs no information the design promises.
+const RETENTION_AFTER_TERMINAL: Duration = Duration::days(7);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -279,21 +283,53 @@ impl Wakeups {
     /// One pass of the timer (and of the restart, whose first pass runs
     /// within a second of startup): a `scheduled` record whose instant is
     /// within the grace window is fired once, one whose instant is past the
-    /// window is `expired` and never replayed, and one whose Session is gone
-    /// is `cancelled`. A fire is only the input write through the public
-    /// `sessions.input`; there is no launch, stop or withdraw (§10).
+    /// window is `expired` and never replayed, one whose Session is gone is
+    /// `cancelled`, and a terminal record older than
+    /// [`RETENTION_AFTER_TERMINAL`] is removed. A fire is only the input
+    /// write through the public `sessions.input`; there is no launch, stop
+    /// or withdraw (§10). The pass reads the file once, takes one clock
+    /// reading, writes at most once, and holds the wakeup lock only around
+    /// the settle batch, never across a `sessions` call.
     pub async fn evaluate(&self) -> Result<(), SchedulerError> {
-        let _hold = self.shared.wakeups.lock().await;
         let now = Utc::now();
-        let due: Vec<Wakeup> = read(&self.shared.files)
-            .await?
-            .into_iter()
+        let snapshot = read(&self.shared.files).await?;
+        let grace = Duration::seconds(GRACE_SECONDS);
+        let due: Vec<Wakeup> = snapshot
+            .iter()
             .filter(|wakeup| wakeup.state == WakeupState::Scheduled)
             .filter(|wakeup| {
-                canonical_instant(&wakeup.at)
-                    .is_some_and(|at| at <= now && now - at < Duration::seconds(GRACE_SECONDS))
+                canonical_instant(&wakeup.at).is_some_and(|at| at <= now && now - at < grace)
             })
+            .cloned()
             .collect();
+        let stale: Vec<String> = snapshot
+            .iter()
+            .filter(|wakeup| wakeup.state == WakeupState::Scheduled)
+            .filter(|wakeup| {
+                canonical_instant(&wakeup.at).is_some_and(|at| at <= now && now - at >= grace)
+            })
+            .map(|wakeup| wakeup.wakeup_id.clone())
+            .collect();
+        let retention_cut = now - RETENTION_AFTER_TERMINAL;
+        let prune: Vec<String> = snapshot
+            .iter()
+            .filter(|wakeup| wakeup.state.is_terminal())
+            .filter(|wakeup| {
+                wakeup
+                    .settled_at
+                    .as_deref()
+                    .and_then(canonical_instant)
+                    .is_some_and(|at| at <= retention_cut)
+            })
+            .map(|wakeup| wakeup.wakeup_id.clone())
+            .collect();
+        // The input writes happen before any settle and without the wakeup
+        // lock. The settle batch below is the one transition that can race a
+        // cancel, and each settle only fires a record that is still
+        // `scheduled`, so a cancel that settles first keeps the record
+        // cancelled any way the two interleave (§10.3's boundary at the
+        // write).
+        let mut outcomes: Vec<(String, WakeupState)> = Vec::new();
         for wakeup in due {
             let session_id = wakeup.session_id.clone();
             let branch_id = wakeup.branch_id.clone();
@@ -310,13 +346,9 @@ impl Wakeups {
                 "content": [{"type": "text", "text": wakeup.prompt}],
             });
             match sessions(self.shared.sessions.as_ref(), "input", input).await {
-                Ok(Ok(_)) => {
-                    self.settle(&wakeup.wakeup_id, WakeupState::Fired, now)
-                        .await?
-                }
+                Ok(Ok(_)) => outcomes.push((wakeup.wakeup_id, WakeupState::Fired)),
                 Ok(Err(code)) if matches!(code.as_str(), "session_closed" | "branch_missing") => {
-                    self.settle(&wakeup.wakeup_id, WakeupState::Cancelled, now)
-                        .await?
+                    outcomes.push((wakeup.wakeup_id, WakeupState::Cancelled))
                 }
                 // `reloading`, transport failures and any other code leave the
                 // record scheduled: the next pass retries with the same
@@ -325,49 +357,46 @@ impl Wakeups {
                 _ => {}
             }
         }
-        // Records whose instant is beyond the grace are settled `expired`
-        // without a fire; their Session is never restored or launched for them.
-        let now = Utc::now();
-        let stale: Vec<String> = read(&self.shared.files)
-            .await?
-            .into_iter()
-            .filter(|wakeup| wakeup.state == WakeupState::Scheduled)
-            .filter(|wakeup| {
-                canonical_instant(&wakeup.at)
-                    .is_some_and(|at| at <= now && now - at >= Duration::seconds(GRACE_SECONDS))
-            })
-            .map(|wakeup| wakeup.wakeup_id)
-            .collect();
-        for wakeup_id in stale {
-            self.settle(&wakeup_id, WakeupState::Expired, now).await?;
+        if outcomes.is_empty() && stale.is_empty() && prune.is_empty() {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    /// Settles a record that is still `scheduled`; a record a cancel settled
-    /// in between keeps its terminal state. `create`, `cancel` and
-    /// `evaluate` share the same lock, so that cannot happen; the terminal
-    /// guard keeps the transition total.
-    async fn settle(
-        &self,
-        wakeup_id: &str,
-        state: WakeupState,
-        at: DateTime<Utc>,
-    ) -> Result<(), SchedulerError> {
-        let wakeup_id = wakeup_id.to_owned();
+        let _hold = self.shared.wakeups.lock().await;
         update(&self.shared.files, move |wakeups| {
-            let Some(record) = wakeups
-                .iter_mut()
-                .find(|wakeup| wakeup.wakeup_id == wakeup_id)
-            else {
-                return Ok((false, ()));
-            };
-            if record.state != WakeupState::Scheduled {
-                return Ok((false, ()));
+            let mut changed = false;
+            for (wakeup_id, state) in &outcomes {
+                let Some(record) = wakeups
+                    .iter_mut()
+                    .find(|wakeup| wakeup.wakeup_id == *wakeup_id)
+                else {
+                    continue;
+                };
+                if record.state != WakeupState::Scheduled {
+                    continue;
+                }
+                record.state = *state;
+                record.settled_at = Some(stamp(now));
+                changed = true;
             }
-            record.state = state;
-            record.settled_at = Some(stamp(at));
-            Ok((true, ()))
+            for wakeup_id in &stale {
+                let Some(record) = wakeups
+                    .iter_mut()
+                    .find(|wakeup| wakeup.wakeup_id == *wakeup_id)
+                else {
+                    continue;
+                };
+                if record.state != WakeupState::Scheduled {
+                    continue;
+                }
+                record.state = WakeupState::Expired;
+                record.settled_at = Some(stamp(now));
+                changed = true;
+            }
+            if !prune.is_empty() {
+                let before = wakeups.len();
+                wakeups.retain(|wakeup| !prune.contains(&wakeup.wakeup_id));
+                changed |= wakeups.len() != before;
+            }
+            Ok((changed, ()))
         })
         .await
     }
