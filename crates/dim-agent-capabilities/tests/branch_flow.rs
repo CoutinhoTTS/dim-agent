@@ -12,7 +12,9 @@ use dim_agent_capabilities::{
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
 use dim_agent_runtime::testing::MinimalHost;
-use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
+use dim_agent_runtime::testing::{
+    branch_events, chain_events, chain_events_paged, timeline_events,
+};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
@@ -4400,5 +4402,43 @@ async fn a_turn_spanning_a_restart_after_a_steer_writes_no_idle_notice() {
         after, before,
         "a turn that steered main before the restart writes no idle notice"
     );
+    soon(agent.close()).await.unwrap();
+}
+
+/// A chain read pages on the queried branch, so a page that ends in an
+/// ancestor continues at that fact rather than restarting on the branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chain_read_continues_past_a_page_that_ended_in_an_ancestor() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let head = session.sequence("main").unwrap();
+    let child = soon(session.branch("main".into(), head, options("child line")))
+        .await
+        .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    let whole = chain_events(&session, &child, ..).await.unwrap();
+    assert!(
+        whole.len() >= 2,
+        "the chain holds the ancestor and the branch: {}",
+        whole.len()
+    );
+    for page in 1..=whole.len() as u64 {
+        let paged = chain_events_paged(&session, &child, .., page)
+            .await
+            .unwrap();
+        assert_eq!(
+            paged.iter().map(|event| &event.id).collect::<Vec<_>>(),
+            whole.iter().map(|event| &event.id).collect::<Vec<_>>(),
+            "a page of {page} reads the same chain"
+        );
+    }
     soon(agent.close()).await.unwrap();
 }

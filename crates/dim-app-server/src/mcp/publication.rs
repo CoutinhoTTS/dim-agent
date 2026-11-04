@@ -6,6 +6,7 @@ use super::config::{
 use super::{
     McpAuth, McpConnection, McpError, McpSource, Result,
     server::{McpRuntime, McpServer, McpServerError, McpServerPlugin, McpServerState},
+    sources_in_precedence,
 };
 use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_runtime::{
@@ -455,7 +456,7 @@ impl Projection {
                 Some(scope) => settings
                     .read::<McpSettings>(scope, cancel)
                     .await
-                    .map(|snapshot| (snapshot.revision, snapshot.document.mcp_servers)),
+                    .map(|snapshot| (snapshot.revision, snapshot.document.into_parts().0)),
                 None => settings
                     .read::<McpPluginServers>(SettingsScope::User, cancel)
                     .await
@@ -624,10 +625,7 @@ impl Projection {
             return Err(McpError::Closed);
         }
         let mut selected = None;
-        for source in [McpSource::User, McpSource::Plugins]
-            .into_iter()
-            .chain(project.map(McpSource::Project))
-        {
+        for source in sources_in_precedence(project) {
             let intent =
                 self.sources
                     .get(&source)

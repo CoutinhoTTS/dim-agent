@@ -266,6 +266,7 @@ pub async fn branch_events<R: std::ops::RangeBounds<u64> + Send>(
         Log::Session(session, branch),
         TimelineQueryScope::Branch,
         range,
+        EVENTS_PAGE,
     )
     .await
 }
@@ -281,6 +282,25 @@ pub async fn chain_events<R: std::ops::RangeBounds<u64> + Send>(
         Log::Session(session, branch),
         TimelineQueryScope::Chain,
         range,
+        EVENTS_PAGE,
+    )
+    .await
+}
+
+/// [`chain_events`] with an explicit page size, so a flow can cross the
+/// ancestor-to-branch boundary of a chain read without a log of thousands of
+/// facts.
+pub async fn chain_events_paged<R: std::ops::RangeBounds<u64> + Send>(
+    session: &Session,
+    branch: &str,
+    range: R,
+    page: u64,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    read(
+        Log::Session(session, branch),
+        TimelineQueryScope::Chain,
+        range,
+        page,
     )
     .await
 }
@@ -293,13 +313,14 @@ pub async fn timeline_events<R: std::ops::RangeBounds<u64> + Send>(
     scope: TimelineQueryScope,
     range: R,
 ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
-    read(Log::Timeline(timeline), scope, range).await
+    read(Log::Timeline(timeline), scope, range, EVENTS_PAGE).await
 }
 
 async fn read<R: std::ops::RangeBounds<u64> + Send>(
     log: Log<'_>,
     scope: TimelineQueryScope,
     range: R,
+    page: u64,
 ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
     use std::ops::Bound;
     let start = match range.start_bound() {
@@ -324,7 +345,7 @@ async fn read<R: std::ops::RangeBounds<u64> + Send>(
         flags: Vec::new(),
         event_id: None,
         predicate: None,
-        limit: std::num::NonZeroU64::new(EVENTS_PAGE).expect("a page keeps at least one fact"),
+        limit: std::num::NonZeroU64::new(page).expect("a page keeps at least one fact"),
         offset: 0,
     };
     let own = log.branch();
@@ -332,15 +353,46 @@ async fn read<R: std::ops::RangeBounds<u64> + Send>(
         dim_agent_types::TimelinePosition,
         Arc<dim_agent_types::AgentEvent>,
     )> = Vec::new();
+    // The fact the last page ended at, when the next page begins there again:
+    // a chain read anchored by event id includes the fact it names, so that
+    // page asks for one fact more than it keeps.
+    let mut repeated = None;
+    let mut request = page;
     loop {
-        let reply = log.query(query.clone()).await?;
-        let short = (reply.events.len() as u64) < EVENTS_PAGE;
-        let last = reply.positions.last().map(|position| position.sequence);
+        let mut reply = log.query(query.clone()).await?;
+        let short = (reply.events.len() as u64) < request;
+        if repeated.is_some() && repeated.as_ref() == reply.positions.first() {
+            reply.events.remove(0);
+            reply.positions.remove(0);
+        }
+        let last = reply.positions.last().cloned();
         events.extend(reply.positions.into_iter().zip(reply.events));
-        if let (false, Some(last)) = (short, last) {
-            query.from_sequence = Some(last + 1);
-        } else {
+        if short {
             break;
+        }
+        match last {
+            // A chain read's `from_sequence` is anchored on the queried branch,
+            // so a page that ended in an ancestor continues at that fact's id.
+            Some(last) if last.branch_id != own => {
+                let Some(id) = events.last().map(|(_, event)| event.id.clone()) else {
+                    break;
+                };
+                query.from_sequence = None;
+                query.from_event = Some(id);
+                request = page + 1;
+                query.limit =
+                    std::num::NonZeroU64::new(request).expect("a page keeps at least one fact");
+                repeated = Some(last);
+            }
+            Some(last) => {
+                query.from_event = None;
+                query.from_sequence = Some(last.sequence + 1);
+                request = page;
+                query.limit =
+                    std::num::NonZeroU64::new(request).expect("a page keeps at least one fact");
+                repeated = None;
+            }
+            None => break,
         }
         if end.is_some_and(|end| {
             events

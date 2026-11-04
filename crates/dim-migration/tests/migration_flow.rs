@@ -1327,6 +1327,130 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     root.shutdown().await.unwrap();
 }
 
+/// #951: a legacy entry that does not decode stays in the legacy home and is
+/// recorded on its own, while a decodable entry imports beside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_imports_decodable_mcp_entries_and_records_broken_ones() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let marker = "token-like-value-2f9a";
+    let servers = json!({
+        "docs": {"type": "streamable-http", "url": "https://mcp.example.test/mcp", "headers": {"X-Key": "public"}, "future": {"keep": 1}},
+        "broken": {"type": "http", "url": "https://mcp.example.test", "headers": {"Authorization": {"leak": marker}}}
+    });
+    std::fs::write(
+        source.join("mcp.json"),
+        json!({"mcpServers": servers.clone()}).to_string(),
+    )
+    .unwrap();
+    let before = snapshot(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    let imported = report
+        .objects
+        .iter()
+        .find(|item| item.id == "mcp.mcpServers")
+        .unwrap();
+    assert_eq!(imported.outcome, Outcome::Imported, "{report:?}");
+    let broken = report
+        .objects
+        .iter()
+        .find(|item| item.id == "mcpServers.broken")
+        .unwrap();
+    assert_eq!(broken.outcome, Outcome::Unsupported, "{report:?}");
+    let reason = broken.reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("headers.Authorization"), "{reason}");
+    assert!(!reason.contains(marker), "{reason}");
+    assert_eq!(snapshot(&source), before);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let stored: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["mcpServers"]["docs"], servers["docs"]);
+    assert!(stored["mcpServers"].get("broken").is_none());
+    assert!(!stored.to_string().contains(marker));
+}
+
+/// #951: a legacy file whose entries all decode imports exactly as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_imports_a_fully_valid_mcp_file_as_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let servers = json!({
+        "local": {"command": "legacy-server", "args": ["--flag"], "env": {"A": "one"}, "future": {"keep": true}},
+        "remote": {"type": "sse", "url": "https://mcp.example.test/sse", "headers": {"X-Key": "public"}, "enabled": false}
+    });
+    std::fs::write(
+        source.join("mcp.json"),
+        json!({"mcpServers": servers.clone()}).to_string(),
+    )
+    .unwrap();
+    let before = snapshot(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|item| item.id == "mcp.mcpServers" && item.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    assert!(
+        !report
+            .objects
+            .iter()
+            .any(|item| item.id.starts_with("mcpServers.")),
+        "{report:?}"
+    );
+    assert_eq!(snapshot(&source), before);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let stored: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["mcpServers"], servers);
+}
 /// #522: a legacy limit equal to the assumed pair imports as undeclared,
 /// while a typed or `metadata.raw`-declared value imports as a declaration;
 /// the `models` of a `bundled` or `remote` row are listing output, so an

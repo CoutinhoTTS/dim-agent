@@ -66,36 +66,54 @@ use std::{
     },
     path::PathBuf,
     process::{Child, Command, ExitStatus, Output, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
 
-struct Home(PathBuf);
+struct Home(PathBuf, Arc<AtomicBool>);
 impl Home {
     fn new() -> Self {
         let path = PathBuf::from("/tmp").join(format!("dim-cli-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(path.join("rust")).unwrap();
         fs::set_permissions(path.join("rust"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(path.join("config.json"), r#"{"locale":"en"}"#).unwrap();
-        Self(path)
+        Self::at(path)
+    }
+    fn at(path: PathBuf) -> Self {
+        Self(path, Arc::new(AtomicBool::new(false)))
+    }
+    /// Ends the CLI itself, as the last step of a flow. From here on a closed
+    /// connection is the end the flow expects; before it, `Wire` fails on one.
+    fn kill(&self, terminal: &Terminal) {
+        self.1.store(true, Ordering::SeqCst);
+        terminal.signal(libc::SIGKILL);
     }
     fn daemon(&self, flow: impl FnOnce(&mut Wire) + Send + 'static) -> thread::JoinHandle<()> {
+        // Each flow owns the deliberate-kill mark. A prior flow's `kill` must
+        // not make this one accept an unexpected close, and a flow's own kill
+        // is only set while it runs: the tests join an earlier daemon before
+        // starting the next, so nothing is pending here.
+        self.1.store(false, Ordering::SeqCst);
         let path = self.0.join("rust/daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         listener.set_nonblocking(true).unwrap();
+        let ending = Arc::clone(&self.1);
         thread::spawn(move || {
             // A client that fails before connecting must fail the test, not
             // hang the run.
-            let deadline = Instant::now() + PATIENCE;
+            let deadline = Instant::now() + HANG_GUARD;
             let stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         assert!(
                             Instant::now() < deadline,
-                            "no client connected within {PATIENCE:?}"
+                            "no client connected within {HANG_GUARD:?}"
                         );
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -103,9 +121,14 @@ impl Home {
                 }
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(PATIENCE)).unwrap();
-            let mut wire = Wire(BufReader::new(stream));
-            flow(&mut wire);
+            stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+            let mut wire = Wire(BufReader::new(stream), ending);
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| flow(&mut wire)))
+                && !payload.is::<PeerGone>()
+            {
+                std::panic::resume_unwind(payload);
+            }
         })
     }
     fn command(&self) -> Command {
@@ -127,25 +150,111 @@ impl Drop for Home {
 /// can take several seconds; a passing step never waits this long.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-struct Wire(BufReader<UnixStream>);
+/// Bounds a peer frame that never arrives, so a broken path fails instead of
+/// hanging; it is not a step's budget. A frame is due when the CLI and the
+/// fixture's daemon reach it, and a debug CLI starting on a loaded machine can
+/// take tens of seconds, so ten times the 30 s step budget keeps machine load
+/// out of the result: the scripted daemon's socket reads, the deadline
+/// `Wire::frame` retries within, and the terminal waits for what the CLI draws
+/// or accepts (#807).
+const HANG_GUARD: Duration = Duration::from_secs(300);
+
+/// The test ended the CLI itself: the flow stops where it would answer a CLI
+/// that is gone. `Home::kill` sets that expectation before the signal; without
+/// it a closed connection fails the flow, so a CLI that exits on its own still
+/// fails the daemon thread. A CLI that stays connected and silent is not gone;
+/// that still fails at `HANG_GUARD`.
+struct PeerGone;
+
+struct Wire(BufReader<UnixStream>, Arc<AtomicBool>);
 impl Wire {
+    fn new(stream: UnixStream) -> Self {
+        Self(BufReader::new(stream), Arc::new(AtomicBool::new(false)))
+    }
     fn read(&mut self, method: &str) -> Value {
-        let mut line = String::new();
-        self.0.read_line(&mut line).unwrap();
-        let value: Value = serde_json::from_str(&line).unwrap();
+        let value = self.frame();
         assert_eq!(value["method"], method);
         value
     }
     /// The next request, whichever it is: for requests whose order the
     /// flow does not fix.
     fn read_any(&mut self) -> Value {
+        self.frame()
+    }
+    fn frame(&mut self) -> Value {
+        let deadline = Instant::now() + HANG_GUARD;
         let mut line = String::new();
-        self.0.read_line(&mut line).unwrap();
+        loop {
+            match self.0.read_line(&mut line) {
+                Ok(0) => self.closed(format!("the CLI closed before a frame: {line:?}")),
+                Ok(_) => break,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "no frame within {HANG_GUARD:?}: {line:?}"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                    self.closed(format!("the CLI reset before a frame: {line:?}"));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
         serde_json::from_str(&line).unwrap()
     }
+    /// The request that arrives after the flow settled, or `None` when the CLI
+    /// closed first. A client killed with a reply still unread resets the
+    /// connection instead of ending it; both mean no request arrived.
+    fn trailing_request(&mut self) -> Option<String> {
+        let deadline = Instant::now() + HANG_GUARD;
+        let mut line = String::new();
+        loop {
+            match self.0.read_line(&mut line) {
+                Ok(0) => return None,
+                Ok(_) => return Some(line),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the CLI neither closed nor sent a request: {line:?}"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => return None,
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
     fn send(&mut self, value: Value) {
-        writeln!(self.0.get_mut(), "{value}").unwrap();
-        self.0.get_mut().flush().unwrap();
+        let written = writeln!(self.0.get_mut(), "{value}").and_then(|()| self.0.get_mut().flush());
+        match written {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                self.closed(format!("the CLI closed while the flow replied: {value}"));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    /// A closed connection while the flow waits: the end of the flow only when
+    /// the test ended the CLI with `Home::kill`.
+    fn closed(&self, message: String) -> ! {
+        if self.1.load(Ordering::SeqCst) {
+            std::panic::panic_any(PeerGone);
+        }
+        panic!("{message}");
     }
     fn reply(&mut self, request: &Value, result: Value) {
         self.send(json!({"jsonrpc":"2.0","id":request["id"],"result":result}));
@@ -159,10 +268,18 @@ impl Wire {
         let mut line = String::new();
         let result = self.0.read_line(&mut line);
         self.0.get_ref().set_read_timeout(previous).unwrap();
-        assert!(
-            matches!(result, Err(ref error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
-            "Unexpected request or closure: {line:?}, {result:?}"
-        );
+        match result {
+            Err(ref error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Ok(0) => self.closed(format!("the CLI closed during the quiet window: {line:?}")),
+            Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                self.closed(format!("the CLI reset during the quiet window: {line:?}"));
+            }
+            _ => panic!("Unexpected request or closure: {line:?}, {result:?}"),
+        }
     }
     fn start(&mut self, resume: bool) {
         self.hello(&[]);
@@ -267,7 +384,7 @@ fn configured_event(sequence: u64, model_id: &str, preferences: Value) -> Value 
 }
 
 fn wait(mut child: Child) -> Output {
-    let deadline = Instant::now() + PATIENCE;
+    let deadline = Instant::now() + HANG_GUARD;
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             child.kill().unwrap();
@@ -858,7 +975,7 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
         successor.set_nonblocking(true).unwrap();
         wire.reply(&shutdown, json!({}));
         wire.0.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             let stream = match successor.accept() {
                 Ok((stream, _)) => stream,
@@ -870,12 +987,11 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
                 Err(error) => panic!("{error}"),
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(PATIENCE)).unwrap();
-            let mut wire = Wire(BufReader::new(stream));
-            let mut line = String::new();
-            if wire.0.read_line(&mut line).unwrap() == 0 {
+            stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+            let mut wire = Wire::new(stream);
+            let Some(line) = wire.trailing_request() else {
                 continue;
-            }
+            };
             let hello: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(hello["method"], "hello");
             wire.reply(&hello,json!({"instanceId":"new","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
@@ -1055,8 +1171,7 @@ fn daemon_stop_never_treats_old_protocol_eof_or_cleanup_failure_as_completion() 
             if case != "old" { features.push("daemon.shutdown.completed"); }
             wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":features}));
             if case == "old" {
-                let mut line = String::new();
-                assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "must not stop an incompatible daemon");
+                assert_eq!(wire.trailing_request(), None, "must not stop an incompatible daemon");
             } else {
                 let request = wire.read("daemon.shutdown");
                 if case == "failed" { wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"Daemon cleanup failed"}})); }
@@ -2547,7 +2662,7 @@ impl Terminal {
         mode.c_lflag
     }
     fn wait(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             assert!(Instant::now() < deadline, "CLI did not settle");
             let mut bytes = [0u8; 4096];
@@ -2573,7 +2688,7 @@ impl Terminal {
     /// consuming it, as a suspended application's or a stalled remote
     /// session's terminal does, and stays that way until the child is gone.
     fn wait_without_reading(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
@@ -2618,7 +2733,7 @@ impl Terminal {
     /// Reads until `found` names how far into the unconsumed transcript the
     /// wait is satisfied.
     fn wait_for(&mut self, expected: &str, found: impl Fn(&str) -> Option<usize>) {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             if let Some(end) = found(&self.transcript[self.consumed..]) {
                 self.consumed += end;
@@ -2660,7 +2775,7 @@ impl Terminal {
         );
     }
     fn raw(&mut self, mut bytes: &[u8]) {
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + HANG_GUARD;
         while !bytes.is_empty() {
             assert!(Instant::now() < deadline, "Terminal did not accept input");
             match self.master.as_mut().unwrap().write(bytes) {
@@ -4092,7 +4207,7 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
     command.arg("--fullscreen");
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     assert_eq!(
@@ -4145,7 +4260,7 @@ fn the_model_label_shows_the_adopted_reasoning_effort_in_both_modes() {
                     terminal.transcript
                 );
             }
-            terminal.signal(libc::SIGKILL);
+            home.kill(&terminal);
             terminal.wait();
             daemon.join().unwrap();
         }
@@ -4210,7 +4325,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
         }
         let mut terminal = Terminal::launch_tui(command);
         terminal.until("test / model · high");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
         let calls: Vec<Value> = observed.try_iter().collect();
@@ -4272,7 +4387,7 @@ fn the_model_label_shows_a_configured_profile_effort() {
                 terminal.transcript
             );
         }
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
     }
 }
@@ -4407,15 +4522,18 @@ fn home_after_new_drops_the_previous_sessions_effort() {
     terminal.until("\u{1b}[2J\u{1b}[H\u{1b}[3J");
     terminal.until("test / model");
     terminal.until("\u{1b}[?2026l");
-    let home = &terminal.transcript[resized_at..];
-    assert!(home.contains("test / model"), "home drew no label: {home}");
+    let screen = &terminal.transcript[resized_at..];
     assert!(
-        !home.contains("· high"),
-        "home kept the previous Session's effort: {home}"
+        screen.contains("test / model"),
+        "home drew no label: {screen}"
+    );
+    assert!(
+        !screen.contains("· high"),
+        "home kept the previous Session's effort: {screen}"
     );
     terminal.write(b"hello\r");
     terminal.until("next reply");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -4481,7 +4599,7 @@ fn repicking_the_current_model_keeps_the_effort() {
     terminal.write(b"\r");
     terminal.until("Ask anything...");
     terminal.until("test / model · high");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     let calls: Vec<Value> = observed.try_iter().collect();
@@ -4520,7 +4638,7 @@ fn a_resumed_session_draws_the_adopted_model_and_effort() {
     command.arg("--resume").arg("session");
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / second · high");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -4555,7 +4673,7 @@ fn another_clients_adoption_redraws_the_model_label() {
     terminal.until("test / model");
     adopt.send(()).unwrap();
     terminal.until("test / model · low");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -4624,7 +4742,7 @@ fn a_narrow_composer_drops_the_effort_before_the_model() {
                 );
             }
         }
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -4688,7 +4806,7 @@ fn tui_escape_sends_the_reason_that_records_the_interruption() {
         settle.send(()).unwrap();
         terminal.until("User interrupted the run.");
         terminal.until("stopped");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -4745,7 +4863,7 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     terminal.write(b"\x03");
     terminal.until("private-out");
     terminal.until("not sent to the model");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     for payload in [
@@ -4850,7 +4968,7 @@ fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writi
         assert!(!terminal.transcript.contains("invalid-neighbor"));
         terminal.write(b"3\r");
         terminal.until("Reasoning effort configuration adopted: none");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -4914,7 +5032,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
     terminal.until("Signed in to \"docs\"");
     terminal.write(b"/effort high\r");
     terminal.until("Reasoning effort configuration adopted: high");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -4964,7 +5082,7 @@ fn tui_mcp_without_a_session_reports_the_catalog_only() {
     terminal.write(b"/mcp list\r");
     terminal.until("No MCP server is configured.");
     quiet_done.recv_timeout(PATIENCE).unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     assert!(!terminal.transcript.contains("session_closed"));
@@ -4981,7 +5099,7 @@ fn tui_agent_without_a_session_answers_the_no_session_notice_and_sends_nothing()
     terminal.write(b"/agent ghost\r");
     terminal.until("Sign in with /login");
     quiet_done.recv_timeout(PATIENCE).unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     assert!(!terminal.transcript.contains("session_closed"));
@@ -4998,7 +5116,7 @@ fn tui_effort_without_a_session_answers_the_no_session_notice_and_sends_nothing(
     terminal.write(b"/effort high\r");
     terminal.until("Sign in with /login");
     quiet_done.recv_timeout(PATIENCE).unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     assert!(!terminal.transcript.contains("session_closed"));
@@ -5017,7 +5135,7 @@ fn tui_shell_without_a_session_settles_with_the_no_session_notice() {
     terminal.until("failed: Sign in with /login");
     terminal.until("Shell: Sign in with");
     quiet_done.recv_timeout(PATIENCE).unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     assert!(!terminal.transcript.contains("session_closed"));
@@ -5072,7 +5190,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     terminal.write(b"\r");
     terminal.until("[Image #1]");
     terminal.until("[Pasted text: /files/paste.txt (1 lines)]");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -5127,7 +5245,7 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
     terminal.write(b"\t");
     terminal.write(b"\r");
     received.recv_timeout(PATIENCE).unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -5416,7 +5534,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
     terminal.until("[my notes.txt]");
     terminal.write(b"\r");
     received.recv_timeout(PATIENCE).unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -5509,7 +5627,7 @@ fn fullscreen_login_releases_mouse_for_the_link_and_restores_the_preference_on_c
                 terminal.transcript
             );
         }
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -5732,7 +5850,7 @@ fn fresh_native_startup_uses_workspace_and_ask_without_policy_file() {
     );
     let stream = UnixStream::connect(home.0.join("rust/daemon.sock")).unwrap();
     stream.set_read_timeout(Some(PATIENCE)).unwrap();
-    let mut wire = Wire(BufReader::new(stream));
+    let mut wire = Wire::new(stream);
     wire.send(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":3,"clientKind":"cli"}}));
     let mut line = String::new();
     wire.0.read_line(&mut line).unwrap();
@@ -6541,7 +6659,7 @@ fn tui_mcp_says_when_no_server_is_configured() {
         "{}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -6603,7 +6721,7 @@ fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
         "the failure message is sanitized: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -6694,7 +6812,7 @@ fn tui_mcp_enables_and_disables_a_project_server() {
     terminal.until("Disabled \"docs\" (project).");
     terminal.write(b"/mcp list\r");
     terminal.until("disabled");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -6785,9 +6903,9 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
     terminal.until("Usage: /mcp login");
     terminal.until("\n> ");
     terminal.write(b"/mcp login --client-secret argument-secret docs\n");
-    terminal.until("No matching MCP server");
+    terminal.until("No MCP server has that id.");
     terminal.until("\n> ");
-    terminal.write(b"/mcp login --no-browser --client-secret docs team\n");
+    terminal.write(b"/mcp login --no-browser --client-secret --source project docs team\n");
     terminal.until("Client secret (hidden): ");
     terminal.write(b"fixture-confidential-secret\n");
     terminal.until("Resource: https://resource.example/mcp");
@@ -6868,8 +6986,11 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
             wire.reply(&catalog, mcp_catalog("docs"));
             mcp_started(wire, &redirect, mode == "expiry");
             if matches!(mode, "cancel" | "expiry") {
-                let mut line = String::new();
-                assert_eq!(wire.0.read_line(&mut line).unwrap(), 0);
+                assert_eq!(
+                    wire.trailing_request(),
+                    None,
+                    "nothing follows the cancelled sign-in"
+                );
                 return;
             }
             let callback = wire.read("mcp.auth.complete");
@@ -7096,8 +7217,8 @@ fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_s
         }
     };
     stream.set_nonblocking(false).unwrap();
-    stream.set_read_timeout(Some(PATIENCE)).unwrap();
-    let mut wire = Wire(BufReader::new(stream));
+    stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    let mut wire = Wire::new(stream);
     let hello = wire.read("hello");
     wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
     let catalog = wire.read("provider.catalog");
@@ -7697,7 +7818,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         .get("result")
         .is_some()
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     let selected = || {
         let mut command = command();
@@ -7736,7 +7857,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         updated["result"]["providers"][0]["preferences"]["fixture-model"]["reasoningEffort"],
         "high"
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     let mut terminal = Terminal::launch_tui(selected());
     terminal.until("Ask anything...");
@@ -7746,7 +7867,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         post(&events, "updated-provider-message")["key"],
         "Bearer second-key"
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     assert!(
         rpc(&mut wire, "daemon.shutdown", json!({}))
@@ -7832,7 +7953,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("Connect ");
     terminal.write(b"\r\r");
     terminal.until("Disconnected Provider flow");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     let disconnected = rpc(&mut wire, "provider.management", json!({"providerId":id}));
     let provider = &disconnected["result"]["providers"][0];
@@ -7876,7 +7997,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("Ask anything...");
     terminal.write(b"/models\r");
     terminal.until("Anonymous fixture /");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     assert!(
         rpc(
@@ -7918,7 +8039,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         format!("http://{address}/v1")
     );
     let builtin_model = builtin["models"][0]["model"]["modelId"].as_str().unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     let mut builtin_command = command();
     builtin_command.args(["--provider", "kimi-for-coding", "--model", builtin_model]);
@@ -7934,7 +8055,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
             break;
         }
     }
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     drop(wire);
     let mut stop = std::net::TcpStream::connect(address).unwrap();
@@ -8148,7 +8269,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         !plain.contains("already left the queue") && !plain.contains("not available"),
         "{plain}"
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -8185,7 +8306,7 @@ fn tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress() {
     terminal.write(b"second");
     terminal.write(b"\x13");
     daemon.join().unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
 }
 
@@ -8229,7 +8350,7 @@ fn tui_escape_withdraws_the_queue_before_the_run_stops() {
     terminal.until("Queue (1)");
     terminal.write(b"\x1b");
     daemon.join().unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
 }
 
@@ -8345,7 +8466,7 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("main remains usable");
     assert!(!terminal.transcript.contains("must-not-copy"));
     proceed.send(()).unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -8395,7 +8516,7 @@ fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
         terminal.until("Background tasks");
         terminal.write(b"\r");
         terminal.until("fresh preview after reopening");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -8486,7 +8607,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("agent result: Other agent completed normally.");
     terminal.write(b"/tasks\r");
     terminal.until("Check the docs");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -8573,7 +8694,7 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
     terminal.until("explicit member action");
     terminal.write(b"y");
     terminal.until("both allowed");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     let config: Value =
@@ -8609,7 +8730,7 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("Full access");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -8681,7 +8802,7 @@ fn tui_approval_alias_selects_presets_and_remembers_them() {
     terminal.until("Full access");
     terminal.write(b"\x1b[A\r");
     terminal.until("Permission: workspace-write");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     let config: Value =
@@ -9625,7 +9746,7 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.until("Fixed subagent model");
     terminal.write(b"other\r");
     terminal.until("Subagent models: Test / other");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     let calls: Vec<Value> = observed.try_iter().collect();
@@ -9757,7 +9878,7 @@ fn tui_models_picker_cycles_reasoning_effort() {
     terminal.until("‹ none ›");
     terminal.write(b"\r");
     terminal.until("Ask anything...");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     let calls: Vec<Value> = observed.try_iter().collect();
@@ -9916,7 +10037,7 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
         thread::sleep(Duration::from_millis(10));
     }
     terminal.until("Broken: no models · dimcode models broken --refresh");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     assert_eq!(
@@ -10011,7 +10132,7 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
         ["fresh".to_owned()],
         "the provider recorded its refill; the reopen asks again"
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -10151,7 +10272,7 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     wait_settled
         .recv_timeout(PATIENCE)
         .expect("the picker settles after its re-list");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     let refreshed = refreshed.lock().unwrap();
@@ -10219,7 +10340,7 @@ fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
         assert!(!terminal.transcript.contains("Allow always"));
         terminal.write(b"y");
         terminal.until("member approvals finished");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -10258,7 +10379,7 @@ fn member_approval_without_the_detail_method_offers_only_rejection() {
         wait_checked.recv_timeout(PATIENCE).unwrap();
         terminal.write(b"n");
         terminal.until("unsupported approval rejected");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -10446,7 +10567,7 @@ fn tui_default_theme_respects_background_and_saved_choice() {
         terminal.write(b"/settings\r");
         terminal.until(&format!("{expected} ›"));
         quiet_done.recv_timeout(PATIENCE).unwrap();
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
         let config: Value =

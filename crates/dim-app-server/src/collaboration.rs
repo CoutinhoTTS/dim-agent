@@ -16,7 +16,7 @@ use crate::protocol::SessionOrigin;
 use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_capabilities::{
     context_block,
-    host::{HostError, HostFuture, ToolExecutionContext},
+    host::{HostError, HostFuture, SelectableModelsHost, ToolExecutionContext},
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::PromptSnapshot,
     timeline_tree::TreeCommands,
@@ -79,7 +79,7 @@ fn member_create_failed(detail: String) -> Failure {
 /// a whole text in place of its built-in one (Collaboration §3).
 #[derive(Debug, Clone, Default)]
 pub struct CollaborationConfig {
-    /// The leader's `agent` description in place of [`LEADER_DESCRIPTION`].
+    /// The leader's `agent` description in place of the built-in leader text.
     pub leader_description: Option<Arc<str>>,
     /// The member's `agent` description in place of [`MEMBER_DESCRIPTION`].
     pub member_description: Option<Arc<str>>,
@@ -778,6 +778,9 @@ pub struct CollaborationSession {
     tree: Arc<TreeCommands>,
     /// Gives each request its hold on this Session.
     lifecycle: Arc<SessionLifecycle>,
+    /// Provider's selectable models, when the deployment reads them: the
+    /// `models` action is offered exactly then.
+    selectable: Option<Arc<SelectableModelsHost>>,
     state: Mutex<State>,
     interactive: bool,
     approval_tools: bool,
@@ -894,6 +897,7 @@ impl CollaborationSession {
                 | Input::Close { .. }
                 | Input::Inspect { .. }
                 | Input::Result { .. }
+                | Input::Models { .. }
         );
         if leader_only && self.role == CollaborationRole::Member {
             return Ok(refusal(
@@ -913,6 +917,7 @@ impl CollaborationSession {
         };
         let (kind, action) = match input {
             Input::List {} => return Ok(self.list().await),
+            Input::Models {} => return self.models(&cancel).await,
             Input::Inspect { agent_id } => return Ok(self.inspect(&agent_id).await),
             Input::Result { result_id } => {
                 return Ok(self.result(&context.branch_id, &result_id).await);
@@ -1060,6 +1065,33 @@ impl CollaborationSession {
             Some(host) => success(json!({"agentId": agent_id, "profile": host.profile})),
             None => refusal(Refusal::AgentNotFound, "no such agent is available to you"),
         }
+    }
+    /// The models a new member can run, with their provider IDs. Provider
+    /// owns the read; a deployment without it offers no `models` action.
+    async fn models(&self, cancel: &CancellationToken) -> Result<ToolResult, HostError> {
+        let Some(selectable) = &self.selectable else {
+            return Ok(refusal(
+                Refusal::InvalidInput,
+                "this deployment does not describe selectable models",
+            ));
+        };
+        let models = match selectable.0.selectable(cancel.clone()).await {
+            Ok(models) => models,
+            Err(error @ HostError::Cancelled(_)) => return Err(error),
+            Err(error) => {
+                return Ok(ToolResult::error(format!(
+                    "Models are unavailable: {error}"
+                )));
+            }
+        };
+        Ok(success(json!({"models": models.iter().map(|model| json!({
+            "providerId": model.target.provider_id,
+            "modelId": model.target.model_id,
+            "contextWindow": model.capabilities.context_window,
+            "maxOutputTokens": model.capabilities.max_output_tokens,
+            "vision": model.capabilities.vision,
+            "reasoning": model.capabilities.reasoning,
+        })).collect::<Vec<_>>()})))
     }
     async fn list(&self) -> ToolResult {
         let participants: Vec<Value> = self
@@ -2420,12 +2452,13 @@ enum Input {
         limit: Option<usize>,
     },
     List {},
+    Models {},
     Inspect {
         agent_id: String,
     },
 }
 
-const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
+const LEADER_DESCRIPTION_HEAD: &str = "Work with other agents as a team you lead.
 - request: give a task to a new member (agentId or profile) or to one of your members
   (agentId + sessionId). An agentId is copied exactly from list's agents[].agentId; an
   Agent's name, such as \"default\", is not an agentId. A profile creates a temporary
@@ -2437,7 +2470,13 @@ const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the
   receiver must change course now.
 - read: view a team member's recent activity. list: show your team and the agents you
-  can use. inspect: show one agent's full profile (instructions, tools, model).
+  can use. inspect: show one agent's full profile (instructions, tools, model).";
+/// The `models` bullet, between [`LEADER_DESCRIPTION_HEAD`] and
+/// [`LEADER_DESCRIPTION_TAIL`]: only a deployment with Provider's selectable
+/// read offers the action.
+const LEADER_MODELS: &str = "
+- models: query the models this Session can start an agent with.";
+const LEADER_DESCRIPTION_TAIL: &str = "
 - result: read a complete result by resultId from a report, even after closing the member.
 Address members with agentId + sessionId from earlier results.";
 
@@ -2450,7 +2489,11 @@ const MEMBER_DESCRIPTION: &str = "You are a member of a team. You cannot delegat
 Your final answer to the task is returned to the leader automatically; do not send it
 as a message.";
 
-fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> ToolDefinition {
+fn agent_definition(
+    role: CollaborationRole,
+    factory: &CollaborationConfig,
+    models: bool,
+) -> ToolDefinition {
     let mut properties = json!({
         "agentId": {"type": "string",
             "description": "An Agent's opaque id, copied exactly from list's agents[].agentId, or from participants[].agentId for a team member. A name such as \"default\" is not an id."},
@@ -2480,22 +2523,28 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
                         "properties": {"providerId": {"type": "string"}, "modelId": {"type": "string"}}},
                 },
             });
-            (
-                vec![
-                    "request", "cancel", "close", "message", "read", "list", "inspect", "result",
-                ],
-                factory
-                    .leader_description
-                    .as_deref()
-                    .unwrap_or(LEADER_DESCRIPTION),
-            )
+            let mut actions = vec![
+                "request", "cancel", "close", "message", "read", "list", "inspect", "result",
+            ];
+            if models {
+                actions.push("models");
+            }
+            let description = match factory.leader_description.as_deref() {
+                Some(text) => text.to_owned(),
+                None => format!(
+                    "{LEADER_DESCRIPTION_HEAD}{}{LEADER_DESCRIPTION_TAIL}",
+                    if models { LEADER_MODELS } else { "" }
+                ),
+            };
+            (actions, description)
         }
         CollaborationRole::Member => (
             vec!["message", "read", "list"],
             factory
                 .member_description
                 .as_deref()
-                .unwrap_or(MEMBER_DESCRIPTION),
+                .unwrap_or(MEMBER_DESCRIPTION)
+                .to_owned(),
         ),
     };
     properties["action"] = json!({"type": "string", "enum": actions});
@@ -2510,7 +2559,7 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
             "message" => vec![vec!["action", "agentId", "sessionId", "content"]],
             "inspect" => vec![vec!["action", "agentId"]],
             "result" => vec![vec!["action", "resultId"]],
-            "list" => vec![vec!["action"]],
+            "list" | "models" => vec![vec!["action"]],
             _ => unreachable!("declared agent action"),
         };
         for required in choices {
@@ -2533,7 +2582,7 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
     }
     definition(
         AGENT_TOOL,
-        description,
+        &description,
         json!({"type": "object", "required": ["action"], "additionalProperties": false,
             "properties": properties, "anyOf": variants}),
     )
@@ -2652,6 +2701,7 @@ impl DynPlugin for CollaborationSessionPlugin {
                 role: config.collaboration_role,
                 tree,
                 lifecycle,
+                selectable: ctx.get::<SelectableModelsHost>(),
                 state: Mutex::new(State::default()),
                 interactive: config.interactive,
                 approval_tools: config.tools.as_ref().is_none_or(|tools| {
@@ -2662,7 +2712,11 @@ impl DynPlugin for CollaborationSessionPlugin {
             tools.register(
                 ctx,
                 ToolContribution {
-                    definition: agent_definition(config.collaboration_role, &factory),
+                    definition: agent_definition(
+                        config.collaboration_role,
+                        &factory,
+                        service.selectable.is_some(),
+                    ),
                     handler: Arc::new(AgentTool {
                         session: service.clone(),
                         stopping: ctx.cancellation_token(),
