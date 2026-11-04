@@ -1900,7 +1900,7 @@ async fn respond_native(
     let missing_terminal = request.to_string().contains("native-eof");
     let missing_stop = request.to_string().contains("native-stop-eof");
     let data = match endpoint.kind {
-        "openai-chat" => {
+        "openai-chat" | "openai-compatible" => {
             if continuation {
                 frame(json!({"content":"finished"}), json!("stop")) + "data: [DONE]\n\n"
             } else {
@@ -2861,6 +2861,164 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
         }
         agent.close().await.unwrap();server.close().await;
     }).await.unwrap();
+}
+
+/// #1038: a Session that ran on an Anthropic model moves to a Chat model and
+/// back. The stored signed thinking only reaches the protocol that produced
+/// it, and moving back continues it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let claude = NativeServer::start("anthropic").await;
+        let chat = NativeServer::start("openai-compatible").await;
+        let models = Arc::new(
+            AimuxModels::from_config(
+                serde_json::from_value(json!({
+                    "defaultModel": {"providerId": "local", "modelId": "test-model"},
+                    "providers": [
+                        {
+                            "id": "local", "kind": "anthropic", "baseUrl": claude.url,
+                            "headers": {"x-api-key": "native-secret", "CONTENT-TYPE": "application/json"},
+                            "models": [{"id": "test-model", "contextWindow": 128000, "maxOutputTokens": 4096,
+                                        "config": {"maxTokens": 4096, "providerOptions": {"anthropic": {"thinking": {"type": "enabled", "budgetTokens": 1024}}}}}]
+                        },
+                        {
+                            "id": "chat", "kind": "openai-compatible", "baseUrl": chat.url,
+                            "headers": {"Authorization": "Bearer native-secret", "CONTENT-TYPE": "application/json"},
+                            "models": [{"id": "test-model", "contextWindow": 128000, "maxOutputTokens": 4096,
+                                        "config": {"maxTokens": 4096}}]
+                        }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let agent = model_agent(models, None).await;
+        let session = agent
+            .create_session(claude.session_config())
+            .await
+            .unwrap();
+        session
+            .submit("question".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert!(
+            matches!(
+                events.last().unwrap().kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ),
+            "{:?}",
+            events.last().unwrap().kind
+        );
+        assert_eq!(claude.endpoint.requests.lock().unwrap().len(), 2);
+        let selection = |provider_id: &str| {
+            let provider_id = provider_id.to_owned();
+            let host = agent.root().get::<ModelSelectionHost>().unwrap();
+            async move {
+                host.0
+                    .resolve(
+                        Some(ModelId {
+                            provider_id,
+                            model_id: "test-model".into(),
+                        }),
+                        None,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // The Session moves to a Chat model; the second turn completes and its
+        // request carries the earlier answer without the Anthropic signature.
+        session
+            .configure(
+                ConfigureUpdate {
+                    model: Some(selection("chat").await),
+                    ..Default::default()
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        session
+            .submit("after the switch".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert!(
+            matches!(
+                events.last().unwrap().kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ),
+            "{:?}",
+            events.last().unwrap().kind
+        );
+        let requests = chat.endpoint.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        let sent = requests[0].2.to_string();
+        assert!(!sent.contains("signature"), "the signature reached the Chat model: {sent}");
+        assert!(sent.contains("before"), "the earlier answer is kept: {sent}");
+        assert!(sent.contains("finished"), "the earlier answer is kept: {sent}");
+        assert!(sent.contains("after the switch"), "{sent}");
+
+        // Moving back with thinking on replays the signed thinking.
+        session
+            .configure(
+                ConfigureUpdate {
+                    model: Some(selection("local").await),
+                    ..Default::default()
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        session
+            .submit("back".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert!(
+            matches!(
+                events.last().unwrap().kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ),
+            "{:?}",
+            events.last().unwrap().kind
+        );
+        let requests = claude.endpoint.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        let replay = &requests[2].2;
+        let thinking = replay["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .find(|part| part["type"] == "thinking")
+            .expect("the signed thinking is replayed");
+        assert_eq!(thinking["signature"], "anthropic-signature");
+        assert_eq!(replay["thinking"]["budget_tokens"], 1024);
+        agent.close().await.unwrap();
+        claude.close().await;
+        chat.close().await;
+    })
+    .await
+    .unwrap();
 }
 
 /// A tool whose result carries a text block and a PNG, as an MCP image result

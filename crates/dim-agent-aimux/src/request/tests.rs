@@ -736,6 +736,182 @@ async fn the_gemini_body_carries_the_stored_nullable_type_verbatim() {
     assert_eq!(parameters["required"], json!(["space_id"]));
 }
 
+/// A stored reply, the only varying input of #1038's switch table.
+fn switch_request(assistant: Value, config: Value) -> ModelRequest {
+    let mut request: ModelRequest = serde_json::from_value(json!({
+        "providerId": "p",
+        "modelId": "other",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": assistant},
+            {"role": "user", "content": "again"}
+        ]
+    }))
+    .unwrap();
+    if !config.is_null() {
+        request.config = Some(serde_json::from_value(config).unwrap());
+    }
+    request
+}
+
+fn anthropic_thinking_reply() -> Value {
+    json!([
+        {"type": "thinking", "thinking": "why",
+         "providerMetadata": {"protocol": "anthropic", "signature": "signature-from-claude"}},
+        {"type": "text", "text": "earlier answer"}
+    ])
+}
+
+fn thinking_on() -> Value {
+    json!({"providerOptions": {"anthropic": {"thinking": {"type": "enabled", "budgetTokens": 2048}}}})
+}
+
+/// The assistant message of a built request.
+fn replied(prepared: &PreparedRequest) -> &[AssistantPart] {
+    prepared
+        .options
+        .prompt
+        .iter()
+        .find_map(|message| match message {
+            LanguageModelMessage::Assistant { content, .. } => Some(content.as_slice()),
+            _ => None,
+        })
+        .expect("the assistant message is present")
+}
+
+fn continuation_options(part: &AssistantPart) -> Option<&SharedProviderOptions> {
+    match part {
+        AssistantPart::Text(part) => part.provider_options.as_ref(),
+        AssistantPart::Reasoning(part) => part.provider_options.as_ref(),
+        AssistantPart::ToolCall(part) => part.provider_options.as_ref(),
+        _ => None,
+    }
+}
+
+fn assert_no_continuation_data(content: &[AssistantPart]) {
+    for part in content {
+        assert!(
+            continuation_options(part).is_none(),
+            "continuation data reached the request: {part:?}"
+        );
+    }
+}
+
+fn text_of(content: &[AssistantPart]) -> Vec<&str> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::Text(part) => Some(part.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_reasoning(part: &AssistantPart) -> bool {
+    matches!(part, AssistantPart::Reasoning(_))
+}
+
+/// #1038: a stored reply whose continuation data belongs to another protocol
+/// is built as a reply with no data, for every target protocol that has none.
+#[test]
+fn stored_foreign_continuation_data_builds_as_if_absent() {
+    for kind in [
+        ProviderKind::OpenaiCompatible,
+        ProviderKind::OpenaiChat,
+        ProviderKind::Gemini,
+    ] {
+        let prepared = convert(
+            &switch_request(anthropic_thinking_reply(), Value::Null),
+            &kind,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{kind:?}: {error}"));
+        let content = replied(&prepared);
+        assert_no_continuation_data(content);
+        assert!(
+            content.iter().any(is_reasoning),
+            "{kind:?} keeps unsigned thinking: {content:?}"
+        );
+        assert_eq!(text_of(content), ["earlier answer"], "{kind:?}");
+    }
+    // The Responses protocol leaves a thinking part without its own data out.
+    let prepared = convert(
+        &switch_request(anthropic_thinking_reply(), Value::Null),
+        &ProviderKind::OpenaiResponses,
+        None,
+    )
+    .unwrap();
+    let content = replied(&prepared);
+    assert_no_continuation_data(content);
+    assert!(
+        !content.iter().any(is_reasoning),
+        "{content:?}"
+    );
+    assert_eq!(text_of(content), ["earlier answer"]);
+
+    // A thinking part from the Responses protocol does not block an Anthropic
+    // request that has thinking on: the part is left out, its data never sent.
+    let prepared = convert(
+        &switch_request(
+            json!([
+                {"type": "thinking", "thinking": "why",
+                 "providerMetadata": {"protocol": "openai-responses", "itemId": "rs_1", "encryptedContent": "encrypted"}},
+                {"type": "text", "text": "earlier answer"}
+            ]),
+            thinking_on(),
+        ),
+        &ProviderKind::Anthropic,
+        None,
+    )
+    .unwrap();
+    let content = replied(&prepared);
+    assert_no_continuation_data(content);
+    assert!(!content.iter().any(is_reasoning), "{content:?}");
+    assert_eq!(text_of(content), ["earlier answer"]);
+
+    // Text with metadata from another protocol is sent as plain text.
+    for (assistant, kind) in [
+        (
+            json!([{"type": "text", "text": "earlier answer",
+                    "providerMetadata": {"protocol": "openai-responses", "itemId": "msg_1"}}]),
+            ProviderKind::OpenaiCompatible,
+        ),
+        (
+            json!([{"type": "text", "text": "earlier answer",
+                    "providerMetadata": {"protocol": "gemini", "thoughtSignature": "gemini-signature"}}]),
+            ProviderKind::OpenaiChat,
+        ),
+    ] {
+        let prepared = convert(&switch_request(assistant, Value::Null), &kind, None).unwrap();
+        let content = replied(&prepared);
+        assert_no_continuation_data(content);
+        assert_eq!(text_of(content), ["earlier answer"], "{kind:?}");
+    }
+
+    // The target protocol's own metadata on a content kind it never produces
+    // still fails: stored content cannot reach the request that way.
+    for (assistant, kind) in [
+        (
+            json!([{"type": "text", "text": "answer",
+                    "providerMetadata": {"protocol": "anthropic", "signature": "signature"}}]),
+            ProviderKind::Anthropic,
+        ),
+        (
+            json!([{"type": "text", "text": "answer",
+                    "providerMetadata": {"protocol": "bedrock", "signature": "signature"}}]),
+            ProviderKind::Bedrock,
+        ),
+    ] {
+        let Err(error) = convert(&switch_request(assistant, Value::Null), &kind, None) else {
+            panic!("{kind:?}: a same-protocol wrong-kind part must fail");
+        };
+        assert!(
+            error.to_string().contains("does not fit this content kind"),
+            "{error}"
+        );
+    }
+}
+
 /// The Gemini model carries the stored JSON Schema as `parametersJsonSchema`;
 /// the converter turns the boolean subschemas into object schemas there, so
 /// `true` reaches the wire as `{}` and `false` as `{"not": {}}`. Recorded here

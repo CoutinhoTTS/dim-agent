@@ -770,6 +770,22 @@ fn error(request: &ModelRequest, path: &str, reason: &str) -> HostError {
     ))
 }
 
+/// The protocol a stored part's continuation data belongs to. The Chat
+/// protocols store none, so every metadata value there is another protocol's.
+fn metadata_protocol(metadata: &ContentMetadata) -> ProviderKind {
+    match metadata {
+        ContentMetadata::Bedrock { .. } | ContentMetadata::BedrockRedacted { .. } => {
+            ProviderKind::Bedrock
+        }
+        ContentMetadata::Anthropic { .. } | ContentMetadata::AnthropicRedacted { .. } => {
+            ProviderKind::Anthropic
+        }
+        ContentMetadata::Gemini { .. } => ProviderKind::Gemini,
+        ContentMetadata::XaiResponses { .. } => ProviderKind::XaiResponses,
+        ContentMetadata::OpenaiResponses { .. } => ProviderKind::OpenaiResponses,
+    }
+}
+
 /// Attaches the native continuation fields a stored part carries, and says
 /// whether the part belongs in the request. A thinking part without
 /// continuation data for this protocol stays in the Timeline and in display,
@@ -796,6 +812,9 @@ fn continuation(
         } => provider_metadata.as_ref(),
         _ => None,
     };
+    // Continuation data reaches only the protocol that produced it; data from
+    // another protocol is no data for this request.
+    let metadata = metadata.filter(|metadata| metadata_protocol(metadata) == *kind);
     let Some(metadata) = metadata else {
         if thinking
             && matches!(
@@ -895,7 +914,7 @@ fn continuation(
             return Err(error(
                 request,
                 &format!("{path}.providerMetadata"),
-                "continuation metadata belongs to a different protocol or content kind",
+                "continuation metadata does not fit this content kind",
             ));
         }
     };
@@ -950,6 +969,6 @@ fn warn_dropped(kind: &ProviderKind) {
             ProviderKind::Gemini => "gemini",
             ProviderKind::Bedrock => "bedrock",
         },
-        "thinking without continuation data was left out of the request"
+        "thinking without usable continuation data was left out of the request"
     );
 }
