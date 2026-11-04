@@ -99,6 +99,10 @@ pub enum ContentMetadata {
         )]
         #[serde(rename = "encryptedContent")]
         encrypted_content: Option<String>,
+        // Sessions written before the aimux v0.6.0 upgrade carry this index.
+        // The provider no longer emits it, and the Responses converter ignores
+        // the key when it replays a request: the field stays readable for those
+        // sessions, but nothing writes it and nothing puts it on the wire.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",

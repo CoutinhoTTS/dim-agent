@@ -33,6 +33,7 @@ pub struct Invalid {
     pub error: String,
 }
 #[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Server {
     pub id: String,
     /// `user`, `project` or `plugin`.
@@ -40,6 +41,12 @@ pub struct Server {
     pub enabled: bool,
     pub transport: String,
     pub auth: Option<Auth>,
+    /// Names only, sorted. A daemon older than this field reports none.
+    #[serde(default)]
+    pub referenced_variables: Vec<String>,
+    /// Names only, sorted. A daemon older than this field reports none.
+    #[serde(default)]
+    pub unset_variables: Vec<String>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,6 +93,18 @@ pub async fn catalog_report(client: &mut Client, cwd: &str) -> Result<(Vec<Strin
                 safe_line(&scopes.join(", "))
             ));
         }
+        if !server.referenced_variables.is_empty() {
+            rows.push(format!(
+                "  Variables: {}",
+                safe_line(&server.referenced_variables.join(", "))
+            ));
+        }
+        if !server.unset_variables.is_empty() {
+            rows.push(format!(
+                "  Unset variables: {}",
+                safe_line(&server.unset_variables.join(", "))
+            ));
+        }
     }
     for entry in catalog.invalid {
         rows.push(format!(
@@ -100,7 +119,7 @@ pub async fn catalog_report(client: &mut Client, cwd: &str) -> Result<(Vec<Strin
         vec!["No MCP server is configured.".to_owned()]
     } else {
         vec![
-            "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.\nA row with `invalid` where its transport belongs did not decode; fix or remove it.".to_owned(),
+            "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.\nA row with `invalid` where its transport belongs did not decode; fix or remove it.\nVariables and unset variables are names only, never values.".to_owned(),
         ]
     };
     for (source, application) in [

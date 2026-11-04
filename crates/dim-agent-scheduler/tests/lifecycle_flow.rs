@@ -422,7 +422,7 @@ async fn a_run_whose_turn_ended_before_its_deadline_keeps_that_outcome() {
 async fn an_input_interrupted_before_consumption_times_out_without_a_stop() {
     let home = home();
     let model = Arc::new(Script::default());
-    model.hold("blocker");
+    model.hold("Hold this run.");
     let server = start(home.path(), model.clone()).await;
     let mut client = connect(&server).await;
     let saved: Value = client
@@ -444,7 +444,7 @@ async fn an_input_interrupted_before_consumption_times_out_without_a_stop() {
     client
         .rpc(
             "session.submit",
-            json!({"sessionId": bound, "branchId": "main", "text": "blocker"}),
+            json!({"sessionId": bound, "branchId": "main", "text": "Hold this run."}),
         )
         .await
         .unwrap();
@@ -516,7 +516,7 @@ async fn a_user_stop_of_the_run_turn_settles_cancelled() {
 async fn a_user_withdrawal_of_a_held_scheduled_input_settles_cancelled_and_releases_the_slot() {
     let home = home();
     let model = Arc::new(Script::default());
-    model.hold("blocker");
+    model.hold("Hold this run.");
     let server = start(home.path(), model.clone()).await;
     let mut client = connect(&server).await;
 
@@ -540,7 +540,7 @@ async fn a_user_withdrawal_of_a_held_scheduled_input_settles_cancelled_and_relea
     client
         .rpc(
             "session.submit",
-            json!({"sessionId": bound, "branchId": "main", "text": "blocker"}),
+            json!({"sessionId": bound, "branchId": "main", "text": "Hold this run."}),
         )
         .await
         .unwrap();

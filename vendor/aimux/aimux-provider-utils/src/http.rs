@@ -1,199 +1,32 @@
-//! One shared HTTP client and one-exchange request transport.
+//! One-exchange request transport.
 //!
 //! Retry and operation/stream timeouts belong to `aimux-core`. This module
-//! sends exactly one request and leaves successful/failed body interpretation
-//! to the response handlers selected by the provider.
+//! sends exactly one request through a [`Fetch`] (the request's own, or the
+//! process default) and leaves successful/failed body interpretation to the
+//! response handlers selected by the provider.
 
-use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt, stream::BoxStream};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
 
+use aimux_core::ErrorCause;
 use aimux_core::recording::{
     HttpExchange, HttpRecord, RecordingContext, ResponseRecord, TimingRecord,
 };
-use aimux_core::{AiMuxError, ApiCallError, ApiCallErrorOrigin};
+use aimux_core::{AiMuxError, ApiCallError};
 
+use crate::fetch::{
+    Fetch, FetchError, FetchFunction, FetchRequest, FetchResponse, PinnedFetch, RequestCredentials,
+    default_fetch,
+};
+use crate::handle_fetch_error::fetch_error_to_ai_mux_error;
 use crate::logging::{body_logging_enabled, redact_body};
-
-/// Process-wide proxy configuration, fixed before the shared client is built.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProxyConfig {
-    pub http_url: Option<String>,
-    pub https_url: Option<String>,
-    pub all_url: Option<String>,
-    pub no_proxy: Option<String>,
-}
-
-static GLOBAL_PROXY: OnceLock<ProxyConfig> = OnceLock::new();
-// One client (and so one connection pool) PER RUNTIME, not per process:
-// pooled connections are driven by tasks spawned onto the runtime that
-// made the request, so when that runtime shuts down its pooled
-// connections become unusable while staying checked in — and the OS can
-// recycle their ports to fresh servers, handing later requests a dead
-// connection. Production processes run a single runtime and still get
-// exactly one client. Runtimes leave no drop signal, so dead entries are
-// undetectable; the map is instead bounded by `SHARED_CLIENT_CAP` — see
-// `shared_client`.
-static SHARED: OnceLock<Mutex<HashMap<Option<tokio::runtime::Id>, Client>>> = OnceLock::new();
-
-// Hosts that churn short-lived runtimes (a test binary, an FFI embedder
-// creating a runtime per call) would otherwise grow the map without bound.
-// Eviction is safe: correctness only requires never *reusing* a dead
-// runtime's pool, and an evicted live runtime simply rebuilds a fresh
-// client on its next request.
-const SHARED_CLIENT_CAP: usize = 8;
-
-/// Set proxy configuration before the first HTTP operation.
-///
-/// The HTTP client snapshots this config when it is first built; the
-/// WebSocket connect path (RFC-0034 §2) re-reads it live on every connect,
-/// so a late `init_proxy` can affect WS while HTTP keeps its first-built
-/// client. Set it before any traffic either way.
-pub fn init_proxy(config: ProxyConfig) -> bool {
-    GLOBAL_PROXY.set(config).is_ok()
-}
-
-/// Return the process-wide proxy configuration (empty default when
-/// `init_proxy` was never called). Read by both the HTTP client builder and
-/// the WebSocket connect path (RFC-0034 §2), so `ws://`/`wss://` traffic
-/// honors the same proxy/no_proxy settings as HTTP.
-pub(crate) fn global_proxy() -> ProxyConfig {
-    GLOBAL_PROXY.get().cloned().unwrap_or_default()
-}
-
-/// Return the single shared client. It has a connect timeout but no
-/// client-wide response timeout: the shared client also serves streaming
-/// exchanges, so the 30s non-streaming response bound lives per-exchange in
-/// `call_to_api`, and Core owns the operation deadline.
-///
-/// # Errors
-///
-/// Returns an initialization error if the shared client cannot be built.
-pub fn shared_client() -> Result<Client, AiMuxError> {
-    let key = tokio::runtime::Handle::try_current().ok().map(|h| h.id());
-    let mut clients = SHARED
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("shared HTTP client mutex poisoned");
-    if let Some(client) = clients.get(&key) {
-        return Ok(client.clone());
-    }
-    let client = owned_client()?;
-    if clients.len() >= SHARED_CLIENT_CAP {
-        // Which entries are dead is unknowable, so evict them all; in-flight
-        // requests hold their own `Client` clone and are unaffected.
-        clients.clear();
-    }
-    clients.insert(key, client.clone());
-    Ok(client)
-}
-
-/// Build a pool whose lifetime belongs to the caller, outside the runtime cache.
-///
-/// # Errors
-///
-/// Returns an initialization error if the HTTP client cannot be built.
-pub fn owned_client() -> Result<Client, AiMuxError> {
-    build_client(global_proxy())
-        .map_err(|error| AiMuxError::Other(format!("HTTP client initialization failed: {error}")))
-}
-
-fn build_client(proxy: ProxyConfig) -> Result<Client, String> {
-    let builder = Client::builder()
-        .connect_timeout(Duration::from_millis(10_000))
-        .pool_max_idle_per_host(10)
-        .pool_idle_timeout(Some(Duration::from_secs(30)))
-        .tcp_keepalive(Some(Duration::from_secs(20)));
-    apply_proxy(builder, &proxy)
-        .build()
-        .map_err(|error| error.to_string())
-}
 
 /// Redirect ceiling for the manual validated-download loop.
 const MAX_REDIRECTS: usize = 10;
-
-/// Non-redirecting client for a validated hop on the trusted origin.
-/// Redirects are followed manually so every hop is re-validated; built per
-/// exchange (downloads are rare and each hop is one request, so there is no
-/// pool to share — and no stale-runtime pool to reuse).
-fn download_client() -> Result<Client, AiMuxError> {
-    let builder = Client::builder()
-        .connect_timeout(Duration::from_millis(10_000))
-        .redirect(reqwest::redirect::Policy::none());
-    apply_proxy(builder, &global_proxy())
-        .build()
-        .map_err(|e| AiMuxError::Other(format!("download client initialization failed: {e}")))
-}
-
-/// Client for one validated hop off the trusted origin: the connection is
-/// pinned to exactly the DNS answers that passed the guard (resolve
-/// overrides), defeating TTL-0 rebinding. The proxy configuration is applied
-/// so reqwest makes the per-URL routing decision itself: when a proxy
-/// carries the request the proxy resolves the target (a trusted transport,
-/// the override below is unused), and any request the proxy rules send
-/// DIRECT still connects only through the validated, pinned addresses.
-fn pinned_client(url: &str, addresses: &[std::net::IpAddr]) -> Result<Client, AiMuxError> {
-    if addresses.is_empty() {
-        return Err(AiMuxError::Other(
-            "cannot build a pinned download client without an address".into(),
-        ));
-    }
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| AiMuxError::Other(format!("invalid download url: {e}")))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| AiMuxError::Other("download url has no host".to_string()))?
-        .to_string();
-    let port = parsed.port_or_known_default().unwrap_or(80);
-    let socket_addresses: Vec<_> = addresses
-        .iter()
-        .map(|address| std::net::SocketAddr::new(*address, port))
-        .collect();
-    let builder = Client::builder()
-        .connect_timeout(Duration::from_millis(10_000))
-        .redirect(reqwest::redirect::Policy::none());
-    apply_proxy(builder, &global_proxy())
-        .resolve_to_addrs(&host, &socket_addresses)
-        .build()
-        .map_err(|e| {
-            AiMuxError::Other(format!("pinned download client initialization failed: {e}"))
-        })
-}
-
-fn apply_proxy(mut builder: reqwest::ClientBuilder, proxy: &ProxyConfig) -> reqwest::ClientBuilder {
-    let http = proxy.http_url.as_deref().or(proxy.all_url.as_deref());
-    let https = proxy.https_url.as_deref().or(proxy.all_url.as_deref());
-    if let Some(url) = http
-        && let Ok(reqwest_proxy) = reqwest::Proxy::http(url)
-    {
-        builder = apply_no_proxy(builder, reqwest_proxy, &proxy.no_proxy);
-    }
-    if let Some(url) = https
-        && let Ok(reqwest_proxy) = reqwest::Proxy::https(url)
-    {
-        builder = apply_no_proxy(builder, reqwest_proxy, &proxy.no_proxy);
-    }
-    builder
-}
-
-// Kept separate so both proxy schemes use precisely the same no-proxy rule.
-fn apply_no_proxy(
-    builder: reqwest::ClientBuilder,
-    proxy: reqwest::Proxy,
-    no_proxy: &Option<String>,
-) -> reqwest::ClientBuilder {
-    match no_proxy.as_deref().map(reqwest::NoProxy::from_string) {
-        Some(Some(no_proxy)) => builder.proxy(proxy.no_proxy(Some(no_proxy))),
-        _ => builder.proxy(proxy),
-    }
-}
 
 /// Explicit raw request body used only by `post_to_api`.
 #[derive(Debug, Clone)]
@@ -223,8 +56,6 @@ impl HttpMethod {
 /// signature rather than supplied as runtime fields.
 #[derive(Debug, Clone, Default)]
 pub struct HttpRequest {
-    /// An explicit owner supplies its pool instead of the runtime cache.
-    pub client: Option<Client>,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub abort_signal: Option<aimux_core::AbortSignal>,
@@ -235,8 +66,7 @@ pub struct HttpRequest {
     /// (e.g. Replicate `prefer: wait`) declares its own bound here. Streaming
     /// exchanges are exempt regardless.
     pub response_timeout: Option<std::time::Duration>,
-    /// Per-request override of the successful-JSON-body size cap (default
-    /// [`crate::read_response_with_size_limit::DEFAULT_MAX_JSON_RESPONSE_SIZE`]).
+    /// Per-request override of the successful-JSON-body size cap (default 64 MiB).
     /// Only consulted by [`crate::response_handler::create_json_response_handler`];
     /// binary downloads keep the separate, larger
     /// `DEFAULT_MAX_DOWNLOAD_SIZE` bound regardless of this field.
@@ -258,11 +88,22 @@ pub struct HttpRequest {
     /// this value — from the first request and on every redirect hop. `None`
     /// means the caller gates its own headers (e.g. BFL's host allowlist).
     pub credentialed_origin: Option<String>,
+    /// Transport for this exchange. `None` resolves [`default_fetch`] when the
+    /// request is sent. Ignored when `validate_url` is set: downloads of
+    /// provider-supplied URLs always use the SSRF guard's pinned transport,
+    /// never a provider-injected one.
+    pub fetch: Option<FetchFunction>,
+    /// Send the `user-agent` as given (or none), without the
+    /// `ai-sdk-provider-utils/<v>` part that the AI SDK's `postToApi` and
+    /// `getFromApi` append (post-to-api.ts:100-104, get-from-api.ts:77-81).
+    /// For an exchange the AI SDK makes with a plain `fetch` call or with
+    /// `downloadBlob` (google-files.ts:84-126, download-blob.ts:111-114).
+    pub omit_provider_utils_user_agent: bool,
 }
 
-/// The per-operation context every model's call options carry into an
-/// exchange: cancellation, and (for language models) the call id and
-/// recording context the RFC-0031 pipeline threads through.
+/// The per-operation context of an exchange: the call options' cancellation,
+/// and for language-model and decision calls the call id and recording context
+/// of the operation the call runs in ([`RecordingContext::current`]).
 pub trait ExchangeContext {
     fn abort_signal(&self) -> Option<aimux_core::AbortSignal>;
     /// Only language-model `CallOptions` participate in recording; the other
@@ -280,10 +121,22 @@ impl ExchangeContext for aimux_core::options::CallOptions {
         self.abort_signal.clone()
     }
     fn call_id(&self) -> Option<String> {
-        self.call_id.clone()
+        RecordingContext::current().map(|ctx| ctx.call_id)
     }
     fn recording_context(&self) -> Option<RecordingContext> {
-        self.recording_context.clone()
+        RecordingContext::current()
+    }
+}
+
+impl ExchangeContext for aimux_core::decision_model::DecisionCallOptions {
+    fn abort_signal(&self) -> Option<aimux_core::AbortSignal> {
+        self.abort_signal.clone()
+    }
+    fn call_id(&self) -> Option<String> {
+        RecordingContext::current().map(|ctx| ctx.call_id)
+    }
+    fn recording_context(&self) -> Option<RecordingContext> {
+        RecordingContext::current()
     }
 }
 
@@ -339,7 +192,6 @@ pub(crate) struct DownloadValidation {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRequest {
-    client: Option<Client>,
     method: HttpMethod,
     body: HttpBody,
     pub(crate) url: String,
@@ -350,6 +202,13 @@ pub(crate) struct PreparedRequest {
     pub(crate) response_timeout: Option<std::time::Duration>,
     pub(crate) max_json_response_bytes: Option<usize>,
     pub(crate) validation: Option<DownloadValidation>,
+    pub(crate) fetch: Option<FetchFunction>,
+    /// [`RequestCredentials::Omit`] once the target is off the credentialed
+    /// origin; never switched back.
+    credentials: RequestCredentials,
+    /// Whether `ai-sdk-provider-utils/<v>` is appended to the `user-agent`
+    /// (not [`HttpRequest::omit_provider_utils_user_agent`]).
+    provider_utils_user_agent: bool,
 }
 
 impl HttpRequest {
@@ -358,13 +217,14 @@ impl HttpRequest {
         // when the target is off the credentialed origin they never leave,
         // whichever transport the exchange takes.
         let mut headers = self.headers;
+        let mut credentials = RequestCredentials::Include;
         if let Some(origin) = self.credentialed_origin.as_deref()
-            && !crate::download_guard::same_origin(&self.url, origin)
+            && !aimux_core::download_guard::same_origin(&self.url, origin)
         {
-            crate::download_guard::retain_user_agent(&mut headers);
+            aimux_core::download_guard::retain_user_agent(&mut headers);
+            credentials = RequestCredentials::Omit;
         }
         PreparedRequest {
-            client: self.client,
             method,
             body,
             url: self.url,
@@ -378,20 +238,18 @@ impl HttpRequest {
                 trusted_origin: self.trusted_origin,
                 credentialed_origin: self.credentialed_origin,
             }),
+            fetch: self.fetch,
+            credentials,
+            provider_utils_user_agent: !self.omit_provider_utils_user_agent,
         }
     }
 }
 
-fn api_call_error(
-    request: &PreparedRequest,
-    message: impl Into<String>,
-    origin: ApiCallErrorOrigin,
-) -> ApiCallError {
+fn api_call_error(request: &PreparedRequest, message: impl Into<String>) -> ApiCallError {
     ApiCallError::new(
         message,
         sanitized_request_url(&request.url),
         crate::logging::redact_request_values(&request.body),
-        origin,
     )
 }
 
@@ -447,7 +305,7 @@ impl Drop for ExchangeGuard<'_> {
 /// Execute exactly one HTTP exchange. Core owns retry and operation timeout.
 pub(crate) async fn send_request_once(
     request: &PreparedRequest,
-) -> Result<reqwest::Response, AiMuxError> {
+) -> Result<FetchResponse, AiMuxError> {
     let started = Instant::now();
     let (attempt, exchange_index) = request
         .recording_context
@@ -475,16 +333,7 @@ pub(crate) async fn send_request_once(
         );
     }
 
-    let sent = if request.validation.is_some() {
-        send_validated_redirects(request).await
-    } else if let Some(client) = &request.client {
-        send_one_request(client, request).await
-    } else {
-        match shared_client() {
-            Ok(client) => send_one_request(&client, request).await,
-            Err(error) => Err(error),
-        }
-    };
+    let sent = send_following_redirects(request).await;
     let response = match sent {
         Ok(response) => response,
         Err(error) => {
@@ -496,7 +345,7 @@ pub(crate) async fn send_request_once(
     let latency_ms = started.elapsed().as_millis() as u64;
     tracing::debug!(
         target: "aimux_provider_utils::http",
-        status = response.status().as_u16(),
+        status = response.status.as_u16(),
         latency_ms,
         "response"
     );
@@ -511,114 +360,141 @@ pub(crate) async fn send_request_once(
 }
 
 async fn send_one_request(
-    client: &Client,
+    fetch: &dyn Fetch,
     request: &PreparedRequest,
-) -> Result<reqwest::Response, AiMuxError> {
-    if let Some(signal) = &request.abort_signal {
-        if signal.is_aborted() {
-            return Err(AiMuxError::from_abort_signal(signal));
-        }
-        tokio::select! {
-            biased;
-            () = signal.cancelled() => Err(AiMuxError::from_abort_signal(signal)),
-            response = build_request_builder(client, request)?.send() => {
-                response.map_err(|error| AiMuxError::ApiCall(Box::new(ApiCallError {
-                    is_retryable: true,
-                    ..api_call_error(request, error.without_url().to_string(), ApiCallErrorOrigin::Transport)
-                })))
+) -> Result<FetchResponse, AiMuxError> {
+    let mut fetch_request = build_fetch_request(request)?;
+    fetch_request.signal = request.abort_signal.clone();
+    let sent = match &request.abort_signal {
+        Some(signal) => {
+            if signal.is_aborted() {
+                return Err(AiMuxError::from_abort_signal(signal));
+            }
+            tokio::select! {
+                biased;
+                () = signal.cancelled() => return Err(AiMuxError::from_abort_signal(signal)),
+                sent = fetch.fetch(fetch_request) => sent,
             }
         }
-    } else {
-        build_request_builder(client, request)?
-            .send()
-            .await
-            .map_err(|error| {
-                AiMuxError::ApiCall(Box::new(ApiCallError {
-                    is_retryable: true,
-                    ..api_call_error(
-                        request,
-                        error.without_url().to_string(),
-                        ApiCallErrorOrigin::Transport,
-                    )
-                }))
-            })
-    }
+        None => fetch.fetch(fetch_request).await,
+    };
+    sent.map_err(|error| {
+        fetch_error_to_ai_mux_error(
+            error,
+            &sanitized_request_url(&request.url),
+            &crate::logging::redact_request_values(&request.body),
+        )
+    })
 }
 
-fn is_redirect_status(status: reqwest::StatusCode) -> bool {
+fn is_redirect_status(status: http::StatusCode) -> bool {
     matches!(
         status,
-        reqwest::StatusCode::MOVED_PERMANENTLY
-            | reqwest::StatusCode::FOUND
-            | reqwest::StatusCode::SEE_OTHER
-            | reqwest::StatusCode::TEMPORARY_REDIRECT
-            | reqwest::StatusCode::PERMANENT_REDIRECT
+        http::StatusCode::MOVED_PERMANENTLY
+            | http::StatusCode::FOUND
+            | http::StatusCode::SEE_OTHER
+            | http::StatusCode::TEMPORARY_REDIRECT
+            | http::StatusCode::PERMANENT_REDIRECT
     )
 }
 
 fn redirect_error(
     request: &PreparedRequest,
     message: impl Into<String>,
-    status: reqwest::StatusCode,
+    status: http::StatusCode,
+    cause: Option<ErrorCause>,
 ) -> AiMuxError {
     AiMuxError::ApiCall(Box::new(ApiCallError {
         status_code: Some(status.as_u16()),
-        ..api_call_error(request, message, ApiCallErrorOrigin::HttpResponse)
+        cause,
+        origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
+        ..api_call_error(request, message)
     }))
 }
 
-/// Send one validated-download exchange, following redirects manually so
-/// every hop is re-validated and its connection pinned to the DNS answers
-/// that passed the guard (see `download_guard`). The whole chain is one
-/// exchange to the caller, matching how an auto-following client behaves.
-async fn send_validated_redirects(
-    request: &PreparedRequest,
-) -> Result<reqwest::Response, AiMuxError> {
-    let validation = request
-        .validation
-        .clone()
-        .expect("send_validated_redirects requires a validation config");
-    let trusted_origin = validation.trusted_origin.as_deref();
-    let credentialed_origin = validation.credentialed_origin.as_deref();
+/// Send one exchange, following redirects hop by hop in this layer (a
+/// transport never follows one itself). The whole chain is one exchange to
+/// the caller, matching how an auto-following client behaves.
+///
+/// - An ordinary API call follows every redirect, as the AI SDK's `postToApi`
+///   does under fetch's default `redirect: "follow"` (provider-utils@5.0.53
+///   `post-to-api.ts:98-107`). Once a hop leaves the request's origin, every
+///   header except `User-Agent` is dropped and the transport is told
+///   `RequestCredentials::Omit`, as `fetchWithValidatedRedirects` does
+///   (`fetch-with-validated-redirects.ts:195-206`), so neither a provider key
+///   in a custom header nor anything a transport decorator adds (a
+///   signature, a bearer token) reaches another origin. Every followed hop
+///   goes through the request's transport again, so a signing transport
+///   signs the URL it actually sends.
+/// - A validated download (`validation` set) re-validates every hop and pins
+///   its connection to the DNS answers that passed the guard (see
+///   `download_guard`); it follows cross-origin hops with the caller headers
+///   stripped. D26: its transport is never provider-injected.
+async fn send_following_redirects(request: &PreparedRequest) -> Result<FetchResponse, AiMuxError> {
+    let validation = request.validation.as_ref();
+    let trusted_origin = validation.and_then(|v| v.trusted_origin.as_deref());
     let mut current = request.clone();
-    // First-request credential gating already ran in `prepare`; this strips
-    // hop-by-hop, forwarding, and metadata-service headers for every hop.
-    crate::download_guard::sanitize_download_headers(&mut current.headers);
     // Headers never travel past this origin on a redirect; stripping is
     // one-way, so a hop back onto it cannot restore them.
-    let credential_anchor = credentialed_origin.unwrap_or(&request.url);
-    let mut pinned =
-        crate::download_guard::validate_download_target(&current.url, trusted_origin).await?;
+    let credential_anchor = validation
+        .and_then(|v| v.credentialed_origin.as_deref())
+        .unwrap_or(&request.url);
+    let mut pinned = match validation {
+        Some(_) => {
+            // First-request credential gating already ran in `prepare`; this
+            // strips hop-by-hop, forwarding, and metadata-service headers.
+            aimux_core::download_guard::sanitize_download_headers(&mut current.headers);
+            Some(
+                aimux_core::download_guard::validate_download_target(&current.url, trusted_origin)
+                    .await?,
+            )
+        }
+        None => None,
+    };
+    // Resolved per request, so a late change of the process default is
+    // honored by providers created before it.
+    let api_fetch = request.fetch.clone().unwrap_or_else(default_fetch);
     for redirect_count in 0..=MAX_REDIRECTS {
-        // Empty pins mean the hop is on the trusted origin.
-        let client = if pinned.is_empty() {
-            download_client()?
-        } else {
-            pinned_client(&current.url, &pinned)?
+        let response = match &pinned {
+            // Empty pins mean the hop is on the trusted origin.
+            // D26: the download hop is never provider-injected; it routes
+            // through the default transport's proxy settings.
+            Some(pins) => {
+                let hop = PinnedFetch::new(
+                    pins.clone(),
+                    crate::fetch::default_transport().proxy().clone(),
+                );
+                send_one_request(&hop, &current).await?
+            }
+            None => send_one_request(api_fetch.as_ref(), &current).await?,
         };
-        let response = send_one_request(&client, &current).await?;
-        let status = response.status();
+        let status = response.status;
         if !is_redirect_status(status) {
             return Ok(response);
         }
-        let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+        let Some(location) = response.headers.get(http::header::LOCATION) else {
             return Ok(response);
         };
-        if redirect_count == MAX_REDIRECTS {
-            return Err(redirect_error(request, "too many redirects", status));
-        }
-        let location = location
-            .to_str()
-            .map(str::to_owned)
-            .map_err(|_| redirect_error(request, "redirect location is not valid UTF-8", status))?;
-        // Dropping the unconsumed 3xx body releases its connection before a
-        // potentially slow DNS check for the next hop.
-        drop(response);
-        let base = url::Url::parse(&current.url)
-            .map_err(|e| AiMuxError::InvalidArgument(format!("invalid request URL: {e}")))?;
-        let next = base
-            .join(&location)
-            .map_err(|e| redirect_error(request, format!("invalid redirect URL: {e}"), status))?;
+        let location = location.to_str().map(str::to_owned).map_err(|error| {
+            redirect_error(
+                request,
+                "redirect location is not valid UTF-8",
+                status,
+                Some(ErrorCause::source(&error)),
+            )
+        })?;
+        let base = url::Url::parse(&current.url).map_err(|e| AiMuxError::InvalidArgument {
+            message: format!("invalid request URL: {e}"),
+            cause: Some(ErrorCause::source(&e)),
+        })?;
+        let next = base.join(&location).map_err(|e| {
+            redirect_error(
+                request,
+                format!("invalid redirect URL: {e}"),
+                status,
+                Some(ErrorCause::source(&e)),
+            )
+        })?;
         // Fetch treats a redirect to a non-HTTP(S) scheme (data:, file:, ...)
         // as a network error; following one would let the redirecting server
         // fabricate a response outside the transport.
@@ -627,20 +503,38 @@ async fn send_validated_redirects(
                 request,
                 format!("redirect to non-HTTP scheme: {}", next.scheme()),
                 status,
+                None,
             ));
         }
         let next = next.to_string();
-        let hop_trusted = crate::download_guard::hop_trusted_origin(trusted_origin, &current.url);
-        pinned = crate::download_guard::validate_download_target(&next, hop_trusted).await?;
-        // Credentials are scoped to the credential anchor, not the previous
-        // hop: once a redirect leaves it, headers cannot come back.
-        if !crate::download_guard::same_origin(&next, credential_anchor) {
-            crate::download_guard::retain_user_agent(&mut current.headers);
+        if redirect_count == MAX_REDIRECTS {
+            return Err(redirect_error(request, "too many redirects", status, None));
         }
-        if status == reqwest::StatusCode::SEE_OTHER
+        // Dropping the unconsumed 3xx body releases its connection before a
+        // potentially slow DNS check for the next hop.
+        drop(response);
+        if pinned.is_some() {
+            let hop_trusted =
+                aimux_core::download_guard::hop_trusted_origin(trusted_origin, &current.url);
+            pinned = Some(
+                aimux_core::download_guard::validate_download_target(&next, hop_trusted).await?,
+            );
+        }
+        // Credentials are scoped to the credential anchor, not the previous
+        // hop: once a redirect leaves it, headers cannot come back. An API
+        // request follows every redirect, like the AI SDK's `postToApi` under
+        // fetch's default `redirect: "follow"`, but off the anchor it keeps
+        // only `User-Agent`, as `fetchWithValidatedRedirects` does: the fetch
+        // spec strips only `Authorization`, and provider keys also travel in
+        // custom headers. Signing decorators see `RequestCredentials::Omit`.
+        if !aimux_core::download_guard::same_origin(&next, credential_anchor) {
+            aimux_core::download_guard::retain_user_agent(&mut current.headers);
+            current.credentials = RequestCredentials::Omit;
+        }
+        if status == http::StatusCode::SEE_OTHER
             || (matches!(
                 status,
-                reqwest::StatusCode::MOVED_PERMANENTLY | reqwest::StatusCode::FOUND
+                http::StatusCode::MOVED_PERMANENTLY | http::StatusCode::FOUND
             ) && matches!(current.method, HttpMethod::Post))
         {
             current.method = HttpMethod::Get;
@@ -651,34 +545,108 @@ async fn send_validated_redirects(
     unreachable!("redirect loop returns on response or error")
 }
 
-fn build_request_builder(
-    client: &Client,
-    request: &PreparedRequest,
-) -> Result<reqwest::RequestBuilder, AiMuxError> {
-    let mut builder = match request.method {
-        HttpMethod::Get => client.get(&request.url),
-        HttpMethod::Post => client.post(&request.url),
-    };
+/// Whether a media type is `multipart/*`, whose boundary parameter is part of
+/// the body it describes.
+fn is_multipart(media_type: &str) -> bool {
+    media_type
+        .trim_start()
+        .get(..10)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("multipart/"))
+}
+
+/// Materialise one prepared request for a [`Fetch`]: validated URL, final body
+/// bytes and an ordered-by-name header map. Headers are *inserted*, so a
+/// later entry for the same (case-insensitive) name replaces an earlier one —
+/// a request never goes out with duplicate `Authorization` headers.
+fn build_fetch_request(request: &PreparedRequest) -> Result<FetchRequest, AiMuxError> {
+    let url = url::Url::parse(&request.url).map_err(|error| AiMuxError::InvalidArgument {
+        message: format!("invalid request URL: {error}"),
+        cause: Some(ErrorCause::source(&error)),
+    })?;
+    let mut headers = http::HeaderMap::new();
     for (name, value) in &request.headers {
-        let header_name = reqwest::header::HeaderName::try_from(name)
-            .map_err(|_| AiMuxError::InvalidArgument(format!("invalid header name: {name}")))?;
-        let header_value = reqwest::header::HeaderValue::try_from(value)
-            .map_err(|_| AiMuxError::InvalidArgument(format!("invalid header value for {name}")))?;
-        builder = builder.header(header_name, header_value);
+        let header_name =
+            http::HeaderName::try_from(name).map_err(|error| AiMuxError::InvalidArgument {
+                message: format!("invalid header name: {name}"),
+                cause: Some(ErrorCause::source(&error)),
+            })?;
+        // The value is never echoed: it is commonly a credential.
+        let header_value =
+            http::HeaderValue::try_from(value).map_err(|error| AiMuxError::InvalidArgument {
+                message: format!("invalid header value for {name}"),
+                cause: Some(ErrorCause::source(&error)),
+            })?;
+        headers.insert(header_name, header_value);
     }
-    Ok(match &request.body {
-        HttpBody::Json(value) => builder.json(value),
-        HttpBody::Bytes(bytes, content_type) => {
-            if !request
-                .headers
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-            {
-                builder = builder.header(reqwest::header::CONTENT_TYPE, content_type);
+    if request.provider_utils_user_agent {
+        let suffix = format!(
+            "ai-sdk-provider-utils/{}",
+            crate::aisdk_pins::PROVIDER_UTILS
+        );
+        let current = request
+            .headers
+            .iter()
+            .rev()
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("user-agent")
+                    .then_some(value.as_str())
+            })
+            .unwrap_or_default();
+        let user_agent = crate::headers::user_agent_value(current, &suffix);
+        headers.insert(
+            http::header::USER_AGENT,
+            http::HeaderValue::try_from(user_agent).map_err(|error| {
+                AiMuxError::InvalidArgument {
+                    message: "invalid header value for user-agent".into(),
+                    cause: Some(ErrorCause::source(&error)),
+                }
+            })?,
+        );
+    }
+    let body = match &request.body {
+        HttpBody::Json(value) => {
+            if !headers.contains_key(http::header::CONTENT_TYPE) {
+                headers.insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("application/json"),
+                );
             }
-            builder.body(bytes.clone())
+            Bytes::from(
+                serde_json::to_vec(value).map_err(|error| AiMuxError::InvalidArgument {
+                    message: format!("request body is not serializable: {error}"),
+                    cause: Some(ErrorCause::source(&error)),
+                })?,
+            )
         }
-        HttpBody::Empty => builder,
+        HttpBody::Bytes(bytes, content_type) => {
+            let value = http::HeaderValue::try_from(content_type).map_err(|error| {
+                AiMuxError::InvalidArgument {
+                    message: format!("invalid content type: {content_type}"),
+                    cause: Some(ErrorCause::source(&error)),
+                }
+            })?;
+            // A caller's `content-type` wins, as for JSON bodies above and as
+            // the AI SDK's `postToApi` leaves the caller's headers alone. A
+            // multipart body is the exception: its boundary is generated with
+            // the body, so only the body's own media type describes the bytes.
+            if is_multipart(content_type) || !headers.contains_key(http::header::CONTENT_TYPE) {
+                headers.insert(http::header::CONTENT_TYPE, value);
+            }
+            Bytes::copy_from_slice(bytes)
+        }
+        HttpBody::Empty => Bytes::new(),
+    };
+    Ok(FetchRequest {
+        method: match request.method {
+            HttpMethod::Get => http::Method::GET,
+            HttpMethod::Post => http::Method::POST,
+        },
+        url,
+        headers,
+        body,
+        signal: None,
+        timeout: None,
+        credentials: request.credentials,
     })
 }
 
@@ -706,16 +674,15 @@ pub async fn sleep_or_abort(
 }
 
 fn observe_response(
-    response: reqwest::Response,
+    response: FetchResponse,
     request: &PreparedRequest,
     started: Instant,
     latency_ms: u64,
     attempt: u32,
     exchange_index: u32,
-) -> reqwest::Response {
-    let status = response.status();
-    let version = response.version();
-    let headers = response.headers().clone();
+) -> FetchResponse {
+    let status = response.status;
+    let headers = response.headers.clone();
     let recording = request.recording_context.as_ref().map(|context| {
         let redacted_headers = redacted_response_headers(&headers);
         let response = ResponseRecord {
@@ -757,23 +724,22 @@ fn observe_response(
         }
     });
     let observed = ObservedBody {
-        inner: response.bytes_stream().boxed(),
+        inner: response.body,
         started,
         chunks: 0,
         done: false,
         recording,
     };
-    let mut rebuilt = http::Response::builder()
-        .status(status)
-        .version(version)
-        .body(reqwest::Body::wrap_stream(observed))
-        .expect("status and version came from a valid reqwest response");
-    *rebuilt.headers_mut() = headers;
-    rebuilt.into()
+    FetchResponse {
+        status,
+        headers,
+        url: response.url,
+        body: observed.boxed(),
+    }
 }
 
 struct ObservedBody {
-    inner: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    inner: BoxStream<'static, Result<Bytes, FetchError>>,
     started: Instant,
     chunks: usize,
     done: bool,
@@ -781,7 +747,7 @@ struct ObservedBody {
 }
 
 impl Stream for ObservedBody {
-    type Item = Result<Bytes, reqwest::Error>;
+    type Item = Result<Bytes, FetchError>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.done {
@@ -982,7 +948,7 @@ fn record_failed_exchange(
     );
 }
 
-fn redacted_response_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+fn redacted_response_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
     crate::extract_response_headers::extract_response_header_pairs(headers)
 }
 
@@ -1014,15 +980,87 @@ fn request_host(url: &str) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// The request URL as logs, errors and recordings show it: without the query
+/// (API keys travel there) and without the `user:password@` userinfo.
 pub(crate) fn sanitized_request_url(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(mut parsed) => {
             parsed.set_query(None);
-            parsed.set_fragment(None);
+            // Both fail only for URLs that cannot carry userinfo at all.
             let _ = parsed.set_username("");
             let _ = parsed.set_password(None);
             parsed.to_string()
         }
-        Err(_) => url.split('?').next().unwrap_or(url).to_owned(),
+        Err(_) => {
+            let without_query = url.split('?').next().unwrap_or(url);
+            // Unparseable: drop anything up to the last '@' of the authority.
+            if let Some((scheme, rest)) = without_query.split_once("://") {
+                let authority = &rest[..rest.find('/').unwrap_or(rest.len())];
+                if let Some(at) = authority.rfind('@') {
+                    return format!("{scheme}://{}", &rest[at + 1..]);
+                }
+            }
+            without_query.to_owned()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpBody, HttpMethod, HttpRequest, RequestCredentials, sanitized_request_url};
+
+    /// AI SDK `credentialedOrigin`: the caller headers go only to that
+    /// origin. Anywhere else only the `user-agent` is sent, with the
+    /// credentials omitted, from the first request on (fal's video status
+    /// poll, #441).
+    #[test]
+    fn prepare_sends_caller_headers_only_to_the_credentialed_origin() {
+        let origin = "https://queue.fal.run/fal-ai/luma-dream-machine";
+        let prepare = |url: &str| {
+            HttpRequest {
+                url: url.into(),
+                headers: vec![
+                    ("authorization".into(), "Key test-api-key".into()),
+                    ("user-agent".into(), "ai-sdk/fal/3.0.54".into()),
+                ],
+                validate_url: true,
+                trusted_origin: Some(origin.into()),
+                credentialed_origin: Some(origin.into()),
+                ..HttpRequest::default()
+            }
+            .prepare(HttpMethod::Get, HttpBody::Empty)
+        };
+
+        let same_origin = prepare("https://queue.fal.run/fal-ai/luma-dream-machine/requests/1");
+        assert_eq!(same_origin.headers.len(), 2);
+        assert_eq!(same_origin.credentials, RequestCredentials::Include);
+
+        let other_origin = prepare("https://elsewhere.example/requests/1");
+        assert_eq!(
+            other_origin.headers,
+            vec![("user-agent".to_string(), "ai-sdk/fal/3.0.54".to_string())]
+        );
+        assert_eq!(other_origin.credentials, RequestCredentials::Omit);
+    }
+
+    #[test]
+    fn sanitized_request_url_drops_userinfo_and_query() {
+        assert_eq!(
+            sanitized_request_url("https://user:secret@api.example.com/v1/chat?key=sk-1"),
+            "https://api.example.com/v1/chat"
+        );
+        assert_eq!(
+            sanitized_request_url("https://token@api.example.com/v1"),
+            "https://api.example.com/v1"
+        );
+        // Unparseable (space in the host): userinfo is still dropped.
+        assert_eq!(
+            sanitized_request_url("https://user:secret@bad host/v1?key=sk-1"),
+            "https://bad host/v1"
+        );
+        assert_eq!(
+            sanitized_request_url("https://api.example.com/v1/chat?key=sk-1"),
+            "https://api.example.com/v1/chat"
+        );
     }
 }

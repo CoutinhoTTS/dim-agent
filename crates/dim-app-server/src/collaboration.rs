@@ -48,6 +48,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const AGENT_TOOL: &str = "agent";
 const READ_PAGE_LIMIT: usize = 200;
+const TOOL_USE_START_PAGE: u64 = 1024;
 const INTERRUPTED: &str = "interrupted by leader";
 const CANCELLED: &str = "cancelled by leader";
 const LEADER_CLOSED: &str = "leader closed";
@@ -1172,18 +1173,31 @@ impl CollaborationSession {
     }
 
     async fn read(&self, agent_id: &str, session_id: &str, after: u64, limit: usize) -> ToolResult {
-        if let Err(error) =
-            self.collaboration
-                .authorize_peer(&self.session_id, agent_id, session_id)
-        {
-            return refusal(error, explain(error));
-        }
-        self.collaboration.note_read();
-        let (_, events) = match self
+        let peer = match self
             .collaboration
-            .index
-            .read_page(session_id, after, limit, None)
+            .resolve(&self.session_id, agent_id, session_id)
             .await
+        {
+            Ok(peer) => peer,
+            Err(error) => return refusal(error, explain(error)),
+        };
+        let session = &peer.session;
+        self.collaboration.note_read();
+        let (next, events) = match read_page(
+            session,
+            after,
+            limit,
+            None,
+            &[
+                "input/message",
+                "step/text",
+                "step/tool-use-start",
+                "step/tool-call",
+                "step/tool-result",
+                "turn/end",
+            ],
+        )
+        .await
         {
             Ok(page) => page,
             Err(error) => return ToolResult::error(error.to_string()),
@@ -1227,19 +1241,14 @@ impl CollaborationSession {
         if !wanted_calls.is_empty() {
             self.collaboration.note_read();
             let ids = wanted_calls.into_iter().collect::<Vec<_>>();
-            match self.collaboration.index.read_events(session_id, &ids).await {
+            match read_events(session, &ids).await {
                 Ok(events) => calls = events,
                 Err(error) => return ToolResult::error(error.to_string()),
             }
         }
         if !wanted_starts.is_empty() {
             self.collaboration.note_read();
-            match self
-                .collaboration
-                .index
-                .read_tool_use_starts(session_id, &wanted_starts)
-                .await
-            {
+            match read_tool_use_starts(session, &wanted_starts).await {
                 Ok(starts) => {
                     for (key, event) in starts {
                         if let EventKind::ToolUseStart(start) = &event.kind {
@@ -1252,9 +1261,12 @@ impl CollaborationSession {
         }
         let mut items: Vec<Value> = vec![];
         let mut text: Option<(String, u64, String)> = None;
-        let mut next = after;
+        let mut previous = after;
         for event in &events {
-            next = event.sequence;
+            if event.sequence > previous + 1 {
+                flush_text(&mut items, &mut text);
+            }
+            previous = event.sequence;
             if let EventKind::Text(data) = &event.kind {
                 match text.as_mut() {
                     Some((request, _, merged)) if request == &data.request_id => {
@@ -1965,13 +1977,7 @@ impl CollaborationSession {
             Some(Ok(cutoff)) => Some(*cutoff),
             _ => None,
         };
-        let (last_turn_id, text, derived) = outcome(
-            &self.collaboration.index,
-            &session,
-            input.as_deref(),
-            through,
-        )
-        .await;
+        let (last_turn_id, text, derived) = outcome(&session, input.as_deref(), through).await;
         let settle = self
             .state
             .lock()
@@ -2281,10 +2287,135 @@ fn close_request(open: &mut BTreeMap<String, BTreeSet<String>>, request: &str) {
     });
 }
 
+async fn read_page(
+    session: &Session,
+    after: u64,
+    limit: usize,
+    through: Option<u64>,
+    kinds: &[&str],
+) -> dim_agent_runtime::Result<(u64, Vec<Arc<AgentEvent>>)> {
+    let head = session.sequence("main")?;
+    let through = through.unwrap_or(head);
+    if through > head || after > through {
+        return Err(AgentError::InvalidInput("future Timeline cursor".into()));
+    }
+    session.batch_end("main", after).await?;
+    session.batch_end("main", through).await?;
+    if after == through {
+        return Ok((after, Vec::new()));
+    }
+    let mut next = through.min(after.saturating_add(limit as u64));
+    while next < through {
+        match session.batch_end("main", next).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => next += 1,
+            Err(error) => return Err(error),
+        }
+    }
+    let mut events = session
+        .query(
+            "main",
+            TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: Some(next),
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: kinds.iter().map(|kind| (*kind).into()).collect(),
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: NonZeroU64::new(next - after).expect("a page keeps at least one fact"),
+                offset: 0,
+            },
+        )
+        .await?
+        .events;
+    events.retain(|event| event.sequence > after);
+    events.reverse();
+    Ok((next, events))
+}
+
+/// The public main-line facts named by their event ids.
+async fn read_events(
+    session: &Session,
+    event_ids: &[String],
+) -> dim_agent_runtime::Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
+    let mut found = HashMap::with_capacity(event_ids.len());
+    for event_id in event_ids {
+        let reply = session
+            .query(
+                "main",
+                TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    include_publishing: false,
+                    from_event: None,
+                    from_sequence: None,
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Ascending,
+                    kinds: vec!["step/tool-call".into()],
+                    flags: Vec::new(),
+                    event_id: Some(event_id.clone()),
+                    predicate: None,
+                    limit: NonZeroU64::MIN,
+                    offset: 0,
+                },
+            )
+            .await?;
+        if let Some(event) = reply.events.into_iter().next() {
+            found.insert(event.id.clone(), event);
+        }
+    }
+    Ok(found)
+}
+/// The public main-line starts of the requested request/call pairs.
+async fn read_tool_use_starts(
+    session: &Session,
+    keys: &[(String, String)],
+) -> dim_agent_runtime::Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>> {
+    let mut starts = HashMap::with_capacity(keys.len());
+    let mut query = TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        include_publishing: false,
+        from_event: None,
+        from_sequence: Some(1),
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        kinds: vec!["step/tool-use-start".into()],
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: NonZeroU64::new(TOOL_USE_START_PAGE).expect("a page keeps at least one tool use"),
+        offset: 0,
+    };
+    loop {
+        let reply = session.query("main", query.clone()).await?;
+        let short = (reply.events.len() as u64) < TOOL_USE_START_PAGE;
+        let last = reply.positions.last().map(|position| position.sequence);
+        for event in reply.events {
+            let EventKind::ToolUseStart(start) = &event.kind else {
+                continue;
+            };
+            let key = (start.request_id.clone(), start.call_id.clone());
+            if keys.contains(&key) {
+                starts.insert(key, event);
+            }
+        }
+        if short || starts.len() == keys.len() {
+            break;
+        }
+        match last {
+            Some(last) => query.from_sequence = Some(last + 1),
+            None => break,
+        }
+    }
+    Ok(starts)
+}
+
 /// Result of a request's work range: from the member's `input/consumed` of
 /// the request input to its idle point; the last `turn/end` decides.
 async fn outcome(
-    index: &crate::agents::AgentIndex,
     session: &Session,
     input: Option<&str>,
     cutoff: Option<u64>,
@@ -2307,11 +2438,21 @@ async fn outcome(
     let mut text = String::new();
     let mut last = None;
     while after < through {
-        let events = match index
-            .read_page(session.id(), after, 256, Some(through))
-            .await
+        let (next, events) = match read_page(
+            session,
+            after,
+            256,
+            Some(through),
+            &[
+                "input/consumed",
+                "step/model-start",
+                "step/text",
+                "turn/end",
+            ],
+        )
+        .await
         {
-            Ok((_, events)) => events,
+            Ok(page) => page,
             Err(error) => {
                 return (
                     None,
@@ -2322,11 +2463,8 @@ async fn outcome(
                 );
             }
         };
-        if events.is_empty() {
-            break;
-        }
+        after = next;
         for event in events {
-            after = event.sequence;
             if matches!(&event.kind, EventKind::InputConsumed(data) if Some(data.input_id.as_str()) == input)
             {
                 started = true;

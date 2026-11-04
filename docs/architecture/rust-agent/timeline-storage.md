@@ -94,14 +94,14 @@
 | `read_context(through)` | 最近有效快照的 `resume` 起的祖先链和本分支后缀；没有快照时是完整前缀 | 分页读取，页按事件计数、不与原子批次对齐，每页释放读连接；不扫描快照恢复位置之前的请求正文 |
 | `trace(sequence)` | 命中事件的物理行 | 合并行完整解码后按逻辑序号过滤；trace 只返回指定事件的轨迹 |
 | 分段读取 | 固定水位，按键 seek；内部读段可切开原子批次，`TimelineStore::read/read_segments` 的最终区间终点须为批次边界 | 每段结束释放读连接；合并行完整解码后截取，不在锁内解码无限历史 |
-| 不读请求正文的分页 | `read_page_without_request_bodies`：历史分页、摘要、协作与流式投影；批次边界与 `read_page` 相同 | 不还原 `context/prepare`、`model/call` 的请求，也不加载其内容行，只校验记录种类与引用形状（[请求增量存储 §7.5](../../design/appserver/request-delta-storage.md#75-不使用请求正文的读取)）；使用请求的读取与首次恢复仍完整校验 |
+| 不读请求正文的分页 | `read_page_without_request_bodies`：历史分页、摘要与流式投影；批次边界与 `read_page` 相同 | 不还原 `context/prepare`、`model/call` 的请求，也不加载其内容行，只校验记录种类与引用形状（[请求增量存储 §7.5](../../design/appserver/request-delta-storage.md#75-不使用请求正文的读取)）；使用请求的读取与首次恢复仍完整校验 |
 | 恢复 | 固定 Session 目录和所有分支头，逐页校验事件、引用、祖先截点及 completed 事实的 through 边界；可选快照 state 不参与恢复校验 | 每页结束释放读连接；解码内容缓存跨页共用、有界（第 2 节），校验结束释放；跨页保留事件 ID 和目录校验信息；进程内首次恢复全量校验，之后目录与所有分支头不变时复用上次结果，记录只在存储的进程内存，校验失败或目录变化回退全量（[恢复校验复用](../../design/appserver/restore-validation.md)）；校验内容与不变量不变 |
 
 存储服务的所有业务读取（历史、目录、校验、设置、Provider 与 Session 文件）走四个只读连接，按调用轮换；读取在语句开始时的最后提交上运行，不进入写连接的互斥锁。目录扫描这类长读只占其中一个连接。
 
 fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 个逻辑序号、内容每 1024 个哈希），每块之间让写入轮取得写锁。fork 先以只读连接分段解析源事件引用并求出内容闭包，最后才在插入 `agent_sessions` 的事务中发布整个 fork；删除先在一个事务中移除使 Session 可见的行，再分块删除事件、快照与内容。两者都不改变持久化格式，见[存储格式](../../design/appserver/native-storage-format.md#sqlite-运行参数与空间回收)。
 
-协作 `read_page` 的 `after` 和固定水位必须为批次边界；页长是目标值，末批超出时完整返回。内部读段可切开批次，但不把内部段尾作为业务游标。反向 `session.history` 仍为独立协议草案。
+协作的 Session 查询分页以批次边界作为 `after` 和固定水位；页长是目标值，末批超出时完整返回。内部读段可切开批次，但不把内部段尾作为业务游标。反向 `session.history` 仍为独立协议草案。
 
 已装载实例采用发布水位，未装载记录采用已提交 head。公开的 `query` 以请求的界为上限，业务分页调用方必须传有界区间。当前范围读取每段 256 个逻辑序号，恢复校验每段 64 条物理行；查询索引及跨行规则见[存储格式](../../design/appserver/native-storage-format.md#分页查询)。
 
@@ -139,7 +139,8 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 | Prompt 与配置发布 | `history::read_context` |
 | 能力重载重建 | 事件查询（`Dispatcher::consume` 给出截点） |
 | TimelineTree 建分支 | `history::read_context(at)` 校验截点并得到子分支的祖先链 |
-| 协作读取、App Server 历史、导出 | 已装载的线走 `Branch::query`；本进程未装载或已结束的线走 `TimelineStore` 的页读取 |
+| 协作读取 | 取得并持有对端 Session，通过其 query 选择所消费的事件种类 |
+| App Server 历史、导出 | 已装载的线走 `Branch::query`；本进程未装载或已结束的线走 `TimelineStore` 的页读取 |
 
 - 每个模型步骤两次上下文历史读取，有有效快照时每次不超过最近一次压缩之后的历史；ContextPolicy 另读一次同准备的尾段，稳态下为空。
 - Dispatcher handler 内不等待冷读取；需要历史的工作在能力自有任务中读取，完成后再提交事件。

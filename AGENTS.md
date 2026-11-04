@@ -15,6 +15,12 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - This is a public repository. The Dim account plugin (`crates/dim-oauth`) lives here, but its OAuth client IDs and any credentials stay out of it: they are build-time secrets; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
 - Review correctness, security, compatibility and unnecessary abstraction before committing. Commit complete, reviewable units on their declared parent, with their documentation and observable-behavior tests. Never commit secrets or scratch experiments.
 
+## Issues and pull requests
+
+- Prefer a linked primary issue on every pull request: `Fixes #N` when it completes the issue, `Refs #N` when it only advances it. Open the issue first when the change's scope, design, or acceptance needs agreement; small mechanical changes — routine dependency updates, typo or formatting fixes — may skip it. When in doubt, open the issue; it is cheap.
+- Before starting, search open issues and pull requests for the same change and read the assignee and comments. If someone already owns it, coordinate in that issue instead of opening a parallel branch or pull request.
+- When the change has an issue, assign it to yourself before opening the pull request; if you cannot assign it, ask a maintainer in the issue. If you stop working on it, unassign yourself and leave a status comment.
+
 ## Data and interface conventions
 
 - Each kind of internal data has one type definition. The producer guarantees the contract; consumers use it directly without re-validating, converting or filling in fields.

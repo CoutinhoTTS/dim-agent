@@ -13,17 +13,20 @@
 //!   the loop alone does not cover the send path).
 //! - **Backpressure is socket-level**: tungstenite's `send().await` drives
 //!   flush and pends while the socket write buffer is full.
-//! - **Proxy support (RFC-0034 §2)**: the global `ProxyConfig` that governs
-//!   HTTP also governs `ws://`/`wss://` — `wss` uses `https_url` (or
-//!   `all_url`), `ws` uses `http_url` (or `all_url`), `no_proxy` entries are
-//!   honored, and tunneled connections are established with a manual HTTP
-//!   CONNECT before the WebSocket handshake. tokio-tungstenite has no proxy
+//! - **Proxy support (RFC-0034 §2)**: a [`TungsteniteConnector`](crate::ws::TungsteniteConnector) carries its
+//!   own `ProxyConfig`; the built-in default shares the default HTTP
+//!   transport's. `wss` uses `https_url` (or `all_url`), `ws` uses `http_url`
+//!   (or `all_url`), `no_proxy` entries are honored, and tunneled
+//!   connections are established with a manual HTTP CONNECT before the
+//!   WebSocket handshake. tokio-tungstenite has no proxy
 //!   support (and will not add it), so the tunnel is ours. SOCKS proxies are
 //!   rejected loudly rather than silently bypassed.
 
 use std::future::pending;
+use std::sync::Arc;
 
-use futures::{SinkExt, StreamExt};
+use async_trait::async_trait;
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -32,8 +35,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use aimux_core::AbortSignal;
 use aimux_core::error::{AiMuxError, ApiCallError};
 use aimux_core::options::TimeoutConfiguration;
+use aimux_core::{ErrorCause, SourceError};
 
 /// A request to open a WebSocket connection.
+#[derive(Debug)]
 pub struct WebSocketRequest {
     /// `wss://` or `ws://` URL.
     pub url: String,
@@ -48,6 +53,69 @@ pub struct WebSocketRequest {
     /// session establishment, `chunk_ms` bounds the gap between events,
     /// `total_ms` bounds the whole connection lifetime.
     pub timeout: Option<TimeoutConfiguration>,
+    /// Transport that performs the handshake. `None` uses a
+    /// [`TungsteniteConnector`] with the default HTTP transport's proxy
+    /// settings, read at connect time. Injection point for tests, for a
+    /// connector with its own proxy, and for providers that bring their own
+    /// socket.
+    pub connector: Option<Arc<dyn WsConnector>>,
+}
+
+impl WebSocketRequest {
+    /// Build a transcription connection with the operation's cancellation and timeouts.
+    #[must_use]
+    pub fn for_transcription(
+        url: String,
+        headers: Vec<(String, String)>,
+        options: &aimux_core::transcription_model::TranscriptionStreamOptions,
+        connector: Option<Arc<dyn WsConnector>>,
+    ) -> Self {
+        Self {
+            url,
+            headers,
+            subprotocols: Vec::new(),
+            abort_signal: options.abort_signal.clone(),
+            timeout: options.timeout,
+            connector,
+        }
+    }
+}
+
+/// Opens WebSocket connections. The built-in implementation is
+/// tungstenite plus the RFC-0034 proxy tunnel; a custom one returns a
+/// [`WsConnection`] built with [`WsConnection::from_transport`].
+#[async_trait]
+pub trait WsConnector: Send + Sync + 'static {
+    /// Establish the connection described by `request`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the connect failure, abort or timeout.
+    async fn connect(&self, request: &WebSocketRequest) -> Result<WsConnection, AiMuxError>;
+}
+
+impl std::fmt::Debug for dyn WsConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("dyn WsConnector")
+    }
+}
+
+/// The message transport behind a [`WsConnection`]: any tungstenite-message
+/// stream/sink pair.
+pub trait WsTransport:
+    Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+    + Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+    + Send
+    + Unpin
+{
+}
+
+impl<T> WsTransport for T where
+    T: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Send
+        + Unpin
+{
 }
 
 /// An inbound WebSocket message.
@@ -59,7 +127,7 @@ pub enum WsMessage {
 
 /// A connected WebSocket with abort/timeout enforcement built in.
 pub struct WsConnection {
-    stream: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    stream: Box<dyn WsTransport>,
     url: String,
     abort: Option<AbortSignal>,
     /// Deadline for the first event (connect + session ack). Cleared after
@@ -87,14 +155,42 @@ fn abort_error(abort: &Option<AbortSignal>) -> AiMuxError {
         .unwrap_or_else(|| AiMuxError::Aborted("request aborted".into()))
 }
 
-fn ws_error(url: &str, msg: impl std::fmt::Display) -> AiMuxError {
+/// Start of the error [`WsConnection::next`] yields for a close frame.
+const PEER_CLOSE: &str = "websocket closed by peer";
+
+/// The close frame behind a [`WsConnection::next`] error: `Some(Some((code,
+/// reason)))` for a close frame with a payload, `Some(None)` for one without,
+/// `None` for any other error.
+#[must_use]
+pub fn peer_close(error: &AiMuxError) -> Option<Option<(u16, String)>> {
+    let AiMuxError::ApiCall(error) = error else {
+        return None;
+    };
+    let detail = error.message.strip_prefix(PEER_CLOSE)?;
+    if detail.is_empty() {
+        return Some(None);
+    }
+    let (code, reason) = detail
+        .strip_prefix(" (code ")?
+        .strip_suffix(')')?
+        .split_once(": ")?;
+    Some(Some((code.parse().ok()?, reason.to_owned())))
+}
+
+fn ws_error(
+    url: &str,
+    msg: impl std::fmt::Display,
+    source: Option<&(dyn std::error::Error + 'static)>,
+    origin: aimux_core::ApiCallErrorOrigin,
+) -> AiMuxError {
     AiMuxError::ApiCall(Box::new(ApiCallError {
         is_retryable: true,
+        cause: source.map(ErrorCause::source),
+        origin,
         ..ApiCallError::new(
             msg.to_string(),
             crate::http::sanitized_request_url(url),
             serde_json::json!({}),
-            aimux_core::ApiCallErrorOrigin::Transport,
         )
     }))
 }
@@ -161,13 +257,13 @@ pub struct ProxyTunnel {
     pub target_authority: String,
 }
 
-/// Test-only exposure of [`resolve_proxy`] (integration tests construct
-/// arbitrary configs without the set-once global).
+/// Test-only exposure of [`resolve_proxy`] (integration tests check proxy
+/// selection for arbitrary configs without connecting).
 #[doc(hidden)]
 #[allow(non_snake_case)]
 pub fn ws__proxy_decision_for(
     target: &url::Url,
-    config: &crate::http::ProxyConfig,
+    config: &crate::fetch::ProxyConfig,
 ) -> Result<Option<ProxyTunnel>, AiMuxError> {
     resolve_proxy(target, config)
 }
@@ -193,10 +289,10 @@ fn sanitized_proxy_url(raw: &str) -> String {
     raw.to_string()
 }
 
-/// Pick direct vs. tunneled for a WS target under the global proxy config.
+/// Pick direct vs. tunneled for a WS target under a proxy config.
 fn resolve_proxy(
     target: &url::Url,
-    config: &crate::http::ProxyConfig,
+    config: &crate::fetch::ProxyConfig,
 ) -> Result<Option<ProxyTunnel>, AiMuxError> {
     let raw = match target.scheme() {
         "wss" => config.https_url.clone().or_else(|| config.all_url.clone()),
@@ -206,11 +302,9 @@ fn resolve_proxy(
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let proxy = url::Url::parse(&raw).map_err(|e| {
-        AiMuxError::InvalidArgument(format!(
-            "invalid proxy URL {}: {e}",
-            sanitized_proxy_url(&raw)
-        ))
+    let proxy = url::Url::parse(&raw).map_err(|e| AiMuxError::InvalidArgument {
+        message: format!("invalid proxy URL {}: {e}", sanitized_proxy_url(&raw)),
+        cause: Some(ErrorCause::source(&e)),
     })?;
     let scheme = proxy.scheme().to_ascii_lowercase();
     if scheme != "http" {
@@ -226,7 +320,7 @@ fn resolve_proxy(
     let host = proxy
         .host_str()
         .ok_or_else(|| {
-            AiMuxError::InvalidArgument(format!(
+            AiMuxError::invalid_argument(format!(
                 "proxy URL has no host: {}",
                 sanitized_proxy_url(&raw)
             ))
@@ -241,10 +335,9 @@ fn resolve_proxy(
         None
     } else {
         let credentials = format!("{}:{}", proxy.username(), proxy.password().unwrap_or(""));
-        use base64::Engine as _;
         Some(format!(
             "Basic {}",
-            base64::engine::general_purpose::STANDARD.encode(credentials)
+            crate::convert_uint8_array_to_base64(credentials.as_bytes())
         ))
     };
     let target_host = target.host_str().unwrap_or_default();
@@ -382,7 +475,10 @@ async fn connect_through_proxy(
             .with_safe_default_protocol_versions()
             .map_err(|e| {
                 ConnectError::Tungstenite(tokio_tungstenite::tungstenite::Error::Io(
-                    std::io::Error::other(format!("building rustls client config: {e}")),
+                    std::io::Error::other(SourceError::with_cause(
+                        format!("building rustls client config: {e}"),
+                        &e,
+                    )),
                 ))
             })?
             .with_root_certificates(roots)
@@ -399,8 +495,9 @@ async fn connect_through_proxy(
     Ok((websocket, response))
 }
 
-/// Open a WebSocket connection. The connect phase races abort and the
-/// `first_chunk_ms` timeout (which doubles as the connect timeout).
+/// Open a WebSocket connection through the request's [`WsConnector`], or the
+/// built-in one when none is set. The built-in connect phase races abort and
+/// the `first_chunk_ms` timeout (which doubles as the connect timeout).
 ///
 /// # Errors
 ///
@@ -408,18 +505,61 @@ async fn connect_through_proxy(
 /// cancellation wins the connect race, and `Timeout` when `first_chunk_ms`
 /// expires while connecting.
 pub async fn ws_connect(req: &WebSocketRequest) -> Result<WsConnection, AiMuxError> {
-    let mut http_req = req
-        .url
-        .as_str()
-        .into_client_request()
-        .map_err(|e| AiMuxError::InvalidArgument(format!("invalid WebSocket URL: {e}")))?;
+    match &req.connector {
+        Some(connector) => connector.connect(req).await,
+        None => {
+            let proxy = crate::fetch::default_transport().proxy().clone();
+            TungsteniteConnector::new(proxy).connect(req).await
+        }
+    }
+}
+
+/// The built-in connector: tungstenite, tunneled through its own proxy
+/// settings (the WebSocket counterpart of a
+/// [`ReqwestFetch`](crate::fetch::ReqwestFetch)).
+#[derive(Debug, Clone, Default)]
+pub struct TungsteniteConnector {
+    proxy: crate::fetch::ProxyConfig,
+}
+
+impl TungsteniteConnector {
+    /// A connector routed by `proxy`.
+    #[must_use]
+    pub fn new(proxy: crate::fetch::ProxyConfig) -> Self {
+        Self { proxy }
+    }
+}
+
+#[async_trait]
+impl WsConnector for TungsteniteConnector {
+    async fn connect(&self, request: &WebSocketRequest) -> Result<WsConnection, AiMuxError> {
+        connect_tungstenite(request, &self.proxy).await
+    }
+}
+
+async fn connect_tungstenite(
+    req: &WebSocketRequest,
+    config: &crate::fetch::ProxyConfig,
+) -> Result<WsConnection, AiMuxError> {
+    let mut http_req =
+        req.url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| AiMuxError::InvalidArgument {
+                message: format!("invalid WebSocket URL: {e}"),
+                cause: Some(ErrorCause::source(&e)),
+            })?;
     for (k, v) in &req.headers {
         http_req.headers_mut().insert(
             tokio_tungstenite::tungstenite::http::HeaderName::try_from(k.as_str()).map_err(
-                |e| AiMuxError::InvalidArgument(format!("invalid WS header name {k}: {e}")),
+                |e| AiMuxError::InvalidArgument {
+                    message: format!("invalid WS header name {k}: {e}"),
+                    cause: Some(ErrorCause::source(&e)),
+                },
             )?,
-            HeaderValue::from_str(v).map_err(|e| {
-                AiMuxError::InvalidArgument(format!("invalid WS header value for {k}: {e}"))
+            HeaderValue::from_str(v).map_err(|e| AiMuxError::InvalidArgument {
+                message: format!("invalid WS header value for {k}: {e}"),
+                cause: Some(ErrorCause::source(&e)),
             })?,
         );
     }
@@ -427,7 +567,10 @@ pub async fn ws_connect(req: &WebSocketRequest) -> Result<WsConnection, AiMuxErr
         http_req.headers_mut().insert(
             "Sec-WebSocket-Protocol",
             HeaderValue::from_str(&req.subprotocols.join(", ")).map_err(|e| {
-                AiMuxError::InvalidArgument(format!("invalid WS subprotocols: {e}"))
+                AiMuxError::InvalidArgument {
+                    message: format!("invalid WS subprotocols: {e}"),
+                    cause: Some(ErrorCause::source(&e)),
+                }
             })?,
         );
     }
@@ -442,12 +585,13 @@ pub async fn ws_connect(req: &WebSocketRequest) -> Result<WsConnection, AiMuxErr
         .map(|ms| tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms));
     let connect_deadline = first_chunk_deadline;
 
-    // Proxy resolution (RFC-0034 §2): the global ProxyConfig governs WS too.
+    // Proxy resolution (RFC-0034 §2): the connector's ProxyConfig.
     // no_proxy hits and a proxy-less config keep the direct path unchanged.
-    let target = url::Url::parse(&req.url)
-        .map_err(|e| AiMuxError::InvalidArgument(format!("invalid WebSocket URL: {e}")))?;
+    let target = url::Url::parse(&req.url).map_err(|e| AiMuxError::InvalidArgument {
+        message: format!("invalid WebSocket URL: {e}"),
+        cause: Some(ErrorCause::source(&e)),
+    })?;
     let proxy = {
-        let config = crate::http::global_proxy();
         let target_host = target.host_str().unwrap_or_default();
         let target_port = target.port_or_known_default().unwrap_or(80);
         if config
@@ -457,7 +601,7 @@ pub async fn ws_connect(req: &WebSocketRequest) -> Result<WsConnection, AiMuxErr
         {
             None
         } else {
-            resolve_proxy(&target, &config)?
+            resolve_proxy(&target, config)?
         }
     };
 
@@ -484,11 +628,11 @@ pub async fn ws_connect(req: &WebSocketRequest) -> Result<WsConnection, AiMuxErr
                     } else {
                         aimux_core::error::is_retryable_status(status)
                     },
+                    origin: aimux_core::ApiCallErrorOrigin::Transport,
                     ..ApiCallError::new(
                         format!("proxy rejected websocket CONNECT: {reason}"),
                         crate::http::sanitized_request_url(&req.url),
                         serde_json::json!({}),
-                        if status == 0 { aimux_core::ApiCallErrorOrigin::Transport } else { aimux_core::ApiCallErrorOrigin::HttpResponse },
                     )
                 })));
             }
@@ -506,41 +650,71 @@ pub async fn ws_connect(req: &WebSocketRequest) -> Result<WsConnection, AiMuxErr
                         .body()
                         .as_ref()
                         .map(|body| String::from_utf8_lossy(body).into_owned()),
+                    origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
                     ..ApiCallError::new(
                         format!("websocket connect rejected: HTTP {status}"),
                         crate::http::sanitized_request_url(&req.url),
                         serde_json::json!({}),
-                        aimux_core::ApiCallErrorOrigin::HttpResponse,
                     )
                 })));
             }
             Err(ConnectError::Tungstenite(e)) => {
-                return Err(ws_error(&req.url, format!("websocket connect failed: {e}")));
+                return Err(ws_error(
+                    &req.url,
+                    format!("websocket connect failed: {e}"),
+                    Some(&e),
+                    aimux_core::ApiCallErrorOrigin::Transport,
+                ));
             }
         },
     };
 
-    Ok(WsConnection {
-        stream,
-        url: req.url.clone(),
-        abort: req.abort_signal.clone(),
-        // The REMAINING first-chunk budget (anchored before connect) — not a
-        // fresh full window, so connect+ack can never exceed first_chunk_ms.
+    // The REMAINING first-chunk budget (anchored before connect) — not a
+    // fresh full window, so connect+ack can never exceed first_chunk_ms.
+    Ok(WsConnection::with_deadline(
+        Box::new(stream),
+        req,
         first_chunk_deadline,
-        chunk_timeout: req
-            .timeout
-            .as_ref()
-            .and_then(|t| t.chunk_ms)
-            .map(tokio::time::Duration::from_millis),
-        total_deadline: req
-            .timeout
-            .as_ref()
-            .and_then(|t| t.total_ms)
-            .map(|ms| tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms)),
-    })
+    ))
 }
 
 impl WsConnection {
+    /// Wrap an already-established transport, applying the request's abort
+    /// signal and timeouts. For custom [`WsConnector`]s; the `first_chunk_ms`
+    /// budget starts now.
+    #[must_use]
+    pub fn from_transport(transport: Box<dyn WsTransport>, req: &WebSocketRequest) -> Self {
+        let first_chunk_deadline = req
+            .timeout
+            .as_ref()
+            .and_then(|t| t.first_chunk_ms)
+            .map(|ms| tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms));
+        Self::with_deadline(transport, req, first_chunk_deadline)
+    }
+
+    fn with_deadline(
+        stream: Box<dyn WsTransport>,
+        req: &WebSocketRequest,
+        first_chunk_deadline: Option<tokio::time::Instant>,
+    ) -> Self {
+        Self {
+            stream,
+            url: req.url.clone(),
+            abort: req.abort_signal.clone(),
+            first_chunk_deadline,
+            chunk_timeout: req
+                .timeout
+                .as_ref()
+                .and_then(|t| t.chunk_ms)
+                .map(tokio::time::Duration::from_millis),
+            total_deadline: req
+                .timeout
+                .as_ref()
+                .and_then(|t| t.total_ms)
+                .map(|ms| tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms)),
+        }
+    }
+
     /// Send a text message. Aborted / timed out sends surface as errors; the
     /// pending-while-buffer-full behavior is the socket-level backpressure.
     ///
@@ -557,7 +731,14 @@ impl WsConnection {
                 Err(AiMuxError::Timeout("websocket send exceeded total timeout".into()))
             }
             res = self.stream.send(Message::Text(text.to_string())) => {
-                res.map_err(|e| ws_error(&self.url, format!("websocket send failed: {e}")))
+                res.map_err(|e| {
+                    ws_error(
+                        &self.url,
+                        format!("websocket send failed: {e}"),
+                        Some(&e),
+                        aimux_core::ApiCallErrorOrigin::Transport,
+                    )
+                })
             }
         }
     }
@@ -577,7 +758,14 @@ impl WsConnection {
                 Err(AiMuxError::Timeout("websocket send exceeded total timeout".into()))
             }
             res = self.stream.send(Message::Binary(bytes.to_vec())) => {
-                res.map_err(|e| ws_error(&self.url, format!("websocket send failed: {e}")))
+                res.map_err(|e| {
+                    ws_error(
+                        &self.url,
+                        format!("websocket send failed: {e}"),
+                        Some(&e),
+                        aimux_core::ApiCallErrorOrigin::Transport,
+                    )
+                })
             }
         }
     }
@@ -627,12 +815,22 @@ impl WsConnection {
                         let detail = frame
                             .map(|f| format!(" (code {}: {})", u16::from(f.code), f.reason))
                             .unwrap_or_default();
-                        return Some(Err(ws_error(&self.url, format!(
-                            "websocket closed by peer{detail}"
-                        ))));
+                        // The peer's close frame is an event on the accepted
+                        // socket, not a transport failure.
+                        return Some(Err(ws_error(
+                            &self.url,
+                            format!("{PEER_CLOSE}{detail}"),
+                            None,
+                            aimux_core::ApiCallErrorOrigin::StreamEvent,
+                        )));
                     }
                     Some(Err(e)) => {
-                        return Some(Err(ws_error(&self.url, format!("websocket error: {e}"))));
+                        return Some(Err(ws_error(
+                            &self.url,
+                            format!("websocket error: {e}"),
+                            Some(&e),
+                            aimux_core::ApiCallErrorOrigin::Transport,
+                        )));
                     }
                 },
             }
@@ -643,12 +841,14 @@ impl WsConnection {
     /// a close handshake against a dead peer must not hang the caller (the
     /// send pends while the socket buffer can't drain).
     pub async fn close(&mut self) {
-        let close_fut = self.stream.close(Some(
+        // What `WebSocketStream::close(Some(frame))` does, expressed through
+        // the transport trait so injected connectors close the same way.
+        let close_fut = self.stream.send(Message::Close(Some(
             tokio_tungstenite::tungstenite::protocol::frame::CloseFrame {
                 code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
                 reason: std::borrow::Cow::Borrowed("finished"),
             },
-        ));
+        )));
         tokio::select! {
             res = close_fut => {
                 let _ = res;

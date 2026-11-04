@@ -722,7 +722,7 @@ MCP 不新增种类。它的条目就是生效目录——各服务器按 id 合
 
 toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用状态，所以比较并交换只覆盖这段窗口；它只作用于一个 id，不会覆盖来源中别处的改动。用户条目的启用状态是本地记录；项目条目一开始是停用的，只有 toggle 或 `dimcode mcp enable|disable` 会启用它。edit 先读 `mcp.configuration` 取得条目的 revision 与文档，再写 `mcp.update`，绝不用 `mcp.save`：save 接收完整配置，而读取会隐藏机密，往返一次就会把它们抹掉。
 
-编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
+编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。它还可以给出 `timeout`——该条目的工具调用时限，毫秒，1000 到 86400000；给 `null` 清除它，按十分钟默认值执行（[MCP 管理 §D20](appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)）。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
 
 ```json
 {"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}
@@ -733,6 +733,8 @@ toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用
 ```json
 {"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
 ```
+
+新建的定义同样可以给出 `timeout`，查看时会显示给出的值。
 
 add 用目录的来源 revision——`userRevision`，来源为 `project` 时用 `projectRevision`——写 `mcp.save`，并拒绝目录中已列出的 id，因为一次 save 会替换该条目。新建文档就是一个条目，带它的来源与 `mcp.save` 接收的定义：
 
@@ -1237,9 +1239,9 @@ JSON 输出包含 `{sessionId, branchId, through, events}`。每个事件都是�
 清楚标注推理、工具调用/结果和非文本附件。它不执行内容、不解析附件 URL、不重放工具。它保留代码围栏，
 同时不允许一条消息闭合外层的工具结果围栏。
 
-CLI 先成功读取固定前缀，再打开输出文件。文件使用"新建"语义：已存在的路径失败，不被替换。在 Unix 上
+CLI 先打开输出文件，再读取固定前缀；读取或写入失败时删除该文件，所以成功的运行留下文件、失败的运行不留。文件使用"新建"语义：已存在的路径失败，不被替换。在 Unix 上
 通过标准 OpenOptions 扩展以 0600 权限创建；Windows 使用原生继承的 ACL。从不为修改权限而打开已有文件。
-历史读取出错后不创建输出文件。写入失败会被报告，可能留下部分新建的文件；不打印成功信息。导出到
+历史读取出错会删除本次运行创建的文件，不留下部分导出；进程在运行中被杀时没有清理，可能留下部分文件。写入失败会被报告并删除文件；不打印成功信息。导出到
 stdout 失败时返回非零码。交互式导出错误回到输入提示符，从不成为模型输入。交互式导出已被接纳期间，
 Ctrl+C 提示 CLI 正在等待结果，并持续消费后续中断直到操作收尾。这些中断不会在下一个提示符处变成退出
 或清空草稿的动作。

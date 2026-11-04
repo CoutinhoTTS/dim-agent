@@ -185,8 +185,8 @@
       "unexpandedMacros": [
         "format",
         "matches",
-        "serde_json::json",
-        "tokio::select"
+        "tokio::select",
+        "unreachable"
       ]
     },
     {
@@ -197,6 +197,16 @@
       "unexpandedMacros": [
         "format",
         "matches"
+      ]
+    },
+    {
+      "id": "dim_agent_aimux::models::tests",
+      "crate": "dim_agent_aimux",
+      "parent": "dim_agent_aimux::models",
+      "file": "crates/dim-agent-aimux/src/models.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "json"
       ]
     },
     {
@@ -228,7 +238,6 @@
         "json",
         "matches",
         "tracing::warn",
-        "unreachable",
         "vec"
       ]
     },
@@ -278,6 +287,7 @@
         "concat",
         "format",
         "json",
+        "matches",
         "panic",
         "vec"
       ]
@@ -291,8 +301,7 @@
         "async_stream::stream",
         "format",
         "matches",
-        "tracing::debug",
-        "unreachable"
+        "tracing::debug"
       ]
     },
     {
@@ -1068,6 +1077,7 @@
       "parent": "dim_agent_capabilities::timeline_tree",
       "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "format",
         "json",
@@ -2156,7 +2166,8 @@
         "assert_eq",
         "format",
         "json",
-        "panic"
+        "panic",
+        "vec"
       ]
     },
     {
@@ -2168,6 +2179,15 @@
         "matches",
         "serde_json::json",
         "unreachable"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::management::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::management",
+      "file": "crates/dim-app-server/src/mcp/management.rs",
+      "unexpandedMacros": [
+        "assert_eq"
       ]
     },
     {
@@ -3205,7 +3225,7 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
-        "json"
+        "write"
       ]
     },
     {
@@ -3349,6 +3369,16 @@
         "matches",
         "vec",
         "write"
+      ]
+    },
+    {
+      "id": "dim_cli::management::mcp::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management::mcp",
+      "file": "crates/dim-cli/src/management/mcp.rs",
+      "unexpandedMacros": [
+        "assert",
+        "json"
       ]
     },
     {
@@ -6388,6 +6418,7 @@
       "references": [
         "path stream",
         "path stream::convert",
+        "path stream::error",
         "use crate::stream"
       ]
     },
@@ -6395,13 +6426,13 @@
       "from": "dim_agent_aimux::driver",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path BedrockAuth::Bearer",
+        "path BedrockAuth::SigV4",
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::classified",
         "path HostErrorKind::InvalidRequest",
         "path HostErrorKind::OwnerClosed",
-        "path HostErrorKind::Transport",
-        "path HostErrorKind::Unsupported",
         "path HostFuture",
         "path ModelChunk",
         "path ModelConnection",
@@ -6410,7 +6441,6 @@
         "path ModelConnection::Local",
         "path ModelDriver",
         "path ModelNetwork",
-        "path ModelNetwork::default",
         "path ModelStream"
       ]
     },
@@ -6418,11 +6448,17 @@
       "from": "dim_agent_aimux::driver",
       "to": "dim_agent_types::model",
       "references": [
+        "path ModelProtocol",
         "path ModelProtocol::Anthropic",
         "path ModelProtocol::Bedrock",
         "path ModelProtocol::Gemini",
+        "path ModelProtocol::OpenaiChat",
+        "path ModelProtocol::OpenaiCompatible",
         "path ModelProtocol::OpenaiResponses",
+        "path ModelProtocol::Xai",
+        "path ModelProtocol::XaiResponses",
         "path ModelRequest",
+        "path model",
         "use dim_agent_types::ModelRequest"
       ]
     },
@@ -6432,6 +6468,20 @@
       "references": [
         "path ModelConfigFile",
         "use crate::config::ModelConfigFile"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models",
+      "to": "dim_agent_aimux::driver",
+      "references": [
+        "path crate::driver::compatible_preset"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models",
+      "to": "dim_agent_aimux::models::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -6488,6 +6538,20 @@
       "references": [
         "path ModelId",
         "use dim_agent_runtime::ModelId"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models::tests",
+      "to": "dim_agent_aimux::config",
+      "references": [
+        "path ModelConfigFile"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models::tests",
+      "to": "dim_agent_aimux::models",
+      "references": [
+        "path AimuxModels::from_config"
       ]
     },
     {
@@ -6636,8 +6700,7 @@
       "from": "dim_agent_aimux::request",
       "to": "dim_agent_aimux::request::native",
       "references": [
-        "mod native",
-        "path native"
+        "mod native"
       ]
     },
     {
@@ -6670,6 +6733,7 @@
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path ContentMetadata",
         "path ContentMetadata::Anthropic",
         "path ContentMetadata::AnthropicRedacted",
         "path ContentMetadata::Bedrock",
@@ -6680,6 +6744,7 @@
         "path ImageSource",
         "path ImageSourceType::Base64",
         "path ImageSourceType::Url",
+        "path MessageContent",
         "path MessageContent::Parts",
         "path MessageContent::Text",
         "path MessagePart",
@@ -6713,7 +6778,10 @@
         "path ProviderKind::Anthropic",
         "path ProviderKind::Bedrock",
         "path ProviderKind::Gemini",
+        "path ProviderKind::OpenaiChat",
+        "path ProviderKind::OpenaiCompatible",
         "path ProviderKind::OpenaiResponses",
+        "path ProviderKind::Xai",
         "path ProviderKind::XaiResponses",
         "path SystemPrompt::Parts",
         "path SystemPrompt::Text",
@@ -6803,6 +6871,7 @@
       "from": "dim_agent_aimux::request::tests",
       "to": "dim_agent_aimux::request",
       "references": [
+        "path PreparedRequest",
         "path convert",
         "path error"
       ]
@@ -6820,7 +6889,6 @@
         "path ProviderKind::OpenaiChat",
         "path ProviderKind::OpenaiCompatible",
         "path ProviderKind::OpenaiResponses",
-        "path ProviderKind::Xai",
         "path ProviderKind::XaiResponses",
         "path SystemPrompt::Parts",
         "path SystemPrompt::Text"
@@ -6845,7 +6913,8 @@
       "from": "dim_agent_aimux::stream",
       "to": "dim_agent_aimux::stream::content",
       "references": [
-        "mod content"
+        "mod content",
+        "path content::metadata"
       ]
     },
     {
@@ -6885,7 +6954,8 @@
       "from": "dim_agent_aimux::stream",
       "to": "dim_agent_types::content",
       "references": [
-        "use dim_agent_types::ContentMetadata",
+        "path dim_agent_types::ContentMetadata",
+        "path dim_agent_types::ContentMetadata::Bedrock",
         "use dim_agent_types::MessagePart"
       ]
     },
@@ -6894,6 +6964,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path ModelProtocol",
+        "path ModelProtocol::Bedrock",
         "path Usage",
         "use dim_agent_capabilities::host::ModelProtocol",
         "use dim_agent_types::Usage"
@@ -7199,6 +7270,7 @@
         "mod host",
         "path host::CompactionStrategyHost",
         "path host::ContextModelHost",
+        "path host::CredentialVariablesHost",
         "path host::ModelHost",
         "path host::ModelSelectionHost",
         "path host::PrepareContextHost",
@@ -13041,6 +13113,13 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path crate::context_block::element"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
         "path BranchLine::fold",
@@ -13055,10 +13134,19 @@
       "references": [
         "path AgentEvent",
         "path EventKind",
+        "path EventKind::InputMessage",
         "path EventKind::ToolResult",
         "path EventKind::ToolUse",
+        "path EventKind::TurnEnd",
+        "path InputMessageData",
+        "path InputMessageData::default",
+        "path InputMessageData::text",
+        "path InputMode::Append",
+        "path InputMode::Queue",
         "path ToolResultData",
-        "path ToolUseData"
+        "path ToolUseData",
+        "path TurnEndData",
+        "path TurnOutcome::Completed"
       ]
     },
     {
@@ -13066,6 +13154,8 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
+        "path ToolResult::error",
+        "path ToolResult::text",
         "path kind"
       ]
     },
@@ -16996,6 +17086,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path dim_agent_capabilities::host::CredentialVariables",
+        "path dim_agent_capabilities::host::CredentialVariablesHost"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path dim_agent_capabilities::host_platform::HostPlatformConfig",
@@ -17652,7 +17750,6 @@
       "references": [
         "path TimelineKey",
         "path dim_agent_runtime::StoredEvent",
-        "path dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineKey"
       ]
     },
@@ -17677,7 +17774,6 @@
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
-        "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
         "path dim_agent_types::AgentEvent",
@@ -18941,6 +19037,7 @@
       "references": [
         "path AgentError",
         "path AgentError::Closed",
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
@@ -18975,6 +19072,7 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "path rebuild_facts",
@@ -19051,6 +19149,7 @@
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
+        "path dim_agent_types::AgentEvent",
         "path events"
       ]
     },
@@ -19122,7 +19221,6 @@
         "path AgentIndex",
         "path SessionRestored",
         "path UnloadedSessionDeleted",
-        "path crate::agents::AgentIndex",
         "path crate::agents::SessionUse",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
@@ -20859,6 +20957,16 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost",
+        "use dim_agent_capabilities::host::CredentialVariables",
+        "use dim_agent_capabilities::host::CredentialVariablesHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
@@ -20906,6 +21014,8 @@
         "path McpAuth::new",
         "path McpAuthError",
         "path auth",
+        "path auth::CredentialKey",
+        "path auth::credential_key",
         "use auth::McpAuth",
         "use auth::McpAuthError"
       ]
@@ -20936,9 +21046,17 @@
         "path McpSettings",
         "path McpSettings::default",
         "path McpSettings::from_value",
+        "path config::Connection",
+        "path config::Expanded",
+        "path config::Origin::Plugin",
+        "path config::Origin::User",
+        "path config::Origin::Workspace",
+        "path config::connected",
         "path config::effective",
         "path config::merge_secret",
         "path config::split_entry",
+        "path config::unresolved",
+        "path config::viewed",
         "path config::workspace",
         "use config::McpEntryError",
         "use config::McpPluginDocument",
@@ -21234,12 +21352,27 @@
       "from": "dim_app_server::mcp::config::tests",
       "to": "dim_app_server::mcp::config",
       "references": [
+        "path BearerAuth::Bearer",
+        "path Expanded",
+        "path McpOAuthSettings",
         "path McpSecretEntry",
+        "path McpServerSettings",
         "path McpServerSettings::Remote",
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::from_file",
-        "path decode_entry"
+        "path McpSettings::from_value",
+        "path Origin::Plugin",
+        "path Origin::User",
+        "path Origin::Workspace",
+        "path PROTECTED_NAMES",
+        "path RemoteTransport::Http",
+        "path Stdio::Stdio",
+        "path decode_entry",
+        "path expand",
+        "path merge_secret",
+        "path split_entry",
+        "path strip_secret"
       ]
     },
     {
@@ -21266,6 +21399,7 @@
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
+        "path SettingsScope::User",
         "use crate::settings::SettingsScope"
       ]
     },
@@ -21295,7 +21429,6 @@
         "path McpSource::Plugins",
         "path McpSource::Project",
         "path McpSource::User",
-        "path super::McpServerEntry",
         "use super::McpChange",
         "use super::McpError",
         "use super::McpService",
@@ -21334,6 +21467,7 @@
         "path RemoteTransport::Http",
         "path RemoteTransport::Sse",
         "path config::decode_entry",
+        "path config::public_endpoint",
         "path config::strip_secret",
         "use super::config",
         "use super::config::BearerAuth",
@@ -21341,6 +21475,13 @@
         "use super::config::McpServerSettings",
         "use super::config::McpSettings",
         "use super::config::RemoteTransport"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp::management::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -21383,6 +21524,32 @@
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management::tests",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path RemoteTransport::Http"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management::tests",
+      "to": "dim_app_server::mcp::management",
+      "references": [
+        "path configuration_view"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost",
+        "use dim_agent_capabilities::host::CredentialVariables",
+        "use dim_agent_capabilities::host::CredentialVariablesHost"
       ]
     },
     {
@@ -21461,11 +21628,13 @@
         "path McpSource::Project",
         "path McpSource::User",
         "path Result",
+        "path daemon_environment",
         "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
         "use super::Result",
+        "use super::daemon_environment",
         "use super::sources_in_precedence"
       ]
     },
@@ -21491,8 +21660,11 @@
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path config",
-        "path config::effective",
-        "path config::merge_secret",
+        "path config::Connection",
+        "path config::Origin::Plugin",
+        "path config::Origin::User",
+        "path config::Origin::Workspace",
+        "path config::connected",
         "path config::settings_changes",
         "path config::workspace",
         "use super::config",
@@ -21540,6 +21712,14 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost"
       ]
     },
     {
@@ -22020,7 +22200,9 @@
       "to": "dim_app_server::mcp",
       "references": [
         "path McpConnection::temporary",
-        "use super::McpConnection"
+        "path daemon_environment",
+        "use super::McpConnection",
+        "use super::daemon_environment"
       ]
     },
     {
@@ -22029,6 +22211,10 @@
       "references": [
         "path McpServerSettings",
         "path McpServerSettings::Stdio",
+        "path config",
+        "path config::Origin::User",
+        "path config::expand",
+        "use super::config",
         "use super::config::McpServerSettings"
       ]
     },
@@ -27426,8 +27612,10 @@
       "from": "dim_cli::export",
       "to": "dim_cli::session",
       "references": [
+        "path HistorySink",
         "path session::read_history",
-        "use crate::session"
+        "use crate::session",
+        "use crate::session::HistorySink"
       ]
     },
     {
@@ -27999,6 +28187,13 @@
     },
     {
       "from": "dim_cli::management::mcp",
+      "to": "dim_cli::management::mcp::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
       "to": "dim_cli::mcp",
       "references": [
         "path Auth",
@@ -28077,6 +28272,14 @@
         "path crate::client::RpcError",
         "path crate::client::app_error",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp::tests",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path Configuration::decode",
+        "path test"
       ]
     },
     {
@@ -30744,7 +30947,8 @@
       "from": "dim_cli::session_host::tasks",
       "to": "dim_cli::model::session",
       "references": [
-        "path Update::Notice"
+        "path Update::Notice",
+        "path Update::Skills"
       ]
     },
     {
@@ -39783,6 +39987,10 @@
       "path": "OptionValue::Text"
     },
     {
+      "module": "dim_agent_aimux::recording",
+      "path": "F::Output"
+    },
+    {
       "module": "dim_agent_capabilities::file_storage::windows",
       "path": "FILE_ID_INFO::default"
     },
@@ -39857,6 +40065,18 @@
     {
       "module": "dim_agent_capabilities::skills::session",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Lost"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Parent"
+    },
+    {
+      "module": "dim_agent_capabilities::timeline_tree",
+      "path": "Wake::Queued"
     },
     {
       "module": "dim_agent_capabilities::workspace_tools::files",

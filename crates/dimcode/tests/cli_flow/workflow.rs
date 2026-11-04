@@ -1858,12 +1858,13 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
     let project = home.0.join("work");
     fs::create_dir(&project).unwrap();
     let socket = home.0.join("rust/daemon.sock");
-    // The installed layout, from the checkout: the product home holds the
-    // plugin files, the defaults name the shipped plugins, and the runtimes
-    // are the system Node and the checkout's runtime packages
-    // (`crates/dim-app-server/README.md`, Plugins). `runtime/node_modules`
-    // holds the packages.
     let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
+    let defaults = home.0.join("workflow-defaults.json");
+    fs::write(
+        &defaults,
+        json!({"plugins":{"workflow":runtime.join("plugins/workflow")}}).to_string(),
+    )
+    .unwrap();
     let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|directory| directory.join("node"))
         .find(|path| path.is_file())
@@ -1878,7 +1879,7 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
         .arg("--product-home")
         .arg(&home.0)
         .arg("--defaults")
-        .arg(runtime.join("default-plugins.json"))
+        .arg(&defaults)
         .arg("--node")
         .arg(node)
         .arg("--js-runtime")
@@ -1899,8 +1900,6 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    // Default plugins start after the daemon does; Workflow's methods are
-    // advertised once it runs.
     let advertised = || -> Option<bool> {
         let stream = UnixStream::connect(&socket).ok()?;
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
