@@ -56,7 +56,7 @@ provides to place it; the scope it is registered for decides.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
-import type { Services } from 'dimcode/plugin'
+import type { BranchEvent, Services } from 'dimcode/plugin'
 
 // A Session part: one copy per Session. It closes over the row's config.
 const greeter = (greeting: string) => definePlugin({
@@ -71,13 +71,30 @@ const greeter = (greeting: string) => definePlugin({
 // A branch part: one copy per branch, providing a name in its branch.
 const counter = definePlugin({
   name: 'ExampleCounter',
-  inject: ['dispatcher'],
+  inject: ['dispatcher', 'timeline'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
+    const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const timeline = ctx.use<Services['timeline']>('timeline')
     let count = 0
-    await ctx.use<Services['dispatcher']>('dispatcher').consume('example-counter', ['input/message'], delivery => {
-      count += 'live' in delivery ? 1 : delivery.replay.filter(event => event.name === 'message').length
-    })
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'input' && event.name === 'message') count++
+    }
+    // One registration: the rebuild folds this branch's facts and returns the
+    // cutoff of its read, then the events above it arrive as live.
+    await dispatcher.consume('example-counter', ['input/message'], async () => {
+      let from: bigint | undefined
+      for (;;) {
+        const page = await timeline.query({
+          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
+          direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
+        })
+        page.events.forEach(fold)
+        const last = page.events.at(-1)
+        if (last === undefined || page.events.length < 256) return BigInt(page.through)
+        from = BigInt(last.sequence) + 1n
+      }
+    }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
 })
@@ -667,7 +684,7 @@ parts.
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `consume(name, keys, handler)` registers an ordered consumer on the calling part's context: the handler receives `{ replay }`, the branch's own committed history through a fixed cutoff, then `{ live }` for each matching event after it, and the call resolves once the replay is handled. `listen(name, keys, handler)` registers for live events only. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
+| `dispatcher` | `consume(name, keys, rebuild, handler)` registers an ordered consumer on the calling part's context. It subscribes first and holds the matching facts, calls `rebuild` once — the part reads the facts it folds through `timeline.query` including its publishing facts and returns the cutoff that read took — then delivers the held facts above the cutoff and each later matching fact, in sequence order, and none twice. `listen(name, keys, handler)` registers a live consumer only, for a part that does not rebuild. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
@@ -684,19 +701,31 @@ const provides = { exampleCounter: { get: 'sync' } } as const
 export const counter = definePlugin({
   name: 'ExampleCounter',
   provides,
-  inject: ['dispatcher'],
+  inject: ['dispatcher', 'timeline'],
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const timeline = ctx.use<Services['timeline']>('timeline')
     let count = 0
     let through = 0n
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
-      through = BigInt(event.sequence)
     }
-    await dispatcher.consume('example-counter', ['input/message'], delivery => {
-      if ('live' in delivery) fold(delivery.live)
-      else for (const event of delivery.replay) fold(event)
-    })
+    await dispatcher.consume('example-counter', ['input/message'], async () => {
+      let from: bigint | undefined
+      for (;;) {
+        const page = await timeline.query({
+          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
+          direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
+        })
+        page.events.forEach(fold)
+        const last = page.events.at(-1)
+        if (last === undefined || page.events.length < 256) {
+          through = BigInt(page.through)
+          return through
+        }
+        from = BigInt(last.sequence) + 1n
+      }
+    }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count, through }) })
   },
 })
@@ -705,18 +734,22 @@ export const counter = definePlugin({
 Its plugin registers it for `branch` and lists `"exampleCounter": "branch"` in its row's
 `instanceNames` ([One row per plugin](#one-row-per-plugin)).
 
-`consume` subscribes, fixes the committed cutoff and hands the handler the replay: this branch's
-own events through the cutoff as `local` reads them, without the ancestor prefix and not filtered
-by the keys, since a rebuild may need facts it does not consume live. Live events after the cutoff
-follow through the same handler in sequence order; none is delivered twice. Live events wait until
-the replay call returns, so do what the replay leaves to do, such as ending the operations a
-previous generation left open, in that call. A rebuild repeats no external side effect. Publish a
-derived service after `consume` resolves. This example's state belongs to the branch part and is
-rebuilt on each generation.
+`consume` subscribes first and holds the events that match the keys, then calls the rebuild, which
+reads this branch's facts through its published head with the facts written and not yet published,
+a page at a time, and folds them itself. The reply's `through` is the cutoff of that read, and it is
+the last page's cutoff when the read pages; an earlier cutoff would re-read what lies between the
+two. The registration returns that cutoff as the rebuild's value, then releases the held facts
+above it, and each later matching fact reaches the handler directly; none is folded twice. Live
+facts wait until the rebuild returns, so do what the rebuild leaves to do, such as ending the
+operations a previous generation left open, before returning. A rebuild repeats no external side
+effect. Publish a derived service after `consume` resolves. This example's state belongs to the
+branch part and is rebuilt on each generation.
 
-The hand-written form stays valid: subscribe with `listen` before sampling `committed()`, rebuild
-from `local` through that fixed cutoff while the handler waits, and skip live events at or below
-it. The [real Node part](../runtime/fixtures/branch-part.ts) is written that way.
+The kind list of the read is the kinds the rebuild folds, which are not always the keys the part
+consumes: a rebuild may fold the terminals of the operations its part issues. A part that reads
+nothing may use `listen` instead, which delivers live facts only; a read of `local` or `history`
+inside a rebuild works too, and the [real Node part](../runtime/fixtures/branch-part.ts) reads that
+way.
 
 Callbacks can run on opening facts before publication. Register long work in the part's owned
 tasks and return; do not wait for dispatch, activation or a child creation whose progress depends
@@ -770,7 +803,7 @@ feeds do not deliver them. History keeps them after your plugin is uninstalled.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
-import type { Services } from 'dimcode/plugin'
+import type { BranchEvent, Services } from 'dimcode/plugin'
 
 export const checkpoints = definePlugin({
   name: 'ExampleCheckpoints',
@@ -781,15 +814,30 @@ export const checkpoints = definePlugin({
     const timeline = ctx.use<Services['timeline']>('timeline')
     // Rebuild from your own events in history; act only on live events.
     let steps = 0
-    await dispatcher.consume('example-checkpoints', ['myplugin/*', 'turn/end'], async delivery => {
-      if ('replay' in delivery) {
-        for (const event of delivery.replay) if (event.type === 'myplugin') steps++
-      } else if (delivery.live.type === 'myplugin') {
-        steps++
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'myplugin') steps++
+    }
+    const release = async (event: BranchEvent) => {
+      if (event.type === 'myplugin') {
+        fold(event)
       } else {
         await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
       }
-    })
+    }
+    // Rebuild from your own events in history; act only on live events.
+    await dispatcher.consume('example-checkpoints', ['myplugin/*', 'turn/end'], async () => {
+      let from: bigint | undefined
+      for (;;) {
+        const page = await timeline.query({
+          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
+          direction: 'ascending', kinds: ['myplugin/*'], limit: 256n, offset: 0n,
+        })
+        page.events.forEach(fold)
+        const last = page.events.at(-1)
+        if (last === undefined || page.events.length < 256) return BigInt(page.through)
+        from = BigInt(last.sequence) + 1n
+      }
+    }, event => release(event))
   },
 })
 ```

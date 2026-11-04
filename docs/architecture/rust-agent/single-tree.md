@@ -202,7 +202,7 @@ Session 与 Timeline 在结构图中分别由 `SessionScopePlugin` 和 `BranchSc
 
 `SessionConfig.collaboration_role: Leader | Member` 是 Session 创建时确定的协作角色，缺省 `Leader`，创建后不变。只有 `CollaborationPlugin` 创建成员 Session 时写入 `Member`；`session.create` 不接受该字段。
 
-`agent` 工具按动作公布必填参数：`request` 需要 `prompt` 和 Agent/profile 目标，`cancel`、`close`、`read` 需要 `agentId + sessionId`，`message` 还需要 `content`，`inspect` 需要 `agentId`，`result` 需要 `resultId`；`list` 不需要目标。成员角色只公布 message/read/list。后台命令的 Task ID 由 `exec_stop` 处理，不是成员身份；无效参数不产生协作操作。
+`agent` 工具按动作公布必填参数：`request` 需要 `prompt` 和 Agent/profile 目标，`cancel`、`close`、`read` 需要 `agentId + sessionId`，`message` 还需要 `content`，`inspect` 需要 `agentId`，`result` 需要 `resultId`；`list` 与 `models` 只需要 `action`。成员角色只公布 message/read/list。后台命令的 Task ID 由 `exec_stop` 处理，不是成员身份；无效参数不产生协作操作。
 
 Collaboration 的成员工具审批在 `collaboration/approvals.rs` 内实现，沿用既有 Session 和分支部件。
 Session 部件注册决策工具与详情查询；成员分支按自己的 Dispatcher 进度观察 Approval，
@@ -364,12 +364,12 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 卸载 | 取消自身在途操作并提交终态：工具调用返回错误结果并在 `structuredContent.settlement` 标记重载结算，模型请求以 `Cancelled` 结束；不代其他能力提交事件 |
 | 重载结算 | Loop 收到带重载结算标记的工具结果、或原因为 `capability reloading` 的模型终态时，turn 以 `Failed` 结束，不再推进；新旧两代 Loop 相同 |
 | 装载：订阅 | 取得依赖后先注册 Dispatcher 订阅 |
-| 装载：重建 | 在能力的重建闸门内固定 `S = Timeline::committed()`，以 `local(..=S)` 读取本分支事件（不含祖先前缀）计算状态。旧代处理器和任务在其卸载完成前结束，读取覆盖旧代写出、尚未发布的终态，不等待持久化或 Dispatcher。重建与事件处理共用闸门，处理器跳过序号不大于 S 的事件；S 之后的事件只走实时消费 |
+| 装载：重建 | 在能力的重建闸门内用 `query`、界取已提交（`bound: committed`），按自己折叠的 kind 读取本分支已发布事件（不含祖先前缀）并加上尚未发布的尾部，读到的截点 `through` 就是本次读取的截点；旧代处理器和任务在其卸载完成前结束，读取覆盖旧代写出、尚未发布的终态，不等待持久化或 Dispatcher。重建与事件处理共用闸门，处理器跳过序号不大于读到的截点的事件；截点之后的事件只走实时消费 |
 | 装载：失败判定 | 读取到的已提交而没有终态的操作，由所属能力提交失败终态，不执行；未结束的 turn 在其在途操作全部有终态后以 `Failed` 结束，期间不再发起模型请求或派发工具调用 |
 | 历史投影 | turn 结束时仍未得到结果的工具提议，投影为未执行的错误结果 |
 | 已知代价 | 未随重载的上下文准备跨过重载时，已判失败的 turn 仍可能完成一次模型调用 |
 
-`Dispatcher::follow`（其他语言为 `dispatcher.consume`）把订阅与重建合为一次注册（[插件契约 §5.2](../../design/plugin-contract.md#52-consuming-facts)）：它先注册订阅，固定 `S`，把 `local(..=S)` 作为一次重放交给处理器；处理器在重放中计算状态、完成失败判定，S 之后的事件在重放处理完后才以实时事件交给同一处理器。手写的订阅、闸门与跳过仍然有效。
+`Dispatcher::consume` 把订阅与重建合为一次注册（[插件契约 §5.2](../../design/plugin-contract.md#52-consuming-facts)）：它先注册订阅并暂存匹配键的实时事件，然后调用重建；重建以分支 `timeline` 的 `query`（界为已提交）读取自己折叠的 kind、算出状态并返回读取的截点，截点之后的暂存事件与之后匹配的事件才按序号交给实时处理器。Dispatcher 不再读历史。其他语言用同一个名字 `consume`，处理函数与重建是各绑定里的函数；不重建的部件用 `listen`，只收实时事件。
 
 随上游重载的能力：
 

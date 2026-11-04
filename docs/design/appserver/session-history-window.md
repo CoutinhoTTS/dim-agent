@@ -18,12 +18,13 @@ and is served by `Connection::history`
 1. It pins `through`: the request's value, or the branch's published head. A
    value beyond the branch's dispatched position fails `invalid`; the call then
    waits until the branch dispatches up to `through`.
-2. It reads `Session::local_page(branch, after, limit, through)`
-   ([agent.rs:530](../../../crates/dim-agent-runtime/src/agent.rs#L530)), which
-   rejects a `through` beyond the published head, then calls the store's
-   `read_page` ([timeline_store.rs:156](../../../crates/dim-agent-runtime/src/timeline_store.rs#L156),
-   SQLite [storage/timeline.rs:2623](../../../crates/dim-app-server/src/storage/timeline.rs#L2623)).
-   `after` must end a batch. `limit` is required and must be positive; the v3
+2. It reads the page through `AgentIndex::history_page`
+   ([agents.rs](../../../crates/dim-app-server/src/agents.rs)): a loaded line
+   pages through the branch's query and the store's `batch_end`, a line that
+   has ended through `TreeCommands.page`, and a line the process does not hold
+   through the App Server's page read
+   ([storage/timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)).
+   `after` and `through` must end a batch. `limit` is required and must be positive; the v3
    method sets no upper bound today, and clients send 256 or 512. A page takes
    `limit` events and then runs to the end of that batch, so it can exceed
    `limit`; it never passes `through`.
@@ -108,7 +109,7 @@ turn consumed.
 | D3 | The window is `(windowStart - 1, through]`: the newest turn at or below `through` together with the `input/message` events that turn consumed (§4.2); with no `turn/start` the window starts at the branch start | Start at `turn/start` only | The prompting input precedes the turn start, and clients render it as their user row (§1.2). A window from `turn/start` gives a turn without its prompt. A fixed number of events before the turn start is arbitrary: a queued input can be much older |
 | D4 | A `latestTurn` page is the newest part of the window, bounded by `HISTORY_TURN_LIMIT` (4,096 raw events) and aims for `HISTORY_TURN_BYTES` (4 MiB of encoded visible events); when the window is larger the reply is its newest part and `nextBefore` names the cursor for the rest. Trimming happens on batch boundaries and never splits a batch, so one batch above 4 MiB is returned whole. A batch above the transport frame (`MAX_FRAME_BYTES` minus headroom, [outbound.rs:6](../../../crates/dim-app-server/src/outbound.rs#L6)) cannot be sent and the call fails `history_too_large` | An event-count bound alone, no bound, or splitting a batch | Events have no size bound: 4,096 events of large tool results can exceed the 16 MiB frame and kill the connection. 4 MiB is a target that bounds ordinary replies, and 4,096 events makes the measured 1,956- and 3,122-event turns one reply and the 6,862-event turn two. A batch is the Timeline's atomic unit, so trimming inside one would break the fold; the only hard error is a batch the transport cannot frame |
 | D5 | `before` adds backward paging: the page ends at the last batch end at or below `before - 1`, and starts at a batch start, so `after = from - 1` reads the same page forward | Read the newest page as `after = head - N`, as [#276](https://github.com/arcships/dim/issues/276) suggested | `after` must end a batch; `head - N` need not, and when it does not the read fails with "cursor is inside an atomic batch", so the client has to search for a boundary. A backward page has to walk batches from their ends |
-| D6 | The turn start and the prompting input are store lookups through one derived partial index, not a scan and not state rebuilt during restore | Fold the newest turn start and the consumed inputs during restore validation; keep them in process memory; or take a native format version | [#601](https://github.com/arcships/dim/issues/601) makes a re-acquired Session skip validation, so a value rebuilt there would be missing exactly when the read is cheap. Process memory would be dropped on unload. The lookups are single statements, independent of the turn's size. The index changes no row and no decode, so it is created at open rather than as a format step (§5.1) |
+| D6 | The turn start and the prompting input are selected reads through one derived partial index, not a scan and not state rebuilt during restore | Fold the newest turn start and the consumed inputs during restore validation; keep them in process memory; or take a native format version | [#601](https://github.com/arcships/dim/issues/601) makes a re-acquired Session skip validation, so a value rebuilt there would be missing exactly when the read is cheap. Process memory would be dropped on unload. Each read is a selection by kind from the pinned watermark down, independent of the turn's size ([ADR 020](../../adr/020-timeline-read-convergence.md) D6). The index changes no row and no decode, so it is created at open rather than as a format step (§5.1) |
 | D7 | A whole-history read keeps using forward paging; the window is opt-in | Replace `after`-paging with backward paging | Clients that show scrollback (CLI, web, export) read from the start and need no window; replacing the direction would change every one of them and the export's fixed-prefix rule |
 | D8 | `sessions.history` (the process service) does not gain the fields | Mirror the fields in both reads | It has no consumer that opens a thread; the fields are a client read. Adding them would advertise a contract nothing uses, and the service can adopt the read when a consumer needs it |
 | D9 | All new request and reply fields are optional; a request without them keeps today's meaning, limits and errors | A protocol version bump | The wire stays v3; replies only gain fields, and request decoding is strict only for fields the client sends. A client learns the feature from `hello.features` (`session.history.latestTurn`), so it never sends the fields to an older daemon that would reject them as unknown |
@@ -302,44 +303,47 @@ Consequences:
 
 ### 5.2 Queries
 
-- Turn start:
-  `SELECT max(sequence) FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' AND sequence<=?3`.
-- Newest input before the turn, the window's floor:
-  `SELECT max(sequence) FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND kind='input/message' AND sequence<=?3`.
-- First request: forward from `T` on the primary key until the first
-  `step/model-start` at or below `through`, collecting the `input/consumed` ids
-  before it. A few events, not a scan of the turn.
-- Input messages: each `input_id` is an event id, so its sequence comes from
-  `timeline_events_by_id`, which already exists
-  ([sqlite.rs:86](../../../crates/dim-app-server/src/storage/sqlite.rs#L86)).
-  `SessionStore::read_events` performs the same lookup today
-  ([storage/timeline.rs:1257](../../../crates/dim-app-server/src/storage/timeline.rs#L1257)).
-- Backward page: rows are read from the primary key
-  `(session_id, branch_id, sequence)` downward from the top, whole batches, so
-  the read does not use `timeline_events_by_end`, which v25 removed
-  ([#596](https://github.com/arcships/dim/issues/596)). The row model already
-  allows a physical row to hold several events (`last_sequence`); the page
-  respects row boundaries and returns events in ascending order.
+The anchors are selections over the loaded branch, so they are the Timeline
+query ([plugin contract §5.4](../plugin-contract.md#54-the-event-query)) over
+this branch, each with the kind named and `through` as the start of its read:
+
+- Turn start: `turn/start`, newest first, one event.
+- Newest input before the turn, the window's floor: `input/message`, newest
+  first from `T`, one event.
+- First request: `step/model-start`, oldest first from `T`, one event at or
+  below `through`.
+- Consumed inputs: `input/consumed`, oldest first from `T` up to the first
+  request, then each `input_id`, which is an event id, as one `input/event_id`
+  read. A few events, not a scan of the turn.
+
+The backward page stays the App Server's own read: rows are read from the
+primary key `(session_id, branch_id, sequence)` downward from the top, whole
+batches, so the read does not use `timeline_events_by_end`, which v25 removed
+([#596](https://github.com/arcships/dim/issues/596)). The row model already
+allows a physical row to hold several events (`last_sequence`); the page
+respects row boundaries and returns events in ascending order, and its ends are
+batch edges, which the query does not carry ([ADR 020](../../adr/020-timeline-read-convergence.md) D4).
 
 ### 5.3 Where the reads live
 
-Both reads are persistence reads of the Session's own branch, next to the store
-reads the App Server already has for Collaboration and summaries: `read_page`
+The anchors are the branch's Timeline service, which `Connection::history`
+already has the loaded Session for. The backward page is a persistence read of
+the Session's own branch, next to the store reads the App Server already has
+for Collaboration and summaries: `read_page`
 ([storage/timeline.rs:1010](../../../crates/dim-app-server/src/storage/timeline.rs#L1010)),
 `read_events`
 ([storage/timeline.rs:1257](../../../crates/dim-app-server/src/storage/timeline.rs#L1257))
 and `read_tool_use_starts`
-([storage/timeline.rs:1293](../../../crates/dim-app-server/src/storage/timeline.rs#L1293)).
-The window is not a Timeline mechanism: it names a turn fact, a message lookup
-and a sequence range, and it is reached from `Connection::history` through
-`AgentIndex`, as `read_tool_use_starts` is
+([storage/timeline.rs:1293](../../../crates/dim-app-server/src/storage/timeline.rs#L1293)),
+reached from `Connection::history` through `AgentIndex`, as
+`read_tool_use_starts` is
 ([agents.rs:670](../../../crates/dim-app-server/src/agents.rs#L670)). The window
 requires the native store: a host without one (`ServerConfig.database_path:
 None`) advertises no `session.history.latestTurn` and answers a window request
 `invalid`, as `session.catalog` is advertised only with a database path. No
-second paging implementation is added. Both the forward and the backward page
-are paging reads, so neither rebuilds the request bodies of `context/prepare`
-and `model/call`; those records do not reach the reply
+second paging implementation is added. Neither the anchors nor the page rebuild
+the request bodies of `context/prepare` and `model/call`; those records do not
+reach the reply
 ([request delta storage §7.5](request-delta-storage.md#75-reads-that-do-not-use-request-bodies)).
 
 The runtime, the Session facade and `sessions.history` are untouched;
@@ -423,13 +427,12 @@ window pages, as it already does after forward pages.
 ## 10. Requirements raised to mechanism owners
 
 None. The design was checked against [§4 rule 8](../../architecture/rust-agent/principles.md#4-通过时间线扩展行为):
-the App Server already reads the Session's store for its own views
-(`read_page`, `read_events`, `read_tool_use_starts`), and the window needs only
-reads over the store's existing tables plus one index. A Timeline facade read
-(`Session::local_page_before`) was considered and rejected: it would add a
-protocol view's needs to the runtime's public read contract, while the window
-also needs the App Server's event-id and kind lookups, and `sessions.history`
-does not need the mode (D8).
+the anchors are the Timeline query the contract already fixes, and the page is
+the App Server's own read of the Session's store (`read_page`, `read_events`,
+`read_tool_use_starts`) over the existing tables plus one index. A Timeline
+facade read with an end bound (`Session::local_page_before`) was considered and
+rejected: the query carries no end and no batch edges, which are what the page
+needs, and `sessions.history` does not need the mode (D8).
 
 ## 11. Acceptance
 

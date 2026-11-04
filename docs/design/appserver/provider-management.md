@@ -45,7 +45,7 @@ with its existing owner; management never writes another owner's state.
 | --- | --- |
 | `managementMethods`, process, namespace `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing namespace |
 | Provider module boundary `stored_selection` (Rust) | Native data-boundary consumers such as Migration; §3.7 adds one pure function over an admitted record, not an RPC, host port or management method |
-| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by Provider | In-process owners that route by model capability (Modality); §3.6 adds one read, not a management method or RPC method |
+| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by Provider | In-process owners that route by model capability (Modality) and the `agent` tool's `models` action; §3.6 adds one read, not a management method or RPC method |
 | Existing `account`, `account.codex`, `account.grok` namespaces | Existing account operations; no new account method, event or managed host capability |
 | `ProviderConnectionResolver`, `ModelSelectionHost` | Provider implements catalog/route decisions through existing types; no new core port |
 | `auxiliaryModel.complete` | Existing caller-selected S4 contract, unchanged |
@@ -504,10 +504,10 @@ not on the `provider` namespace, is not served over RPC, and does not change
 in its own crate, and `xtask check` rejects a dependency on `dim-app-server`, the
 composition layer, so the consumer cannot name `ProviderService`. The port and its
 data type live in `dim-agent-capabilities`, which Provider and the consumer both
-depend on; registering it as a process name lets the consumer declare
-`Keyed<SelectableModelsHost>` and the catalog resolve it. The dependency points
-from the extension to the core, as [ADR 002 D3](../../adr/002-plugin-scope.md)
-requires, and Provider keeps the implementation, the catalog and the rules.
+depend on; registering it as a process name lets a consumer name the port and
+the catalog resolve it, and the dependency points from the extension to the core,
+as [ADR 002 D3](../../adr/002-plugin-scope.md) requires. Provider keeps the
+implementation, the catalog and the rules.
 
 **Contract (language-neutral).** A process host port, no instance key, provided
 by Provider: operation `selectableModels`, asynchronous, request `{}`, reply
@@ -568,7 +568,10 @@ availability predicate of its own. The reply carries IDs and capabilities only,
 not a display name: a client that renders an option joins the ID with the model
 list of `provider.catalog` or `provider.management`, and Modality copies no name.
 Provider gains no per-consumer key, setting or filter: the read has no input, so a
-caller that wants one provider filters the reply.
+caller that wants one provider filters the reply. Collaboration's `agent` tool
+reads the same reply for its `models` action and hands the IDs to the leader's
+model, and keeps no rule of its own either
+([Collaboration](../plugins/Collaboration.md#7-the-models-a-member-can-run)).
 
 **What does not change.** `provider.catalog`, `provider.management`,
 `provider.select`, model selection, adoption, preferences and their errors; the
@@ -593,9 +596,12 @@ pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
 ```
 
 The owner implementation is `ProviderService::selectable_models`; `ProductResolver`
-delegates to it. A consumer declares `Keyed<SelectableModelsHost>` in its `Deps`;
-no consumer reads `ProviderService` directly. A non-Rust consumer reaches the port
-by name when the runtime-services-by-name requirement
+delegates to it. A consumer that needs the read declares
+`Keyed<SelectableModelsHost>` in its `Deps` and gates on it (Modality). A consumer
+that must load without Provider reads the name when it is provided and gates
+nothing (Collaboration's `models` action); it takes a snapshot at load, so a
+Provider reload does not reload it. No consumer reads `ProviderService` directly.
+A non-Rust consumer reaches the port by name when the runtime-services-by-name requirement
 ([#4](https://github.com/arcships/dim/issues/4)) is delivered; that requirement is
 raised once in [Modality §9](../plugins/Modality.md#9-requirements-raised-to-mechanism-owners)
 and is not raised again here.

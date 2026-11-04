@@ -5,6 +5,7 @@ use dim_agent_capabilities::{
     host::{SessionFileErrorCode, SessionFilesHost, StoredSessionFile},
 };
 use dim_agent_runtime::SessionConfig;
+use dim_agent_runtime::testing::chain_events;
 use dim_app_server::storage::{SessionStore, SessionStorePlugin, SqliteStoragePlugin};
 use rusqlite::Connection;
 use rutis::host::{CtxHost, FiberState};
@@ -427,7 +428,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             !history
                 .iter()

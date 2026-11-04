@@ -9,6 +9,7 @@ use dim_agent_capabilities::{
     tool_executor::ToolExecutor,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -290,7 +291,7 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
         soon(stop).await.unwrap().unwrap();
         assert!(native.cleaned.load(Ordering::SeqCst));
         extension.release.notify_one();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(&event.kind, EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn)));
         assert!(matches!(
             events.last().unwrap().kind,
@@ -329,7 +330,7 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
             .unwrap();
         soon(session.idle("main")).await.unwrap();
         assert!(echoed(
-            &session.history("main", None).await.unwrap(),
+            &chain_events(&session, "main", ..).await.unwrap(),
             "resume"
         ));
         soon(agent.close()).await.unwrap();
@@ -444,7 +445,7 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
         .unwrap();
     gate.release.notify_one();
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         !events
             .iter()
@@ -470,7 +471,7 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
         .await
         .unwrap();
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(echoed(&events, "new input"));
     let consumed: Vec<_> = events
         .iter()
@@ -527,7 +528,7 @@ async fn a_steer_input_after_a_stop_starts_a_turn() {
         .unwrap();
     soon(session.idle("main")).await.unwrap();
     assert!(echoed(
-        &session.history("main", None).await.unwrap(),
+        &chain_events(&session, "main", ..).await.unwrap(),
         "after stop"
     ));
     soon(agent.close()).await.unwrap();
@@ -634,7 +635,7 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
     let interrupt = timeline.append(interrupt()).unwrap();
     gate.release.notify_one();
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let call = events
         .iter()
         .find(|event| matches!(event.kind, EventKind::ToolCall(_)))
@@ -700,8 +701,7 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
     soon(gate.entered.notified()).await;
     let stopping = session.clone();
     let mut stop = tokio::spawn(async move { stopping.stop("main", "user stop".into()).await });
-    while !session
-        .history("main", None)
+    while !chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -727,7 +727,7 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
     );
     soon(next_model.started.notified()).await;
     let returned = soon(stop).await.unwrap().unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let interrupt = events
         .iter()
         .find(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
@@ -841,7 +841,7 @@ async fn until_events(
 ) -> Vec<Arc<AgentEvent>> {
     soon(async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if check(&events) {
                 return events;
             }
@@ -934,7 +934,7 @@ async fn a_stop_during_output_keeps_its_text_and_closes_every_started_call() {
         session.get::<ModelProgress>("main").unwrap().unwrap(),
         ModelProgress::default()
     );
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let texts: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -1109,7 +1109,7 @@ async fn a_replaced_request_commits_no_output_its_host_still_streams() {
     drop(chunks);
     soon(model.ended.notified()).await;
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let starts = model_starts(&events);
     assert_eq!(starts.len(), 2);
     let replaced = starts[0].1.clone();
@@ -1198,7 +1198,7 @@ async fn a_steer_during_preparation_ends_the_request_before_the_model_call() {
     soon(native.cleaning.notified()).await;
     native.release.notify_one();
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let starts = model_starts(&events);
     assert_eq!(starts.len(), 2);
     assert!(replaced_terminal(&events, &starts[0].1));
@@ -1321,7 +1321,7 @@ async fn a_steer_consumed_after_the_first_output_waits_for_the_output_end() {
     soon(dispatch.wait_for(|state| state.sequence >= text))
         .await
         .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(
         model_starts(&events).len(),
         1,
@@ -1335,7 +1335,7 @@ async fn a_steer_consumed_after_the_first_output_waits_for_the_output_end() {
         .unwrap();
     drop(chunks);
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let starts = model_starts(&events);
     assert_eq!(starts.len(), 2);
     let first_end = events
@@ -1459,7 +1459,7 @@ async fn hold_steer(session: &Session, gate: &AppliedGate, hold: &TerminalHold) 
         .await
         .unwrap();
     soon(gate.entered.notified()).await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(session, "main", ..).await.unwrap();
     let applied = events
         .iter()
         .find(|event| matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == steer.id))
@@ -1511,7 +1511,7 @@ async fn a_steer_is_not_consumed_between_a_failed_call_and_its_terminal() {
     hold_steer(&session, &gate, &hold).await;
     drop(chunks);
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_steer_after_terminal(&events, &hold, "Provider stream ended without message_stop");
     soon(agent.close()).await.unwrap();
 }
@@ -1574,7 +1574,7 @@ async fn a_steer_is_not_consumed_between_a_failed_preparation_and_its_terminal()
     hold_steer(&session, &gate, &hold).await;
     prepare.fail.notify_one();
     soon(session.idle("main")).await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_steer_after_terminal(&events, &hold, "preparation failed");
     soon(agent.close()).await.unwrap();
 }

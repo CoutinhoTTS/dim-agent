@@ -408,7 +408,7 @@ fn tui_mcp_panel_seeds_a_remote_patch_without_stored_values() {
         "{}",
         &terminal.transcript[header..]
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -444,7 +444,7 @@ fn tui_mcp_panel_shows_one_entries_failed_configuration_read() {
     // The entry after it kept the detail its own read supplied.
     terminal.raw(b"\x1b[B");
     terminal.until("Endpoint: https://metrics.example.com");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -506,7 +506,7 @@ fn tui_mcp_panel_lists_entries_when_the_read_is_absent() {
         "a detail appeared without a read: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -667,7 +667,7 @@ fn tui_mcp_panel_draws_tool_text_sanitized() {
         "the escape sequence reaches the screen: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -701,7 +701,7 @@ fn tui_mcp_panel_shows_a_failed_catalog_read() {
         "a failed read was reported as an applied reload: {}",
         terminal.transcript
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -1776,7 +1776,7 @@ fn mcp_disconnect_closes_the_entry_connections() {
     terminal.until("test / model");
     terminal.write(b"/mcp disconnect docs\r");
     terminal.until("Disconnected docs.");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }

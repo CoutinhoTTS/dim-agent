@@ -216,7 +216,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 **不含业务内容的快照锚定（#130）。** 目前 Timeline 核心和两个存储为了锚定投影快照，都会读取 `context/compaction` 的内容：
 
-- `Timeline::context_with_checkpoint`（[timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)）要求锚点是 `EventKind::ContextCompaction`，比较 `data.through`，并把 `Completed { cursor }` 与 `checkpoint.state.compacted_through` 比对。
+- `Timeline::checkpoint`（[timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)）要求锚点是 `EventKind::ContextCompaction`，比较 `data.through`，并把 `Completed { cursor }` 与 `checkpoint.state.compacted_through` 比对。
 - `MemoryTimelineStore::save_snapshot`（[memory_timeline_store.rs](../../../../crates/dim-agent-runtime/src/memory_timeline_store.rs)）拒绝锚点不是已完成压缩的快照。
 - SQLite 存储（[storage/timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs)）保存时做同样的检查，查找 SQL 还按 `e.kind='context/compaction'` 和 `status='completed'` 过滤。
 
@@ -224,7 +224,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 | 部件 | F1 之后检查什么 |
 | --- | --- |
-| Timeline（`context_with_checkpoint`）与两个存储 | 只检查结构：锚点事件存在于快照的序号上、事件 id 与快照一致、解释器标签匹配、序号在切点之内（另有对解码后检查点的现有恢复位置检查）。不匹配 `EventKind` 或结局，SQL 中也不再出现业务类型或状态 |
+| Timeline（`checkpoint`）与两个存储 | 只检查结构：锚点事件存在于快照的序号上、事件 id 与快照一致、解释器标签匹配、序号在切点之内（另有对解码后检查点的现有恢复位置检查）。不匹配 `EventKind` 或结局，SQL 中也不再出现业务类型或状态 |
 | 快照所有者（`HistoryRenderer`，由 ContextPolicy 保存其快照） | 锚点是否有效，经 Timeline 本来就会调用的解释器回调判断。回调现在还接收锚点事件：`decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>`。它只接受已完成的 `context/compaction`，且其 `retain_from` 与状态一致、`through` 早于快照。返回 `None` 就是缓存未命中，与现在相同 |
 | 保存 | 所有者只在自己已完成的压缩处保存快照，与现在相同；存储不再强制检查类型 |
 
@@ -675,7 +675,7 @@ consume pending inputs --> prepare next request
 - `CompactionInput` 的字段。
 - `CompactionCheckpoint {retain_from, replacement}` 与 `HistoryEntry.source`。
 - `history.rs` 的切点验收与游标查找改为基于事件；快照状态保存 `retain_from`（解释器版本升级）。
-- 快照锚定（#130）：`Timeline::context_with_checkpoint` 只保留结构检查，其 `decode` 回调改为 `fn(&RecoverySnapshot, &AgentEvent)`；`MemoryTimelineStore::save_snapshot` 以及 SQLite 存储的保存与查找都去掉压缩类型与状态的检查。
+- 快照锚定（#130）：`Timeline::checkpoint` 只保留结构检查，其 `decode` 回调改为 `fn(&RecoverySnapshot, &AgentEvent)`；`MemoryTimelineStore::save_snapshot` 以及 SQLite 存储的保存与查找都去掉压缩类型与状态的检查。
 - `AgentLoop` 与 `ContextPreparation` 上的 `PublicService`。
 
 **向机制所有者提出的需求：** 无。

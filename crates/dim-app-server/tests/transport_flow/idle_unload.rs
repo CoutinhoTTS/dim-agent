@@ -4,6 +4,7 @@
 //! the loaded count in `agent.list`, or a call's reply.
 use super::super::deletion::eventually;
 use super::*;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{SessionIdentity, TimelineTreeControl};
 use rutis::host::CtxHost;
 use std::sync::Weak;
@@ -658,7 +659,7 @@ async fn a_refused_unload_leaves_a_streaming_response_intact() {
     let through = sessions.ok("idle", at(&id)).await["sequence"]
         .as_u64()
         .unwrap();
-    let events = session.local("main", ..=through).await.unwrap();
+    let events = branch_events(&session, "main", ..=through).await.unwrap();
     let turn: Vec<_> = events
         .iter()
         .skip_while(|event| event.id != receipt["inputId"])

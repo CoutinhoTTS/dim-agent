@@ -182,16 +182,23 @@ export interface SessionLifecycle {
   release(id: number | bigint): Promise<boolean>
 }
 
-/**
- * What an ordered consumer registered with [`Dispatcher::follow`] receives:
- * the replay once, then live events.
- */
-export type Delivery =
-  | /** The branch's own committed events through the cutoff, as [`Dispatcher::local`] reads them. They are not filtered by the keys: a rebuild also reads facts it does not consume live, such as the terminals of its own operations. */ { replay: import('./plugin.js').BranchEvent[] }
-  | /** A committed event after the cutoff that matches the keys. */ { live: import('./plugin.js').BranchEvent }
-
 /** Delivers one branch's committed events on that branch's private channel. */
 export interface Dispatcher {
+  /**
+   * Registers an ordered consumer that rebuilds: the subscribe and rebuild
+   * steps of the capability reload protocol as one registration (plugin
+   * contract §5.2). It subscribes like [`Self::subscribe`] and holds the
+   * facts that match the keys, calls `rebuild` once, which reads the facts
+   * the part folds through this branch's `timeline` and returns the cutoff
+   * that read took, then delivers the held facts and every later matching
+   * fact above that cutoff, in sequence order and none twice. Live facts
+   * wait until `rebuild` returns, so work it leaves to do, such as terminals
+   * for open operations, is done before them. A `rebuild` failure is
+   * returned and lets no live fact through; live failures and the lifetime
+   * are [`Self::subscribe`]'s.
+   * @throws {AgentErrorThrown}
+   */
+  consume(name: string, keys: string[], rebuild: () => number | bigint | Promise<number | bigint>, handler: (arg0: import('./plugin.js').BranchEvent) => void | Promise<void>): Promise<void>
   /**
    * [`Self::subscribe`] in data form, for parts in other languages: the
    * calling row's `ctx`, owned keys, and a handler taking the committed
@@ -200,29 +207,10 @@ export interface Dispatcher {
    */
   listen(name: string, keys: string[], handler: (arg0: import('./plugin.js').BranchEvent) => void | Promise<void>): Promise<void>
   /**
-   * [`Self::follow`] in data form, for parts in other languages: the
-   * calling row's `ctx`, the keys, and a handler taking each delivery by
-   * value whose failure is the replay's or the subscriber's handler
-   * failure. It resolves once the replay is handled.
-   * @throws {AgentErrorThrown}
-   */
-  consume(name: string, keys: string[], handler: (arg0: Delivery) => void | Promise<void>): Promise<void>
-  /**
-   * The branch's committed sequence: a subscriber's rebuild cutoff. It
-   * rebuilds from [`Self::local`] through it and skips live events at or
-   * below it.
+   * Last sequence assigned on this branch, published or not: the end a
+   * rebuild's read reaches, and the position live delivery continues from.
    */
   committed(): Promise<number | bigint>
-  /**
-   * This branch's own committed events in `start..=through`.
-   * @throws {AgentErrorThrown}
-   */
-  local(start: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
-  /**
-   * The branch's committed events through `through`, ancestor prefix included.
-   * @throws {AgentErrorThrown}
-   */
-  history(through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
   notify(): Promise<void>
   sequence(): Promise<number | bigint>
   changed(): Promise<void>
@@ -267,8 +255,8 @@ export interface TimelineQueryPredicate {
 }
 
 /**
- * One bounded read of a branch's facts: what it covers, at which published
- * sequence, what it accepts, and how much of the result it returns.
+ * One bounded read of a branch's facts: what it covers, how far it reaches,
+ * what it accepts, and how much of the result it returns.
  */
 export interface TimelineQuery {
   scope: TimelineQueryScope
@@ -286,6 +274,12 @@ export interface TimelineQuery {
   order_by?: TimelineQueryOrderBy
   /** The end a page is taken from; ascending is the default. */
   direction?: TimelineQueryDirection
+  /**
+   * Whether the queried branch's own facts written above the published head
+   * belong to the read, up to the point the reply reports as `through`. An
+   * ancestor is read to its cut either way.
+   */
+  include_publishing?: boolean
   /** Event kinds (`domain/name`) the read accepts; empty accepts every kind. */
   kinds?: string[]
   /**
@@ -314,17 +308,13 @@ export interface TimelineQueryReply {
    * read from and its sequence there.
    */
   positions: ({ branch_id: string; sequence: number | bigint })[]
-}
-
-export interface TraceStep {
-  handler: string
-  result?: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean } | null
-}
-
-export interface TimelineTrace {
-  event_id: string
-  original: { type: string; name: string; data: unknown; tags?: string[]; context_render?: boolean; context_state?: boolean }
-  steps: TraceStep[]
+  /**
+   * The sequence the read is cut at on the queried branch: what was
+   * published when it ran, or the committed head it asked for. No fact
+   * above it was read; an ancestor is read to its cut. A caller holding
+   * live events releases the ones above this sequence.
+   */
+  through: number | bigint
 }
 
 export interface Timeline {
@@ -348,8 +338,6 @@ export interface Timeline {
   committed(): Promise<number | bigint>
   /** Pending events participate in idle/close accounting before publication. */
   hasPending(): Promise<boolean>
-  /** @throws {AgentErrorThrown} */
-  history(through?: number | bigint | null): Promise<import('./plugin.js').BranchEvent[]>
   /**
    * One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
    * [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
@@ -361,19 +349,19 @@ export interface Timeline {
    * segment did not use moves to the next one, so paging is skipping and a
    * page shorter than the limit means the selection is exhausted. The read
    * never returns a fact above a branch's coverage: an ancestor to its cut,
-   * this branch to its published head.
+   * this branch to the published head, or to the committed head when the
+   * query asks for it, in which case this branch's own facts in
+   * `published+1..=through` are part of the same page.
+   *
+   * The reply's `through` is the cutoff the read took on this branch: the
+   * published head, or the committed head the query asked for, which is
+   * read when the call starts, so a write during the call stays out of the
+   * page. The published part and the tail are disjoint in sequence, so each
+   * fact is returned once. A caller that holds live events releases the ones
+   * above the cutoff ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
    * @throws {AgentErrorThrown}
    */
   query(query: TimelineQuery): Promise<TimelineQueryReply>
-  /**
-   * Reads the rows this projection consumes after an event cursor; a cursor
-   * inside an atomic batch reads that row and filters by sequence. The event
-   * limit is a target: the final batch may exceed it.
-   * @throws {AgentErrorThrown}
-   */
-  storedContextPage(after: number | bigint, limit: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
-  /** @throws {AgentErrorThrown} */
-  trace(sequence: number | bigint): Promise<TimelineTrace | null>
 }
 
 /** The scope a part is registered for. */

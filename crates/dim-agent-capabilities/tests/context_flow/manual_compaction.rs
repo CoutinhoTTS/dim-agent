@@ -6,6 +6,7 @@ use dim_agent_capabilities::{
     agent_loop::AgentLoop,
     history::{context_messages, read_context, summary_message},
 };
+use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
 use rutis::host::CtxHost;
 use std::sync::atomic::AtomicBool;
 
@@ -263,7 +264,7 @@ async fn until(
 ) -> Vec<Arc<AgentEvent>> {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if done(&events) {
                 return events;
             }
@@ -365,7 +366,7 @@ async fn steers_wait_for_compaction_and_explicit_interrupts_still_cancel() {
         tokio::time::timeout(Duration::from_secs(10), strategy.entered.notified())
             .await
             .expect("the requested compaction starts");
-        let before = session.history("main", None).await.unwrap();
+        let before = chain_events(&session, "main", ..).await.unwrap();
         let start = before
             .iter()
             .find(|event| {
@@ -409,7 +410,7 @@ async fn steers_wait_for_compaction_and_explicit_interrupts_still_cancel() {
         .await;
         let through = applied.last().unwrap().sequence;
         consumed(&session, through).await;
-        let held = session.history("main", None).await.unwrap();
+        let held = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             !held.iter().any(|event| event.sequence > start
                 && matches!(
@@ -438,7 +439,7 @@ async fn steers_wait_for_compaction_and_explicit_interrupts_still_cancel() {
             .await
             .unwrap()
             .unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(strategy.calls.load(Ordering::SeqCst), 1, "{trigger:?}");
         assert_paired(&events);
         let result = events
@@ -552,7 +553,9 @@ pub(crate) fn assert_paired(events: &[Arc<AgentEvent>]) {
 /// The messages a preparation at the head would start from.
 async fn projected(timeline_session: &Session, branch: &str) -> Vec<Message> {
     let through = timeline_session.sequence(branch).unwrap();
-    let context = timeline_session.context(branch, through).await.unwrap();
+    let context = read_context_in(timeline_session, branch, through)
+        .await
+        .unwrap();
     let history = project_context_history(&context).unwrap();
     context_messages(&context, &history)
         .into_iter()
@@ -628,7 +631,7 @@ async fn a_manual_compaction_with_no_turn_writes_only_its_facts() {
     assert_eq!(diagnostics.reason, CompactionReason::Manual);
     assert_eq!(diagnostics.retain_limit.as_ref(), Some(&starts[2].id));
     turns(&session, &["fourth"]).await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let request = events
         .iter()
         .rev()
@@ -706,13 +709,13 @@ async fn a_checkpointed_step_renders_its_context_once() {
     })
     .await
     .expect("the compaction step saves its snapshot");
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let anchor = events
         .iter()
         .find(|event| event.id == snapshot.event_id)
         .unwrap();
     let checkpoint = (default.decode_checkpoint)(&snapshot, anchor).unwrap();
-    store.ranges.lock().unwrap().clear();
+    store.context_pages.lock().unwrap().clear();
     RENDERS.store(0, Ordering::SeqCst);
     let command = session
         .service::<AgentLoop>("main")
@@ -722,9 +725,12 @@ async fn a_checkpointed_step_renders_its_context_once() {
     let events = until(&session, |events| result_for(events, command).is_some()).await;
     assert!(result_for(&events, command).is_some());
     assert!(
-        store.ranges.lock().unwrap().iter().any(|(branch, range)| {
-            branch == "main" && *range.start() == checkpoint.resume.sequence
-        }),
+        store
+            .context_pages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|page| page.branch == "main" && page.from == checkpoint.resume.sequence),
         "the step must read from the checkpoint's resume"
     );
     assert_eq!(
@@ -850,7 +856,7 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
         dispatch.changed().await.unwrap();
     }
     assert!(
-        result_for(&session.history("main", None).await.unwrap(), command).is_none(),
+        result_for(&chain_events(&session, "main", ..).await.unwrap(), command).is_none(),
         "no step runs while a request is in flight"
     );
     model.release.notify_one();
@@ -977,10 +983,16 @@ impl DynPlugin for OpeningReads {
             let identity = ctx.require_at(&self.identity)?;
             let store = &self.store;
             if !self.armed.load(Ordering::SeqCst) {
+                timeline_events(
+                    &timeline,
+                    TimelineQueryScope::Branch,
+                    ..=timeline.committed(),
+                )
+                .await?;
                 return Ok(Effect::Done);
             }
             if identity.branch_id != "main" {
-                timeline.history(Some(0)).await?;
+                timeline_events(&timeline, TimelineQueryScope::Chain, ..=0).await?;
                 let (context, reads) = TASK_READS
                     .scope(Default::default(), async {
                         let context = read_context(&timeline, timeline.committed()).await;
@@ -993,11 +1005,28 @@ impl DynPlugin for OpeningReads {
                 *self.reads.lock().unwrap() = Some((reads, resume.unwrap_or_default()));
                 return Ok(Effect::Done);
             }
-            store.entered.notified().await;
-            timeline.local(2..).await?;
-            let (whole, ()) = tokio::join!(timeline.local(..=timeline.committed()), async {
-                store.release.notify_one();
+            let held = timeline.clone();
+            let reader = tokio::spawn(async move {
+                let through = held.committed();
+                timeline_events(&held, TimelineQueryScope::Branch, ..=through).await
             });
+            ctx.effect(move || async move {
+                reader.abort();
+                let _ = reader.await;
+                Ok(())
+            })?;
+            store.entered.notified().await;
+            timeline_events(&timeline, TimelineQueryScope::Branch, 2..).await?;
+            let (whole, ()) = tokio::join!(
+                timeline_events(
+                    &timeline,
+                    TimelineQueryScope::Branch,
+                    ..=timeline.committed()
+                ),
+                async {
+                    store.release.notify_one();
+                }
+            );
             whole?;
             Ok(Effect::Done)
         })
@@ -1070,7 +1099,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             .unwrap();
         session.idle(&child).await.unwrap();
     }
-    let context = session.context("main", fact).await.unwrap();
+    let context = read_context_in(&session, "main", fact).await.unwrap();
     let renamed = renamed_history(&context).unwrap();
     assert_eq!(
         context_messages(&context, &renamed)
@@ -1125,86 +1154,51 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     );
     assert_eq!(agent.live_openings(), 0);
     let main_head = head("main").await;
-    let child_head = head(&child).await;
     store.ranges.lock().unwrap().clear();
     store.pages.lock().unwrap().clear();
+    store.queries.lock().unwrap().clear();
     *store.hold_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 1));
     armed.store(true, Ordering::SeqCst);
     let session = tokio::time::timeout(Duration::from_secs(5), agent.restore_session(id))
         .await
         .expect("a read of a part does not wait for the held read")
         .unwrap();
-    let reads = std::mem::take(&mut *store.ranges.lock().unwrap());
-    let cut = session
-        .branches()
-        .into_iter()
-        .find(|info| info.id == child)
-        .unwrap()
-        .branch_point
-        .unwrap();
-    let of = |branch: &str| -> Vec<_> {
-        reads
-            .iter()
-            .filter(|(read, _)| read == branch)
-            .map(|(_, range)| range.clone())
-            .collect()
-    };
-    let from_start = |branch: &str| -> Vec<_> {
-        let mut ranges: Vec<_> = of(branch)
-            .into_iter()
-            .filter(|range| *range.start() == 1)
-            .collect();
-        ranges.sort_by_key(|range| *range.end());
-        ranges
-    };
-    let starts = from_start("main");
+    store.ranges.lock().unwrap().clear();
+    let queries = std::mem::take(&mut *store.queries.lock().unwrap());
+    // The opening part reads `main` from its start and the child from its own.
     assert!(
-        starts.contains(&(1..=cut)) && starts.contains(&(1..=main_head)),
-        "{reads:?}"
+        queries
+            .iter()
+            .any(|(branch, range)| branch == "main" && *range.start() == 1),
+        "queries={queries:?}"
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|(branch, range)| branch == &child && *range.start() == 1),
+        "queries={queries:?}"
     );
     let (context_reads, resume) = child_reads.lock().unwrap().take().unwrap();
     assert_eq!(resume, "main");
+    // The child's context read pages the child; a checkpoint on an ancestor
+    // checks its anchor with a point read of that one row.
     assert!(
-        context_reads.iter().all(|(branch, _)| *branch == child),
+        context_reads
+            .iter()
+            .all(|(branch, range)| *branch == child || range.start() == range.end()),
         "{context_reads:?}"
-    );
-    assert_eq!(
-        from_start(&child),
-        [1..=child_head, 1..=child_head],
-        "{reads:?}"
-    );
-    let pages = std::mem::take(&mut *store.pages.lock().unwrap());
-    assert!(
-        matches!(&pages[..], [(branch, 0, events)] if *branch == child && (*events as u64) < child_head),
-        "{pages:?}, {child_head}"
-    );
-    // A checkpointed read checks its anchor with a read of that one row.
-    assert!(
-        of(&child).iter().all(|range| *range.start() == 1
-            || *range.start() > child_head
-            || *range.start() == *range.end()
-            || *range.end() == child_head),
-        "{reads:?}"
-    );
-    assert!(
-        of("main").iter().all(|range| *range.start() == 1
-            || *range.start() > main_head
-            || *range == (2..=main_head)
-            || *range.start() == *range.end()
-            || *range.end() == cut),
-        "{reads:?}"
     );
     assert_eq!(agent.live_openings(), 0);
     let published = session.sequence("main").unwrap();
-    session.local("main", ..).await.unwrap();
+    branch_events(&session, "main", ..).await.unwrap();
     assert!(
         store
-            .ranges
+            .queries
             .lock()
             .unwrap()
             .contains(&("main".into(), 1..=published))
     );
-    let timeline_context = session.context("main", fact).await.unwrap();
+    let timeline_context = read_context_in(&session, "main", fact).await.unwrap();
     let history = renamed_history(&timeline_context).unwrap();
     assert_eq!(
         context_messages(&timeline_context, &history)
@@ -1237,6 +1231,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     };
     let before = [generation("main"), generation(&child)].map(|loop_| loop_.unwrap().0);
     store.ranges.lock().unwrap().clear();
+    store.queries.lock().unwrap().clear();
     let view = reload.0.lock().unwrap().last().cloned().unwrap();
     view.restart().await.unwrap();
     for (branch, before) in ["main", child.as_str()].into_iter().zip(before) {
@@ -1249,10 +1244,11 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     let through = session.sequence("main").unwrap();
     assert!(
         store
-            .ranges
+            .queries
             .lock()
             .unwrap()
-            .contains(&("main".into(), 1..=through))
+            .contains(&("main".into(), 1..=through)),
+        "the reloaded Loop reads the branch from its start"
     );
     agent.close().await.unwrap();
 }
@@ -1290,7 +1286,7 @@ async fn an_interrupt_cancels_a_running_step_and_a_pending_command() {
     assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        results_of(&session.history("main", None).await.unwrap(), command),
+        results_of(&chain_events(&session, "main", ..).await.unwrap(), command),
         1,
         "settled once"
     );
@@ -1356,7 +1352,7 @@ async fn a_reload_during_a_step_settles_it_without_another_strategy_call() {
     assert_eq!(projected(&session, "main").await, before);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        results_of(&session.history("main", None).await.unwrap(), command),
+        results_of(&chain_events(&session, "main", ..).await.unwrap(), command),
         1,
         "settled once"
     );
@@ -1554,7 +1550,7 @@ async fn repeated_and_concurrent_requests_join_the_outstanding_command() {
         .sequence;
     consumed(&session, result).await;
     assert!(loop_service.compact().unwrap() > result);
-    assert_paired(&session.history("main", None).await.unwrap());
+    assert_paired(&chain_events(&session, "main", ..).await.unwrap());
     agent.close().await.unwrap();
 }
 
@@ -1610,7 +1606,7 @@ async fn a_second_command_consumed_while_one_is_outstanding_is_skipped() {
         ContextCompactionResult::Completed { .. }
     ));
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(starts_of(&events), [Some(command)]);
     assert_eq!(results_of(&events, raw), 1);
     assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);

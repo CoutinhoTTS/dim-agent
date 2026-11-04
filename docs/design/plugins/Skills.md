@@ -454,8 +454,8 @@ trip, and no AgentLoop change. The design is:
   Skills of the Session's current view. A disabled or unknown name adds nothing, and a view
   error, a stopped part or a reloading part adds nothing: an error is no opinion. Each Skill is
   resolved once, in the order of its first reference. References are read from the operator's own
-  content only: a block a submit check added, a loaded Skill's instructions or a hook context,
-  never adds one, so a steer of a queued input loads the same Skills as its submit.
+  content only: a block that starts with a runtime marker, which includes the blocks every submit
+  check adds, never adds one, so a steer of a queued input loads the same Skills as its submit.
 - **One block per Skill.** The block is `<dim-skill name="{name}">`, the exact text the `skill`
   tool returns, and `</dim-skill>`. The name is escaped with the attribute escaping every
   `<dim-…>` marker uses, and one function renders the loaded text for both the tool result and
