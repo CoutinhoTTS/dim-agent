@@ -44,6 +44,8 @@ Rules:
 - A missing label leaves the channel alone; no empty quotes.
 - `(claimed)` marks a self-declared `clientName`; it is not an identity.
 - Escape quotes, backslashes and control characters; cap a label at 64 characters.
+- The body is sorted by channel and label, so the same audience produces the same text.
+- A label is escaped as tag text; `<`, `>` and ampersands cannot break the `<dim-state>` element.
 - The body states connections; it does not claim how many people are present.
 - No ids, device names, entry names, attach times or departure history.
 
@@ -148,11 +150,15 @@ A change that arrives during a turn is appended when it arrives. The input-order
 
 No Prompt registry, no configure control, no version.
 
+### Requirements raised to mechanism owners
+
+None to the runtime or rutis.
+
 ## 10. Rule check
 
 | Rule | How this design complies |
 | --- | --- |
-| §1 Parts bounded | The connection registries stay with the App Server; the branch part only appends a snapshot. |
+| §1 Parts bounded; Capability | The connection registries stay with the App Server; `EnvironmentClientsBranch` is the Capability, and there is no process part. |
 | §4 rule 1 Command events | Presence changes no state. |
 | §4 rule 2 Handover | No handover. |
 | §4 rule 3 Before callbacks | The branch part appends in its own task; the event handler only wakes it. |

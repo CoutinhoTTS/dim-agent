@@ -65,7 +65,7 @@ Rules:
 
 ### Branch open
 
-The branch part appends the current snapshot once after the branch is published. The first request of the branch then carries the current value.
+The branch part registers its listener during `apply` and appends the current snapshot once after `BranchLifecycle::activated()`. The first request of the branch then carries the current value.
 
 ### Settings change
 
@@ -74,18 +74,11 @@ The Settings service emits:
 ```text
 SettingsChanged {
   source,
-  revision,
-  origin: Option<session_id>
+  revision
 }
 ```
 
-The branch part uses `origin`:
-
-- `origin` matches the branch's Session: append the current snapshot immediately.
-- `origin` is another Session: mark the branch dirty. On the next `turn/start`, append the current snapshot once.
-- `origin` is empty: mark the branch dirty. On the next `turn/start`, append the current snapshot once.
-
-The branch part does not broadcast a snapshot to other Sessions. An idle Session does not get a block. A Session that is about to run a turn refreshes a dirty value before that turn.
+Every open branch wakes, reads the current value and appends the snapshot when the body differs. There is no origin routing and no turn-boundary refresh. An `Append` input does not drive a turn, so an idle Session gets a new history input but no turn.
 
 No Timeline event is written.
 
@@ -109,15 +102,18 @@ A read failure is not a value. The design does not append `unknown` or a fabrica
 | The setting module's read port | Read the effective values for the body |
 | The branch's input path | Append the snapshot |
 | Process bus (`SettingsChanged`) | Wake on a committed write |
-| `turn/start` | Refresh a dirty snapshot before a turn |
 
 No `PromptRegistry`, no `ConfigureControl`, no prompt source, no version.
+
+### Requirements raised to mechanism owners
+
+None to the runtime or rutis.
 
 ## 7. Rule check
 
 | Rule | How this design complies |
 | --- | --- |
-| §1 Parts bounded | The setting value stays with its module; this capability only appends a snapshot. |
+| §1 Parts bounded; Capability | The setting value stays with its module; `SettingsSnapshotBranch` is the Capability, and there is no process part. |
 | §4 rule 1 Command events | The design changes no setting. The settings tool is [AgentSettings](AgentSettings.md). |
 | §4 rule 2 Handover | No handover. |
 | §4 rule 3 Before callbacks | The branch part appends in its own task; the event handler only marks work and returns. |
@@ -139,10 +135,10 @@ No `PromptRegistry`, no `ConfigureControl`, no prompt source, no version.
 | Scenario | Expected |
 | --- | --- |
 | Branch open | One current snapshot before the first request |
-| Another client changes sandbox | The origin Session gets a snapshot; another Session refreshes at its next `turn/start` |
+| Another client changes sandbox | Every open branch appends the new snapshot; an idle branch gets no turn |
 | Same value written twice | One snapshot, no duplicate |
 | Non-model field changes | No snapshot |
-| Idle Session when another Session changes a setting | No block until `turn/start` |
+| Idle Session when a setting changes | A history snapshot, no turn |
 | Host read fails | Earlier snapshot stays; no fabricated value |
 | Compaction | A snapshot may be removed; no replay |
 | Secret field changes | No snapshot |

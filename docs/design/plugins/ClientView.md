@@ -92,7 +92,11 @@ No Timeline event. The view is process memory on the connection/registry. It is 
 
 - A model-visible "this line" boolean needs a branch-scoped source. That is the same requirement as the permission preset in [EnvironmentSettings §6](EnvironmentSettings.md#6-branch-scoped-settings); the owner decides it.
 
-## 7. Rule check
+## 7. Requirements raised to mechanism owners
+
+None to the runtime or rutis; the per-connection record and its read are new App Server work.
+
+## 8. Rule check
 
 | Rule | How this design complies |
 | --- | --- |

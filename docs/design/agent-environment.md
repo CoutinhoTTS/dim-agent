@@ -19,7 +19,7 @@ The goal is awareness of the user's environment and choices, not a new permissio
 | Attached connections | App Server connection and UI registries | `<dim-state>` snapshot | [EnvironmentClients](plugins/EnvironmentClients.md) |
 | Execution sandbox and network | Execution settings module | `<dim-state>` snapshot | [EnvironmentSettings](plugins/EnvironmentSettings.md) |
 | Per-session model, effort, fast mode | Their setting modules | `<dim-state>` snapshot when provided | [EnvironmentSettings](plugins/EnvironmentSettings.md) |
-| Settings tool | One `settings` tool registered by `SettingsPlugin` | tool call and tool result | [AgentSettings](plugins/AgentSettings.md) |
+| Settings tool | One `settings` tool registered by the setting owner (v1 `ExecutionSettingsPlugin`) | tool call and tool result | [AgentSettings](plugins/AgentSettings.md) |
 | Viewed branch | Client report | deferred | [ClientView](plugins/ClientView.md) |
 | Permission preset | Permission | not delivered | Branch-specific; outside this design |
 
@@ -42,12 +42,7 @@ Environment facts are snapshots, not Prompt sources.
 
 ### Settings
 
-`SettingsChanged` carries `origin: Option<session_id>`.
-
-- The origin Session appends the new snapshot immediately.
-- Another Session marks the setting dirty and appends the current snapshot before its next `turn/start`.
-- An empty origin marks every Session dirty.
-- No broadcast; an idle Session gets no block.
+Every open branch wakes on `SettingsChanged`, reads the current value and appends the snapshot when the body differs. There is no origin routing and no `turn/start` refresh. An `Append` input does not drive a turn, so an idle Session gets a new history input but no turn.
 
 The settings tool is separate from the snapshot. Its result is a tool result; the new value reaches context through the snapshot.
 
@@ -62,14 +57,14 @@ The settings tool is separate from the snapshot. Its result is a tool result; th
 
 ## 5. Settings tool
 
-There is exactly one tool, `settings`, with `op`, `name` and `value`.
+There is exactly one tool, `settings`, with `op` and `name`.
 
 - `list` returns each setting's name, description, type, current value, allowed values and writability.
 - `get` returns one setting.
-- `set` calls the setting module's typed write. A read-only setting returns `not_writable`.
+- v1 has no `set`; a write path is deferred.
 - No source, session or visibility parameter.
-- Permission decides allow, ask or deny. The tool has no security level.
-- Secrets never appear in list, get, set, result or snapshot.
+- Permission decides allow, ask or deny. The read tool uses the `session` risk; it has no write security level.
+- Secrets never appear in list, get, result or snapshot.
 
 The full contract is [AgentSettings](plugins/AgentSettings.md).
 

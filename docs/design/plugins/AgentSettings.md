@@ -2,33 +2,33 @@
 
 Status: Draft. Parent: [agent environment awareness](../agent-environment.md). Issue: [#1022](https://github.com/arcships/dim/issues/1022). Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §4 and §5, [ADR 002](../../adr/002-plugin-scope.md), [ADR 003](../../adr/003-approval-scope.md), [ADR 009](../../adr/009-permission-decides.md), [settings service](../appserver/settings-service.md).
 
-AgentSettings exposes one `settings` tool. The tool lists, reads and changes user settings on demand. It is not a per-setting tool collection, not a general document editor and not a second Settings store. Automatic awareness is [EnvironmentSettings](EnvironmentSettings.md); this document owns only the tool.
+AgentSettings exposes one `settings` tool. In v1 the tool lists and reads user settings on demand; a write path is deferred. It is not a per-setting tool collection, not a general document editor and not a second Settings store. Automatic awareness is [EnvironmentSettings](EnvironmentSettings.md); this document owns only the tool.
 
 ## 1. Decisions
 
 - Exactly one tool, named `settings`. No `settings.execution.set` and no per-setting tools.
-- Parameters are `op`, `name` and `value`. No `source`, `session` or visibility parameter.
+- Parameters are `op` and `name`. No `source`, `session` or visibility parameter.
 - The setting identity is the model-facing `name`; internal routing is hidden.
 - `list` returns the available settings, their descriptions, types, current values and whether they are writable.
 - `get` returns one setting.
-- `set` calls the setting module's typed write. A setting that cannot change returns `not_writable`.
+- `set` is deferred until a setting is writable; v1 has no write path.
 - A refusal is a tool result, not a missing tool.
-- Secrets and `writeOnly` fields never appear in `list`, `get`, `set`, results or logs.
-- No per-setting tool; no tool-level security level.
+- Secrets and `writeOnly` fields never appear in `list`, `get`, results or logs.
+- No per-setting tool; no tool-level security level. The read tool uses the `session` risk, so it does not prompt under the product default.
 
 ## 2. Tool contract
 
 ```json
 {
   "name": "settings",
-  "description": "Read or change the user's settings. Call op=list first to see each setting's name, meaning, current value, type, and whether it is writable. op=get reads one setting. op=set changes a writable setting; read-only settings return not_writable. Never guess a setting name.",
+  "description": "Read the user's settings. Call op=list first to see each setting's name, meaning, current value, type, and whether it is writable. op=get reads one setting. Never guess a setting name.",
   "parameters": {
     "type": "object",
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["list", "get", "set"],
-        "description": "list: show available settings. get: read one. set: change one."
+        "enum": ["list", "get"],
+        "description": "list: show available settings. get: read one."
       },
       "name": {
         "type": "string",
@@ -44,7 +44,7 @@ AgentSettings exposes one `settings` tool. The tool lists, reads and changes use
 }
 ```
 
-`list` takes no `name`. `get` requires `name`. `set` requires `name` and `value`.
+`list` takes no `name`. `get` requires `name`.
 
 The tool has no `source`, `session`, revision, path or document parameter. The setting name is the only identity the model supplies.
 
@@ -92,27 +92,15 @@ Every setting carries a description and type. `allowed` is present when the valu
 }
 ```
 
-### set
-
-```json
-{"op": "set", "name": "model.effort", "value": "low"}
-```
-
-```json
-{"name": "model.effort", "value": "low", "changed": true}
-```
-
 ### Errors
 
 | Error | Meaning |
 | --- | --- |
 | `unknown` | No setting has this name; call `list` |
-| `not_writable` | The setting exists but cannot change |
 | `invalid` | The value has the wrong type or is outside `allowed` |
 | `denied` | Permission or approval refused the call |
-| `failed` | The setting module's write failed |
 
-A refused `set` changes nothing. The result states the reason; the model does not infer success from its own text.
+A refused read changes nothing. The result states the reason; the model does not infer success from its own text.
 
 ## 4. Registration
 
@@ -125,23 +113,21 @@ description
 type
 allowed
 get
-set
 writable
 ```
 
 - The dispatcher maps `name` to the handler. `source` and document paths are internal and never exposed.
 - One tool; no per-setting tool contributions.
 - The tool is registered with the existing `toolRegistry` and `ToolContribution`; it is admitted and executed like every tool.
-- The handler calls the setting module's typed write, which validates and writes through the Settings service (CAS on revision) or its own typed store.
-- A successful write emits `SettingsChanged` with `origin` set to the calling Session.
+- The read handler calls the setting module's read port. A future write path adds a typed setter and separates the write risk.
 
 ## 5. Permission
 
 - Permission sees one tool name: `settings`.
 - `op=list` and `op=get` are normally allowed.
-- `op=set` needs approval when the policy requires it; Permission rules or an advisor inspect `op` and `name`.
+- A future `set` op needs approval; v1 has no `set`.
 - The tool carries no security level. The setting module's `writable` and the real handler decide whether the change is possible; Permission decides whether this call is allowed.
-- A denied call returns `denied`; a read-only setting returns `not_writable`. They are different outcomes.
+- A denied call returns `denied`.
 
 ## 6. Boundaries
 
@@ -153,11 +139,15 @@ writable
 - A concurrent write yields a readable conflict; the tool does not overwrite.
 - A cancelled call leaves the previous value.
 
-## 7. Rule check
+## 7. Requirements raised to mechanism owners
+
+None to the runtime or rutis.
+
+## 8. Rule check
 
 | Rule | How this design complies |
 | --- | --- |
-| §1 Parts bounded | The setting module owns the value and the typed write; the tool is a Session entry. |
+| §1 Parts bounded; Capability | The setting module owns the value; `SettingsTool` is the Capability in the Session. |
 | §4 rule 1 Command events | The setting module writes its own state; the tool does not write another module's state. |
 | §4 rule 2 Handover | No handover. |
 | §4 rule 3 Before callbacks | No wait in an event handler; the tool call is its own task. |
@@ -182,11 +172,7 @@ writable
 | `list` | Names, descriptions, types, values, writability; no secrets |
 | `get` a known setting | The current value and type |
 | `get` an unknown setting | `unknown`; not an empty value |
-| `set` a writable setting | The value changes; a snapshot reaches the origin Session |
-| `set` a read-only setting | `not_writable`; nothing changes |
-| `set` an invalid value | `invalid`; nothing changes |
-| `set` denied by Permission | `denied`; nothing changes |
-| Concurrent write | One wins; the other gets a readable conflict |
+| `set` | Not in the v1 schema |
 | Secret | Never in schema, result, log or snapshot |
 | Two tools declared | Rejected; the design allows exactly one `settings` tool |
 
