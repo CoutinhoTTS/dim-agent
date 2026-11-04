@@ -2633,6 +2633,88 @@ async fn a_plugin_document_cannot_set_the_wrappers_members() {
     fixture.close().await;
 }
 
+async fn management(fixture: &Fixture, method: &str, params: Value) -> Value {
+    fixture
+        .root
+        .get::<dim_app_server::methods::ManagementMethods>()
+        .expect("management methods are installed")
+        .provider(method)
+        .expect("the method is registered")
+        .accept(method.into(), params, CancellationToken::new(), |_| {})
+        .expect("the method is accepted")
+        .reply
+        .await
+        .expect("the method replies")
+        .expect("the method succeeds")
+}
+
+/// #952: a `://` inside a query value is withheld text, so a move never puts
+/// the preceding query into the project file or the configuration view, and
+/// the overlay keeps the full URL.
+#[tokio::test]
+async fn a_moved_reference_url_keeps_its_query_in_the_overlay() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let url = "${BASE}/mcp?token=demo-key&next=https://callback.example/done";
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "query".into(),
+            McpChange::Put(serde_json::from_value(json!({"type": "http", "url": url})).unwrap()),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "query".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let project = fs::read_to_string(fixture.home.join("project/.mcp.json")).unwrap();
+    assert!(
+        !project.contains("demo-key"),
+        "the project file keeps the query private: {project}"
+    );
+    assert!(
+        !project.contains("callback.example"),
+        "the project file keeps the query private: {project}"
+    );
+
+    let configuration = management(
+        &fixture,
+        "mcp.configuration",
+        json!({"source": "project", "id": "query", "cwd": fixture.home.join("project")}),
+    )
+    .await;
+    assert_eq!(configuration["configuration"]["endpoint"], "${BASE}/mcp");
+    assert!(
+        !configuration.to_string().contains("demo-key"),
+        "the configuration view keeps the query private: {configuration}"
+    );
+
+    let secrets: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("mcp-secrets.json")).unwrap()).unwrap();
+    let workspace = fs::canonicalize(fixture.home.join("project")).unwrap();
+    assert_eq!(
+        secrets["entries"][workspace.to_str().unwrap()]["query"]["url"],
+        url,
+        "the overlay keeps the full URL"
+    );
+    fixture.close().await;
+}
+
 /// #1014: a member dim does not read is unknown and goes back as written, and
 /// `$generation` stays reserved: the entry that carries it reads as broken,
 /// beside the entries that load.

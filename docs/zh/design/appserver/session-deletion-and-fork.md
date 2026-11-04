@@ -437,7 +437,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 | 对象 | 需求 | 状态 |
 | --- | --- | --- |
 | FileStorage | `remove` 在报告成功之前同步被移除条目的父目录（条目原本就不存在时也同步），同步失败时返回 `Unsynced`。Windows 没有目录同步，与 `replace` 一样依赖 NTFS 元数据日志。用于让删除的移除在提交之前落盘（§4） | 已在 S5c 中实现（[FileStorage](../../../architecture/rust-agent/plugins/FileStorage.md#listing-and-removal)） |
-| Loop、InputQueue、BackgroundExec | 作用于固定前缀的只读静止点检查：没有未结束的轮次，没有等着驱动轮次的 Queue 或 Steer 输入，每个后台任务都已结束且其唤醒已发出（§6.2）。某个能力的重载规则以后要从其他事实开始工作时，就把这些事实加入检查，分叉因此始终不会开始任何工作 | 已在 Agents 中实现，读取这些能力的公开事实，不改动它们（§16 D1）。它们的所有者保留这些事实；某条重载规则以后要从其他事实开始工作时，扩展 [agents.rs](../../../../crates/dim-app-server/src/agents.rs) 中的 `rest_point`。实现中发现、留给 BackgroundExec 所有者的问题：它的 `rebuild` 沿用了更早一代的分支关闭（`session.close` 或正常关机）留下的 `closing`，因此恢复之后不会重新发出崩溃中丢失的唤醒。`rest_point` 像实时唤醒那样把这个标志限定在本代之内，所以落在这样的 `exec/ended` 与其唤醒之间的切点会被拒绝 |
+| Loop、InputQueue、BackgroundExec | 作用于固定前缀的只读静止点检查：没有未结束的轮次，没有等着驱动轮次的 Queue 或 Steer 输入，每个后台任务都已结束且其唤醒已发出（§6.2）。某个能力的重载规则以后要从其他事实开始工作时，就把这些事实加入检查，分叉因此始终不会开始任何工作 | 已在 Agents 中实现，读取这些能力的公开事实，不改动它们（§16 D1）。它们的所有者保留这些事实；某条重载规则以后要从其他事实开始工作时，扩展 [agents.rs](../../../../crates/dim-app-server/src/agents.rs) 中的 `RestPoint`。实现中发现、留给 BackgroundExec 所有者的问题：它的 `rebuild` 沿用了更早一代的分支关闭（`session.close` 或正常关机）留下的 `closing`，因此恢复之后不会重新发出崩溃中丢失的唤醒。`RestPoint` 像实时唤醒那样把这个标志限定在本代之内，所以落在这样的 `exec/ended` 与其唤醒之间的切点会被拒绝 |
 | Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。原先重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | 已实现（[#127](https://github.com/arcships/dim/issues/127)）。#127 之前，这种重载会停止已加载的该成员；现在成员自身重载规则启动的工作会继续运行，leader 已把请求结算为失败，成员发给 leader 分叉的 `agent` 消息因没有成员关系而被拒绝（`TeamMemberNotFound`）（[#97 评审](https://github.com/arcships/dim/pull/97)）。重启后 Team 保留：关系由存储的 leader 重建（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)）。验收第 7 条 |
 | Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | 复制来的目标不得在 F 中驱动轮次，也不是 F 的目标。分叉在其事务中、复制来的事实之后写 `session/forked`（§6.5）；Goal 从该事实之后折叠 `main`，并对复制来的生效目标清除一次（[Goal](../plugins/Goal.md) A11） | 随 Goal 验收实现（[#209](https://github.com/arcships/dim/pull/209)） |
 | S5b（[#60](https://github.com/arcships/dim/issues/60)） | 标题元数据行在删除事务中删除，分叉不复制 | 已在 S5b 实现（[#96](https://github.com/arcships/dim/pull/96)，[标题元数据 §9](session-title-metadata.md#9-生命周期)） |
@@ -468,7 +468,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 | # | 变更 | 理由 |
 | --- | --- | --- |
-| D1 | 静止点检查是 Agents 中的 `rest_point`：在 Agents 为 `validate_context_boundary` 已经读取的前缀上，只读地折叠 Loop、InputQueue 和 BackgroundExec 的公开事实，而不是放在能力 crate 中 `validate_context_boundary` 旁边的检查。其中的输入规则与 Loop 一致：在最后一次 `stop/interrupt` 之前已采纳、尚未消费的 Queue 或 Steer 输入允许留下，因为重载不会执行它（它会像 Append 输入一样并入下一次请求）；InputQueue 因撤回而删除的输入（`input/deleted`，S1）永远不会被采纳，不计入；其他尚未采纳的输入则被拒绝。任务若不是在本代的分支关闭之后结束，就必须有唤醒，与实时唤醒的发出条件一致 | 它需要的事实都是公开事件，因此不需要这些能力提供 API，也不改动它们。要求所有这类输入都已消费，会拒绝刚停止一轮之后的切点，而那里并不会执行任何东西 |
+| D1 | 静止点检查是 Agents 中的 `RestPoint`：在 Agents 为 `validate_context_boundary` 已经读取的前缀上，只读地折叠 Loop、InputQueue 和 BackgroundExec 的公开事实，而不是放在能力 crate 中 `validate_context_boundary` 旁边的检查。其中的输入规则与 Loop 一致：在最后一次 `stop/interrupt` 之前已采纳、尚未消费的 Queue 或 Steer 输入允许留下，因为重载不会执行它（它会像 Append 输入一样并入下一次请求）；InputQueue 因撤回而删除的输入（`input/deleted`，S1）永远不会被采纳，不计入；其他尚未采纳的输入则被拒绝。任务若不是在本代的分支关闭之后结束，就必须有唤醒，与实时唤醒的发出条件一致 | 它需要的事实都是公开事件，因此不需要这些能力提供 API，也不改动它们。要求所有这类输入都已消费，会拒绝刚停止一轮之后的切点，而那里并不会执行任何东西 |
 | D2 | `session.fork` 需要原生存储。没有原生存储的守护进程（不带 `--database` 的 mock 配置）不在 `hello.features` 中列出它，并回复 `unknown_method`（"Method requires native storage"）。`session.delete` 在那里同样与 `session.create` 一起列出；没有存储时它关闭 Session 并将其遗忘 | 分叉复制的是存储的行；内存中的 Timeline 没有可供复制的 SessionStore |
 | D3 | `session.delete` 对不是单一路径分量的 `sessionId` 回复 `session_invalid_input`。空 `sessionId` 会更早被拒绝：在每个 Session 方法共享的边界上回复 `invalid_params`（"sessionId must not be empty"）；路径分量规则覆盖其余 id。Agents 在取得任何准入状态之前检查它；删除若在该 id 下既没有找到已加载的 Session 也没有找到存储的行，就不为它保留槽位；对 Agents 不认识的 id 执行 `session.close` 也不保留 | 这个 id 构成 `command-output/<id>`。Session id 是 UUID；否则像 `<S>/.` 这样的 id 会移除 S 的命令输出，却不删除任何行。没有后两条规则，删除或关闭任意不存在的 id 都会各留下一个槽位，没有上限 |
 | D4 | 分叉事务不再检查切点：它复制 `main` 截至 `at` 的行，运行时在构建分叉时校验这些行。校验失败的副本和任何失败的创建一样被回滚 | Agents 已在源上检查过切点（已发布的头部、批次末尾、上下文边界、静止点），而切点及之前的行不会改变；在事务中再检查一次，只会重复每次构建都会执行的校验 |
@@ -511,7 +511,11 @@ impl AgentIndex {
     pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session>;
 }
 /// The rest point of §6.2 over `main`'s prefix (D1).
-fn rest_point(events: &[Arc<AgentEvent>]) -> Result<(), String>;
+struct RestPoint;
+impl RestPoint {
+    fn page(&mut self, events: &[Arc<AgentEvent>]);
+    fn check(&self) -> Result<(), String>;
+}
 impl SessionStore {
     /// `ctx` gives each file step the node's FileStorage; `files_root` is the
     /// database directory's root.

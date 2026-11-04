@@ -988,10 +988,11 @@ impl McpSecretOAuth {
 /// The safe part of a project entry, without the overlay-held members.
 ///
 /// A reference is not a URL, so parsing and serializing it would change its
-/// spelling or reject the entry. With a reference, the scheme and authority
-/// are kept as written, in the reference's own case, and everything the
-/// reference could hide (userinfo, path, query and fragment) is dropped. A
-/// reference without an authority keeps the text before any `?` or `#`.
+/// spelling or reject the entry. With a reference, a value whose first `://`
+/// comes before any `/`, `?` or `#` keeps its scheme and authority as
+/// written, in the reference's own case, and everything the reference could
+/// hide (userinfo, path, query and fragment) is dropped. A reference without
+/// such a scheme keeps the text before any `?` or `#`.
 /// Without a reference the previous rule applies: a URL reduces to its
 /// origin, and unparseable text is returned as written.
 pub(crate) fn public_url(value: &str) -> String {
@@ -1047,15 +1048,24 @@ fn has_reference(value: &str) -> bool {
 
 fn reference_public_url(value: &str) -> String {
     let Some((scheme, rest)) = value.split_once("://") else {
-        let end = value.find(['?', '#']).unwrap_or(value.len());
-        return value[..end].to_owned();
+        return before_query_or_fragment(value);
     };
+    // A `://` after a `/`, `?` or `#` belongs to the withheld text, not to
+    // the value's leading components.
+    if scheme.contains(['/', '?', '#']) {
+        return before_query_or_fragment(value);
+    }
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..end];
     let authority = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
     format!("{scheme}://{authority}")
+}
+
+fn before_query_or_fragment(value: &str) -> String {
+    let end = value.find(['?', '#']).unwrap_or(value.len());
+    value[..end].to_owned()
 }
 
 fn public_oauth(oauth: &McpOAuthSettings) -> Option<McpOAuthSettings> {
@@ -2509,6 +2519,22 @@ mod tests {
         // No authority: the text before any query or fragment stays.
         assert_eq!(public_url("${MCP_URL}/mcp"), "${MCP_URL}/mcp");
         assert_eq!(public_url("${MCP_URL}/mcp?x#y"), "${MCP_URL}/mcp");
+        // A `://` after a `/`, `?` or `#` is part of the withheld text, not the
+        // value's scheme, so the query never becomes public.
+        assert_eq!(
+            public_url("${BASE}/mcp?token=demo-key&next=https://callback.example/done"),
+            "${BASE}/mcp"
+        );
+        assert_eq!(public_url("${BASE}/mcp#frag?x=https://y"), "${BASE}/mcp");
+        // The scheme may be a reference itself; userinfo, path and query go.
+        assert_eq!(
+            public_url("${SCHEME}://user:secret@host/mcp?token=t"),
+            "${SCHEME}://host"
+        );
+        assert_eq!(
+            public_url("https://${HOST}/a?next=https://b"),
+            "https://${HOST}"
+        );
 
         // Without a reference the previous rule is unchanged.
         assert_eq!(

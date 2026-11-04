@@ -21,7 +21,7 @@ pub use session::SchedulerSession;
 /// Installs the scheduler as an optional feature: the process owner and the
 /// `schedule` tool. Neither is required, so a host without the App Server
 /// services it needs (settings, pluginFiles, managementMethods and
-/// sessionPermissions), or with an unreadable run store, still starts and
+/// sessionPermissions and sessions), or with an unreadable run store, still starts and
 /// opens Sessions; only `schedule.*` and the tool are unavailable.
 pub fn install(builder: &mut AgentBuilder) {
     install_with(builder, SchedulerTexts::default()).expect("the built-in texts are valid");

@@ -405,21 +405,27 @@ fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQu
 /// How many facts one page of a prefix read holds.
 const PREFIX_PAGE: u64 = 4096;
 
-/// The facts of the session's `main` chain through `at`, in chain order: the
-/// fork's rest-point check folds them as one history.
+/// Folds the facts of the session's `main` chain through `at`, in chain order,
+/// into `rest` one page at a time: the fork's rest-point check reads them as
+/// one history without the prefix being held.
 async fn chain_through(
     session: &Session,
     at: u64,
-) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    rest: &mut RestPoint,
+) -> dim_agent_runtime::Result<()> {
     let mut query = history_page_query(0, PREFIX_PAGE as usize);
     query.scope = dim_agent_runtime::TimelineQueryScope::Chain;
-    let mut events: Vec<Arc<dim_agent_types::AgentEvent>> = Vec::new();
     loop {
         let reply = session.query("main", query.clone()).await?;
         let short = (reply.events.len() as u64) < PREFIX_PAGE;
         let last = reply.positions.last().map(|position| position.sequence);
-        events.extend(reply.events);
-        if events.last().is_some_and(|event| event.sequence >= at) {
+        let cut = reply.events.partition_point(|event| event.sequence <= at);
+        rest.page(&reply.events[..cut]);
+        if reply
+            .events
+            .last()
+            .is_some_and(|event| event.sequence >= at)
+        {
             break;
         }
         match (short, last) {
@@ -427,8 +433,7 @@ async fn chain_through(
             _ => break,
         }
     }
-    events.retain(|event| event.sequence <= at);
-    Ok(events)
+    Ok(())
 }
 
 impl AgentIndex {
@@ -448,8 +453,6 @@ impl AgentIndex {
     /// How many `input/message` facts a session summary's preview scan keeps.
     const SUMMARY_SCAN_LIMIT: u64 = 256;
     const SUMMARY_PREVIEW_CHARS: usize = 120;
-    /// How many `step/tool-use-start` facts one read of a call's start holds.
-    const TOOL_USE_START_PAGE: u64 = 1024;
     /// Process Session defaults that Agent profiles apply on top of.
     pub fn session_defaults(&self) -> &SessionConfig {
         &self.session_defaults
@@ -724,52 +727,6 @@ impl AgentIndex {
     pub(crate) fn session_available(&self, id: &str) -> bool {
         self.host_by_session(id).is_some() && !self.closed(id)
     }
-    pub(crate) async fn read_page(
-        &self,
-        id: &str,
-        after: u64,
-        limit: usize,
-        through: Option<u64>,
-    ) -> dim_agent_runtime::Result<(u64, Vec<Arc<dim_agent_types::AgentEvent>>)> {
-        if let Some(store) = &self.session_store {
-            let head = match self
-                .session(id)
-                .map(|(_, session)| (session.sequence("main"), session))
-            {
-                Some((Ok(head), _)) => head,
-                Some((Err(error), session)) if !session.is_unloading() => return Err(error),
-                // Not loaded, or released under the read: the store holds
-                // every event it published (idle unload D8).
-                _ => {
-                    store
-                        .timeline_store()
-                        .head(&dim_agent_runtime::TimelineKey {
-                            session_id: id.into(),
-                            branch_id: "main".into(),
-                        })
-                        .await?
-                }
-            };
-            let through = through.unwrap_or(head);
-            if through > head {
-                return Err(AgentError::InvalidInput("future Timeline sequence".into()));
-            }
-            return Ok((
-                through,
-                store
-                    .read_page_without_request_bodies(id, "main", after, limit, through)
-                    .await?,
-            ));
-        }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        let through = through.unwrap_or(session.sequence("main")?);
-        Ok((
-            through,
-            session_history_page(&session, "main", after, limit, through).await?,
-        ))
-    }
     /// One page of `branch`'s own facts after `after`, at most `limit`, never
     /// past `through`, ending on an atomic batch.
     ///
@@ -810,99 +767,6 @@ impl AgentIndex {
             .ok_or_else(|| AgentError::Closed(id.into()))?
             .read_page_without_request_bodies(id, branch, after, limit, through)
             .await
-    }
-    /// The stored events of `event_ids` in one read; ids the store does not
-    /// hold are absent.
-    pub(crate) async fn read_events(
-        &self,
-        id: &str,
-        event_ids: &[String],
-    ) -> dim_agent_runtime::Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
-        if let Some(store) = &self.session_store {
-            return store.read_events(id, event_ids).await;
-        }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        let mut found = HashMap::with_capacity(event_ids.len());
-        for event_id in event_ids {
-            let reply = session
-                .query(
-                    "main",
-                    TimelineQuery {
-                        scope: TimelineQueryScope::Branch,
-                        include_publishing: false,
-                        from_event: None,
-                        from_sequence: None,
-                        order_by: TimelineQueryOrderBy::Sequence,
-                        direction: TimelineQueryDirection::Ascending,
-                        kinds: Vec::new(),
-                        flags: Vec::new(),
-                        event_id: Some(event_id.clone()),
-                        predicate: None,
-                        limit: NonZeroU64::MIN,
-                        offset: 0,
-                    },
-                )
-                .await?;
-            if let Some(event) = reply.events.into_iter().next() {
-                found.insert(event.id.clone(), event);
-            }
-        }
-        Ok(found)
-    }
-    /// The main-branch `step/tool-use-start` of each `(request_id, call_id)`
-    /// in one read; calls the store does not hold are absent.
-    pub(crate) async fn read_tool_use_starts(
-        &self,
-        id: &str,
-        keys: &[(String, String)],
-    ) -> dim_agent_runtime::Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>>
-    {
-        if let Some(store) = &self.session_store {
-            return store.read_tool_use_starts(id, keys).await;
-        }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        let mut starts = HashMap::with_capacity(keys.len());
-        let mut query = TimelineQuery {
-            scope: TimelineQueryScope::Branch,
-            include_publishing: false,
-            from_event: None,
-            from_sequence: Some(1),
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Ascending,
-            kinds: vec!["step/tool-use-start".into()],
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::new(Self::TOOL_USE_START_PAGE)
-                .expect("a page keeps at least one tool use"),
-            offset: 0,
-        };
-        loop {
-            let reply = session.query("main", query.clone()).await?;
-            let short = (reply.events.len() as u64) < Self::TOOL_USE_START_PAGE;
-            let last = reply.positions.last().map(|position| position.sequence);
-            for event in reply.events {
-                let EventKind::ToolUseStart(start) = &event.kind else {
-                    continue;
-                };
-                let key = (start.request_id.clone(), start.call_id.clone());
-                if keys.contains(&key) {
-                    starts.insert(key, event);
-                }
-            }
-            if short || starts.len() == keys.len() {
-                break;
-            }
-            match last {
-                Some(last) => query.from_sequence = Some(last + 1),
-                None => break,
-            }
-        }
-        Ok(starts)
     }
     /// The error a history window answers without the native Session store.
     fn no_history_store() -> AgentError {
@@ -1648,16 +1512,17 @@ impl AgentIndex {
             let boundary =
                 dim_agent_capabilities::history::validate_context_boundary_in(session, "main", at)
                     .await?;
-            let prefix = chain_through(session, at).await?;
-            Ok::<_, AgentError>((boundary, prefix))
+            let mut rest = RestPoint::default();
+            chain_through(session, at, &mut rest).await?;
+            Ok::<_, AgentError>((boundary, rest))
         }
         .await;
         if session.is_closing() {
             return Err(AgentError::Closed(source.into()));
         }
-        let (boundary, prefix) = checked?;
+        let (boundary, rest) = checked?;
         boundary
-            .and_then(|()| rest_point(&prefix))
+            .and_then(|()| rest.check())
             .map_err(AgentError::InvalidInput)?;
         let version = self
             .version_of(source)
@@ -1902,7 +1767,8 @@ impl AgentIndex {
     }
 }
 
-/// Whether a fork whose `main` holds `events` starts no work when it loads
+/// Whether a fork whose `main` holds the prefix folded here starts no work
+/// when it loads
 /// ([S5c §6.2](../../../docs/design/appserver/session-deletion-and-fork.md#62-the-cut)).
 /// The reload rules that start work read these facts: Loop and InputQueue
 /// start a turn for an open turn's work or for a Queue or Steer input not
@@ -1913,27 +1779,38 @@ impl AgentIndex {
 /// the cut. This reads only their public facts;
 /// a capability whose reload rule comes to start work from other facts
 /// adds them here, so a fork keeps starting nothing.
-fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String> {
-    use dim_agent_capabilities::workspace_tools::background::WAKE_RESULT_TAG;
-    use dim_agent_types::{ExecStatus, InputMode, InterruptScope};
-    let mut turn = false;
-    let mut interrupted_at = 0;
-    let mut closing = false;
-    let mut inputs: BTreeMap<&str, Option<u64>> = BTreeMap::new();
-    let mut tasks = BTreeSet::new();
-    let mut wakes = BTreeSet::new();
-    for event in events {
+#[derive(Default)]
+struct RestPoint {
+    turn: bool,
+    interrupted_at: u64,
+    closing: bool,
+    /// Inputs not yet consumed, and the sequence each was applied at.
+    inputs: BTreeMap<String, Option<u64>>,
+    tasks: BTreeSet<String>,
+    wakes: BTreeSet<String>,
+}
+
+impl RestPoint {
+    /// Folds one page of the prefix.
+    fn page(&mut self, events: &[Arc<dim_agent_types::AgentEvent>]) {
+        for event in events {
+            self.event(event);
+        }
+    }
+    fn event(&mut self, event: &dim_agent_types::AgentEvent) {
+        use dim_agent_capabilities::workspace_tools::background::WAKE_RESULT_TAG;
+        use dim_agent_types::{ExecStatus, InputMode, InterruptScope};
         match &event.kind {
-            EventKind::TurnStart(_) => turn = true,
-            EventKind::TurnEnd(_) => turn = false,
-            EventKind::BranchStart(_) | EventKind::BranchResume(_) => closing = false,
+            EventKind::TurnStart(_) => self.turn = true,
+            EventKind::TurnEnd(_) => self.turn = false,
+            EventKind::BranchStart(_) | EventKind::BranchResume(_) => self.closing = false,
             EventKind::StopInterrupt(data) => {
-                interrupted_at = event.sequence;
-                closing |= data.scope == InterruptScope::Branch;
+                self.interrupted_at = event.sequence;
+                self.closing |= data.scope == InterruptScope::Branch;
             }
             EventKind::InputMessage(data) => {
                 if data.effective_mode() != InputMode::Append {
-                    inputs.insert(&event.id, None);
+                    self.inputs.insert(event.id.clone(), None);
                 }
                 if let Some(ended) = event
                     .tags
@@ -1941,47 +1818,50 @@ fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String>
                     .flatten()
                     .find_map(|tag| tag.strip_prefix(WAKE_RESULT_TAG))
                 {
-                    wakes.remove(ended);
+                    self.wakes.remove(ended);
                 }
             }
             EventKind::InputApplied(data) => {
-                if let Some(applied) = inputs.get_mut(data.input_id.as_str()) {
+                if let Some(applied) = self.inputs.get_mut(data.input_id.as_str()) {
                     *applied = Some(event.sequence);
                 }
             }
             EventKind::InputConsumed(data) => {
-                inputs.remove(data.input_id.as_str());
+                self.inputs.remove(data.input_id.as_str());
             }
             EventKind::InputDeleted(data) => {
-                inputs.remove(data.input_id.as_str());
+                self.inputs.remove(data.input_id.as_str());
             }
             EventKind::ExecStarted(data) => {
-                tasks.insert(data.task_id.as_str());
+                self.tasks.insert(data.task_id.clone());
             }
             EventKind::ExecEnded(data) => {
-                tasks.remove(data.task_id.as_str());
-                if data.status != ExecStatus::Cancelled && !closing {
-                    wakes.insert(event.id.as_str());
+                self.tasks.remove(data.task_id.as_str());
+                if data.status != ExecStatus::Cancelled && !self.closing {
+                    self.wakes.insert(event.id.clone());
                 }
             }
             _ => {}
         }
     }
-    let cause = if turn {
-        "a turn is open"
-    } else if inputs
-        .values()
-        .any(|applied| applied.is_none_or(|sequence| sequence > interrupted_at))
-    {
-        "an input is waiting to be consumed"
-    } else if !tasks.is_empty() {
-        "a background task is running"
-    } else if !wakes.is_empty() {
-        "a background task has not woken the branch"
-    } else {
-        return Ok(());
-    };
-    Err(format!("the fork position is not a rest point: {cause}"))
+    fn check(&self) -> Result<(), String> {
+        let cause = if self.turn {
+            "a turn is open"
+        } else if self
+            .inputs
+            .values()
+            .any(|applied| applied.is_none_or(|sequence| sequence > self.interrupted_at))
+        {
+            "an input is waiting to be consumed"
+        } else if !self.tasks.is_empty() {
+            "a background task is running"
+        } else if !self.wakes.is_empty() {
+            "a background task has not woken the branch"
+        } else {
+            return Ok(());
+        };
+        Err(format!("the fork position is not a rest point: {cause}"))
+    }
 }
 
 /// Owns every Agent subtree: the process assembly entry.

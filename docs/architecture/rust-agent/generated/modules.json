@@ -287,6 +287,7 @@
         "concat",
         "format",
         "json",
+        "matches",
         "panic",
         "vec"
       ]
@@ -3224,7 +3225,7 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
-        "json"
+        "write"
       ]
     },
     {
@@ -6732,6 +6733,7 @@
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path ContentMetadata",
         "path ContentMetadata::Anthropic",
         "path ContentMetadata::AnthropicRedacted",
         "path ContentMetadata::Bedrock",
@@ -6869,6 +6871,7 @@
       "from": "dim_agent_aimux::request::tests",
       "to": "dim_agent_aimux::request",
       "references": [
+        "path PreparedRequest",
         "path convert",
         "path error"
       ]
@@ -17747,7 +17750,6 @@
       "references": [
         "path TimelineKey",
         "path dim_agent_runtime::StoredEvent",
-        "path dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineKey"
       ]
     },
@@ -17772,7 +17774,6 @@
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
-        "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
         "path dim_agent_types::AgentEvent",
@@ -19036,6 +19037,7 @@
       "references": [
         "path AgentError",
         "path AgentError::Closed",
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
@@ -19070,6 +19072,7 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "path rebuild_facts",
@@ -19146,6 +19149,7 @@
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
+        "path dim_agent_types::AgentEvent",
         "path events"
       ]
     },
@@ -19217,7 +19221,6 @@
         "path AgentIndex",
         "path SessionRestored",
         "path UnloadedSessionDeleted",
-        "path crate::agents::AgentIndex",
         "path crate::agents::SessionUse",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
@@ -27610,8 +27613,10 @@
       "from": "dim_cli::export",
       "to": "dim_cli::session",
       "references": [
+        "path HistorySink",
         "path session::read_history",
-        "use crate::session"
+        "use crate::session",
+        "use crate::session::HistorySink"
       ]
     },
     {
