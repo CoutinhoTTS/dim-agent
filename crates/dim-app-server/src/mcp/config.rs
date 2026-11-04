@@ -1,8 +1,10 @@
 //! Typed MCP documents and the effective configuration of each entry.
 use crate::settings::{BusinessDocument, Result, SettingsError, SettingsScope, SettingsService};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -37,15 +39,638 @@ pub(super) fn settings_changes(
     Ok(wake.subscribe())
 }
 
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+/// Why one entry did not decode. It names the entry and the field and states
+/// the expected kind; it never repeats the value, which may hold a credential.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpEntryError {
+    pub id: String,
+    pub field: Option<String>,
+    pub expected: String,
+}
+impl fmt::Display for McpEntryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = if self.id.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.id)
+        };
+        match &self.field {
+            Some(field) => write!(
+                formatter,
+                "MCP server{id}: field {} must be {}",
+                field, self.expected
+            ),
+            None => write!(formatter, "MCP server{id}: expected {}", self.expected),
+        }
+    }
+}
+impl std::error::Error for McpEntryError {}
+
+/// Every entry under `mcpServers`. An entry that does not decode is kept out
+/// of `mcp_servers` and its error is listed in `invalid`; `raw` holds each
+/// entry's value in document order so a write can put every untouched entry
+/// back as the file wrote it.
+#[derive(Clone, Default, PartialEq)]
 pub struct McpSettings {
-    pub mcp_servers: BTreeMap<String, McpServerSettings>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, serde_json::Value>,
+    mcp_servers: BTreeMap<String, McpServerSettings>,
+    invalid: BTreeMap<String, McpEntryError>,
+    raw: Map<String, Value>,
+    dirty: BTreeSet<String>,
+    pub extra: BTreeMap<String, Value>,
+}
+impl McpSettings {
+    /// Replaces an entry. Only this entry is serialised from its typed value
+    /// on the next write.
+    pub fn insert(&mut self, id: impl Into<String>, configuration: McpServerSettings) {
+        let id = id.into();
+        self.invalid.remove(&id);
+        self.mcp_servers.insert(id.clone(), configuration);
+        self.dirty.insert(id);
+    }
+
+    /// Removes a decoded or a broken entry. Only this entry's value is
+    /// dropped from the document; the other ids keep their order.
+    pub fn remove(&mut self, id: &str) -> Option<McpServerSettings> {
+        self.invalid.remove(id);
+        self.raw.shift_remove(id);
+        self.dirty.insert(id.to_owned());
+        self.mcp_servers.remove(id)
+    }
+
+    /// A mutable decoded entry, marked for serialisation from its typed value.
+    pub fn configure_mut(&mut self, id: &str) -> Option<&mut McpServerSettings> {
+        if self.mcp_servers.contains_key(id) {
+            self.dirty.insert(id.to_owned());
+        }
+        self.mcp_servers.get_mut(id)
+    }
+
+    pub fn invalid_error(&self, id: &str) -> Option<&McpEntryError> {
+        self.invalid.get(id)
+    }
+
+    /// The decoded entries, by id.
+    pub fn entries(&self) -> &BTreeMap<String, McpServerSettings> {
+        &self.mcp_servers
+    }
+
+    /// One decoded entry, by id.
+    pub fn get(&self, id: &str) -> Option<&McpServerSettings> {
+        self.mcp_servers.get(id)
+    }
+
+    /// Whether `id` names a decoded entry.
+    pub fn contains(&self, id: &str) -> bool {
+        self.mcp_servers.contains_key(id)
+    }
+
+    /// Entries that did not decode, by id, holding only their errors.
+    pub fn invalid_entries(&self) -> &BTreeMap<String, McpEntryError> {
+        &self.invalid
+    }
+
+    /// Consumes the document into its decoded entries and its broken entries.
+    pub fn into_parts(
+        self,
+    ) -> (
+        BTreeMap<String, McpServerSettings>,
+        BTreeMap<String, McpEntryError>,
+    ) {
+        (self.mcp_servers, self.invalid)
+    }
+
+    /// Decodes each entry on its own. An id that is empty names no entry that
+    /// any management call could address, so it fails the whole document.
+    fn from_entries(entries: Map<String, Value>, extra: BTreeMap<String, Value>) -> Result<Self> {
+        if entries.keys().any(|id| id.trim().is_empty()) {
+            return Err(SettingsError::Document(
+                "MCP server entry id is empty".to_owned(),
+            ));
+        }
+        let mut document = Self {
+            extra,
+            ..Self::default()
+        };
+        for (id, value) in entries {
+            match decode_entry(&id, &value) {
+                Ok(configuration) => {
+                    document.mcp_servers.insert(id.clone(), configuration);
+                }
+                Err(error) => {
+                    document.invalid.insert(id.clone(), error);
+                }
+            }
+            document.raw.insert(id, value);
+        }
+        Ok(document)
+    }
+
+    /// Decodes a document that is already parsed, as an RPC request carries
+    /// it.
+    pub fn from_value(value: Value) -> Result<Self> {
+        let object = match value {
+            Value::Object(object) => object,
+            _ => {
+                return Err(SettingsError::Document(
+                    "MCP document must be a JSON object".to_owned(),
+                ));
+            }
+        };
+        let servers = match object.get("mcpServers") {
+            Some(Value::Object(servers)) => servers.clone(),
+            Some(_) => {
+                return Err(SettingsError::Document(
+                    "mcpServers must be a JSON object".to_owned(),
+                ));
+            }
+            None => {
+                return Err(SettingsError::Document(
+                    "MCP document must contain an mcpServers object".to_owned(),
+                ));
+            }
+        };
+        let extra = object
+            .into_iter()
+            .filter(|(key, _)| key != "mcpServers")
+            .collect();
+        Self::from_entries(servers, extra)
+    }
+
+    /// Decodes each entry on its own. Only a file that is not JSON and an
+    /// `mcpServers` that is not an object fail the whole document.
+    pub fn from_file(bytes: &[u8]) -> Result<Self> {
+        let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+            SettingsError::Document(format!(
+                "MCP document is not valid JSON at line {} column {}",
+                error.line(),
+                error.column()
+            ))
+        })?;
+        let object = match value.as_object() {
+            Some(object) => object,
+            None => {
+                let position = serde_json::from_slice::<BTreeMap<String, Value>>(bytes)
+                    .err()
+                    .map(|error| format!(" at line {} column {}", error.line(), error.column()))
+                    .unwrap_or_default();
+                return Err(SettingsError::Document(format!(
+                    "MCP document must be a JSON object{position}"
+                )));
+            }
+        };
+        let servers = match object.get("mcpServers") {
+            Some(Value::Object(servers)) => servers,
+            Some(_) => {
+                let position = serde_json::from_slice::<RequiredServers>(bytes)
+                    .err()
+                    .map(|error| format!(" at line {} column {}", error.line(), error.column()))
+                    .unwrap_or_default();
+                return Err(SettingsError::Document(format!(
+                    "mcpServers must be a JSON object{position}"
+                )));
+            }
+            None => {
+                let position = serde_json::from_slice::<RequiredServers>(bytes)
+                    .err()
+                    .map(|error| format!(" at line {} column {}", error.line(), error.column()))
+                    .unwrap_or_default();
+                return Err(SettingsError::Document(format!(
+                    "MCP document must contain an mcpServers object{position}"
+                )));
+            }
+        };
+        let extra = object
+            .iter()
+            .filter(|(key, _)| key.as_str() != "mcpServers")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        Self::from_entries(servers.clone(), extra)
+    }
+}
+impl Serialize for McpSettings {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::{Error as _, SerializeMap};
+        let mut map = serializer.serialize_map(Some(1 + self.extra.len()))?;
+        let mut servers = Map::<String, Value>::new();
+        for (id, raw) in &self.raw {
+            if let Some(configuration) = self.mcp_servers.get(id) {
+                let value = if self.dirty.contains(id) {
+                    serde_json::to_value(configuration).map_err(S::Error::custom)?
+                } else {
+                    raw.clone()
+                };
+                servers.insert(id.clone(), value);
+            } else if self.invalid.contains_key(id) {
+                servers.insert(id.clone(), raw.clone());
+            }
+        }
+        for (id, configuration) in &self.mcp_servers {
+            if !self.raw.contains_key(id) {
+                servers.insert(
+                    id.clone(),
+                    serde_json::to_value(configuration).map_err(S::Error::custom)?,
+                );
+            }
+        }
+        map.serialize_entry("mcpServers", &servers)?;
+        for (key, value) in &self.extra {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+impl<'de> Deserialize<'de> for McpSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(rename = "mcpServers")]
+            mcp_servers: Map<String, Value>,
+            #[serde(flatten)]
+            extra: BTreeMap<String, Value>,
+        }
+        use serde::de::Error as _;
+        let raw = Raw::deserialize(deserializer)?;
+        Self::from_entries(raw.mcp_servers, raw.extra).map_err(D::Error::custom)
+    }
+}
+#[derive(Deserialize)]
+struct RequiredServers {
+    #[serde(rename = "mcpServers")]
+    _mcp_servers: BTreeMap<String, Value>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+enum Transport {
+    Stdio,
+    Http,
+    Sse,
+}
+
+fn entry_error(id: &str, field: Option<&str>, expected: &str) -> McpEntryError {
+    McpEntryError {
+        id: id.to_owned(),
+        field: field.map(str::to_owned),
+        expected: expected.to_owned(),
+    }
+}
+
+/// Decodes one entry. The error names the entry and the field and never
+/// repeats the value.
+pub fn decode_entry(
+    id: &str,
+    value: &Value,
+) -> std::result::Result<McpServerSettings, McpEntryError> {
+    if id.trim().is_empty() {
+        return Err(entry_error(id, None, "a nonempty id"));
+    }
+    decode_value(Some(id), value)
+}
+
+/// The one decoder. Every optional member treats `null` as absent; the
+/// required `command` and `url` do not.
+fn decode_value(
+    id: Option<&str>,
+    value: &Value,
+) -> std::result::Result<McpServerSettings, McpEntryError> {
+    let id = id.unwrap_or_default();
+    let entry = value
+        .as_object()
+        .ok_or_else(|| entry_error(id, None, "a JSON object"))?;
+    let transport = match entry.get("type") {
+        Some(Value::String(kind)) => match kind.as_str() {
+            "stdio" => Transport::Stdio,
+            "http" | "streamable-http" => Transport::Http,
+            "sse" => Transport::Sse,
+            "ws" => {
+                return Err(entry_error(
+                    id,
+                    Some("type"),
+                    "http or sse; ws is not a supported transport",
+                ));
+            }
+            _ => return Err(entry_error(id, Some("type"), "stdio, http or sse")),
+        },
+        Some(Value::Null) | None if entry.contains_key("command") => Transport::Stdio,
+        Some(Value::Null) | None if entry.contains_key("url") => {
+            return Err(entry_error(
+                id,
+                Some("type"),
+                "http or sse; an entry with a url must name its type",
+            ));
+        }
+        Some(Value::Null) | None => {
+            return Err(entry_error(
+                id,
+                Some("type"),
+                "stdio, http or sse, or a command for stdio",
+            ));
+        }
+        Some(_) => return Err(entry_error(id, Some("type"), "a string")),
+    };
+    if entry.contains_key("$generation") {
+        return Err(entry_error(id, Some("$generation"), "not a reserved field"));
+    }
+    match transport {
+        Transport::Stdio => decode_stdio(id, entry),
+        Transport::Http => decode_remote(id, entry, RemoteTransport::Http),
+        Transport::Sse => decode_remote(id, entry, RemoteTransport::Sse),
+    }
+}
+
+fn field_string(
+    entry: &Map<String, Value>,
+    id: &str,
+    field: &str,
+    expected: &str,
+) -> std::result::Result<Option<String>, McpEntryError> {
+    match entry.get(field) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(entry_error(id, Some(field), expected)),
+    }
+}
+
+fn string_map(
+    entry: &Map<String, Value>,
+    id: &str,
+    field: &str,
+) -> std::result::Result<BTreeMap<String, String>, McpEntryError> {
+    match entry.get(field) {
+        None | Some(Value::Null) => Ok(BTreeMap::new()),
+        Some(Value::Object(values)) => values
+            .iter()
+            .map(|(name, value)| {
+                value
+                    .as_str()
+                    .map(|value| (name.clone(), value.to_owned()))
+                    .ok_or_else(|| entry_error(id, Some(&format!("{field}.{name}")), "a string"))
+            })
+            .collect(),
+        Some(_) => Err(entry_error(id, Some(field), "an object of strings")),
+    }
+}
+
+fn field_enabled(
+    entry: &Map<String, Value>,
+    id: &str,
+) -> std::result::Result<Option<bool>, McpEntryError> {
+    match entry.get("enabled") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(entry_error(id, Some("enabled"), "a boolean")),
+    }
+}
+
+fn decode_stdio(
+    id: &str,
+    entry: &Map<String, Value>,
+) -> std::result::Result<McpServerSettings, McpEntryError> {
+    let command = match field_string(entry, id, "command", "a nonempty string")? {
+        Some(command) if !command.trim().is_empty() => command,
+        _ => return Err(entry_error(id, Some("command"), "a nonempty string")),
+    };
+    let args = match entry.get("args") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| entry_error(id, Some(&format!("args[{index}]")), "a string"))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        Some(_) => return Err(entry_error(id, Some("args"), "an array of strings")),
+    };
+    let env = string_map(entry, id, "env")?;
+    let cwd = match entry.get("cwd") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            return Err(entry_error(id, Some("cwd"), "a string or null"));
+        }
+    };
+    let enabled = field_enabled(entry, id)?;
+    for member in ["url", "headers", "auth", "oauth"] {
+        if entry.get(member).is_some_and(|value| !value.is_null()) {
+            return Err(entry_error(
+                id,
+                Some(member),
+                "not a member of the stdio transport",
+            ));
+        }
+    }
+    let known = [
+        "type", "command", "args", "env", "cwd", "enabled", "url", "headers", "auth", "oauth",
+    ];
+    let extra = entry
+        .iter()
+        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Ok(McpServerSettings::Stdio {
+        kind: matches!(entry.get("type"), Some(Value::String(_))).then_some(Stdio::Stdio),
+        command,
+        args,
+        env,
+        cwd,
+        enabled,
+        extra,
+    })
+}
+
+fn decode_remote(
+    id: &str,
+    entry: &Map<String, Value>,
+    kind: RemoteTransport,
+) -> std::result::Result<McpServerSettings, McpEntryError> {
+    let url = match field_string(entry, id, "url", "a nonempty string")? {
+        Some(url) if !url.trim().is_empty() => url,
+        _ => return Err(entry_error(id, Some("url"), "a nonempty string")),
+    };
+    let headers = string_map(entry, id, "headers")?;
+    let auth = decode_auth(id, entry)?;
+    let oauth = decode_oauth(id, entry)?;
+    if oauth.is_some() {
+        if auth.is_some() {
+            return Err(entry_error(
+                id,
+                Some("oauth"),
+                "absent when a bearer token is set",
+            ));
+        }
+        if headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+        {
+            return Err(entry_error(
+                id,
+                Some("oauth"),
+                "absent when an Authorization header is set",
+            ));
+        }
+    }
+    let enabled = field_enabled(entry, id)?;
+    for member in ["command", "args", "env", "cwd"] {
+        if entry.get(member).is_some_and(|value| !value.is_null()) {
+            return Err(entry_error(
+                id,
+                Some(member),
+                "not a member of the remote transport",
+            ));
+        }
+    }
+    let known = [
+        "type", "url", "headers", "auth", "oauth", "enabled", "command", "args", "env", "cwd",
+    ];
+    let extra = entry
+        .iter()
+        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Ok(McpServerSettings::Remote {
+        kind,
+        url,
+        headers,
+        auth,
+        oauth,
+        enabled,
+        extra,
+    })
+}
+
+fn decode_auth(
+    id: &str,
+    entry: &Map<String, Value>,
+) -> std::result::Result<Option<BearerAuth>, McpEntryError> {
+    let Some(value) = entry.get("auth").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let auth = value
+        .as_object()
+        .ok_or_else(|| entry_error(id, Some("auth"), "an object"))?;
+    match auth.get("type") {
+        Some(Value::String(kind)) if kind == "bearer" => {}
+        Some(Value::String(_)) => return Err(entry_error(id, Some("auth.type"), "bearer")),
+        Some(_) => return Err(entry_error(id, Some("auth.type"), "a string")),
+        None => return Err(entry_error(id, Some("auth.type"), "bearer")),
+    }
+    let token = auth
+        .get("token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| entry_error(id, Some("auth.token"), "a nonempty string"))?;
+    Ok(Some(BearerAuth::Bearer {
+        token: token.to_owned(),
+    }))
+}
+
+fn decode_oauth(
+    id: &str,
+    entry: &Map<String, Value>,
+) -> std::result::Result<Option<Box<McpOAuthSettings>>, McpEntryError> {
+    let Some(value) = entry.get("oauth").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let oauth = value
+        .as_object()
+        .ok_or_else(|| entry_error(id, Some("oauth"), "an object"))?;
+    let client_id = match oauth.get("clientId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        Some(_) => {
+            return Err(entry_error(
+                id,
+                Some("oauth.clientId"),
+                "a nonempty string or null",
+            ));
+        }
+    };
+    let callback_port = match oauth.get("callbackPort") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => match value.as_u64() {
+            Some(port) if (1..=65535).contains(&port) => Some(port as u16),
+            _ => {
+                return Err(entry_error(
+                    id,
+                    Some("oauth.callbackPort"),
+                    "an integer from 1 to 65535 or null",
+                ));
+            }
+        },
+        Some(_) => {
+            return Err(entry_error(
+                id,
+                Some("oauth.callbackPort"),
+                "an integer from 1 to 65535 or null",
+            ));
+        }
+    };
+    let auth_server_metadata_url = match oauth.get("authServerMetadataUrl") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if valid_metadata_url(value) => Some(value.clone()),
+        Some(_) => {
+            return Err(entry_error(
+                id,
+                Some("oauth.authServerMetadataUrl"),
+                "an https URL or a loopback http URL",
+            ));
+        }
+    };
+    let scopes = match oauth.get("scopes") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if valid_scopes(value) => Some(value.clone()),
+        Some(_) => {
+            return Err(entry_error(
+                id,
+                Some("oauth.scopes"),
+                "space-separated RFC 6749 scope tokens",
+            ));
+        }
+    };
+    let known = [
+        "clientId",
+        "callbackPort",
+        "authServerMetadataUrl",
+        "scopes",
+    ];
+    let extra = oauth
+        .iter()
+        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Ok(Some(Box::new(McpOAuthSettings {
+        client_id,
+        callback_port,
+        auth_server_metadata_url,
+        scopes,
+        extra,
+    })))
+}
+
+fn valid_metadata_url(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| {
+        url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+            && (url.scheme() == "https"
+                || (url.scheme() == "http" && matches!(url.host(), Some(host) if loopback(&host))))
+    })
+}
+
+fn valid_scopes(scopes: &str) -> bool {
+    !scopes.trim().is_empty()
+        && scopes
+            .bytes()
+            .all(|byte| byte == b' ' || (byte.is_ascii_graphic() && byte != b'"' && byte != b'\\'))
+}
+
+#[derive(Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum McpServerSettings {
     Stdio {
@@ -79,7 +704,25 @@ pub enum McpServerSettings {
         extra: BTreeMap<String, serde_json::Value>,
     },
 }
+impl<'de> Deserialize<'de> for McpServerSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let value = Value::deserialize(deserializer)?;
+        decode_value(None, &value).map_err(D::Error::custom)
+    }
+}
 impl McpServerSettings {
+    /// Re-reads a typed entry through the one decoder. A typed value that an
+    /// edit or a programmatic caller changed decodes again before it is
+    /// written, so an invalid combination cannot persist.
+    pub fn canonical(&self, id: &str) -> std::result::Result<Self, McpEntryError> {
+        let value =
+            serde_json::to_value(self).map_err(|_| entry_error(id, None, "a valid entry"))?;
+        decode_entry(id, &value)
+    }
+
     /// The enablement an entry's own field states; a project entry ignores it
     /// (`config::effective`).
     pub fn enabled(&self) -> bool {
@@ -127,38 +770,6 @@ pub struct McpOAuthSettings {
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
-impl McpOAuthSettings {
-    fn validate(&self) -> Result<()> {
-        let metadata_url = self
-            .auth_server_metadata_url
-            .as_deref()
-            .map(url::Url::parse);
-        if self.client_id.as_ref().is_some_and(|id| id.trim().is_empty())
-            || self.callback_port == Some(0)
-            || metadata_url.is_some_and(|url| {
-                !url.is_ok_and(|url| {
-                    url.username().is_empty()
-                        && url.password().is_none()
-                        && url.fragment().is_none()
-                        && (url.scheme() == "https"
-                            || (url.scheme() == "http"
-                                && matches!(url.host(), Some(host) if loopback(&host))))
-                })
-            })
-            // RFC 6749 §3.3 scope tokens, separated by spaces.
-            || self.scopes.as_ref().is_some_and(|scopes| {
-                scopes.trim().is_empty()
-                    || !scopes
-                        .bytes()
-                        .all(|b| b == b' ' || (b.is_ascii_graphic() && b != b'"' && b != b'\\'))
-            })
-        {
-            return Err(SettingsError::Invalid("invalid MCP OAuth configuration"));
-        }
-        Ok(())
-    }
-}
-
 pub(crate) fn loopback(host: &url::Host<&str>) -> bool {
     match host {
         url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
@@ -539,74 +1150,18 @@ impl BusinessDocument for McpSettings {
     const USER_FILE: &'static str = "mcp.json";
     const PROJECT_FILE: Option<&'static str> = Some(".mcp.json");
 
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        Self::from_file(bytes)
+    }
+
     fn validate(&self) -> Result<()> {
         if self.extra.contains_key("mcpServers") {
             return Err(SettingsError::Invalid("reserved MCP configuration field"));
         }
-        for (id, server) in &self.mcp_servers {
-            if id.trim().is_empty() {
-                return Err(SettingsError::Invalid("empty MCP server id"));
-            }
-            let (target, extra) = match server {
-                McpServerSettings::Stdio { command, extra, .. } => (command, extra),
-                McpServerSettings::Remote {
-                    url,
-                    headers,
-                    auth,
-                    oauth,
-                    extra,
-                    ..
-                } => {
-                    if let Some(BearerAuth::Bearer { token }) = auth
-                        && token.trim().is_empty()
-                    {
-                        return Err(SettingsError::Invalid("empty MCP bearer token"));
-                    }
-                    if let Some(oauth) = oauth {
-                        // Static credentials exclude OAuth (design D15).
-                        if auth.is_some()
-                            || headers
-                                .keys()
-                                .any(|name| name.eq_ignore_ascii_case("authorization"))
-                        {
-                            return Err(SettingsError::Invalid(
-                                "MCP OAuth excludes static credentials",
-                            ));
-                        }
-                        oauth.validate()?;
-                    }
-                    (url, extra)
-                }
-            };
-            if target.trim().is_empty()
-                || extra.keys().any(|key| {
-                    matches!(
-                        key.as_str(),
-                        "type"
-                            | "command"
-                            | "args"
-                            | "env"
-                            | "cwd"
-                            | "enabled"
-                            | "url"
-                            | "headers"
-                            | "auth"
-                            | "transport"
-                            | "oauth"
-                            | "$generation"
-                    )
-                })
-            {
-                return Err(SettingsError::Invalid(
-                    "invalid MCP transport configuration",
-                ));
-            }
-            if extra
-                .get("metadata")
-                .is_some_and(|value| !value.is_object())
-            {
-                return Err(SettingsError::Invalid("MCP metadata must be an object"));
-            }
+        if self.mcp_servers.keys().any(|id| id.trim().is_empty()) {
+            return Err(SettingsError::Document(
+                "MCP server entry id is empty".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -730,7 +1285,7 @@ impl BusinessDocument for McpPluginServers {
             }
             McpSettings {
                 mcp_servers: document.mcp_servers.clone(),
-                extra: BTreeMap::new(),
+                ..McpSettings::default()
             }
             .validate()?;
             for config in document.mcp_servers.values() {
@@ -844,12 +1399,226 @@ mod tests {
             }
         }))
         .unwrap();
-        assert!(document.validate().is_err());
+        assert!(document.entries().is_empty());
+        let error = document.invalid_error("collision").unwrap();
+        assert_eq!(error.field.as_deref(), Some("$generation"));
+        assert_eq!(error.expected, "not a reserved field");
+        assert!(document.validate().is_ok());
 
         let record = McpSecretEntry {
             extra: BTreeMap::from([("$generation".into(), json!("g"))]),
             ..Default::default()
         };
         assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn entries_decode_one_by_one_and_keep_unread_entries_as_written() {
+        let source = json!({
+            "mcpServers": {
+                "stdio": {"command": "server", "args": ["--flag"], "future": {"keep": [1, 2]}},
+                "stream": {"type": "streamable-http", "url": "https://stream.test/mcp", "headers": {"X-Key": "value"}},
+                "ws": {"type": "ws", "url": "wss://ws.test"},
+                "untyped": {"url": "https://untyped.test/mcp"},
+                "scalar": "not an object"
+            },
+            "extension": {"preserve": true}
+        });
+        let document: McpSettings = serde_json::from_value(source.clone()).unwrap();
+        assert_eq!(document.entries().len(), 2);
+        assert_eq!(document.invalid_entries().len(), 3);
+        assert_eq!(
+            document.invalid_entries()["ws"].field.as_deref(),
+            Some("type")
+        );
+        assert_eq!(
+            document.invalid_entries()["ws"].expected,
+            "http or sse; ws is not a supported transport"
+        );
+        assert_eq!(
+            document.invalid_entries()["untyped"].expected,
+            "http or sse; an entry with a url must name its type"
+        );
+        assert_eq!(document.invalid_entries()["scalar"].field, None);
+        assert!(document.validate().is_ok());
+
+        let written = serde_json::to_value(&document).unwrap();
+        for id in ["stdio", "stream", "ws", "untyped"] {
+            assert_eq!(written["mcpServers"][id], source["mcpServers"][id], "{id}");
+            assert_eq!(
+                serde_json::to_string(&written["mcpServers"][id]).unwrap(),
+                serde_json::to_string(&source["mcpServers"][id]).unwrap(),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            written["mcpServers"]["scalar"],
+            source["mcpServers"]["scalar"]
+        );
+        assert_eq!(written["extension"], source["extension"]);
+    }
+
+    #[test]
+    fn an_entry_error_names_the_field_and_never_repeats_the_value() {
+        let marker = "token-like-value-8f2c";
+        let document: McpSettings = serde_json::from_value(json!({
+            "mcpServers": {
+                "header": {"type": "http", "url": "https://example.test/mcp", "headers": {"Authorization": {"leak": marker}}},
+                "arg": {"command": "server", "args": [marker, true]}
+            }
+        }))
+        .unwrap();
+        assert_eq!(document.invalid_entries().len(), 2);
+        let header = &document.invalid_entries()["header"];
+        assert_eq!(header.field.as_deref(), Some("headers.Authorization"));
+        assert!(header.to_string().contains("must be a string"));
+        let arg = &document.invalid_entries()["arg"];
+        assert_eq!(arg.field.as_deref(), Some("args[1]"));
+        assert!(arg.to_string().contains("must be a string"));
+        assert!(!header.to_string().contains(marker));
+        assert!(!arg.to_string().contains(marker));
+    }
+
+    #[test]
+    fn a_streamable_http_entry_reads_as_http_and_is_written_back_as_written() {
+        let mut document: McpSettings = serde_json::from_value(json!({
+            "mcpServers": {
+                "stream": {"type": "streamable-http", "url": "https://example.test/mcp", "future": 1}
+            }
+        }))
+        .unwrap();
+        let written = serde_json::to_value(&document).unwrap();
+        assert_eq!(written["mcpServers"]["stream"]["type"], "streamable-http");
+        assert_eq!(written["mcpServers"]["stream"]["future"], 1);
+        assert!(document.configure_mut("stream").is_some());
+        let written = serde_json::to_value(&document).unwrap();
+        assert_eq!(written["mcpServers"]["stream"]["type"], "http");
+        assert_eq!(written["mcpServers"]["stream"]["future"], 1);
+    }
+
+    #[test]
+    fn a_broken_entry_is_removed_or_replaced_without_touching_others() {
+        let mut document: McpSettings = serde_json::from_value(json!({
+            "mcpServers": {
+                "broken": {"type": "ws", "url": "wss://example.test"},
+                "kept": {"command": "server", "future": {"keep": true}}
+            }
+        }))
+        .unwrap();
+        assert!(document.remove("broken").is_none());
+        assert!(document.invalid_entries().is_empty());
+        let written = serde_json::to_value(&document).unwrap();
+        assert!(written["mcpServers"].get("broken").is_none());
+        assert_eq!(
+            serde_json::to_string(&written["mcpServers"]["kept"]).unwrap(),
+            serde_json::to_string(&json!({"command": "server", "future": {"keep": true}})).unwrap()
+        );
+
+        let mut document: McpSettings = serde_json::from_value(json!({
+            "mcpServers": {"broken": {"type": "ws", "url": "wss://example.test"}}
+        }))
+        .unwrap();
+        let configuration = decode_entry("broken", &json!({"command": "server"})).unwrap();
+        document.insert("broken", configuration);
+        assert!(document.invalid_entries().is_empty());
+        let written = serde_json::to_value(&document).unwrap();
+        assert_eq!(written["mcpServers"]["broken"]["command"], "server");
+        assert!(written["mcpServers"]["broken"].get("url").is_none());
+    }
+
+    #[test]
+    fn only_a_document_level_failure_refuses_the_whole_file() {
+        let marker = "secret-marker-4a1f";
+        let invalid =
+            McpSettings::from_file(format!("{{\"mcpServers\": \"{marker}\"}}").as_bytes())
+                .err()
+                .unwrap()
+                .to_string();
+        assert!(invalid.contains("mcpServers must be a JSON object at line 1 column"));
+        assert!(!invalid.contains(marker));
+
+        let not_json = McpSettings::from_file(format!("{{{marker}").as_bytes())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(not_json.contains("not valid JSON at line"));
+        assert!(!not_json.contains(marker));
+
+        let missing = McpSettings::from_file(b"{}").err().unwrap().to_string();
+        assert!(missing.contains("must contain an mcpServers object"));
+    }
+
+    #[test]
+    fn null_optional_members_read_as_absent() {
+        let document = McpSettings::from_file(
+            br#"{"mcpServers":{
+                "stdio": {"type": null, "command": "server", "enabled": null, "auth": null, "oauth": null},
+                "remote": {"type": "http", "url": "https://example.test/mcp", "enabled": null, "auth": null, "oauth": null},
+                "lists": {"command": "server", "args": null, "env": null, "headers": null},
+                "metadata": {"command": "server", "metadata": null}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(document.entries().len(), 4);
+        assert!(document.invalid_entries().is_empty());
+        let McpServerSettings::Stdio { kind, enabled, .. } = &document.entries()["stdio"] else {
+            panic!("a null type with a command is stdio");
+        };
+        assert!(kind.is_none());
+        assert_eq!(*enabled, None);
+        let McpServerSettings::Remote {
+            auth,
+            oauth,
+            enabled,
+            ..
+        } = &document.entries()["remote"]
+        else {
+            panic!("a typed url entry is remote");
+        };
+        assert!(auth.is_none());
+        assert!(oauth.is_none());
+        assert_eq!(*enabled, None);
+        let McpServerSettings::Stdio { args, env, .. } = &document.entries()["lists"] else {
+            panic!("a stdio entry with null lists");
+        };
+        assert!(args.is_empty());
+        assert!(env.is_empty());
+
+        // A required member set to null is still an entry error.
+        let broken = McpSettings::from_file(
+            br#"{"mcpServers":{
+                "no-command": {"type": null, "command": null},
+                "no-url": {"type": "http", "url": null},
+                "no-transport": {"type": null}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(broken.invalid_entries().len(), 3);
+        assert_eq!(
+            broken.invalid_entries()["no-command"].field.as_deref(),
+            Some("command")
+        );
+        assert_eq!(
+            broken.invalid_entries()["no-url"].field.as_deref(),
+            Some("url")
+        );
+        assert_eq!(
+            broken.invalid_entries()["no-transport"].field.as_deref(),
+            Some("type")
+        );
+    }
+
+    #[test]
+    fn an_empty_entry_id_fails_the_document() {
+        for source in [
+            br#"{"mcpServers":{"": {"command": "server"}}}"#.as_slice(),
+            br#"{"mcpServers":{"   ": {"command": "server"}}}"#.as_slice(),
+        ] {
+            let error = McpSettings::from_file(source).err().unwrap();
+            assert!(matches!(error, SettingsError::Document(_)), "{error}");
+            let text = error.to_string();
+            assert!(text.contains("entry id is empty"), "{text}");
+            assert!(!text.contains("command") && !text.contains('{'), "{text}");
+        }
     }
 }

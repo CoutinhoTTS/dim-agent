@@ -4,7 +4,9 @@ use dim_agent_runtime::wait_active;
 use dim_app_server::{
     mcp::{
         McpChange, McpError, McpPlugin, McpService, McpSource,
-        config::{McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings},
+        config::{
+            McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings, RemoteTransport,
+        },
     },
     settings::{
         SettingsChanged, SettingsError, SettingsPlugin, SettingsScope, SettingsService,
@@ -662,7 +664,12 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     );
     assert_eq!(persisted["extension"], json!({"preserve":17}));
 
-    let invalid = serde_json::from_value(json!({"command":""})).unwrap();
+    let mut invalid =
+        serde_json::from_value::<McpServerSettings>(json!({"command": "valid"})).unwrap();
+    let McpServerSettings::Stdio { command, .. } = &mut invalid else {
+        panic!("an untyped command is stdio");
+    };
+    command.clear();
     assert!(matches!(
         mcp.update(
             SettingsScope::User,
@@ -672,7 +679,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
             &cancel
         )
         .await,
-        Err(McpError::Settings(SettingsError::Invalid(_)))
+        Err(McpError::InvalidEntry(_))
     ));
     assert_eq!(
         mcp.catalog(None, &cancel).await.unwrap().user_revision,
@@ -711,7 +718,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     fs::write(fixture.home.join("project/.mcp.json"), b"{").unwrap();
     assert!(matches!(
         mcp.catalog(Some(1), &cancel).await,
-        Err(McpError::Settings(SettingsError::Invalid(_)))
+        Err(McpError::Settings(SettingsError::Document(_)))
     ));
     assert!(mcp.catalog(None, &cancel).await.is_ok());
     fixture.close().await;
@@ -1010,14 +1017,14 @@ async fn scope_move_partial_is_recoverable_and_remove_cleans_the_overlay() {
         .await
         .unwrap()
         .document;
-    assert!(project.mcp_servers.contains_key("user-only"));
+    assert!(project.contains("user-only"));
     let user = fixture
         .settings
         .read::<McpSettings>(SettingsScope::User, &cancel)
         .await
         .unwrap()
         .document;
-    assert!(user.mcp_servers.contains_key("user-only"));
+    assert!(user.contains("user-only"));
     let enablement = fixture
         .settings
         .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
@@ -1066,7 +1073,7 @@ async fn scope_move_partial_is_recoverable_and_remove_cleans_the_overlay() {
         .await
         .unwrap()
         .document;
-    let skeleton = serde_json::to_value(&project.mcp_servers["user-only"]).unwrap();
+    let skeleton = serde_json::to_value(&project.entries()["user-only"]).unwrap();
     assert!(
         skeleton["url"]
             .as_str()
@@ -1181,7 +1188,7 @@ async fn scope_move_back_to_user_keeps_the_merged_entry_and_its_enablement() {
         auth,
         extra,
         ..
-    } = &user.mcp_servers["user-only"]
+    } = &user.entries()["user-only"]
     else {
         panic!("the moved entry is remote");
     };
@@ -1190,7 +1197,7 @@ async fn scope_move_back_to_user_keeps_the_merged_entry_and_its_enablement() {
     assert!(headers.is_empty());
     assert!(extra.contains_key("future"), "unknown fields survive");
     assert!(
-        user.mcp_servers["user-only"].enabled(),
+        user.entries()["user-only"].enabled(),
         "the user entry keeps the destination's effective enablement"
     );
     let project = fixture
@@ -1199,7 +1206,7 @@ async fn scope_move_back_to_user_keeps_the_merged_entry_and_its_enablement() {
         .await
         .unwrap()
         .document;
-    assert!(!project.mcp_servers.contains_key("user-only"));
+    assert!(!project.contains("user-only"));
     let secrets = fixture
         .settings
         .read::<McpSecrets>(SettingsScope::User, &cancel)
@@ -1303,8 +1310,7 @@ async fn a_conflicting_remove_keeps_the_project_entry_and_its_overlay() {
         .await
         .unwrap()
         .document;
-    let Some(McpServerSettings::Remote { extra, .. }) = document.mcp_servers.get_mut("user-only")
-    else {
+    let Some(McpServerSettings::Remote { extra, .. }) = document.configure_mut("user-only") else {
         panic!("the moved entry is remote");
     };
     extra.insert("note".into(), json!(1));
@@ -1697,5 +1703,504 @@ async fn remove_keeps_a_replacement_moves_overlay() {
             .is_none(),
         "a later removal deletes the replacement's own record"
     );
+    fixture.close().await;
+}
+
+/// #951: entries decode one by one, and a write keeps every entry it did
+/// not change exactly as it was read, broken entries included.
+#[tokio::test]
+async fn entries_decode_one_by_one_and_writes_keep_every_other_entry_as_written() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let marker = "token-like-value-4c1e";
+    let user_file = json!({
+        "mcpServers": {
+            "valid": {"command": "user-server", "args": ["--flag"], "future": {"keep": true}},
+            "stream": {"type": "streamable-http", "url": "https://stream.test/mcp", "headers": {"X-Key": "value"}},
+            "ws": {"type": "ws", "url": "wss://ws.test"},
+            "untyped": {"url": "https://untyped.test/mcp"},
+            "leaky": {"type": "http", "url": "https://leaky.test/mcp", "headers": {"Authorization": {"leak": marker}}}
+        },
+        "extension": {"preserve": 17}
+    });
+    let project_file = json!({
+        "mcpServers": {
+            "project-valid": {"type": "sse", "url": "https://project.test/sse"},
+            "project-broken": {"command": ""}
+        },
+        "projectExtension": "keep"
+    });
+    let user_path = fixture.home.join("mcp.json");
+    let project_path = fixture.home.join("project/.mcp.json");
+    fs::write(&user_path, serde_json::to_vec(&user_file).unwrap()).unwrap();
+    fs::write(&project_path, serde_json::to_vec(&project_file).unwrap()).unwrap();
+    let user_bytes = fs::read(&user_path).unwrap();
+    let project_bytes = fs::read(&project_path).unwrap();
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert!(catalog.servers.contains_key("valid"));
+    assert!(catalog.servers.contains_key("stream"));
+    assert!(catalog.servers.contains_key("project-valid"));
+    assert_eq!(catalog.servers["stream"].source, McpSource::User);
+    assert!(matches!(
+        catalog.servers["stream"].configuration,
+        McpServerSettings::Remote {
+            kind: RemoteTransport::Http,
+            ..
+        }
+    ));
+    let broken: Vec<&str> = catalog
+        .invalid
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    // Rows are ordered by source in precedence order, then by id.
+    assert_eq!(broken, ["leaky", "untyped", "ws", "project-broken"]);
+    let ws = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "ws")
+        .unwrap();
+    assert_eq!(ws.source, McpSource::User);
+    assert_eq!(ws.error.field.as_deref(), Some("type"));
+    assert!(ws.error.expected.contains("http or sse"));
+    let untyped = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "untyped")
+        .unwrap();
+    assert_eq!(untyped.error.field.as_deref(), Some("type"));
+    assert!(
+        untyped
+            .error
+            .expected
+            .contains("an entry with a url must name its type")
+    );
+    let leaky = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "leaky")
+        .unwrap();
+    assert_eq!(leaky.error.field.as_deref(), Some("headers.Authorization"));
+    assert_eq!(leaky.error.expected, "a string");
+    assert!(!leaky.error.to_string().contains(marker));
+    let project_broken = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "project-broken")
+        .unwrap();
+    assert_eq!(project_broken.source, McpSource::Project(1));
+    assert_eq!(project_broken.error.field.as_deref(), Some("command"));
+
+    // A read writes nothing: bytes and revision stay as the file had them.
+    assert_eq!(fs::read(&user_path).unwrap(), user_bytes);
+    assert_eq!(fs::read(&project_path).unwrap(), project_bytes);
+    assert_eq!(
+        fixture
+            .settings
+            .read::<McpSettings>(SettingsScope::User, &cancel)
+            .await
+            .unwrap()
+            .revision,
+        catalog.user_revision
+    );
+
+    // A broken entry has no effective or editable configuration, and its
+    // enablement is refused.
+    for id in ["ws", "untyped"] {
+        assert!(matches!(
+            fixture.mcp.entry(McpSource::User, id.into(), &cancel).await,
+            Err(McpError::InvalidEntry(_))
+        ));
+        assert!(matches!(
+            fixture
+                .mcp
+                .editable(McpSource::User, id.into(), &cancel)
+                .await,
+            Err(McpError::InvalidEntry(_))
+        ));
+        assert!(matches!(
+            fixture
+                .mcp
+                .update(
+                    SettingsScope::User,
+                    catalog.user_revision.clone(),
+                    id.into(),
+                    McpChange::SetEnabled(true),
+                    &cancel,
+                )
+                .await,
+            Err(McpError::InvalidEntry(_))
+        ));
+    }
+    assert!(matches!(
+        fixture
+            .mcp
+            .update(
+                SettingsScope::Project(1),
+                catalog.project_revision.clone().unwrap(),
+                "project-broken".into(),
+                McpChange::SetEnabled(false),
+                &cancel,
+            )
+            .await,
+        Err(McpError::InvalidEntry(_))
+    ));
+
+    // Removing one broken entry keeps every other entry and the document's
+    // other members as written.
+    let revision = fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "ws".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let persisted: Value = serde_json::from_slice(&fs::read(&user_path).unwrap()).unwrap();
+    assert!(persisted["mcpServers"].get("ws").is_none());
+    assert_eq!(
+        persisted["mcpServers"]["valid"],
+        user_file["mcpServers"]["valid"]
+    );
+    assert_eq!(
+        persisted["mcpServers"]["leaky"],
+        user_file["mcpServers"]["leaky"]
+    );
+    assert_eq!(
+        serde_json::to_string(&persisted["mcpServers"]["stream"]).unwrap(),
+        serde_json::to_string(&user_file["mcpServers"]["stream"]).unwrap()
+    );
+    assert_eq!(persisted["extension"], user_file["extension"]);
+    assert_eq!(fs::read(&project_path).unwrap(), project_bytes);
+
+    // Saving an entry that was broken replaces only that entry.
+    let replacement =
+        serde_json::from_value(json!({"type": "http", "url": "https://replacement.test/mcp"}))
+            .unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            revision,
+            "leaky".into(),
+            McpChange::Put(replacement),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let persisted: Value = serde_json::from_slice(&fs::read(&user_path).unwrap()).unwrap();
+    assert_eq!(
+        persisted["mcpServers"]["leaky"],
+        json!({"type": "http", "url": "https://replacement.test/mcp"})
+    );
+    assert_eq!(persisted["mcpServers"]["stream"]["type"], "streamable-http");
+
+    // A broken project entry takes no overlay; its record is kept until the
+    // entry is removed, and the removal deletes it.
+    let workspace = fs::canonicalize(fixture.home.join("project")).unwrap();
+    let workspace = workspace.to_str().unwrap();
+    let secrets = json!({"entries": {workspace: {"project-broken": {
+        "$generation": "generation-1",
+        "headers": {"X-Key": "private"}
+    }}}});
+    fs::write(
+        fixture.home.join("mcp-secrets.json"),
+        serde_json::to_vec(&secrets).unwrap(),
+    )
+    .unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert!(
+        catalog
+            .invalid
+            .iter()
+            .any(|entry| entry.id == "project-broken")
+    );
+    assert!(!catalog.servers.contains_key("project-broken"));
+    let stored = fixture
+        .settings
+        .read::<McpSecrets>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .document;
+    assert!(
+        stored
+            .entries
+            .get(workspace)
+            .and_then(|servers| servers.get("project-broken"))
+            .is_some()
+    );
+    fixture
+        .mcp
+        .update(
+            SettingsScope::Project(1),
+            catalog.project_revision.clone().unwrap(),
+            "project-broken".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let stored = fixture
+        .settings
+        .read::<McpSecrets>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .document;
+    assert!(
+        stored
+            .entries
+            .get(workspace)
+            .and_then(|servers| servers.get("project-broken"))
+            .is_none()
+    );
+    let persisted: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    assert!(persisted["mcpServers"].get("project-broken").is_none());
+    assert_eq!(
+        persisted["mcpServers"]["project-valid"],
+        project_file["mcpServers"]["project-valid"]
+    );
+    assert_eq!(persisted["projectExtension"], "keep");
+
+    fixture.close().await;
+}
+
+/// #951: a write keeps the document's id order and every untouched entry's
+/// bytes: a new id is appended and a removed id leaves its place.
+#[tokio::test]
+async fn a_write_keeps_the_documents_id_order() {
+    fn block<'a>(text: &'a str, id: &str) -> &'a str {
+        let start = text.find(&format!("    \"{id}\": {{\n")).unwrap();
+        let rest = &text[start..];
+        let end = rest
+            .find("\n    },")
+            .or_else(|| rest.find("\n    }\n"))
+            .unwrap();
+        &rest[..end]
+    }
+    fn position(text: &str, id: &str) -> usize {
+        text.find(&format!("    \"{id}\": {{\n")).unwrap()
+    }
+
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let path = fixture.home.join("mcp.json");
+    let source = json!({
+        "mcpServers": {
+            "zeta": {"command": "z", "future": {"keep": [1, 2]}},
+            "alpha": {"type": "http", "url": "https://alpha.test/mcp", "auth": {"type": "bearer", "token": "private"}, "unknown": true},
+            "middle": {"command": "m", "enabled": false}
+        },
+        "extension": {"preserve": 17}
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    let replacement =
+        serde_json::from_value(json!({"command": "m-edited", "enabled": false})).unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "middle".into(),
+            McpChange::Put(replacement),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert_eq!(block(&before, "zeta"), block(&after, "zeta"));
+    assert_eq!(block(&before, "alpha"), block(&after, "alpha"));
+    assert!(position(&after, "zeta") < position(&after, "alpha"));
+    assert!(position(&after, "alpha") < position(&after, "middle"));
+    assert!(after.contains("m-edited"), "{after}");
+
+    // A new id is appended after the document's ids.
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let added = serde_json::from_value(json!({"command": "n"})).unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "new".into(),
+            McpChange::Put(added),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(position(&after, "middle") < position(&after, "new"));
+    assert!(position(&after, "new") < after.find("  \"extension\"").unwrap());
+
+    // A removed id leaves its place.
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            snapshot.revision,
+            "alpha".into(),
+            McpChange::Remove,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(!after.contains("\"alpha\""), "{after}");
+    assert!(position(&after, "zeta") < position(&after, "middle"));
+    assert!(position(&after, "middle") < position(&after, "new"));
+    assert_eq!(block(&before, "zeta"), block(&after, "zeta"));
+    fixture.close().await;
+}
+
+/// A broken project entry with the same id as a valid user entry must not hide
+/// the user server: the catalog reports the valid row under `servers` and the
+/// broken row under `invalid`, and runtime selection reaches the user entry.
+#[tokio::test]
+async fn a_broken_project_entry_does_not_hide_the_user_entry_with_the_same_id() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    // The default fixture gives `shared` a valid user entry; make the project
+    // `shared` entry broken.
+    let project_file = fixture.home.join("project/.mcp.json");
+    fs::write(
+        &project_file,
+        json!({"mcpServers": {"shared": {"command": ""}}}).to_string(),
+    )
+    .unwrap();
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    let shared = catalog.servers.get("shared").unwrap();
+    assert_eq!(shared.source, McpSource::User);
+    assert!(matches!(
+        shared.configuration,
+        McpServerSettings::Stdio { ref command, .. } if command == "user-server"
+    ));
+    let broken = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "shared")
+        .unwrap();
+    assert_eq!(broken.source, McpSource::Project(1));
+    assert_eq!(broken.error.field.as_deref(), Some("command"));
+
+    // Runtime selection reaches the user entry, not the broken project row.
+    let connection = fixture
+        .mcp
+        .server(Some(1), "shared".into(), &cancel)
+        .await
+        .unwrap();
+    drop(connection);
+
+    fixture.close().await;
+}
+
+/// #1014: a member dim does not read is unknown and goes back as written, and
+/// `$generation` stays reserved: the entry that carries it reads as broken,
+/// beside the entries that load.
+#[tokio::test]
+async fn unread_entry_members_are_kept_and_a_reserved_generation_is_broken() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let user_path = fixture.home.join("mcp.json");
+    let user_file = json!({
+        "mcpServers": {
+            "legacy": {
+                "command": "legacy-server",
+                "transport": "stdio",
+                "metadata": "x",
+                "args": ["--flag"]
+            },
+            "collision": {"command": "server", "$generation": "g"}
+        }
+    });
+    fs::write(&user_path, serde_json::to_vec(&user_file).unwrap()).unwrap();
+
+    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    assert!(
+        catalog.servers.contains_key("legacy"),
+        "a member dim does not read keeps the entry: {:?}",
+        catalog
+            .invalid
+            .iter()
+            .map(|entry| entry.error.to_string())
+            .collect::<Vec<_>>()
+    );
+    let collision = catalog
+        .invalid
+        .iter()
+        .find(|entry| entry.id == "collision")
+        .expect("the reserved member is the entry's error");
+    assert_eq!(collision.error.field.as_deref(), Some("$generation"));
+    assert!(
+        !catalog.invalid.iter().any(|entry| entry.id == "legacy"),
+        "the reserved member breaks only its own entry"
+    );
+
+    // Read the entry, edit another member, and write it back.
+    let revision = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .revision;
+    let mut editable = fixture
+        .mcp
+        .editable(McpSource::User, "legacy".into(), &cancel)
+        .await
+        .unwrap();
+    let McpServerSettings::Stdio { args, .. } = &mut editable.configuration else {
+        panic!("the fixture entry is stdio");
+    };
+    args.push("--edited".into());
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            revision,
+            "legacy".into(),
+            McpChange::Put(editable.configuration),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let persisted: Value = serde_json::from_slice(&fs::read(&user_path).unwrap()).unwrap();
+    assert_eq!(persisted["mcpServers"]["legacy"]["transport"], "stdio");
+    assert_eq!(persisted["mcpServers"]["legacy"]["metadata"], "x");
+    assert_eq!(
+        persisted["mcpServers"]["legacy"]["args"],
+        json!(["--flag", "--edited"])
+    );
+    assert_eq!(
+        persisted["mcpServers"]["collision"],
+        user_file["mcpServers"]["collision"]
+    );
+
+    // The read back returns the stored text of both unknown members.
+    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    let McpServerSettings::Stdio { extra, .. } = &catalog.servers["legacy"].configuration else {
+        panic!("the edited entry is stdio");
+    };
+    assert_eq!(extra["transport"], json!("stdio"));
+    assert_eq!(extra["metadata"], json!("x"));
+
     fixture.close().await;
 }

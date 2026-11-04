@@ -95,6 +95,12 @@ pub trait BusinessDocument: Default + Serialize + DeserializeOwned + Send + Sync
     const NAMESPACE: &'static str;
     const USER_FILE: &'static str;
     const PROJECT_FILE: Option<&'static str> = None;
+    /// Decodes a document that exists. A source whose entries decode one by
+    /// one overrides this; the default refuses the whole document.
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|_| SettingsError::Invalid("invalid settings document"))
+    }
     fn validate(&self) -> Result<()>;
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -119,8 +125,7 @@ impl<D: BusinessDocument> Format for Typed<D> {
     }
     fn decode(&self, bytes: Option<&[u8]>) -> Result<D> {
         let document: D = match bytes {
-            Some(bytes) => serde_json::from_slice(bytes)
-                .map_err(|_| SettingsError::Invalid("invalid settings document"))?,
+            Some(bytes) => D::decode(bytes)?,
             None => D::default(),
         };
         document.validate()?;

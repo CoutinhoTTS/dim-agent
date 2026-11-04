@@ -2,7 +2,6 @@
   "plugins": {
     "goal": "plugins/goal",
     "workflow": "plugins/workflow",
-    "scheduler": "plugins/scheduler",
     "plugin-authoring": "plugins/plugin-authoring"
   },
   "locked": ["PluginManager", "Rpc", "Transport"],

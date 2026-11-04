@@ -377,7 +377,7 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 | Steer/Queue/Append inputs after the first | — | Never in the excerpt | SessionTitle |
 | Tool batch, compaction | — | Irrelevant: only the input fact is read | — |
 | Child branch inputs | branch filter | Never trigger | SessionTitle |
-| Member, stage, scheduled or ACP Session | `SessionConfig` | Never generated | SessionTitle |
+| Member, stage or scheduled Session | `SessionConfig` | Never generated | SessionTitle |
 | Session close during generation | — | Cancel before store handover; an admitted mutation remains owned by SessionStore | Lifecycle / SessionStore |
 | Session fork | metadata not copied (A7) | Fork untitled; the next adopted operator input on `main` triggers generation from the first adopted operator input in its prefix | SessionTitle |
 | SessionTitle, the model-selection owner, SessionStore or Settings reload | — | Before handover, cancel generation; an admitted store mutation follows S5b settlement (D3) | Lifecycle / SessionStore |

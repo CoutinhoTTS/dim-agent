@@ -117,6 +117,8 @@ try {
   // does not need it.
   const plugins = path.join(staging, 'plugins');
   run('node', ['scripts/stage-plugins.mjs', plugins, '--portable']);
+  const rustNotices = path.join(staging, 'rust-notices.txt');
+  run('node', ['scripts/rust-notices.mjs', rustNotices]);
   for (const platform of platforms) {
     const { triple, zig } = targets[platform];
     console.log(`\n▸ ${platform}`);
@@ -126,7 +128,7 @@ try {
     { cwd: repo, env: { ...process.env, DIM_RELEASE_BUILD: '1' } });
     run('node', ['scripts/stage-release.mjs', path.join(repo, 'target', triple, 'release'),
       path.join(staging, 'stage', platform), version, sourceCommit, ...(account ? ['--account'] : []),
-      '--plugins', plugins],
+      '--plugins', plugins, '--rust-notices', rustNotices],
     { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });
     run('node', ['scripts/pack-release.mjs', path.join(staging, 'stage', platform),
       path.join(staging, 'platforms', `release-${platform}`)]);

@@ -257,6 +257,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "MCP's documents belong to one entry; this save names none." => {
             "MCP 的文档属于单个条目；本次保存没有指定条目。"
         }
+        "{id} is in more than one MCP source: {sources}. Name one with --source." => {
+            "「{id}」出现在多个 MCP 来源中：{sources}。请用 --source 指定其中一个。"
+        }
+        "The action names no MCP source; a row carries the source its owner reported." => {
+            "该操作没有指定 MCP 来源；每一行都带有其所有者报告的来源。"
+        }
+        "No MCP server {id} is in source {source}." => "来源 {source} 中没有 MCP 服务器 {id}。",
         "No MCP server has that id." => "没有该 id 的 MCP 服务器。",
         "This workspace has no project MCP source." => "此工作区没有项目级 MCP 来源。",
         "Enabled {id} ({source})." => "已启用 {id}（{source}）。",

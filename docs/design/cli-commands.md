@@ -27,7 +27,12 @@ Settings · Interface
   Thinking details   collapsed
 ```
 
-Collapsed tool groups retain their existing header and member cards. Summary
+Collapsed tool groups retain their existing header and member cards. The header
+appends the first program name of each shell call, without arguments, executable
+paths, script bodies or output. Names stay in first-call order, with repetitions
+counted (`python ×2, rg`), including shell calls classified as reads or searches.
+The header remains one terminal row and keeps its disclosure when truncated.
+Other tools retain their existing header summaries. Summary
 adds one row per call, in call order, naming its tool and input target or command,
 without output, diffs or script bodies. Each row truncates to one terminal row;
 a multiline command shows its first nonblank line followed by `…`. Expanded
@@ -42,20 +47,21 @@ written to the terminal remains append-only; fullscreen redraws retained history
 
 ## Command menu
 
-In both scrollback and fullscreen TUI, list commands in a fixed task order:
-Session, model and permissions, extensions and automation, view, then app.
-Within each category use the following order, not alphabetical or recent-use order:
+In both scrollback and fullscreen TUI, list commands in one fixed, curated
+order, not alphabetically or by recent use. The menu draws no category column:
 
-| Category | Commands in order |
-| --- | --- |
-| `session` | `/new`, `/resume`, `/timeline`, `/goal`, `/tasks`, `/lines`, `/branch`, `/fork`, `/compact`, `/usage`, `/rename`, `/web` |
-| `model` | `/models`, `/agent`, `/effort`, `/fast`, `/permissions`, `/connect`, `/login` |
-| `extensions` | `/skills`, `/mcp`, `/plugins`, `/hooks`, `/scheduled`, `/workflow`, `/workflow:save`, `/reload-skills`, `/runtime` |
-| `view` | `/theme`, `/language`, `/tools`, `/tui` |
-| `app` | `/settings`, `/keys`, `/exit` |
+```text
+/new /resume /models /compact /usage
+/effort /fast /agent /permissions /settings
+/branch /fork /lines /timeline /goal
+/tasks /rename /web /connect /login
+/skills /reload-skills /mcp /plugins /runtime
+/hooks /scheduled /workflow /workflow:save
+/tools /tui /theme /language /keys /exit
+```
 
 `/fast` is listed only when the model advertises service tiers.
-Search relevance takes priority; equally ranked matches keep this task order.
+Search relevance takes priority; equally ranked matches keep this order.
 The order is independent of the interface language. Opening `/` selects `/new`;
 `/exit` is last in the unfiltered command list.
 Exit requires its exact name or alias before dispatch: choosing an
@@ -65,9 +71,8 @@ Menu selection can still complete rather than dispatch an exact name: commands
 with inline arguments and `/goal` fill the composer for a separate submission.
 `Tab` only completes the selected row and never runs or sends it: a command
 fills its name, one that takes an argument also fills the space after it, and a
-Skill row fills its `$skill: <name> ` marker. A category heading, or a query
-matching nothing, leaves the draft unchanged. A command without an argument
-runs on `Enter` only.
+Skill row fills its `$skill: <name> ` marker. A query matching nothing leaves the
+draft unchanged. A command without an argument runs on `Enter` only.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
 remain compatibility aliases when typed directly. Run, queue and steer keys are
 omitted from the menu. The menu lists slash commands and Skills: the view actions for
@@ -75,7 +80,7 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 `Tab`, `Home` and `End` keep their fullscreen message-picker and scroll bindings
 outside the menu.
 
-A Skill row reads `$name` with its description and shows the `skill` category. Only
+A Skill row reads `$name` with its description. Only
 an enabled Skill that no other root shadows is listed; a name containing whitespace
 is not listed either, because a reference ends at the first whitespace. The list follows the
 Session's catalog: the client rereads it on attach, on a Session switch, after
@@ -88,14 +93,13 @@ command keeps both rows, the command first. `/` is the only trigger: `@` stays t
 file picker.
 
 The menu fits the available terminal columns and rows in both modes. Command
-names take priority over category labels, descriptions and shortcut labels;
-category labels shorten when needed to preserve command names. A shortcut that
+names take priority over descriptions and shortcut labels. A shortcut that
 would crowd out its command name is omitted from the row, without changing
 the binding. On short screens, fewer commands are shown and the window follows
 the selection. Scrollback keeps the command draft visible above the menu and
 omits the menu title and footer when necessary; fullscreen keeps its palette
-query and selection above the composer. Category grouping and ordering do not
-change with terminal size.
+query and selection above the composer. The order does not change with terminal
+size.
 
 When the usual history reservation leaves fewer than eight live rows,
 live controls take priority: either renderer can use up to eight rows for
@@ -132,14 +136,13 @@ Natural height                                      Short budget, 5 rows
 
 ```text
 Commands
-  session /new         start a new session
-  session /resume      resume a previous session
-  session /timeline    jump to a message of the shown line
-  session /goal        follow or change the shown line's goal
-  session /tasks       view command output or interrupt a member
-  session /lines       follow, talk to and end this session's lines
-  model   /permissions permission preset and command rules
-  skill   $commit      write a commit message for the staged changes
+  /new         start a new session
+  /resume      resume a previous session
+  /models      select a model
+  /compact     compact the context of the shown line
+  /usage       show the context window usage
+  /effort      show or set the reasoning effort
+  $commit      write a commit message for the staged changes
 
 / + Enter          -> start a new session
 /ex + Enter        -> /exit (completion only)
@@ -151,10 +154,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| session /new            |   | > /                     |
+| /new                    |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | session /new            |
++- input -----------------+   | /new                    |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -241,8 +244,8 @@ below uses synthetic data; an account need not have a 5h window.
 `/goal` reads the goal of the line the client shows and writes it through the methods Goal
 registers. The methods, the marker blocks and the rule that reads the goal belong to
 [Goal](plugins/Goal.md#a2-session-methods) (A.2, A.3) and [Pursuit](plugins/Pursuit.md#3-changes-to-goal);
-this section owns what the native clients do with them. The command is listed in the palette as a
-`session` command, like `/compact`.
+this section owns what the native clients do with them. The command is listed in the palette,
+like `/compact`.
 
 In both TUI modes, selecting `/goal` with Enter or Tab only fills `/goal ` in the
 composer and closes the palette. It does not dispatch until the user submits the
@@ -479,7 +482,7 @@ daemon already reports it.
 
 ### Menu entry
 
-`/runtime` is a slash command in category `extensions`; its position follows the
+`/runtime` is a slash command; its position follows the
 [command menu order](#command-menu). It needs no Session (`Needs::Nothing`) and takes no inline
 argument, because the panel carries the actions. The typed subforms below are accepted when typed,
 not offered as menu completions.
@@ -668,6 +671,11 @@ opens the external editor on it first, and sends what it leaves with the run.
 
 The client has a closed set of action kinds. Each kind has one key in every panel, and the hint
 lists the area's kinds plus the selected entry's kinds, in the table's order.
+
+An action that names one entry carries the entry's id and the source its row reports. Two entries
+of one id in different sources are two rows, each selected and acted on on its own, and the
+adapter acts on the source the action names rather than searching its catalog for one. An area
+whose owner reports no source leaves the source out, and its ids are unique on their own.
 
 | Kind | Key | What it does |
 | --- | --- | --- |
@@ -1113,6 +1121,14 @@ that entry. The create document is one entry with its source and the definition 
 }
 ```
 
+Every `dimcode mcp` command that names one stored entry by `ID` takes an optional
+`--source SOURCE`, whose values are the source names `mcp list` prints: `user`, `project` and
+`plugin`. One resolver turns `(catalog, id, source)` into one entry, valid or broken. With a
+source it is that source's entry, or a refusal that names the source; without one, an id a single
+source lists is that entry, and an id more than one source lists is refused, naming the sources and
+the flag. The client never picks one. The panel uses the same resolver with the source of the row
+the action came from, and `mcp list` already prints the source each id is in.
+
 The two remote forms replace `configuration` with
 `{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}` or the
 same with `"type": "sse"`, and add `"auth": {"type": "bearer", "token": "…"}` for a static
@@ -1282,15 +1298,15 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/workflow:save` | Open the Workflow panel in its create editor. |
 | `dimcode mcp list` | List the effective catalog over `mcp.catalog` ([The MCP area](#the-mcp-area)): each entry's id, source, transport, enablement and authorization, then each source application's errors. |
 | `dimcode mcp add PATH` | Create an entry from the panel's create document, `-` for stdin, over `mcp.save` with the source revision `mcp.catalog` reported; an id the catalog already lists is refused. |
-| `dimcode mcp edit ID` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
-| `dimcode mcp set ID PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
-| `dimcode mcp remove ID` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
-| `dimcode mcp test ID` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
-| `dimcode mcp inspect ID` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
-| `dimcode mcp disconnect ID` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
-| `dimcode mcp login\|logout\|enable\|disable ID` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
+| `dimcode mcp edit ID [--source SOURCE]` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
+| `dimcode mcp set ID [--source SOURCE] PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
+| `dimcode mcp remove ID [--source SOURCE]` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
+| `dimcode mcp test ID [--source SOURCE]` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
+| `dimcode mcp inspect ID [--source SOURCE]` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
+| `dimcode mcp disconnect ID [--source SOURCE]` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
+| `dimcode mcp login\|logout\|enable\|disable ID [--source SOURCE]` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
 | `/mcp` | Open the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server, grouped `user`, `project` and `plugin`, with the toggle, edit, add, remove, test and inspect kinds. |
-| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands, unchanged: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. Every command that names one stored entry (`login`, `logout`, `disconnect`, `enable`, `disable`) takes an optional `--source SOURCE`, as `dimcode mcp` does; an id more than one source lists requires it. |
 
 | `dimcode permissions list` | List the user's command rules over `permission.rules`: each rule's decision, match and command, then the columns and what deny means. |
 | `dimcode permissions add PATH` | Add one rule from `PATH`, or from stdin for `-`, over `permission.rules` and `permission.set_rules`: an equal rule writes nothing; a conflict re-reads and retries, at most three attempts. |
