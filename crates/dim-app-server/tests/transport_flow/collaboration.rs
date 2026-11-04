@@ -4042,14 +4042,19 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
         idle(&mut client, &lead).await;
         reads.push(last_ok(&events(&lead_session).await));
     }
-    unloaded(agent.get_session(&member).unwrap()).await;
+    super::deletion::eventually("the member unloads after peer reads", || {
+        agent.get_session(&member).is_none()
+    })
+    .await;
+    let loaded_before_read = loads.of(&member).0;
     say(&mut client, &lead, read, "queue").await;
     let lead_session = agent.get_session(&lead).unwrap();
     idle(&mut client, &lead).await;
     reads.push(last_ok(&events(&lead_session).await));
     drop(lead_session);
-    assert!(
-        agent.get_session(&member).is_some(),
+    assert_eq!(
+        loads.of(&member),
+        (loaded_before_read + 1, true),
         "the read restores the member"
     );
     let first = &reads[0];
