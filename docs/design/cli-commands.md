@@ -292,10 +292,11 @@ A `/pursue` form is Pursuit's later option (§10) and is not part of this contra
 A.3's rule: the latest live `goal:objective` block is the objective, the latest live `goal:status`
 block is the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue
 deleted leaves the fold. It adds no query method and asks Goal no question. `/goal` with no
-arguments prints usage before that fold. Before it picks between `set` and `edit` the client reads the line up
-to its published head, and after a write it reads again before printing: the state shown and the
-method chosen come from the events, never from a guess taken from the reply. The fold starts over
-at the line's own opening — its
+arguments prints usage before that fold. Before it picks between `set` and `edit` the client reads the line
+up to its published head. After a write, it folds the events that write produced before printing: the
+line prompt reads them again, and the terminal UI waits for them among the line's live events. The
+state shown and the method chosen come from the events, never from a guess taken from the reply. The
+fold starts over at the line's own opening — its
 `branch/start`, or the `session/forked` a fork writes after the facts it copied — so a new line has
 no goal and a forked Session's `main` never shows the copied one (Goal §2, A11). A v3 client
 receives that opening, so a fork reads the same here as it does in Goal.
@@ -445,7 +446,7 @@ when it is on, and the status `runtime.list` gives: `off`, `acquiring`, `startin
 
 Below the rows the panel names what waits on the runtime — the plugin rows that are Pending because
 one is `off` or `down` ([PluginManager §2.5](plugins/PluginManager.md#25-runtimes)) — so "why is
-goal not working" is answered in the same place as its fix. A failure prints one line per source,
+workflow not working" is answered in the same place as its fix. A failure prints one line per source,
 as `runtime.list` reports it.
 
 ```text
@@ -454,7 +455,7 @@ as `runtime.list` reports it.
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      not installed                   │
 │                                                                           │
-│   3 plugins wait for node: goal, scheduler, workflow                      │
+│   1 plugin waits for node: workflow                                       │
 ╰─ Enter install or apply · s source · a auto · r retry · Esc close ────────╯
 ```
 
@@ -472,7 +473,7 @@ as `runtime.list` reports it.
 │               https://npmmirror.com/mirrors/node/v24.21.0/…: 404         │
 │   python    system    3.12.15    off      not installed                   │
 │                                                                           │
-│   3 plugins wait for node: goal, scheduler, workflow                      │
+│   1 plugin waits for node: workflow                                       │
 ╰─ Enter retry · s switch node to system · Esc close ───────────────────────╯
 ```
 
@@ -526,9 +527,9 @@ with that runtime selected. Today the row says only `pending`.
 ```text
 /plugins
 ╭─ Plugins ─────────────────────────────────────────────────────────────────╮
-│ › goal           on     pending · waits for the node runtime              │
+│ › goal           on     ready · built-in                                  │
 │   session-title  on     ready · built-in                                  │
-│   scheduler      on     pending · waits for the node runtime              │
+│   scheduler      on     ready · built-in                                  │
 │   workflow       on     pending · waits for the node runtime              │
 ╰─ Enter open /runtime · o on/off · r reload · Esc close ───────────────────╯
 ```
@@ -548,7 +549,7 @@ The typed forms are the whole area, so a caller needs no panel:
 $ dimcode runtime list
 node    download  24.21.0   ready
 python  system    3.12.15   off       not installed
-3 plugins wait for node: goal, scheduler, workflow
+1 plugin waits for node: workflow
 $ dimcode runtime install node
 node    download  24.21.0   acquiring
 $ dimcode runtime config python --source system --auto on

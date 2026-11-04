@@ -126,6 +126,7 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | ContextPreparation | branch | `dispatcher`, `timeline` |
 | EnvironmentClientsBranch | branch | `timeline` |
 | FileReads | branch | `timeline` |
+| GoalBranch | branch | `dispatcher`, `timeline` |
 | InputQueue | branch | `dispatcher`, `timeline` |
 | Loop | branch | `dispatcher`, `timeline` |
 | ModelProvider | branch | `dispatcher`, `timeline` |

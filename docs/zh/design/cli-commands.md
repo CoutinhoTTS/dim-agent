@@ -208,8 +208,8 @@ No goal on main.
 **读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
 `goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
 被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
-先打印用法，再打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
-显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
+先打印用法，再打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部。写入之后，客户端先折叠该次写入产生的事件再打印：
+行模式提示符会再读一次，终端界面则等待该线的实时事件。显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
 或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
 复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
 
@@ -337,7 +337,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 原因（列出每个来源和它的错误）的 `failed`。
 
 行下方列出在等这个运行时的插件行——因为它是 `off` 或 `down` 而处于 Pending 的那些
-（[PluginManager §2.5](plugins/PluginManager.md#25-runtimes)）——这样"goal 为什么不工作"和它的
+（[PluginManager §2.5](plugins/PluginManager.md#25-runtimes)）——这样"workflow 为什么不工作"和它的
 解决办法在同一个地方。失败时每个来源一行，与 `runtime.list` 报的一致。
 
 ```text
@@ -346,7 +346,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   3 个插件在等 node：goal、scheduler、workflow                            │
+│   1 个插件在等 node：workflow                                             │
 ╰─ Enter 安装或应用 · s 来源 · a 自动 · r 重试 · Esc 关闭 ──────────────────╯
 ```
 
@@ -364,7 +364,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │               https://npmmirror.com/mirrors/node/v24.21.0/…：404          │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   3 个插件在等 node：goal、scheduler、workflow                            │
+│   1 个插件在等 node：workflow                                             │
 ╰─ Enter 重试 · s 把 node 换成 system · Esc 关闭 ───────────────────────────╯
 ```
 
@@ -411,9 +411,9 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ```text
 /plugins
 ╭─ 插件 ────────────────────────────────────────────────────────────────────╮
-│ › goal           on     pending · 等待 node 运行时                        │
+│ › goal           on     ready · 内置                                      │
 │   session-title  on     ready · 内置                                     │
-│   scheduler      on     pending · 等待 node 运行时                        │
+│   scheduler      on     ready · 内置                                      │
 │   workflow       on     pending · 等待 node 运行时                        │
 ╰─ Enter 打开 /runtime · o 开/关 · r 重载 · Esc 关闭 ───────────────────────╯
 ```

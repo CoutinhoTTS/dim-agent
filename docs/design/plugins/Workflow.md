@@ -91,7 +91,9 @@ and is installed and enabled explicitly through [PluginManager](PluginManager.md
 The base CLI's default development, alpha and release payloads omit it; without
 the plugin, its tool and management methods are unavailable, and its Settings
 documents and run records remain untouched. An installed copy retains the user's
-explicit selection and enablement. External packaging and distribution are
+explicit selection and enablement. The base CLI no longer acquires the Node
+runtime on its first start, so an installed Workflow needs `runtime.install`
+(`dimcode runtime install node`) before it runs. External packaging and distribution are
 tracked in [#1091](https://github.com/arcships/dim/issues/1091). An embedding host
 may build the row below from the manifest's `code` fields.
 

@@ -212,7 +212,7 @@ Agents 取得该分支的发布观察器，调用 `Session::input`；它像对�
 | Rpc `session.submit`，协议 v3（[connection/tree.rs](../../../../crates/dim-app-server/src/connection/tree.rs)） | 可选的 UUID | — |
 | Agents `sessions.input`（§6.2） | 必填、非空，按约定为 `<source>:<uuid>` | — |
 | 分支 Timeline（[core/timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)），经 `Session::input` 与 `Session::lookup`（`sessions.input`、`sessions.lookup`、Rpc 的 `session.submit` 与 `session.input_lookup`） | — | 每个分支对每个标识只接受一次；查找回答 `accepted`、`unknown` 或 `ambiguous` |
-| Goal 分支部分（[goal.ts](../../../../runtime/plugins/goal/goal.ts)） | 经 `Branch::input` 写 `goal:<uuid>` | 不读取 |
+| Goal 的部件（[crates/dim-goal](../../../../crates/dim-goal)） | 经 `TreeCommands::input` 写 `goal:<uuid>` | 不读取 |
 | Workflow（[engine.ts](../../../../runtime/plugins/workflow/engine.ts)） | 每个阶段输入和报告写 `workflow:<uuid>`，写入前先存入运行文件 | 同一代或替换代重试时以同一标识重新提交，按回复结算 |
 | Scheduler（[A.5](../plugins/Scheduler.md#a5-timeline-与-capability-机制)；运行时在 draft [#317](https://github.com/arcships/dim/pull/317)） | `scheduler:<run_id>` 与 `scheduler-report:<run_id>` | `submitted` 或 `lost`，从不重写；报告从不写两次 |
 | `dimcode` 与 Rust TUI（[#312](https://github.com/arcships/dim/pull/312)） | 每次提交新生成一个 UUID | 目前不读取：不确定的提交只报告给用户，不查找 |

@@ -1,7 +1,7 @@
 {
   "analysis": {
     "source": "syn AST: mod declarations, use trees, item definitions and symbol paths",
-    "scope": "dim-agent-*, dim-app-server, dim-client, dim-acp, dim-cli, dim-migration and dim-session-title library/binary targets; cfg branches are conservatively included",
+    "scope": "dim-agent-*, dim-app-server, dim-client, dim-acp, dim-cli, dim-migration, dim-session-title and dim-goal library/binary targets; cfg branches are conservatively included",
     "glob": "glob/re-export chains are resolved for referenced names; an unused glob does not create every possible dependency",
     "limitations": [
       "Macros are not expanded; unexpandedMacros names are reported per module",
@@ -5566,6 +5566,81 @@
       "parent": "dim_client",
       "file": "crates/dim-client/src/wire.rs",
       "unexpandedMacros": []
+    },
+    {
+      "id": "dim_goal",
+      "crate": "dim_goal",
+      "parent": null,
+      "file": "crates/dim-goal/src/lib.rs",
+      "unexpandedMacros": [
+        "json",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_goal::branch",
+      "crate": "dim_goal",
+      "parent": "dim_goal",
+      "file": "crates/dim-goal/src/branch.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_goal::fold",
+      "crate": "dim_goal",
+      "parent": "dim_goal",
+      "file": "crates/dim-goal/src/fold.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_goal::fold::tests",
+      "crate": "dim_goal",
+      "parent": "dim_goal::fold",
+      "file": "crates/dim-goal/src/fold.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "panic"
+      ]
+    },
+    {
+      "id": "dim_goal::session",
+      "crate": "dim_goal",
+      "parent": "dim_goal",
+      "file": "crates/dim-goal/src/session.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_goal::session::tests",
+      "crate": "dim_goal",
+      "parent": "dim_goal::session",
+      "file": "crates/dim-goal/src/session.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "json"
+      ]
+    },
+    {
+      "id": "dim_goal::text",
+      "crate": "dim_goal",
+      "parent": "dim_goal",
+      "file": "crates/dim-goal/src/text.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "vec"
+      ]
     },
     {
       "id": "dim_migration",
@@ -30721,6 +30796,8 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::goal",
       "references": [
+        "path crate::goal::Call",
+        "path crate::goal::Goal",
         "path crate::goal::NOT_AVAILABLE",
         "path crate::goal::Request",
         "path crate::goal::available",
@@ -31181,7 +31258,6 @@
         "path EventContent::PermissionChanged",
         "path EventContent::TurnEnd",
         "path Progress",
-        "path crate::wire::History",
         "use crate::wire::Configuration",
         "use crate::wire::Event",
         "use crate::wire::EventContent",
@@ -39019,6 +39095,500 @@
       "references": [
         "path Result",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartScope::Branch",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use dim_app_server::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use dim_app_server::settings::SourceDeclaration"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_goal::branch",
+      "references": [
+        "mod branch",
+        "path branch",
+        "path branch::GoalBranch::new"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_goal::fold",
+      "references": [
+        "mod fold"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_goal::session",
+      "references": [
+        "mod session",
+        "path session",
+        "path session::GoalSession::new"
+      ]
+    },
+    {
+      "from": "dim_goal",
+      "to": "dim_goal::text",
+      "references": [
+        "mod text",
+        "path GoalTexts",
+        "path GoalTexts::default",
+        "use text::GoalTexts"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use dim_app_server::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path BranchLifecycle",
+        "path SessionLifecycle",
+        "path TimelineIdentity",
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::SessionLifecycle",
+        "use dim_agent_runtime::TimelineIdentity"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_runtime::contracts",
+      "references": [
+        "path BranchOptions",
+        "use dim_agent_runtime::BranchOptions"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_runtime::core::dispatcher",
+      "references": [
+        "path Dispatcher",
+        "use dim_agent_runtime::Dispatcher"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::BranchEnded",
+        "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQuery",
+        "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
+        "path TimelineQueryOrderBy::Sequence",
+        "path TimelineQueryPredicate",
+        "path TimelineQueryScope",
+        "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain",
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryDirection",
+        "use dim_agent_runtime::TimelineQueryOrderBy",
+        "use dim_agent_runtime::TimelineQueryPredicate",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path BranchSource::Host",
+        "path EventKind::BranchCreate",
+        "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchEnded",
+        "path EventKind::InputDeleted",
+        "path EventKind::InputMessage",
+        "path EventKind::ModelStart",
+        "path EventKind::StopInterrupt",
+        "path EventKind::Text",
+        "path EventKind::TurnEnd",
+        "path InputBlock::Raw",
+        "path InterruptScope::Turn",
+        "path TurnEndData",
+        "path dim_agent_types::BranchCreateFailedData::Cancelled",
+        "path dim_agent_types::BranchCreateFailedData::Failed",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::BranchSource",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InterruptScope",
+        "use dim_agent_types::TurnEndData",
+        "use dim_agent_types::TurnOutcome"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use dim_app_server::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_goal::fold",
+      "references": [
+        "path Conclusion",
+        "path ConclusionAction::Blocked",
+        "path ConclusionAction::Completed",
+        "path ConclusionAction::Continue",
+        "path ConclusionAction::Failed",
+        "path Decision::Continuation",
+        "path Decision::Pause",
+        "path Fold",
+        "path TurnEnd",
+        "path fold",
+        "path fold::ConclusionKind",
+        "path fold::ConclusionKind::Blocked",
+        "path fold::ConclusionKind::Continue",
+        "path fold::ConclusionKind::Done",
+        "path fold::ConclusionKind::Failed",
+        "path fold::conclusion_of",
+        "path fold::decide_conclusion",
+        "path fold::decide_evaluated_continuation",
+        "path fold::decide_evaluation",
+        "path fold::decide_interrupt",
+        "path fold::decide_turn_end",
+        "path fold::evaluation_of_operation",
+        "path fold::evaluation_operation",
+        "path fold::is_opening",
+        "path fold::reply_conclusion",
+        "path fold::truncate",
+        "use crate::fold",
+        "use crate::fold::Conclusion",
+        "use crate::fold::ConclusionAction",
+        "use crate::fold::Decision",
+        "use crate::fold::Fold",
+        "use crate::fold::TurnEnd"
+      ]
+    },
+    {
+      "from": "dim_goal::branch",
+      "to": "dim_goal::text",
+      "references": [
+        "path GoalTexts",
+        "path text",
+        "path text::OBJECTIVE_KEY",
+        "path text::STATUS_KEY",
+        "path text::automatic_pause",
+        "path text::conclusion",
+        "path text::continuation",
+        "path text::evaluate_again",
+        "path text::evaluated",
+        "path text::evaluated_continuation",
+        "path text::evaluator_prompt",
+        "path text::marker",
+        "path text::start_clear",
+        "use crate::text",
+        "use crate::text::GoalTexts"
+      ]
+    },
+    {
+      "from": "dim_goal::fold",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path BranchSource::Host",
+        "path EventKind",
+        "path EventKind::BranchCreate",
+        "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchEnded",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::InputMessage",
+        "path EventKind::StopInterrupt",
+        "path EventKind::TurnEnd",
+        "path EventKind::TurnStart",
+        "path InputBlock",
+        "path InputBlock::Raw",
+        "path InputMessageData",
+        "path InputMode::Append",
+        "path InterruptScope::Turn",
+        "path TurnOutcome",
+        "path TurnOutcome::Cancelled",
+        "path TurnOutcome::Completed",
+        "path TurnOutcome::Failed",
+        "path dim_agent_types::BranchCreateFailedData::Cancelled",
+        "path dim_agent_types::BranchCreateFailedData::Failed",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::BranchSource",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::InputMode",
+        "use dim_agent_types::InterruptScope",
+        "use dim_agent_types::TurnOutcome"
+      ]
+    },
+    {
+      "from": "dim_goal::fold",
+      "to": "dim_goal::fold::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_goal::fold",
+      "to": "dim_goal::text",
+      "references": [
+        "path Judge",
+        "path Judge::Evaluator",
+        "path Judge::Model",
+        "path Judge::of",
+        "path Marker",
+        "path OBJECTIVE_KEY",
+        "path STATUS_KEY",
+        "path text",
+        "path text::body",
+        "path text::marker",
+        "path text::value",
+        "use crate::text",
+        "use crate::text::Judge",
+        "use crate::text::Marker",
+        "use crate::text::OBJECTIVE_KEY",
+        "use crate::text::STATUS_KEY"
+      ]
+    },
+    {
+      "from": "dim_goal::fold::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputBlock::Raw",
+        "use dim_agent_types::InputBlock"
+      ]
+    },
+    {
+      "from": "dim_goal::fold::tests",
+      "to": "dim_goal::fold",
+      "references": [
+        "path Conclusion",
+        "path conclusion_of",
+        "use super::Conclusion",
+        "use super::conclusion_of"
+      ]
+    },
+    {
+      "from": "dim_goal::fold::tests",
+      "to": "dim_goal::text",
+      "references": [
+        "path text",
+        "path text::conclusion",
+        "use crate::text"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "path ToolExecutionContext",
+        "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Interruption::Report",
+        "path MethodDecl::new",
+        "path RpcError",
+        "path RpcError::from",
+        "path RpcError::invalid",
+        "path SessionMethods",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Session",
+        "use dim_agent_capabilities::prompt_guide::GuideEntries",
+        "use dim_agent_capabilities::prompt_guide::GuideEntry",
+        "use dim_agent_capabilities::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolContribution",
+        "path ToolHandler",
+        "path ToolRegistry",
+        "use dim_agent_capabilities::tool_registry::ToolContribution",
+        "use dim_agent_capabilities::tool_registry::ToolHandler",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path ToolSource::Extension",
+        "use dim_agent_types::ToolCall",
+        "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolResult",
+        "use dim_agent_types::ToolSource"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_goal::session::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
+      "to": "dim_goal::text",
+      "references": [
+        "path GoalTexts",
+        "path OBJECTIVE_LIMIT",
+        "path SUMMARY_LIMIT",
+        "path text::ENTRY",
+        "path text::Judge::Evaluator",
+        "path text::Judge::Model",
+        "path text::TOOL_DESCRIPTION",
+        "path text::TOOL_INVALID",
+        "path text::clear",
+        "path text::edit",
+        "path text::pause",
+        "path text::report",
+        "path text::resume",
+        "path text::set",
+        "path text::tool_schema",
+        "use crate::text",
+        "use crate::text::GoalTexts",
+        "use crate::text::OBJECTIVE_LIMIT",
+        "use crate::text::SUMMARY_LIMIT"
+      ]
+    },
+    {
+      "from": "dim_goal::session::tests",
+      "to": "dim_goal::session",
+      "references": [
+        "path branch_of",
+        "use super::branch_of"
+      ]
+    },
+    {
+      "from": "dim_goal::text",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputBlock",
+        "path InputBlock::Raw",
+        "path InputMessageData",
+        "path InputMode",
+        "path InputMode::Append",
+        "path InputMode::Queue",
+        "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::InputMode"
       ]
     },
     {

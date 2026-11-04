@@ -2,7 +2,7 @@
 
 Status: Proposed. Scope: every way a part, the App Server or a TypeScript plugin reads events from a Timeline, which of them the event query ([ADR 019](../adr/019-event-query.md), [plugin contract §5.4](plugin-contract.md#54-the-event-query)) replaces, and what is left. This document holds an audit and the decisions proposed in [ADR 020](../adr/020-timeline-read-convergence.md); a decision here takes effect when that ADR is accepted. Language: English.
 
-Base: `origin/main` at `514225777`. Call sites exclude tests and examples. Every row below was read from source, not carried over from an earlier plan.
+Base: `origin/main` at `514225777`. Call sites exclude tests and examples. Every row below was read from source at that base, so the TypeScript paths it names, Goal's `runtime/plugins/goal/branch.ts` among them, are a pre-port snapshot.
 
 ## 1. The entries
 
