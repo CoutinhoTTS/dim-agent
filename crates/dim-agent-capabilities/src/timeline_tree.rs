@@ -3207,6 +3207,19 @@ fn read_items(events: &[Arc<AgentEvent>], after: u64) -> (Vec<serde_json::Value>
                     if let Some(name) = name {
                         item["name"] = serde_json::json!(name);
                     }
+                    if let Some(effects) = result
+                        .result
+                        .effects
+                        .as_ref()
+                        .filter(|effects| !effects.is_empty())
+                    {
+                        item["effects"] = serde_json::json!(
+                            effects
+                                .iter()
+                                .map(ToolEffect::shortened)
+                                .collect::<Vec<_>>()
+                        );
+                    }
                     items.push(item);
                 }
             }
