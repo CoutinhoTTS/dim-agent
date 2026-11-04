@@ -384,7 +384,7 @@ impl Owner {
         }
         self.task(format!("start:{at}"), move |owner| {
             Box::pin(async move {
-                if owner.inherited_live(at).await? {
+                if owner.inherited_live().await? {
                     owner.started_clear(at);
                 }
                 Ok(())
@@ -877,47 +877,70 @@ impl Owner {
         }
     }
 
-    /// The goal an inherited prefix left live, read newest first from the
-    /// chain, if the branch has no copied facts to answer it (A11).
-    async fn inherited_live(&self, at: u64) -> Result<bool, AgentError> {
-        let mut offset = 0;
-        loop {
-            let mut query = read_page(TimelineQueryScope::Chain, Some(at), INHERITED_PAGE, false);
-            query.kinds = vec!["input/message".into()];
-            query.direction = TimelineQueryDirection::Descending;
-            query.offset = offset;
-            let reply = self.timeline.query(query).await?;
-            for (index, event) in reply.events.iter().enumerate() {
-                if reply.positions[index].branch_id == self.branch_id {
-                    continue;
-                }
-                let EventKind::InputMessage(data) = &event.kind else {
-                    continue;
-                };
-                let mut live = None;
-                for block in &data.blocks {
-                    let InputBlock::Raw {
-                        text: block_text,
-                        key,
-                        retire,
-                    } = block;
-                    if text::marker(block_text).is_some()
-                        && key.as_deref().is_some_and(|key| {
-                            key == text::OBJECTIVE_KEY || key == text::STATUS_KEY
-                        })
-                    {
-                        live = Some(!retire);
+    /// The goal an inherited prefix left live, read newest first one ancestor
+    /// at a time, if the branch has no copied facts to answer it (A11).
+    ///
+    /// `Timeline::ancestors` is root first and the direct parent is pushed
+    /// after that list (`timeline_tree.rs`, `restore` and `branch`), so the
+    /// reverse is nearest first: the first keyed block found is the nearest
+    /// one, which is the one the chain read returned before.
+    async fn inherited_live(&self) -> Result<bool, AgentError> {
+        for (branch, cut) in self.timeline.ancestors().iter().rev() {
+            // A cut of zero contributes nothing to the chain (the chain read
+            // skips it), and a read cannot start at sequence zero.
+            if *cut == 0 {
+                continue;
+            }
+            let mut from = *cut;
+            loop {
+                let mut query = read_page(
+                    TimelineQueryScope::Branch,
+                    Some(from),
+                    INHERITED_PAGE,
+                    false,
+                );
+                query.kinds = vec!["input/message".into()];
+                query.direction = TimelineQueryDirection::Descending;
+                let reply = self.tree.query(branch.clone(), query).await?;
+                for (index, event) in reply.events.iter().enumerate() {
+                    // A branch-scope read returns the ancestor's own facts, so
+                    // this cannot hold today; it stays so a later change of
+                    // scope cannot read this branch's goal as inherited.
+                    if reply.positions[index].branch_id == self.branch_id {
+                        continue;
+                    }
+                    let EventKind::InputMessage(data) = &event.kind else {
+                        continue;
+                    };
+                    let mut live = None;
+                    for block in &data.blocks {
+                        let InputBlock::Raw {
+                            text: block_text,
+                            key,
+                            retire,
+                        } = block;
+                        if text::marker(block_text).is_some()
+                            && key.as_deref().is_some_and(|key| {
+                                key == text::OBJECTIVE_KEY || key == text::STATUS_KEY
+                            })
+                        {
+                            live = Some(!retire);
+                        }
+                    }
+                    if let Some(live) = live {
+                        return Ok(live);
                     }
                 }
-                if let Some(live) = live {
-                    return Ok(live);
+                let Some(last) = reply.events.last().map(|event| event.sequence) else {
+                    break;
+                };
+                if (reply.events.len() as u64) < INHERITED_PAGE || last <= 1 {
+                    break;
                 }
+                from = last - 1;
             }
-            if (reply.events.len() as u64) < INHERITED_PAGE {
-                return Ok(false);
-            }
-            offset += reply.events.len() as u64;
         }
+        Ok(false)
     }
 }
 
