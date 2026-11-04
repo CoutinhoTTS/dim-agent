@@ -2895,7 +2895,7 @@ async fn call(session: &Session, branch: &str, arguments: &str) -> (String, Stri
 async fn line_events(session: &Session, branch: &str) -> Result<Vec<Arc<AgentEvent>>> {
     session
         .session_service::<TreeCommands>()?
-        .page(branch.to_owned(), 0, LINE_PAGE)
+        .page(branch.to_owned(), 0, LINE_PAGE, session.sequence(branch)?)
         .await
 }
 async fn local_events(session: &Session, branch: &str) -> Vec<Arc<AgentEvent>> {
@@ -6123,6 +6123,47 @@ async fn a_host_lines_end_says_nothing_to_main() {
         .events
         .is_empty()
     );
+    soon(agent.close()).await.unwrap();
+}
+
+/// The tree's page never cuts an atomic batch: `through` must end one, for an
+/// open line and for an ended one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tree_page_refuses_a_through_inside_a_batch() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "read the batch").await;
+    soon(session.idle(&child)).await.unwrap();
+    let timeline = probe.child_timeline.lock().unwrap().clone().unwrap();
+    let input = |text: &str| {
+        EventKind::InputMessage(InputMessageData::text(text, Some(InputMode::Append))).into()
+    };
+    let batch = timeline
+        .append_batch_registered(vec![input("first"), input("second")], |_| Ok(()))
+        .unwrap();
+    let (inside, end) = (batch[0].sequence, batch[1].sequence);
+    let commands = session.session_service::<TreeCommands>().unwrap();
+    let refused = |page: Result<Vec<Arc<AgentEvent>>>, ended: bool| {
+        assert!(
+            matches!(page, Err(AgentError::InvalidInput(ref message)) if message.contains("inside an atomic batch")),
+            "an interior through is refused (ended: {ended})"
+        );
+    };
+    refused(commands.page(child.clone(), 0, 8, inside).await, false);
+    soon(session.end_branch(
+        &child,
+        BranchSource::Host {
+            operation_id: "test-end".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    refused(commands.page(child.clone(), 0, 8, inside).await, true);
+    let page = commands.page(child, 0, 1024, end).await.unwrap();
+    assert_eq!(page.last().map(|event| event.sequence), Some(end));
     soon(agent.close()).await.unwrap();
 }
 

@@ -182,18 +182,19 @@ impl TreeCommands {
             .end(&id, source)
             .await
     }
-    /// One page of `id`'s committed batches; an ended line reads at its
-    /// fixed head.
+    /// One page of `id`'s committed batches up to `through`; an ended line
+    /// reads at its fixed head and `through` must end an atomic batch.
     pub async fn page(
         &self,
         id: String,
         after: u64,
         limit: usize,
+        through: u64,
     ) -> std::result::Result<Vec<Arc<AgentEvent>>, AgentError> {
         self.tree
             .upgrade()
             .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
-            .page(&id, after, limit)
+            .page(&id, after, limit, through)
             .await
     }
     /// Queries one line's own facts, forwarding to its Timeline while open
@@ -826,14 +827,29 @@ impl TimelineTree {
             ready.send_replace(Some(outcome));
         });
     }
-    async fn page(&self, id: &str, after: u64, limit: usize) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self
+    /// One page of `id`'s committed batches, never past `through`: an ended
+    /// line reads at its fixed head. `through` must end an atomic batch, as it
+    /// does for a live line's read, so a page cannot be cut inside one.
+    async fn page(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        let head = self
             .head(id)
             .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
+        if through > head {
+            return Err(AgentError::InvalidInput(format!(
+                "future timeline sequence {through}"
+            )));
+        }
         if through <= after {
             return Ok(Vec::new());
         }
         if let Some(context) = self.owned_context(id) {
+            context.timeline().batch_end(through).await?;
             return open_page(context.timeline(), after, limit, through).await;
         }
         let key = TimelineKey {
@@ -3102,7 +3118,7 @@ impl BranchTool {
         }
         let events = self
             .tree
-            .page(target.id.clone(), after, limit)
+            .page(target.id.clone(), after, limit, head)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
         let (items, next) = read_items(&events, after);

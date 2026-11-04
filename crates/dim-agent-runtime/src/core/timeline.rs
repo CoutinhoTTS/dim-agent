@@ -547,18 +547,11 @@ impl Timeline {
             stored.extend(hot);
             return Ok(stored);
         }
-        Ok(events(
-            self.0
-                .store
-                .read(
-                    &TimelineKey {
-                        session_id: self.0.key.session_id.clone(),
-                        branch_id: branch.into(),
-                    },
-                    start..=end,
-                )
-                .await?,
-        ))
+        let key = TimelineKey {
+            session_id: self.0.key.session_id.clone(),
+            branch_id: branch.into(),
+        };
+        Ok(events(self.0.store.read(&key, start..=end).await?))
     }
     /// The event a context checkpoint is anchored at, out of the events of
     /// `branch` up to `cut`. The point read decodes one row. A row inside an

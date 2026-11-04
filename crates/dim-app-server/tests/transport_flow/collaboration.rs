@@ -4003,8 +4003,11 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
         first.to_string().contains("Echo: again"),
         "the read holds the second request: {first}"
     );
+    // Every read acquires the member, and it may unload and restore between
+    // reads: `branch/resume` then advances `nextCursor` legitimately, so only
+    // the visible events must stay the same.
     for read in &reads {
-        assert_eq!(read, first);
+        assert_eq!(read["events"], first["events"]);
     }
     loads.released(&member).await;
     super::deletion::eventually("the leader unloads", || agent.get_session(&lead).is_none()).await;

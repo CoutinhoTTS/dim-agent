@@ -383,6 +383,22 @@ async fn session_history_page(
     Ok(events)
 }
 
+/// One page of an ended `branch` at its fixed head, from the tree that owns
+/// the end. `through` must end an atomic batch, so the page is never cut
+/// inside one.
+async fn ended_page(
+    session: &Session,
+    branch: &str,
+    after: u64,
+    limit: usize,
+    through: u64,
+) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    session
+        .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
+        .page(branch.to_owned(), after, limit, through)
+        .await
+}
+
 /// The facts after `after` a page asks for, up to `limit`.
 fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQuery {
     dim_agent_runtime::TimelineQuery {
@@ -748,7 +764,9 @@ impl AgentIndex {
     /// past `through`, ending on an atomic batch.
     ///
     /// The Session must already be loaded. An ended line is served by the tree
-    /// at its fixed head; otherwise the Session query serves the page.
+    /// at its fixed head; otherwise the Session query serves the page. A line
+    /// that ends while the query reads it is retried against the tree: the
+    /// `ended_head` check is only a snapshot.
     pub(crate) async fn history_page(
         &self,
         id: &str,
@@ -764,16 +782,15 @@ impl AgentIndex {
             return Err(AgentError::Storage("Session is unloading".into()));
         }
         if session.ended_head(branch).is_some() {
-            let page = session
-                .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
-                .page(branch.to_owned(), after, limit)
-                .await?;
-            return Ok(page
-                .into_iter()
-                .filter(|event| event.sequence <= through)
-                .collect());
+            return ended_page(&session, branch, after, limit, through).await;
         }
-        session_history_page(&session, branch, after, limit, through).await
+        match session_history_page(&session, branch, after, limit, through).await {
+            Ok(page) => Ok(page),
+            Err(AgentError::BranchEnded(_)) => {
+                ended_page(&session, branch, after, limit, through).await
+            }
+            Err(error) => Err(error),
+        }
     }
     /// The events of `event_ids` in one read; ids the Session does not hold
     /// are absent. Collaboration supplies ids from its `main`-branch page, so

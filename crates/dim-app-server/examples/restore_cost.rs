@@ -27,11 +27,11 @@
 //! event count includes the `branch/resume` events earlier restores wrote.
 //! A counting allocator reports the live heap over its level before each
 //! restore: the peak until the first idle, at the first idle and after the
-//! unload. The first
-//! restore of each Session in the process validates the stored Timeline; later
-//! ones reuse it while the stored directory is unchanged, so the line reports
-//! `firstRestoreMs`/`firstBranchesMs` and the medians of the re-acquisitions
-//! separately ([restore validation reuse](../../../docs/design/appserver/restore-validation.md)).
+//! unload. The first restore of each Session in the process validates the
+//! stored Timeline; later ones reuse it while the stored directory is
+//! unchanged, so the line reports `firstRestoreMs`/`firstBranchesMs` and the
+//! medians of the re-acquisitions separately
+//! ([restore validation reuse](../../../docs/design/appserver/restore-validation.md)).
 //!
 //! `RESTORE_COST_CHILD` also grows a child cut at `main`'s head with one turn
 //! of its own, so a restore opens a branch with ancestry.
