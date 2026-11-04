@@ -172,7 +172,7 @@ export function readPlugins(value: unknown): PluginEntry[] {
   })
 }
 
-export type McpEntry = { id: string; source: "user" | "project" | "plugin"; enabled: boolean; transport: string; auth: string | undefined }
+export type McpEntry = { id: string; source: "user" | "project" | "plugin"; enabled: boolean; transport: string; auth: string | undefined; referencedVariables: string[]; unsetVariables: string[] }
 export type McpInvalidEntry = { id: string; source: "user" | "project" | "plugin"; error: string }
 export type McpView = { userRevision: string; projectRevision: string | undefined; servers: McpEntry[]; invalid: McpInvalidEntry[]; errors: string[] }
 export function readMcp(value: unknown): McpView {
@@ -181,7 +181,9 @@ export function readMcp(value: unknown): McpView {
     userRevision: string(source.userRevision), projectRevision: optionalString(source.projectRevision),
     servers: array(source.servers, (item) => {
       const server = object(item)
-      return { id: string(server.id), source: choice(server.source, ["user", "project", "plugin"]), enabled: boolean(server.enabled), transport: string(server.transport), auth: server.auth === undefined ? undefined : string(object(server.auth).status) }
+      // A daemon older than these fields reports none.
+      const variables = (value: unknown) => value === undefined ? [] : array(value, string)
+      return { id: string(server.id), source: choice(server.source, ["user", "project", "plugin"]), enabled: boolean(server.enabled), transport: string(server.transport), auth: server.auth === undefined ? undefined : string(object(server.auth).status), referencedVariables: variables(server.referencedVariables), unsetVariables: variables(server.unsetVariables) }
     }),
     // A daemon older than this list reports no broken entries.
     invalid: source.invalid === undefined ? [] : array(source.invalid, (item) => {
@@ -208,14 +210,16 @@ export type McpServerInput =
   | { type: "stdio"; command: string; args: string[]; cwd?: string; env: Record<string, string>; enabled: boolean }
   | { type: "http" | "sse"; url: string; headers: Record<string, string>; enabled: boolean; auth?: { type: "bearer"; token: string }; oauth?: McpOAuthInput }
 export type McpConfiguration =
-  | { type: "stdio"; command: string; argsCount: number; cwd: string | undefined; envNames: string[] }
-  | { type: "http" | "sse"; endpoint: string; headerNames: string[]; authConfigured: boolean; oauthConfigured: boolean; oauth: McpOAuthConfiguration | undefined }
+  | { type: "stdio"; command: string; argsCount: number; cwd: string | undefined; envNames: string[]; referencedVariables: string[]; unsetVariables: string[] }
+  | { type: "http" | "sse"; endpoint: string; headerNames: string[]; authConfigured: boolean; oauthConfigured: boolean; oauth: McpOAuthConfiguration | undefined; referencedVariables: string[]; unsetVariables: string[] }
 export function readMcpConfiguration(value: unknown): McpConfiguration {
   const source = object(value)
   const type = choice(source.type, ["stdio", "http", "sse"])
-  if (type === "stdio") return { type, command: string(source.command), argsCount: number(source.argsCount), cwd: optionalString(source.cwd), envNames: array(source.envNames, string) }
+  const referencedVariables = source.referencedVariables === undefined ? [] : array(source.referencedVariables, string)
+  const unsetVariables = source.unsetVariables === undefined ? [] : array(source.unsetVariables, string)
+  if (type === "stdio") return { type, command: string(source.command), argsCount: number(source.argsCount), cwd: optionalString(source.cwd), envNames: array(source.envNames, string), referencedVariables, unsetVariables }
   const oauth = source.oauth === null ? undefined : object(source.oauth)
-  return { type, endpoint: string(source.endpoint), headerNames: array(source.headerNames, string), authConfigured: boolean(source.authConfigured), oauthConfigured: boolean(source.oauthConfigured), oauth: oauth === undefined ? undefined : { clientId: optionalString(oauth.clientId), callbackPort: oauth.callbackPort === null ? undefined : number(oauth.callbackPort), scopes: optionalString(oauth.scopes), metadataConfigured: boolean(oauth.metadataConfigured) } }
+  return { type, endpoint: string(source.endpoint), headerNames: array(source.headerNames, string), authConfigured: boolean(source.authConfigured), oauthConfigured: boolean(source.oauthConfigured), oauth: oauth === undefined ? undefined : { clientId: optionalString(oauth.clientId), callbackPort: oauth.callbackPort === null ? undefined : number(oauth.callbackPort), scopes: optionalString(oauth.scopes), metadataConfigured: boolean(oauth.metadataConfigured) }, referencedVariables, unsetVariables }
 }
 export type McpEditableEntry = { revision: string | undefined; enabled: boolean; secretsInUserScope: boolean; configuration: McpConfiguration }
 export function readMcpEditableEntry(value: unknown): McpEditableEntry {

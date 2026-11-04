@@ -1370,7 +1370,7 @@ async fn plugin_content_reaches_sessions_through_its_owners() {
     let catalog = client.rpc("mcp.catalog", json!({})).await;
     assert_eq!(
         catalog["result"]["servers"],
-        json!([{"id":"kit:docs","source":"plugin","enabled":true,"transport":"stdio"}]),
+        json!([{"id":"kit:docs","source":"plugin","enabled":true,"transport":"stdio","referencedVariables":[],"unsetVariables":[]}]),
         "{catalog}"
     );
     let entry = client

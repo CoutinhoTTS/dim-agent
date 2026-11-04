@@ -394,8 +394,11 @@ Provider entry. See [Model startup](../../docs/design/model-startup.md).
 
 `mcp list` prints tab-separated rows: quoted and escaped ID, source, transport, enablement and
 authorization (`sign-in required`, `signed in`, `sign-in expired`, or `—` when absent).
-Missing scopes appear below the entry. With no entry in the catalog it says so in one line
-instead of printing the column legend, which describes rows.
+Missing scopes appear below the entry. `Variables:` and `Unset variables:` appear below a row when
+the entry references environment variables or has unset ones; both are sorted name lists only. A
+reference is kept as written in the stored entry and expanded when the daemon connects, so the
+lists explain a connection failure without showing a value. With no entry in the catalog it says
+so in one line instead of printing the column legend, which describes rows.
 An entry that does not decode is listed with `invalid` in place of its transport and its error
 instead of the authorization column. It stays in its file as written and never runs; `mcp remove
 ID` deletes it, an add with the same id and source replaces it, and `mcp enable`, `mcp test` and
@@ -416,10 +419,11 @@ omitted `url` or header key keeps the stored one. `dimcode mcp remove ID` delete
 source revision. `dimcode mcp test ID`
 runs the stored entry once and prints the tools the temporary connection found, and `dimcode mcp
 inspect ID` prints the effective configuration and the Session's connections without contacting
-the server. A broken entry has no configuration to read, so `mcp edit` and `mcp set` refuse it
-with its error. `dimcode mcp disconnect ID` closes the entry's live connections without changing its
-enablement or stored configuration; the entry reconnects on next use. The `/mcp` panel does the
-same on a list: `Enter`, `Ctrl+E`, `Ctrl+N`, `Ctrl+X`, `Ctrl+T` and `Tab`.
+the server, including the same referenced and unset variable names. A broken entry has no
+configuration to read, so `mcp edit` and `mcp set` refuse it with its error. `dimcode mcp
+disconnect ID` closes the entry's live connections without changing its enablement or stored
+configuration; the entry reconnects on next use. The `/mcp` panel does the same on a list:
+`Enter`, `Ctrl+E`, `Ctrl+N`, `Ctrl+X`, `Ctrl+T` and `Tab`.
 
 Every command above that names one stored entry by ID also takes `--source SOURCE`, whose values
 are the sources `mcp list` prints: `user`, `project` and `plugin`. An ID one source lists is that

@@ -17,6 +17,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `collaboration` | process | Collaboration | Rust-only | — |
 | `collaborationDirectory` | process | CollaborationDirectory | Rust-only | — |
 | `connectionHub` | process | Connection | Rust-only | — |
+| `credentialVariablesHost` | process | root | Rust-only | — |
 | `executionSettingsHost` | process | ExecutionSettings | Rust-only | — |
 | `fileStorage` | process | FileStorage | Rust-only | — |
 | `grokOAuthService` | process | GrokOAuth | Rust-only | — |

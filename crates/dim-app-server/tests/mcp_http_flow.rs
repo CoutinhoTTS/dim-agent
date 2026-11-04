@@ -96,6 +96,7 @@ impl Fixture {
         file.write_all(&serde_json::to_vec(&json!({"mcpServers":{"docs":configuration}})).unwrap())
             .unwrap();
         let root = Ctx::root().unwrap();
+        mcp_host::provide_credentials(&root);
         let catalog = dim_app_server::catalog();
         let build = Build::default();
         let names = Names::copy(&catalog, &build);
