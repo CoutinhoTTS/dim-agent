@@ -4,6 +4,60 @@ Dim uses self-hosted runners for PR checks, alpha builds and npm package verific
 
 The source, including the Dim account plugin, uses MIT. An account-enabled distribution differs from the API-key one only by the OAuth client IDs compiled in from repository secrets.
 
+## Release skills
+
+Both skills live in this repository and travel with its release workflow. Use the requested stage explicitly:
+
+| Request | Skill | Result |
+| --- | --- | --- |
+| Choose the next alpha and prepare its version PR | [dim-release](../../.agents/skills/dim-release/SKILL.md) | Committed, consistent metadata and a PR into `main`; no tag/build/publication |
+| Build a GitHub draft or publish its npm packages | [dim-release](../../.agents/skills/dim-release/SKILL.md) | The authorized CI stage, using the immutable release version and original archives |
+| Choose the alpha route, or explicitly build/publish on a local Mac | [dim-alpha-release](../../skills/dim-alpha-release/SKILL.md) | CI by default; the local command only when that route is requested |
+
+Example agent requests:
+
+```text
+Use $dim-release to prepare the next alpha version PR. Select an unused version,
+synchronize the metadata and run its consistency checks. Do not merge, tag,
+dispatch a build or publish.
+
+Use $dim-release to build a GitHub prerelease draft from the verified release
+commit on main. Inspect the artifacts and stop before publishing it or npm.
+
+Use $dim-release to publish the existing GitHub prerelease vX.Y.Z-alpha.N to npm.
+Use its original packages and the configured OIDC workflow; do not rebuild them.
+
+Use $dim-alpha-release for a local Mac dry run only. Build and validate the alpha;
+do not publish to npm or create GitHub tags/Releases.
+```
+
+If an agent does not list a skill, ask it to read the linked repository `SKILL.md` by path. An explicit end-to-end publication request can authorize the complete workflow; a preparation or review request does not. Existing authorization does not need to be requested again at each stage.
+
+## Version preparation
+
+The CI route uses an explicit committed `X.Y.Z-alpha.N`. It does not select, bump or write back versions. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
+
+For the next alpha, inspect registry versions across `dimcode-alpha`, `dimcode-web`, the six platform packages and legacy `dimcode`, plus reserved remote tags/GitHub Releases and open release PRs. Continue an existing PR for the same preparation task; otherwise increment the highest reserved alpha numerically. A partial publication reserves its version too. Do not infer availability from the checkout's version or a dist-tag alone. Reuse the matching release version and original archives for a CI retry instead of allocating another number. Keep the existing legacy-beta compatibility guard.
+
+Prepare a normal version PR from `origin/main`, synchronizing:
+
+| File | Fields |
+| --- | --- |
+| `Cargo.toml` | `[workspace.package].version` |
+| `Cargo.lock` | Generated versions of packages inheriting the workspace version; refresh with Cargo metadata |
+| `npm/package.json` | `version` and every exact `optionalDependencies` version |
+| `runtime/package.json` | `version` |
+| `runtime/package-lock.json` | Root `version` and `packages[""].version` |
+
+Explicitly versioned crates such as `dim-agent-types` keep their own version. The npm source template keeps the name `dimcode` and the `dim`/`dimcode` bins: collection selects `dimcode-alpha`/`dima` for an alpha. Do not change Node/Rutis versions or unrelated dependencies as part of the product bump. The skill provides executable consistency checks; metadata-only preparation needs no release build.
+
+```text
+version PR -> required CI -> merge into main -> annotated vX.Y.Z-alpha.N tag
+           -> self-hosted build -> inspect GitHub draft -> authorized publication
+```
+
+The local Mac route differs: `publish-alpha.mjs` selects a version and temporarily updates these product fields, then restores them without committing. Do not use it to prepare a CI version PR. Source changes after tagging need a new version and tag; existing tags and published package bytes are immutable.
+
 ## Upgrade compatibility
 
 Before replacing an older CLI and daemon, stop that daemon with its matching CLI. The replacement `dimcode daemon stop` refuses daemons without `daemon.shutdown.completed` and leaves them running. Forced shutdown does not certify storage or plugin cleanup.
