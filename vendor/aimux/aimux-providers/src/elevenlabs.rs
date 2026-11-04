@@ -13,22 +13,37 @@
 //! returns raw binary audio. The `output_format` is passed as a query parameter.
 //! `instructions` is not supported and emits a warning.
 
-use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use aimux_core::ErrorCause;
 use aimux_core::error::AiMuxError;
 use aimux_core::shared::{SharedProviderOptions, Warning};
 use aimux_core::speech_model::{
     AudioData, SpeechCallOptions, SpeechModel, SpeechRequest, SpeechResponse, SpeechResult,
 };
 
-use aimux_provider_utils::{HttpBody, HttpRequest, load_api_key};
+use aimux_core::embedding_model::EmbeddingModel;
+use aimux_core::image_model::ImageModel;
+use aimux_core::language_model::LanguageModel;
+use aimux_core::provider::Provider;
+use aimux_provider_utils::{
+    FetchFunction, HeaderMapOpt, HttpBody, Resolvable, optional_field, validate_base_url,
+};
+
+use crate::shared::{EndpointConfig, TransformRequestBody};
+use aimux_provider_utils::{AuthScheme, Credential, ProviderHeaders};
+
+pub(crate) mod options;
 
 /// ElevenLabs errors: `{"detail": {"status": "invalid_api_key", "message": ...}}`
 /// where `detail.status` is the machine code. FastAPI validation errors carry
-/// `detail` as a plain string or a `[{loc, msg, type}]` list instead.
+/// `detail` as a plain string or a `[{loc, msg, type}]` list instead. The
+/// `{"error": {"message", "code"}}` shape of `elevenlabsErrorDataSchema` gives
+/// the code as `error.code`, a number or a string.
 fn elevenlabs_error_parts(data: &Value) -> aimux_provider_utils::ProviderErrorParts {
     let detail = data.get("detail");
     let message = detail
@@ -56,7 +71,14 @@ fn elevenlabs_error_parts(data: &Value) -> aimux_provider_utils::ProviderErrorPa
         provider_code: detail
             .and_then(|value| value.get("status"))
             .and_then(Value::as_str)
-            .map(str::to_owned),
+            .map(str::to_owned)
+            .or_else(
+                || match data.get("error").and_then(|error| error.get("code"))? {
+                    Value::String(code) => Some(code.clone()),
+                    Value::Number(code) => Some(code.to_string()),
+                    _ => None,
+                },
+            ),
     }
 }
 
@@ -64,78 +86,188 @@ fn elevenlabs_failed_response_handler() -> aimux_provider_utils::ResponseHandler
     aimux_provider_utils::create_json_error_response_handler(elevenlabs_error_parts)
 }
 
-// ── Config ───────────────────────────────────────────────────────────────────
+// ── Settings ─────────────────────────────────────────────────────────────────
 
-/// Configuration for the ElevenLabs provider.
-#[derive(Debug, Clone)]
-pub struct ElevenLabsConfig {
-    pub api_key: String,
-    /// Base URL for the ElevenLabs API (no trailing slash). Defaults to
-    /// `https://api.elevenlabs.io`.
-    pub base_url: String,
-    /// Extra headers merged into every request.
-    pub headers: Option<HashMap<String, String>>,
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io";
+pub(crate) const API_KEY_ENV_VAR: &str = "ELEVENLABS_API_KEY";
+const DEFAULT_NAME: &str = "elevenlabs";
+
+/// Settings of [`create_elevenlabs`] (the AI SDK's `ElevenLabsProviderSettings`).
+///
+/// Every field is optional. Nothing here is evaluated when the provider is
+/// created except `base_url` and `name`; `api_key` and `headers` are
+/// evaluated on every request, including the WebSocket handshake of realtime
+/// transcription.
+#[derive(Clone, Default)]
+pub struct ElevenLabsProviderSettings {
+    /// Base URL for the API calls. Default `https://api.elevenlabs.io`; a
+    /// trailing slash is removed.
+    pub base_url: Option<String>,
+    /// The API key, sent as `xi-api-key`. `None` loads `ELEVENLABS_API_KEY`
+    /// when a request is made and fails that request with
+    /// `AiMuxError::LoadApiKey` if it is unset. An explicit value is used as
+    /// given, `""` included: it never falls back to the environment. A
+    /// [`Resolvable::Future`] is awaited once, an [`Resolvable::AsyncFn`] on
+    /// every request.
+    pub api_key: Option<Resolvable<String>>,
+    /// Extra headers on every request. A `None` value removes the header,
+    /// including `xi-api-key`. Per-call headers win over these.
+    pub headers: Option<HeaderMapOpt>,
+    /// The provider name, the prefix of the `provider()` strings
+    /// (`"{name}.speech"`, `"{name}.transcription"`). Default `"elevenlabs"`.
+    /// The providerOptions key stays `elevenlabs`.
+    pub name: Option<String>,
+    /// The transport: a mock, a signing decorator, a proxy-aware client.
+    /// `None` uses the process default, resolved per request.
+    pub fetch: Option<FetchFunction>,
+    /// Rewrites every JSON request body once, after it is serialized and
+    /// before it is sent.
+    pub transform_request_body: Option<TransformRequestBody>,
+    /// Opens the WebSocket of realtime transcription (the AI SDK's
+    /// `webSocket`). `None` uses the built-in tungstenite connector.
+    #[cfg(feature = "realtime")]
+    pub web_socket: Option<Arc<dyn aimux_provider_utils::ws::WsConnector>>,
 }
 
-impl ElevenLabsConfig {
-    pub fn new(api_key: impl Into<String>) -> Self {
-        Self {
-            api_key: api_key.into(),
-            base_url: "https://api.elevenlabs.io".to_string(),
-            headers: None,
-        }
+impl std::fmt::Debug for ElevenLabsProviderSettings {
+    /// Never prints the key or header values.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("ElevenLabsProviderSettings");
+        debug
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key)
+            .field(
+                "headers",
+                &self.headers.as_ref().map(std::collections::HashMap::len),
+            )
+            .field("name", &self.name)
+            .field("fetch", &self.fetch.is_some())
+            .field(
+                "transform_request_body",
+                &self.transform_request_body.is_some(),
+            );
+        #[cfg(feature = "realtime")]
+        debug.field("web_socket", &self.web_socket.is_some());
+        debug.finish()
     }
+}
 
-    /// Override the base URL (for testing or proxies).
-    #[must_use]
-    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into().trim_end_matches('/').to_string();
-        self
-    }
+/// Create an ElevenLabs provider.
+///
+/// # Errors
+///
+/// Returns `AiMuxError::invalid_argument` when `base_url` is not an `http(s)`
+/// URL with a host. That is the only way this fails: the key is loaded per
+/// request, not here.
+pub fn create_elevenlabs(
+    settings: ElevenLabsProviderSettings,
+) -> Result<ElevenLabsProvider, AiMuxError> {
+    let base_url = match settings.base_url.as_deref() {
+        Some(url) => validate_base_url(url)?,
+        None => DEFAULT_BASE_URL.to_string(),
+    };
+    Ok(ElevenLabsProvider {
+        name: settings.name.unwrap_or_else(|| DEFAULT_NAME.to_string()),
+        base_url,
+        headers: ProviderHeaders::new(
+            Credential::explicit_or_env(settings.api_key, API_KEY_ENV_VAR, "ElevenLabs"),
+            AuthScheme::Header("xi-api-key"),
+            Vec::new(),
+            settings.headers,
+        )
+        .with_user_agent(
+            crate::shared::aisdk_pins::ELEVENLABS.name,
+            crate::shared::aisdk_pins::ELEVENLABS.version,
+        ),
+        fetch: Some(crate::shared::package_fetch(
+            settings.fetch,
+            crate::shared::aisdk_pins::ELEVENLABS,
+        )),
+        transform_request_body: settings.transform_request_body,
+        #[cfg(feature = "realtime")]
+        web_socket: settings.web_socket,
+    })
+}
 
-    /// Attach extra headers merged into every request.
-    #[must_use]
-    pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
-        self.headers = Some(headers);
-        self
-    }
-
-    /// Create from environment variable `ELEVENLABS_API_KEY`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `AiMuxError::InvalidArgument` when `ELEVENLABS_API_KEY` is not set.
-    pub fn from_env() -> Result<Self, AiMuxError> {
-        let api_key = load_api_key(None, "ELEVENLABS_API_KEY", "ElevenLabs")?;
-        Ok(Self::new(api_key))
-    }
+/// The default provider: `create_elevenlabs` with default settings, created
+/// on first use. Creating it reads nothing from the environment and cannot
+/// fail; a missing key surfaces from the first request instead.
+pub fn elevenlabs() -> &'static ElevenLabsProvider {
+    static DEFAULT: OnceLock<ElevenLabsProvider> = OnceLock::new();
+    DEFAULT.get_or_init(|| {
+        create_elevenlabs(ElevenLabsProviderSettings::default())
+            .expect("default ElevenLabs settings are always valid")
+    })
 }
 
 // ── Provider ─────────────────────────────────────────────────────────────────
 
-/// ElevenLabs provider — creates `ElevenLabsSpeechModel` instances.
+/// ElevenLabs provider (the AI SDK's `ElevenLabsProvider`) — creates speech
+/// and transcription models. Cheap to clone the models out of; it holds no
+/// HTTP client.
 pub struct ElevenLabsProvider {
-    config: ElevenLabsConfig,
+    name: String,
+    base_url: String,
+    headers: ProviderHeaders,
+    fetch: Option<FetchFunction>,
+    transform_request_body: Option<TransformRequestBody>,
+    #[cfg(feature = "realtime")]
+    web_socket: Option<Arc<dyn aimux_provider_utils::ws::WsConnector>>,
 }
 
 impl ElevenLabsProvider {
-    #[must_use]
-    pub fn new(config: ElevenLabsConfig) -> Self {
-        Self { config }
+    fn model_config(&self, method: &str) -> EndpointConfig {
+        EndpointConfig::fixed(
+            format!("{}.{method}", self.name),
+            self.base_url.clone(),
+            self.headers.clone(),
+            self.fetch.clone(),
+            self.transform_request_body.clone(),
+        )
     }
 
-    /// Create a speech (TTS) model instance for the given model name (e.g.
-    /// `"eleven_multilingual_v2"`).
+    /// A speech (TTS) model (e.g. `"eleven_multilingual_v2"`); `provider()`
+    /// is `"{name}.speech"`.
     #[must_use]
     pub fn speech(&self, model_id: &str) -> ElevenLabsSpeechModel {
-        ElevenLabsSpeechModel::new(model_id.to_string(), self.config.clone())
+        ElevenLabsSpeechModel::from_config(model_id.to_string(), self.model_config("speech"))
     }
 
-    /// Create a transcription (STT) model instance for the given model name
-    /// (e.g. `"scribe_v1"`). Uses the `/v1/speech-to-text` endpoint.
+    /// A transcription (STT) model (e.g. `"scribe_v1"`); `provider()` is
+    /// `"{name}.transcription"`. Uses the `/v1/speech-to-text` endpoint.
     #[must_use]
     pub fn transcription(&self, model_id: &str) -> ElevenLabsTranscriptionModel {
-        ElevenLabsTranscriptionModel::new(model_id.to_string(), self.config.clone())
+        ElevenLabsTranscriptionModel::from_config(
+            model_id.to_string(),
+            self.model_config("transcription"),
+            #[cfg(feature = "realtime")]
+            self.web_socket.clone(),
+        )
+    }
+}
+
+impl Provider for ElevenLabsProvider {
+    fn language_model(&self, model_id: &str) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
+        Err(AiMuxError::no_such_model(model_id, "languageModel"))
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Arc<dyn EmbeddingModel>, AiMuxError> {
+        Err(AiMuxError::no_such_model(model_id, "embeddingModel"))
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Arc<dyn ImageModel>, AiMuxError> {
+        Err(AiMuxError::no_such_model(model_id, "imageModel"))
+    }
+
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Option<Result<Arc<dyn TranscriptionModel>, AiMuxError>> {
+        Some(Ok(Arc::new(self.transcription(model_id))))
+    }
+
+    fn speech_model(&self, model_id: &str) -> Option<Result<Arc<dyn SpeechModel>, AiMuxError>> {
+        Some(Ok(Arc::new(self.speech(model_id))))
     }
 }
 
@@ -150,40 +282,19 @@ const DEFAULT_OUTPUT_FORMAT: &str = "mp3_44100_128";
 /// An ElevenLabs speech (TTS) model.
 pub struct ElevenLabsSpeechModel {
     model_id: String,
-    config: ElevenLabsConfig,
+    config: EndpointConfig,
 }
 
 impl ElevenLabsSpeechModel {
-    #[must_use]
-    pub fn new(model_id: String, config: ElevenLabsConfig) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
         Self { model_id, config }
-    }
-
-    fn build_headers(&self, extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-        headers.insert("xi-api-key".to_string(), self.config.api_key.clone());
-        if let Some(ref config_headers) = self.config.headers {
-            for (k, v) in config_headers {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        headers
-    }
-
-    fn endpoint(&self, voice_id: &str) -> String {
-        format!("{}/v1/text-to-speech/{}", self.config.base_url, voice_id)
     }
 }
 
 #[async_trait]
 impl SpeechModel for ElevenLabsSpeechModel {
     fn provider(&self) -> &str {
-        "elevenlabs.speech"
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
@@ -193,32 +304,22 @@ impl SpeechModel for ElevenLabsSpeechModel {
     async fn do_generate(&self, options: &SpeechCallOptions) -> Result<SpeechResult, AiMuxError> {
         let (body, query_params, warnings, voice_id) = build_request(options, &self.model_id)?;
 
-        let headers = self.build_headers(options.headers.as_ref());
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
 
+        let endpoint = exchange.url(&format!("/v1/text-to-speech/{voice_id}"));
         let url = if query_params.is_empty() {
-            self.endpoint(&voice_id)
+            endpoint
         } else {
             let qs: Vec<String> = query_params
                 .iter()
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect();
-            format!("{}?{}", self.endpoint(&voice_id), qs.join("&"))
+            format!("{endpoint}?{}", qs.join("&"))
         };
 
         let resp = aimux_provider_utils::post_json_to_api(
-            HttpRequest {
-                url,
-                headers: headers
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-
-                abort_signal: options.abort_signal.clone(),
-                call_id: None,
-                recording_context: None,
-                ..Default::default()
-            },
-            Value::Object(body.clone()),
+            exchange.request(url, options),
+            exchange.transform_body(Value::Object(body.clone())),
             aimux_provider_utils::create_binary_response_handler(),
             elevenlabs_failed_response_handler(),
         )
@@ -227,11 +328,12 @@ impl SpeechModel for ElevenLabsSpeechModel {
         let response_headers = resp.response_headers;
         let audio_bytes = resp.value.to_vec();
 
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        let timestamp = aimux_core::Timestamp::now();
 
         Ok(SpeechResult {
             audio: AudioData::Binary(audio_bytes),
             warnings,
+            usage: None,
             request: Some(SpeechRequest {
                 body: Some(Value::Object(body)),
             }),
@@ -294,8 +396,13 @@ fn build_request(
     let mapped_format = map_output_format(output_format);
     query_params.push(("output_format".to_string(), mapped_format));
 
-    // Add language code if provided.
-    if let Some(ref language) = options.language {
+    // Add language code if provided (`if (language)`: an empty string is
+    // not sent).
+    if let Some(language) = options
+        .language
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         body.insert("language_code".to_string(), json!(language));
     }
 
@@ -306,7 +413,7 @@ fn build_request(
     }
 
     // Parse and apply provider-specific options.
-    let elevenlabs_options = parse_elevenlabs_provider_options(options.provider_options.as_ref());
+    let elevenlabs_options = parse_elevenlabs_provider_options(options.provider_options.as_ref())?;
     if let Some(ref opts) = elevenlabs_options {
         // Voice settings from provider options.
         if let Some(ref vs) = opts.voice_settings {
@@ -324,8 +431,12 @@ fn build_request(
             }
         }
 
-        // Add language code from provider options if not already set.
-        if let Some(ref lc) = opts.language_code
+        // Add language code from provider options if not already set
+        // (`languageCode && !requestBody.language_code`).
+        if let Some(lc) = opts
+            .language_code
+            .as_deref()
+            .filter(|value| !value.is_empty())
             && !body.contains_key("language_code")
         {
             body.insert("language_code".to_string(), json!(lc));
@@ -353,13 +464,15 @@ fn build_request(
             );
         }
 
-        if let Some(seed) = opts.seed {
+        if let Some(ref seed) = opts.seed {
             body.insert("seed".to_string(), json!(seed));
         }
-        if let Some(ref pt) = opts.previous_text {
+        // `if (elevenLabsOptions.previousText)`: an empty string is not sent.
+        if let Some(pt) = opts.previous_text.as_ref().filter(|text| !text.is_empty()) {
             body.insert("previous_text".to_string(), json!(pt));
         }
-        if let Some(ref nt) = opts.next_text {
+        // `if (elevenLabsOptions.nextText)`: an empty string is not sent.
+        if let Some(nt) = opts.next_text.as_ref().filter(|text| !text.is_empty()) {
             body.insert("next_text".to_string(), json!(nt));
         }
         if let Some(ref prids) = opts.previous_request_ids {
@@ -423,122 +536,121 @@ fn map_output_format(format: &str) -> String {
 
 // ── Provider options parsing ─────────────────────────────────────────────────
 
-/// Parsed `elevenlabs` speech provider options.
-#[derive(Debug, Default)]
+/// `elevenLabsSpeechModelOptionsSchema` (elevenlabs-speech-model-options.ts).
+/// Every key is `.optional()`: absent is `None`, `null` fails.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ElevenLabsSpeechProviderOptions {
+    #[serde(default, deserialize_with = "optional_field")]
     language_code: Option<String>,
+    #[serde(default, deserialize_with = "optional_field")]
     voice_settings: Option<ElevenLabsVoiceSettings>,
+    /// At most 3.
+    #[serde(default, deserialize_with = "at_most_three")]
     pronunciation_dictionary_locators: Option<Vec<ElevenLabsPronunciationLocator>>,
-    seed: Option<u64>,
+    /// `z.number().min(0).max(4294967295)`, sent as written.
+    #[serde(default, deserialize_with = "seed")]
+    seed: Option<serde_json::Number>,
+    #[serde(default, deserialize_with = "optional_field")]
     previous_text: Option<String>,
+    #[serde(default, deserialize_with = "optional_field")]
     next_text: Option<String>,
+    /// At most 3.
+    #[serde(default, deserialize_with = "at_most_three")]
     previous_request_ids: Option<Vec<String>>,
+    /// At most 3.
+    #[serde(default, deserialize_with = "at_most_three")]
     next_request_ids: Option<Vec<String>>,
-    apply_text_normalization: Option<String>,
+    #[serde(default, deserialize_with = "optional_field")]
+    apply_text_normalization: Option<TextNormalization>,
+    #[serde(default, deserialize_with = "optional_field")]
     apply_language_text_normalization: Option<bool>,
+    #[serde(default, deserialize_with = "optional_field")]
     enable_logging: Option<bool>,
 }
 
-#[derive(Debug, Default)]
+/// `z.enum(['auto', 'on', 'off'])`, sent as written.
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum TextNormalization {
+    Auto,
+    On,
+    Off,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ElevenLabsVoiceSettings {
+    /// 0 to 1.
+    #[serde(default, deserialize_with = "unit_interval")]
     stability: Option<f64>,
+    /// 0 to 1.
+    #[serde(default, deserialize_with = "unit_interval")]
     similarity_boost: Option<f64>,
+    /// 0 to 1.
+    #[serde(default, deserialize_with = "unit_interval")]
     style: Option<f64>,
+    #[serde(default, deserialize_with = "optional_field")]
     use_speaker_boost: Option<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ElevenLabsPronunciationLocator {
     pronunciation_dictionary_id: String,
+    #[serde(default, deserialize_with = "optional_field")]
     version_id: Option<String>,
 }
 
-/// Extract ElevenLabs-specific speech options from the shared provider options.
+/// `.max(3)` on an `.optional()` array.
+fn at_most_three<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let items = Vec::<T>::deserialize(deserializer)?;
+    if items.len() > 3 {
+        return Err(serde::de::Error::custom("expected at most 3 items"));
+    }
+    Ok(Some(items))
+}
+
+/// `z.number().min(0).max(1)` on an `.optional()` key.
+fn unit_interval<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    let value = f64::deserialize(deserializer)?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom("expected a number from 0 to 1"))
+    }
+}
+
+/// `seed`: `z.number().min(0).max(4294967295)` on an `.optional()` key.
+fn seed<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Number>, D::Error> {
+    let number = serde_json::Number::deserialize(deserializer)?;
+    if number
+        .as_f64()
+        .is_some_and(|value| (0.0..=4_294_967_295.0).contains(&value))
+    {
+        Ok(Some(number))
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a number from 0 to 4294967295",
+        ))
+    }
+}
+
+/// `parseProviderOptions({ provider: 'elevenlabs', providerOptions, schema:
+/// elevenLabsSpeechModelOptionsSchema })` (elevenlabs-speech-model.ts
+/// getArgs).
 fn parse_elevenlabs_provider_options(
     options: Option<&SharedProviderOptions>,
-) -> Option<ElevenLabsSpeechProviderOptions> {
-    let provider_opts = options.and_then(|opts| opts.get("elevenlabs"))?;
-    let opts = provider_opts.as_object()?;
-
-    let voice_settings = opts
-        .get("voiceSettings")
-        .and_then(|vs| vs.as_object())
-        .map(|vs| ElevenLabsVoiceSettings {
-            stability: vs.get("stability").and_then(serde_json::Value::as_f64),
-            similarity_boost: vs
-                .get("similarityBoost")
-                .and_then(serde_json::Value::as_f64),
-            style: vs.get("style").and_then(serde_json::Value::as_f64),
-            use_speaker_boost: vs
-                .get("useSpeakerBoost")
-                .and_then(serde_json::Value::as_bool),
-        });
-
-    let pronunciation_dictionary_locators = opts
-        .get("pronunciationDictionaryLocators")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|loc| loc.as_object())
-                .map(|loc| ElevenLabsPronunciationLocator {
-                    pronunciation_dictionary_id: loc
-                        .get("pronunciationDictionaryId")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    version_id: loc
-                        .get("versionId")
-                        .and_then(|v| v.as_str())
-                        .map(std::string::ToString::to_string),
-                })
-                .collect()
-        });
-
-    Some(ElevenLabsSpeechProviderOptions {
-        language_code: opts
-            .get("languageCode")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string),
-        voice_settings,
-        pronunciation_dictionary_locators,
-        seed: opts.get("seed").and_then(serde_json::Value::as_u64),
-        previous_text: opts
-            .get("previousText")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string),
-        next_text: opts
-            .get("nextText")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string),
-        previous_request_ids: opts
-            .get("previousRequestIds")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(std::string::ToString::to_string)
-                    .collect()
-            }),
-        next_request_ids: opts
-            .get("nextRequestIds")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(std::string::ToString::to_string)
-                    .collect()
-            }),
-        apply_text_normalization: opts
-            .get("applyTextNormalization")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string),
-        apply_language_text_normalization: opts
-            .get("applyLanguageTextNormalization")
-            .and_then(serde_json::Value::as_bool),
-        enable_logging: opts
-            .get("enableLogging")
-            .and_then(serde_json::Value::as_bool),
-    })
+) -> Result<Option<ElevenLabsSpeechProviderOptions>, AiMuxError> {
+    aimux_provider_utils::parse_provider_options(options::NAMESPACE, options)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -550,7 +662,218 @@ use aimux_core::transcription_model::{
     TranscriptionResponse, TranscriptionResult, TranscriptionSegment,
 };
 use aimux_provider_utils::{MultipartForm, media_type_to_extension};
-use serde::Deserialize;
+
+/// `elevenLabsTranscriptionModelOptionsSchema`
+/// (elevenlabs-transcription-model-options.ts). Every key is `.nullish()`:
+/// `null` reads as absent, and a key left out takes the schema's default
+/// (`tagAudioEvents` true, `timestampsGranularity` `word`, `diarize` false,
+/// `fileFormat` `other`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ElevenLabsTranscriptionOptions {
+    #[serde(default)]
+    language_code: Option<String>,
+    #[serde(default = "some_true")]
+    tag_audio_events: Option<bool>,
+    /// An integer from 1 to 32.
+    #[serde(default, deserialize_with = "num_speakers")]
+    num_speakers: Option<u8>,
+    #[serde(default = "word_granularity")]
+    timestamps_granularity: Option<TimestampsGranularity>,
+    #[serde(default = "some_false")]
+    diarize: Option<bool>,
+    #[serde(default = "other_file_format")]
+    file_format: Option<FileFormat>,
+    /// The options of a realtime session; a batch call warns about them.
+    #[serde(default)]
+    streaming: Option<RealtimeOptions>,
+}
+
+fn some_true() -> Option<bool> {
+    Some(true)
+}
+
+fn some_false() -> Option<bool> {
+    Some(false)
+}
+
+fn word_granularity() -> Option<TimestampsGranularity> {
+    Some(TimestampsGranularity::Word)
+}
+
+fn other_file_format() -> Option<FileFormat> {
+    Some(FileFormat::Other)
+}
+
+/// `z.number().int().min(1).max(32).nullish()`.
+fn num_speakers<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u8>, D::Error> {
+    match Option::<f64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) if value.fract() == 0.0 && (1.0..=32.0).contains(&value) => {
+            Ok(Some(value as u8))
+        }
+        Some(_) => Err(serde::de::Error::custom("expected an integer from 1 to 32")),
+    }
+}
+
+/// `z.enum(['none', 'word', 'character'])`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TimestampsGranularity {
+    None,
+    Word,
+    Character,
+}
+
+impl TimestampsGranularity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Word => "word",
+            Self::Character => "character",
+        }
+    }
+}
+
+/// `z.enum(['pcm_s16le_16', 'other'])`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum FileFormat {
+    #[serde(rename = "pcm_s16le_16")]
+    PcmS16le16,
+    #[serde(rename = "other")]
+    Other,
+}
+
+impl FileFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PcmS16le16 => "pcm_s16le_16",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// The `streaming` object of the schema. Only checked here: aimux's realtime
+/// session reads its own two keys (RFC-0034 D5).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(
+    dead_code,
+    reason = "validated only; the realtime session reads its own keys"
+)]
+struct RealtimeOptions {
+    #[serde(default)]
+    commit_strategy: Option<CommitStrategy>,
+    #[serde(default)]
+    enable_logging: Option<bool>,
+    #[serde(default)]
+    filter_background_audio: Option<bool>,
+    #[serde(default)]
+    include_language_detection: Option<bool>,
+    #[serde(default)]
+    include_timestamps: Option<bool>,
+    /// At most 50, each at most 20 characters.
+    #[serde(default, deserialize_with = "keyterms")]
+    keyterms: Option<Vec<String>>,
+    /// An integer from 50 to 2000.
+    #[serde(default, deserialize_with = "duration_ms")]
+    min_silence_duration_ms: Option<f64>,
+    /// An integer from 50 to 2000.
+    #[serde(default, deserialize_with = "duration_ms")]
+    min_speech_duration_ms: Option<f64>,
+    #[serde(default)]
+    no_verbatim: Option<bool>,
+    #[serde(default)]
+    previous_text: Option<String>,
+    #[serde(default)]
+    secondary_languages: Option<Vec<String>>,
+    /// 0.3 to 3.
+    #[serde(default, deserialize_with = "vad_silence_threshold_secs")]
+    vad_silence_threshold_secs: Option<f64>,
+    /// 0.1 to 0.9.
+    #[serde(default, deserialize_with = "vad_threshold")]
+    vad_threshold: Option<f64>,
+}
+
+/// `z.enum(['manual', 'vad'])`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CommitStrategy {
+    Manual,
+    Vad,
+}
+
+/// A `.nullish()` number in `range` (an integer when `integer`).
+fn nullish_number_in<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    range: std::ops::RangeInclusive<f64>,
+    integer: bool,
+    expected: &'static str,
+) -> Result<Option<f64>, D::Error> {
+    match Option::<f64>::deserialize(deserializer)? {
+        Some(value) if !range.contains(&value) || (integer && value.fract() != 0.0) => {
+            Err(serde::de::Error::custom(expected))
+        }
+        value => Ok(value),
+    }
+}
+
+fn duration_ms<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
+    nullish_number_in(
+        deserializer,
+        50.0..=2000.0,
+        true,
+        "expected an integer from 50 to 2000",
+    )
+}
+
+fn vad_silence_threshold_secs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    nullish_number_in(
+        deserializer,
+        0.3..=3.0,
+        false,
+        "expected a number from 0.3 to 3",
+    )
+}
+
+fn vad_threshold<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    nullish_number_in(
+        deserializer,
+        0.1..=0.9,
+        false,
+        "expected a number from 0.1 to 0.9",
+    )
+}
+
+/// `z.array(z.string().max(20)).max(50).nullish()`.
+fn keyterms<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    let keyterms = Option::<Vec<String>>::deserialize(deserializer)?;
+    if keyterms
+        .as_ref()
+        .is_some_and(|terms| terms.len() > 50 || terms.iter().any(|term| term.chars().count() > 20))
+    {
+        return Err(serde::de::Error::custom(
+            "expected at most 50 keyterms of at most 20 characters",
+        ));
+    }
+    Ok(keyterms)
+}
+
+/// `parseProviderOptions({ provider: 'elevenlabs', providerOptions, schema:
+/// elevenLabsTranscriptionModelOptionsSchema })`
+/// (elevenlabs-transcription-model.ts getArgs); `None` without an
+/// `elevenlabs` namespace.
+fn parse_transcription_options(
+    provider_options: Option<&SharedProviderOptions>,
+) -> Result<Option<ElevenLabsTranscriptionOptions>, AiMuxError> {
+    aimux_provider_utils::parse_provider_options(options::NAMESPACE, provider_options)
+}
 
 /// ElevenLabs transcription response word.
 #[derive(Debug, Deserialize)]
@@ -581,43 +904,37 @@ struct ElevenLabsTranscriptionResponse {
 /// Endpoint: `POST {base_url}/v1/speech-to-text` (multipart form-data)
 pub struct ElevenLabsTranscriptionModel {
     model_id: String,
-    config: ElevenLabsConfig,
+    config: EndpointConfig,
+    #[cfg(feature = "realtime")]
+    web_socket: Option<Arc<dyn aimux_provider_utils::ws::WsConnector>>,
 }
 
 impl ElevenLabsTranscriptionModel {
-    #[must_use]
-    pub fn new(model_id: String, config: ElevenLabsConfig) -> Self {
-        Self { model_id, config }
-    }
-
-    fn build_headers(&self, extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-        headers.insert("xi-api-key".to_string(), self.config.api_key.clone());
-        if let Some(ref config_headers) = self.config.headers {
-            for (k, v) in config_headers {
-                headers.insert(k.clone(), v.clone());
-            }
+    pub(crate) fn from_config(
+        model_id: String,
+        config: EndpointConfig,
+        #[cfg(feature = "realtime")] web_socket: Option<
+            Arc<dyn aimux_provider_utils::ws::WsConnector>,
+        >,
+    ) -> Self {
+        Self {
+            model_id,
+            config,
+            #[cfg(feature = "realtime")]
+            web_socket,
         }
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        headers
-    }
-
-    fn endpoint(&self) -> String {
-        format!("{}/v1/speech-to-text", self.config.base_url)
     }
 }
 
 fn audio_input_to_bytes_stt(audio: &AudioInput) -> Result<Vec<u8>, AiMuxError> {
     match audio {
         AudioInput::Binary(bytes) => Ok(bytes.clone()),
-        AudioInput::Base64(b64) => {
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
-                .map_err(|e| AiMuxError::InvalidArgument(format!("invalid base64: {e}")))
-        }
+        AudioInput::Base64(b64) => aimux_provider_utils::convert_base64_to_uint8_array(b64)
+            .map_err(|e| AiMuxError::InvalidArgument {
+                message: format!("invalid base64: {e}"),
+                cause: Some(ErrorCause::source(&e)),
+            }),
+        AudioInput::Url(_) => Err(AudioInput::url_error()),
     }
 }
 
@@ -631,7 +948,7 @@ fn is_realtime_transcription_model_id(model_id: &str) -> bool {
 #[async_trait]
 impl TranscriptionModel for ElevenLabsTranscriptionModel {
     fn provider(&self) -> &str {
-        "elevenlabs"
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
@@ -650,7 +967,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
             )));
         }
 
-        let warnings: Vec<Warning> = Vec::new();
+        let mut warnings: Vec<Warning> = Vec::new();
 
         let audio_bytes = audio_input_to_bytes_stt(&options.audio)?;
         let file_extension = media_type_to_extension(&options.media_type);
@@ -661,46 +978,44 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
         form.file("file", &filename, &options.media_type, &audio_bytes)?;
         form.text("diarize", "true")?;
 
-        // Parse provider options.
-        if let Some(ref po) = options.provider_options
-            && let Some(el) = po.get("elevenlabs")
-        {
-            if let Some(v) = el.get("diarize").and_then(serde_json::Value::as_bool) {
+        // elevenlabs-transcription-model.ts getArgs: the schema's defaults
+        // apply when the namespace is present.
+        if let Some(el) = parse_transcription_options(options.provider_options.as_ref())? {
+            if el.streaming.is_some() {
+                warnings.push(Warning::Unsupported {
+                    feature: "providerOptions.elevenlabs.streaming".to_string(),
+                    details: Some(
+                        "ElevenLabs batch transcription does not support streaming options."
+                            .to_string(),
+                    ),
+                });
+            }
+            if let Some(v) = el.diarize {
                 form.text("diarize", &v.to_string())?;
             }
-            if let Some(v) = el.get("languageCode").and_then(|v| v.as_str()) {
+            if let Some(v) = &el.language_code {
                 form.text("language_code", v)?;
             }
-            if let Some(v) = el
-                .get("tagAudioEvents")
-                .and_then(serde_json::Value::as_bool)
-            {
+            if let Some(v) = el.tag_audio_events {
                 form.text("tag_audio_events", &v.to_string())?;
             }
-            if let Some(v) = el.get("numSpeakers").and_then(serde_json::Value::as_u64) {
+            if let Some(v) = el.num_speakers {
                 form.text("num_speakers", &v.to_string())?;
             }
-            if let Some(v) = el.get("timestampsGranularity").and_then(|v| v.as_str()) {
-                form.text("timestamps_granularity", v)?;
+            if let Some(v) = el.timestamps_granularity {
+                form.text("timestamps_granularity", v.as_str())?;
             }
-            if let Some(v) = el.get("fileFormat").and_then(|v| v.as_str()) {
-                form.text("file_format", v)?;
+            if let Some(v) = el.file_format {
+                form.text("file_format", v.as_str())?;
             }
         }
 
         let (body_bytes, content_type) = form.finish();
 
-        let headers = self.build_headers(options.headers.as_ref());
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
 
         let resp = aimux_provider_utils::post_to_api(
-            HttpRequest::new(
-                self.endpoint(),
-                headers
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-                options,
-            ),
+            exchange.request(exchange.url("/v1/speech-to-text"), options),
             HttpBody::Bytes(body_bytes, content_type),
             aimux_provider_utils::create_json_response_handler::<ElevenLabsTranscriptionResponse>(),
             elevenlabs_failed_response_handler(),
@@ -732,7 +1047,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
             .and_then(|w| w.last())
             .and_then(|w| w.end);
 
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        let timestamp = aimux_core::Timestamp::now();
 
         Ok(TranscriptionResult {
             text: parsed.text,
@@ -750,6 +1065,23 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
             provider_metadata: None,
         })
     }
+
+    /// The model has a streaming method; the session itself is
+    /// `ElevenLabsTranscriptionModel::stream_transcription`.
+    fn do_stream(
+        &self,
+        options: aimux_core::transcription_model::TranscriptionStreamOptions,
+    ) -> Option<
+        futures::future::BoxFuture<
+            '_,
+            Result<aimux_core::transcription_model::TranscriptionStreamResult, AiMuxError>,
+        >,
+    > {
+        Some(Box::pin(self.stream_transcription(options)))
+    }
+}
+
+impl ElevenLabsTranscriptionModel {
     /// Streaming transcription over the ElevenLabs realtime WebSocket
     /// (RFC-0034 §3, wire shape per the public API reference 2026-09).
     ///
@@ -765,7 +1097,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
     /// shape is pinned field-by-field against the documented reference by
     /// the local mock-server tests — same posture as RFC-0028 D4.
     #[cfg(feature = "realtime")]
-    async fn do_stream(
+    async fn stream_transcription(
         &self,
         options: aimux_core::transcription_model::TranscriptionStreamOptions,
     ) -> Result<aimux_core::transcription_model::TranscriptionStreamResult, AiMuxError> {
@@ -785,9 +1117,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
         // languageCode + includeTimestamps. Anything else waits for a user.
         let mut language_code: Option<String> = None;
         let mut include_timestamps = false;
-        if let Some(ref po) = options.provider_options
-            && let Some(el) = po.get("elevenlabs")
-        {
+        if let Some(el) = options::elevenlabs_options(options.provider_options.as_ref()) {
             if let Some(v) = el.get("languageCode").and_then(serde_json::Value::as_str) {
                 language_code = Some(v.to_string());
             }
@@ -816,7 +1146,8 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
             }
         };
 
-        let base = self.config.base_url.trim_end_matches('/');
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
+        let base = exchange.base_url();
         let (scheme, host) = if let Some(rest) = base.strip_prefix("https://") {
             ("wss", rest)
         } else if let Some(rest) = base.strip_prefix("http://") {
@@ -844,10 +1175,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
             )
         };
 
-        let header_list: Vec<(String, String)> = self
-            .build_headers(options.headers.as_ref())
-            .into_iter()
-            .collect();
+        let header_list = exchange.headers();
 
         // Connect BEFORE the stream so connect failures surface from
         // do_stream's Result (same contract as the OpenAI realtime path).
@@ -857,6 +1185,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
             subprotocols: Vec::new(),
             abort_signal: options.abort_signal.clone(),
             timeout: options.timeout,
+            connector: self.web_socket.clone(),
         };
         let mut ws = ws_connect(&req).await?;
 
@@ -913,8 +1242,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
                                 (held.take().unwrap_or_default(), true)
                             }
                             Some(aimux_core::transcription_model::AudioChunk::Binary(bytes)) => {
-                                use base64::Engine as _;
-                                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                                let b64 = aimux_provider_utils::convert_uint8_array_to_base64(bytes);
                                 match held.replace(b64) {
                                     Some(previous) => (previous, false),
                                     // First chunk: hold it, nothing to send yet.
@@ -967,8 +1295,8 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
                                         "realtime transcription socket closed before the committed transcript",
                                         error_url.clone(),
                                         serde_json::json!({}),
-                                        aimux_core::ApiCallErrorOrigin::Transport,
-                                    ),
+                                    )
+                                    .with_origin(aimux_core::ApiCallErrorOrigin::Transport),
                                 )));
                                 break;
                             }
@@ -1090,11 +1418,11 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
                                             aimux_core::error::ApiCallError {
                                                 is_retryable,
                                                 response_body: Some(value.to_string()),
+                                                origin: aimux_core::ApiCallErrorOrigin::StreamEvent,
                                                 ..aimux_core::error::ApiCallError::new(
                                                     format!("elevenlabs realtime: {message}"),
                                                     error_url.clone(),
                                                     serde_json::json!({}),
-                                                    aimux_core::ApiCallErrorOrigin::StreamEvent,
                                                 )
                                             },
                                         )));
@@ -1114,7 +1442,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
             stream: Box::pin(stream),
             request: Some(TranscriptionRequest { body: Some(ws_url) }),
             response: Some(TranscriptionResponse {
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                timestamp: Some(aimux_core::Timestamp::now()),
                 model_id: Some(model_id),
                 headers: None,
                 body: None,
@@ -1124,7 +1452,7 @@ impl TranscriptionModel for ElevenLabsTranscriptionModel {
 
     /// Without the `realtime` feature the WebSocket path is compiled out.
     #[cfg(not(feature = "realtime"))]
-    async fn do_stream(
+    async fn stream_transcription(
         &self,
         _options: aimux_core::transcription_model::TranscriptionStreamOptions,
     ) -> Result<aimux_core::transcription_model::TranscriptionStreamResult, AiMuxError> {
