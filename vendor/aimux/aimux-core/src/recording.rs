@@ -1,6 +1,6 @@
 //! RFC-0023: 调用上下文录制(P1 — 数据模型 + Recorder trait + 门控 + JsonlRecorder)。
 //!
-//! 录制一次 `generate_text`/`stream_text` 调用的三层完整上下文:
+//! 录制一次 `generate_text`/`stream_text`/`decide` 调用的三层完整上下文:
 //! ① 输入侧(prompt + options)、② 配置侧(provider 身份)、③ HTTP 侧(wire 交换)。
 //!
 //! 关键性质(按 2026-08-06 定稿):
@@ -16,30 +16,108 @@
 
 use crate::language_model_message::LanguageModelPrompt;
 use crate::options::CallOptions;
+use futures::Stream;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, RwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use ts_rs::TS;
 
 // ── 数据模型(三层 + call_id 关联;schema 版本)────────────────────────────
 
 /// 录制格式版本(用于未来字段迁移与绑定层兼容)。
+///
+/// Schema 2, as released aimux writes it: the V4 layers keep it until the
+/// full schema 3 of the alignment doc (§4.3) lands with the last layers.
 pub const RECORDING_SCHEMA: u32 = 2;
 
+/// Reads `schema`: 1 and 2, the schemas released aimux versions write, load;
+/// any other value is refused with a clear error. No schema 3 recording was
+/// ever released.
+fn deserialize_known_schema<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let schema = u32::deserialize(deserializer)?;
+    if (1..=RECORDING_SCHEMA).contains(&schema) {
+        Ok(schema)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "unsupported recording schema {schema}: only schemas 1 to {RECORDING_SCHEMA} \
+             are readable"
+        )))
+    }
+}
+
+/// Reads `InputRecord.prompt`. A prompt this version cannot read, such as
+/// one written by aimux 0.5 or earlier with a system message whose content is
+/// a part array, loads as empty so the recording still loads;
+/// [`InputRecord::unreadable_prompt`] then says why, and replay refuses it.
+fn deserialize_prompt<'de, D>(deserializer: D) -> Result<LanguageModelPrompt, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+fn recording_version_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = u32::json_schema(generator);
+    if generator.contract().is_deserialize() {
+        schema.insert("minimum".into(), 1.into());
+        schema.insert("maximum".into(), RECORDING_SCHEMA.into());
+    }
+    schema
+}
+
+fn recorded_prompt_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    if generator.contract().is_serialize() {
+        generator.subschema_for::<LanguageModelPrompt>()
+    } else {
+        generator.subschema_for::<serde_json::Value>()
+    }
+}
+
+/// Operation stored in a unified recording. Older recordings are language calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingOperation {
+    #[default]
+    LanguageModel,
+    Decision,
+}
+
+impl RecordingOperation {
+    fn is_language_model(&self) -> bool {
+        *self == Self::LanguageModel
+    }
+}
+
 /// 一次完整调用的录制记录(三层 + call_id 关联)。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Recording {
-    /// 格式版本。
+    /// 格式版本。Written as [`RECORDING_SCHEMA`]; schemas 1 and 2 are read.
+    /// Recordings written by aimux 0.5 and earlier also carry a configuration
+    /// snapshot under `provider` (base URL, key source, profile, provider
+    /// options), which is ignored, and write the envelope's keys snake_case
+    /// (`call_id`, `recorded_at`, ...), which are read as aliases of the
+    /// camelCase keys this version writes.
+    #[serde(deserialize_with = "deserialize_known_schema")]
+    #[schemars(schema_with = "recording_version_schema")]
     pub schema: u32,
     /// 暴露逻辑调用 ID,关联三层。
+    #[serde(alias = "call_id")]
     pub call_id: String,
     /// ISO 8601 时间戳。
+    #[serde(alias = "recorded_at")]
     pub recorded_at: String,
 
     /// ① 输入侧:调用参数(prompt + options)。
@@ -54,18 +132,20 @@ pub struct Recording {
     /// 最终结果摘要(状态 + finish_reason + usage)。
     pub outcome: OutcomeRecord,
 
-    /// wire 是否完整(流式 body 未补全时为 false;由 writer 标记)。
+    /// wire 是否完整(流式 body 未补全时为 false;由 writer 标记)。A call
+    /// that lost an event (full queue, writer gone) or was marked
+    /// inconsistent (duplicate attempt, unmatched update) is never complete.
     #[serde(default)]
     pub complete: bool,
     /// 传输层封闭信号:层 B 声明"不再有 exchange"(P1:层 A 收尾自动发;
     /// P2:由层 B 发送)。false = 仍可能来 exchange(记录暂不可定稿)。
-    #[serde(default)]
+    #[serde(default, alias = "transport_closed")]
     pub transport_closed: bool,
 
     /// 会话归组(RFC-0024 P3):所在会话 id。None = 未归组(无 session_id 且
     /// 推断关闭)。由 `Recorder::record_session` 填充,写入 InputRecord 之前
     /// 或之后均可(writer 端按 call_id 合并)。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "session_id", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// 会话内步号(0 起,由 SessionStore 分配)。与 `session_id` 同生命周期。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,73 +180,180 @@ impl Recording {
     /// 权衡:合法的空 prompt 调用(`prompt: Vec::new()`)与"input 丢失"在此
     /// 不可区分,会落到 shutdown 兜底以 incomplete 写出——取证失真远轻于
     /// 反向错误(空占位被标 complete),可接受。
+    /// Decision input uses its explicit operation marker and question map;
+    /// it does not fabricate a language prompt to satisfy this barrier.
     fn ready(&self) -> bool {
         self.transport_closed
             && self.outcome.status != OutcomeStatus::Pending
-            && !self.input.prompt.is_empty()
+            && (!self.input.prompt.is_empty()
+                || (self.input.operation == RecordingOperation::Decision
+                    && self.input.options["questions"]
+                        .as_object()
+                        .is_some_and(|q| !q.is_empty())))
             && self.exchanges.iter().all(|e| e.finalized)
+    }
+
+    /// Whether an `InputRecord` has arrived for this recording (distinguishing
+    /// real calls from out-of-order `entry_or_init` placeholders whose
+    /// `prompt` is empty and `options` is `Value::Null`).
+    fn has_input(&self) -> bool {
+        !self.input.prompt.is_empty() || !self.input.options.is_null()
+    }
+
+    /// Tier-1 eviction candidate: an out-of-order placeholder with neither
+    /// `InputRecord` nor any recorded `HttpExchange`.
+    fn is_empty_placeholder(&self) -> bool {
+        !self.has_input() && self.exchanges.is_empty()
+    }
+
+    /// Tier-2 eviction candidate: an entry missing `InputRecord` (e.g. layer-B
+    /// orphan exchange) or whose transport/outcome has already terminated while
+    /// waiting on an unmatched barrier condition. Active in-flight calls
+    /// (`has_input() && !transport_closed && outcome.status == Pending`) return
+    /// `false` so they are protected ahead of placeholders and stalled entries.
+    fn is_inactive_or_missing_input(&self) -> bool {
+        !self.has_input() || self.transport_closed || self.outcome.status != OutcomeStatus::Pending
     }
 }
 
 /// ① 输入侧:完整调用参数,足以重建 generate_text 调用。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct InputRecord {
-    /// 完整 prompt(消息数组,含 ContentPart::Image 等多模态)。
+    #[serde(default, skip_serializing_if = "RecordingOperation::is_language_model")]
+    pub operation: RecordingOperation,
+    /// 完整 prompt(消息数组,含 ContentPart::Image 等多模态)。Loads as
+    /// empty when this version cannot read it ([`Self::unreadable_prompt`]).
+    #[serde(deserialize_with = "deserialize_prompt")]
+    #[schemars(schema_with = "recorded_prompt_schema")]
     pub prompt: LanguageModelPrompt,
-    /// 序列化的 CallOptions(abort_signal/call_id 已 serde skip);
-    /// headers/provider_options/body_overrides 已递归脱敏。
+    /// 序列化的 CallOptions(abort_signal 已 serde skip),
+    /// 加上所在操作的 `max_retries` / `timeout` / `session_id`
+    /// (`OperationSettings`);headers/provider_options 已递归脱敏。
     pub options: serde_json::Value,
 }
 
 impl InputRecord {
     /// 从 CallOptions 提取输入侧快照(options 序列化后递归脱敏)。
+    ///
+    /// The retry count, the timeout and the session id are operation
+    /// settings, not call options. They are taken from the operation the
+    /// call runs in ([`crate::operation::OperationSettings::current`]) and
+    /// written under the keys they had as call options, so the record still
+    /// rebuilds the whole `generate_text` call.
     #[must_use]
     pub fn from_call_options(options: &CallOptions) -> Self {
-        let value = serde_json::to_value(options).unwrap_or(serde_json::Value::Null);
+        let mut value = serde_json::to_value(options).unwrap_or(serde_json::Value::Null);
+        if let (serde_json::Value::Object(map), Ok(serde_json::Value::Object(settings))) = (
+            &mut value,
+            serde_json::to_value(
+                crate::operation::OperationSettings::current().unwrap_or_default(),
+            ),
+        ) {
+            map.extend(settings);
+        }
         Self {
+            operation: RecordingOperation::LanguageModel,
             prompt: options.prompt.clone(),
             options: redact_json(value),
         }
     }
+
+    /// The input of a decision: the options of `decide`. What a model supports
+    /// is a property of the model, looked up again on replay (as
+    /// `DecisionModelV4.supportedQuestionTypes`,
+    /// `@ai-sdk/provider@4.0.22 src/decision-model/v4/decision-model-v4.ts:11`),
+    /// so no capability snapshot is recorded.
+    #[must_use]
+    pub fn from_decision_options(options: &crate::decision_model::DecideOptions) -> Self {
+        Self {
+            operation: RecordingOperation::Decision,
+            prompt: Vec::new(),
+            options: redact_json(serde_json::to_value(options).unwrap_or_default()),
+        }
+    }
+
+    /// Why the recorded prompt cannot be replayed, when it cannot: the
+    /// recorded options hold a prompt this version does not read (one written
+    /// by aimux 0.5 or earlier, for example with a system message whose
+    /// content is a part array). `prompt` then loaded as empty.
+    #[must_use]
+    pub fn unreadable_prompt(&self) -> Option<String> {
+        if !self.prompt.is_empty() {
+            return None;
+        }
+        let recorded = self.options.get("prompt")?;
+        if recorded.as_array().is_none_or(Vec::is_empty) {
+            return None;
+        }
+        serde_json::from_value::<LanguageModelPrompt>(recorded.clone())
+            .err()
+            .map(|e| e.to_string())
+    }
 }
 
 /// ② 配置侧:provider 身份(请求回放重建用)。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+///
+/// 只记身份,不记配置:回放时按 `provider_id` + `model_id` 重新构建 model,
+/// 凭证与 base URL 只来自环境/registry(RFC-0036 §3.3)。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderRecord {
-    /// `model.provider()`,如 "openai"。
+    /// provider 名(registry 名),回放重建的查找键,如 "openai"、"deepseek"。
+    /// Empty in a recording written by aimux 0.5 or earlier, which has none
+    /// ([`Self::registry_id`]).
+    #[serde(default, alias = "provider_id")]
+    pub provider_id: String,
+    /// `model.provider()`,如 "openai.chat"。
     pub provider: String,
     /// `model.model_id()`,如 "gpt-4o"。
+    #[serde(alias = "model_id")]
     pub model_id: String,
-    /// provider 的 base_url。
-    pub base_url: Option<String>,
-    /// api_key 来源(不存明文):"env:OPENAI_API_KEY" / "explicit" / "none" / "unknown"。
-    pub api_key_source: String,
-    /// OpenAICompatProfile(能力差异)。
-    pub profile: Option<serde_json::Value>,
-    /// ProviderOptions(headers/org/project/...;已脱敏)。
-    pub provider_options: Option<serde_json::Value>,
 }
 
 impl ProviderRecord {
-    /// 最小快照(provider/model_id)——`config_snapshot` 默认实现;cover 的部分放结构方法。
+    /// 显式给出三项身份。
     #[must_use]
-    pub fn minimal(provider: &str, model_id: &str) -> Self {
+    pub fn new(provider_id: &str, provider: &str, model_id: &str) -> Self {
         Self {
+            provider_id: provider_id.to_string(),
             provider: provider.to_string(),
             model_id: model_id.to_string(),
-            base_url: None,
-            api_key_source: "unknown".to_string(),
-            profile: None,
-            provider_options: None,
         }
+    }
+
+    /// `provider_id`, the registry name live replay rebuilds the model from.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` when the recording has none: aimux 0.5 and earlier
+    /// record the model's `provider()` and its configuration instead, so such
+    /// a recording is replayed by passing the model to `replay_with_model`.
+    pub fn registry_id(&self) -> Result<&str, crate::error::AiMuxError> {
+        if self.provider_id.is_empty() {
+            return Err(crate::error::AiMuxError::invalid_argument(format!(
+                "replay: the recording of `{}` has no provider_id (recordings written by \
+                 aimux 0.5 or earlier carry none), so the model cannot be rebuilt from a \
+                 registry; pass the model to replay_with_model",
+                self.provider
+            )));
+        }
+        Ok(&self.provider_id)
+    }
+
+    /// 由 model 的 `provider()` / `model_id()` 构造:`provider_id` 暂取
+    /// `provider()` 字符串的首段(`"openai.chat"` → `"openai"`);registry
+    /// 名接入后由其填写。
+    #[must_use]
+    pub fn from_model(provider: &str, model_id: &str) -> Self {
+        let provider_id = provider.split('.').next().unwrap_or_default();
+        Self::new(provider_id, provider, model_id)
     }
 }
 
 /// ③ HTTP 侧:单次 attempt 的 wire 交换。
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct HttpExchange {
     /// Composite step this exchange belongs to (e.g. `router[0]:openai/gpt-4o`
     /// or `moa.ref[1]:...`). `None` for a plain, non-composite operation.
@@ -177,12 +364,14 @@ pub struct HttpExchange {
     /// `(attempt, exchange_index)` alone still identifies an exchange.
     pub attempt: u32,
     /// HTTP exchange within the operation attempt, starting at 1.
-    #[serde(default)]
+    #[serde(default, alias = "exchange_index")]
     pub exchange_index: u32,
     pub request: HttpRecord,
     /// None = 请求失败未获响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<ResponseRecord>,
     pub timing: TimingRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// 流式:该 exchange 是否已终结(收到 response 补全)。非流式恒 true。
     #[serde(default = "default_finalized")]
@@ -193,45 +382,52 @@ fn default_finalized() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct HttpRecord {
     pub method: String,
     pub url: String,
     /// 敏感头(authorization/cookie/含 api-key/key/x-amz-security-token 等)已脱敏为 "\[REDACTED\]"。
+    #[schemars(with = "Vec<[String; 2]>")]
     pub headers: Vec<(String, String)>,
     /// 明文(脱敏后);None = 无 body。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ResponseRecord {
     pub status: u16,
+    #[schemars(with = "Vec<[String; 2]>")]
     pub headers: Vec<(String, String)>,
     /// 非流式:完整 JSON;流式:原始 SSE 拼接文本(上限截断)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(
+        default,
+        alias = "stream_chunks",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stream_chunks: Option<usize>,
     /// 首字节延迟(流式)。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
+    #[serde(default, alias = "ttfb_ms", skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TimingRecord {
     /// ms 级延迟,TS 用 number(远小于 2^53,避免 bigint)。
-    #[ts(type = "number")]
+    #[serde(alias = "latency_ms")]
     pub latency_ms: u64,
-    #[ts(type = "number | null")]
+    #[serde(default, alias = "ttfb_ms", skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
 }
 
 /// 调用终结状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[ts(export)]
 pub enum OutcomeStatus {
     /// 未到(内部哨兵,不作为最终输出)。
     #[default]
@@ -246,32 +442,62 @@ pub enum OutcomeStatus {
 }
 
 /// 最终结果摘要。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct OutcomeRecord {
+    /// The result `decide` returned (`DecideResult`), independent of a
+    /// provider's wire format.
+    #[serde(
+        default,
+        alias = "decision_result",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub decision_result: Option<serde_json::Value>,
     pub status: OutcomeStatus,
+    #[serde(
+        default,
+        alias = "finish_reason",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Lossless structured domain error. In particular, `RetryError.errors`
     /// keeps the complete attempt history rather than only its display text.
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "error_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub error_value: Option<serde_json::Value>,
     /// 序列化的 Usage。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<serde_json::Value>,
 }
 
 impl OutcomeRecord {
-    /// 非流式成功。
+    fn redacted(&self) -> Self {
+        let mut outcome = self.clone();
+        outcome.decision_result = outcome.decision_result.map(redact_json);
+        outcome.error_value = outcome.error_value.map(redact_json);
+        outcome
+    }
+    /// 成功:最终步骤的 finish reason 与用户层 usage(`LanguageModelUsage`)。
+    /// 非流式与流式共用,两条路径录制的 usage 形状一致。
     #[must_use]
-    pub fn from_generate_result(r: &crate::result::GenerateResult) -> Self {
+    pub fn success(
+        finish_reason: crate::types::FinishReasonUnified,
+        usage: &crate::types::LanguageModelUsage,
+    ) -> Self {
         Self {
             status: OutcomeStatus::Success,
-            finish_reason: serde_json::to_value(r.finish_reason.unified)
+            finish_reason: serde_json::to_value(finish_reason)
                 .ok()
                 .and_then(|v| v.as_str().map(std::string::ToString::to_string)),
             error: None,
             error_value: None,
-            usage: serde_json::to_value(&r.usage).ok(),
+            decision_result: None,
+            usage: serde_json::to_value(usage).ok(),
         }
     }
 
@@ -283,6 +509,7 @@ impl OutcomeRecord {
             finish_reason: None,
             error: Some(e.to_string()),
             error_value: serde_json::to_value(e).ok(),
+            decision_result: None,
             usage: None,
         }
     }
@@ -330,14 +557,29 @@ pub enum RecordingError {
 
 /// 录制器 trait。
 pub trait Recorder: Send + Sync {
+    /// Optional backend inspection for Rust adapters; custom recorders may opt out.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
     /// 录制输入侧 + 配置侧最小信息(层 A 入口调用)。
     fn record_input(&self, call_id: &str, options: &CallOptions, provider: &str, model_id: &str);
+    /// Custom recorders can opt into decision input capture. Built-in recorders
+    /// store it in the same Input event and completion barrier as language calls.
+    fn record_decision_input(
+        &self,
+        _call_id: &str,
+        _options: &crate::decision_model::DecideOptions,
+        _provider: &str,
+        _model_id: &str,
+    ) {
+    }
     /// 录制会话归组信息(RFC-0024 P3):session_id + 会话内步号。
     ///
     /// 默认空实现(不参与录制的 Recorder 无需关心);开启录制且调用被归组
     /// 时,`generate_text`/`stream_text` 入口调用它。
     fn record_session(&self, _call_id: &str, _session_id: &str, _step: u32) {}
-    /// 录制配置侧完整快照。
+    /// 录制配置侧身份(`ProviderRecord`:provider_id / provider / model_id)。
     fn record_provider(&self, call_id: &str, snapshot: &ProviderRecord);
     /// 录制单次 HTTP 交换(层 B http.rs 调用,per-attempt 一条)。
     fn record_exchange(&self, call_id: &str, exchange: &HttpExchange);
@@ -380,7 +622,10 @@ pub trait Recorder: Send + Sync {
 static RECORDER: RwLock<Option<Arc<dyn Recorder>>> = RwLock::new(None);
 
 /// 一次调用的录制上下文(RFC R7 快照绑定):层 A 入口构造一次,
-/// 随 `CallOptions`/`HttpRequest` 传到底层,禁止各录制点重读全局 recorder。
+/// 作为 operation 作用域的值([`RecordingContext::scope`])传到底层,
+/// `HttpRequest` 构造时取一次([`RecordingContext::current`]);
+/// 禁止各录制点重读全局 recorder。它和 `OperationSettings` 一样不是模型调用
+/// 选项(docs/aisdk-architecture-alignment.md §3.1, §3.5)。
 #[derive(Clone)]
 pub struct RecordingContext {
     pub call_id: String,
@@ -455,23 +700,73 @@ impl std::fmt::Debug for RecordingContext {
     }
 }
 
-/// 注册/替换/关闭全局录制器。传 None 关闭。
-pub fn init_recording(recorder: Option<Arc<dyn Recorder>>) {
-    if let Ok(mut g) = RECORDER.write() {
-        *g = recorder;
+tokio::task_local! {
+    static CURRENT_CONTEXT: Option<RecordingContext>;
+}
+
+impl RecordingContext {
+    /// The recording context of the operation (or composite child step) the
+    /// current task runs in. `None` outside a scope, inside a `None` scope, or
+    /// when recording is off.
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        CURRENT_CONTEXT.try_with(Clone::clone).ok().flatten()
+    }
+
+    /// Run `future` with `context` as the current recording context. A `None`
+    /// context hides an outer one. A task spawned inside the future does not
+    /// inherit it.
+    pub async fn scope<F: Future>(context: Option<Self>, future: F) -> F::Output {
+        CURRENT_CONTEXT.scope(context, future).await
+    }
+
+    /// `stream` with `context` current during every poll, so a request made
+    /// while the stream is consumed, from any task, is recorded under it.
+    pub fn scope_stream<S: Stream + Unpin>(context: Option<Self>, stream: S) -> ScopedStream<S> {
+        ScopedStream { context, stream }
     }
 }
 
-/// 从环境变量初始化:`AIMUX_RECORD=1` 开启,`AIMUX_RECORD_DIR` 指定目录(默认 `./recordings`)。
-/// 未开启返回 false(静默)。
-#[must_use]
-pub fn init_recording_from_env() -> bool {
-    if std::env::var("AIMUX_RECORD").as_deref() != Ok("1") {
-        return false;
+/// A stream polled inside a recording scope ([`RecordingContext::scope_stream`]).
+pub struct ScopedStream<S> {
+    context: Option<RecordingContext>,
+    stream: S,
+}
+
+impl<S: Stream + Unpin> Stream for ScopedStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        let this = self.get_mut();
+        CURRENT_CONTEXT.sync_scope(this.context.clone(), || {
+            Pin::new(&mut this.stream).poll_next(cx)
+        })
     }
-    let dir = std::env::var("AIMUX_RECORD_DIR").unwrap_or_else(|_| "./recordings".to_string());
-    init_recording(Some(Arc::new(JsonlRecorder::new(dir))));
-    true
+}
+
+/// 注册/替换/关闭全局录制器。传 None 关闭。
+pub fn init_recording(recorder: Option<Arc<dyn Recorder>>) {
+    let previous = match RECORDER.write() {
+        Ok(mut current) => std::mem::replace(&mut *current, recorder),
+        Err(_) => None,
+    };
+    // A recorder's final Arc can join its writer; release the state lock first.
+    drop(previous);
+}
+
+/// Detach only the matching active recorder, returning it for cleanup outside the lock.
+/// Existing call snapshots retain their strong references.
+#[must_use]
+pub fn detach_recording_if(expected: &Arc<dyn Recorder>) -> Option<Arc<dyn Recorder>> {
+    let mut current = RECORDER.write().ok()?;
+    if current
+        .as_ref()
+        .is_some_and(|active| Arc::ptr_eq(active, expected))
+    {
+        current.take()
+    } else {
+        None
+    }
 }
 
 /// 从当前全局 recorder 生成一次调用的 context(关闭时 None)。
@@ -493,7 +788,7 @@ pub fn recorder() -> Option<Arc<dyn Recorder>> {
 static CALL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 生成进程级唯一 call_id(`call-{ns}-{seq}`;与 session.rs 同构)。
-pub fn new_call_id() -> String {
+pub(crate) fn new_call_id() -> String {
     let ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -506,10 +801,12 @@ pub fn new_call_id() -> String {
 /// 敏感键判断:受保护头/参数名(值将恒脱敏)。
 ///
 /// 这是 recording、logging 和 public error context 的唯一敏感键策略。
-/// 覆盖 `authorization`/`api-key`/`apikey`/`key`/`cookie`/`set-cookie`。
-/// 其中 `key` 取 **exact** 匹配
-/// 而非 contains——避免误伤 `X-Key`/`monkey`/`keyboard`/`keyword` 等含 "key"
-/// 子串的非凭据名(既有 `redact_json` 测试即要求 `X-Key` 值保留)。
+/// 覆盖 `authorization`/`api-key`/`apikey`/`key`/`cookie`/`set-cookie`,
+/// 以及去掉 `-`/`_` 后以 `key`、`auth` 或 `token` 结尾,或含 `secret` 的名字
+/// (arcships/aimux#459:连接头 `x-portkey-virtual-key`、`helicone-auth` 这类
+/// 名字不在此列时会以明文写入录制)。因此 `X-Key` 也会被脱敏:多脱敏是安全
+/// 的一侧,少脱敏则把凭据写进录制;`monkey`/`keyboard`/`keyword` 这类名字
+/// 不以 `key` 结尾,不受影响。
 ///
 /// **token 不再用 contains**——教训:`contains("token")` 会误伤
 /// `max_output_tokens`/`prompt_tokens`/`completion_tokens` 这类正常用量字段名
@@ -517,17 +814,46 @@ pub fn new_call_id() -> String {
 /// 精确匹配常见 bearer-token 字段和 AWS Bedrock sigv4 的
 /// `x-amz-security-token`(name 已 lowercase 归一化)。其余 needle 维持 contains,以覆盖
 /// `x-goog-api-key`/`proxy-authorization` 等变体。
+///
+/// Provider auth headers whose names match none of these are listed by name:
+/// Prodia's `X-Prodia-Key` and the Azure `Ocp-Apim-Subscription-Key`.
 #[must_use]
 pub fn is_sensitive_key(name: &str) -> bool {
+    // Fast stack-only ASCII path for normal header / JSON key lengths (<= 128 B).
+    let bytes = name.as_bytes();
+    if bytes.len() <= 128 {
+        let mut n_buf = [0u8; 128];
+        let mut sq_buf = [0u8; 128];
+        let mut sq_len = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            let low = b.to_ascii_lowercase();
+            n_buf[i] = low;
+            if low != b'-' && low != b'_' {
+                sq_buf[sq_len] = low;
+                sq_len += 1;
+            }
+        }
+        let n = &n_buf[..bytes.len()];
+        let squashed = &sq_buf[..sq_len];
+        return n == b"cookie"
+            || n == b"set-cookie"
+            || n == b"key"
+            || squashed == b"xprodiakey"
+            || squashed.ends_with(b"subscriptionkey")
+            || squashed.ends_with(b"token")
+            || squashed.ends_with(b"key")
+            || squashed.ends_with(b"auth")
+            || contains_subslice(squashed, b"secret")
+            || contains_subslice(n, b"authorization")
+            || contains_subslice(squashed, b"apikey");
+    }
     let n = name.to_ascii_lowercase();
-    // Separator-insensitive form so `accessToken`, `access-token`, and
-    // `x-access-token` all classify like `access_token`. A `token` SUFFIX is
-    // the credential shape; plural usage fields (`max_tokens`,
-    // `input_tokens`) end in `tokens` and stay loggable.
     let squashed: String = n.chars().filter(|c| *c != '-' && *c != '_').collect();
     n == "cookie"
         || n == "set-cookie"
         || n == "key"
+        || squashed == "xprodiakey"
+        || squashed.ends_with("subscriptionkey")
         || squashed.ends_with("token")
         || squashed.ends_with("key")
         || squashed.ends_with("auth")
@@ -536,25 +862,35 @@ pub fn is_sensitive_key(name: &str) -> bool {
         || squashed.contains("apikey")
 }
 
+#[inline]
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// 递归脱敏(JSON 中含敏感键的项值替换为 `[REDACTED]`)。
-/// 覆盖 `CallOptions.headers`/`provider_options`/`body_overrides` 任意层级。
-pub(crate) fn redact_json(value: serde_json::Value) -> serde_json::Value {
+/// 覆盖 `CallOptions.headers`/`provider_options` 任意层级。
+pub(crate) fn redact_json(mut value: serde_json::Value) -> serde_json::Value {
+    redact_json_in_place(&mut value);
+    value
+}
+
+fn redact_json_in_place(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
-            let mut out = serde_json::Map::with_capacity(map.len());
-            for (k, v) in map {
-                if is_sensitive_key(&k) {
-                    out.insert(k, serde_json::Value::String("[REDACTED]".into()));
+            for (k, v) in map.iter_mut() {
+                if is_sensitive_key(k) {
+                    *v = serde_json::Value::String("[REDACTED]".into());
                 } else {
-                    out.insert(k, redact_json(v));
+                    redact_json_in_place(v);
                 }
             }
-            serde_json::Value::Object(out)
         }
         serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(redact_json).collect())
+            for item in items.iter_mut() {
+                redact_json_in_place(item);
+            }
         }
-        other => other,
+        _ => {}
     }
 }
 
@@ -602,6 +938,23 @@ enum RecordEvent {
     },
 }
 
+impl RecordEvent {
+    /// The call this event belongs to; `None` for `Flush`, which is never
+    /// dropped (it is sent with a blocking send).
+    fn call_id(&self) -> Option<&str> {
+        match self {
+            Self::Input { call_id, .. }
+            | Self::Session { call_id, .. }
+            | Self::Provider { call_id, .. }
+            | Self::Exchange { call_id, .. }
+            | Self::ExchangeUpdate { call_id, .. }
+            | Self::Outcome { call_id, .. }
+            | Self::TransportClosed { call_id } => Some(call_id),
+            Self::Flush { .. } => None,
+        }
+    }
+}
+
 /// JsonlRecorder 事件通道容量(有界,A4):防止 writer 跟不上时录制热路径
 /// 无界堆积内存。满时 **drop-newest** 并递增 `dropped` 计数(经
 /// [`JsonlRecorder::dropped_count`] 可查),保持 `send_ev` 非阻塞;writer
@@ -614,8 +967,14 @@ pub struct JsonlRecorder {
     tx: Option<SyncSender<RecordEvent>>,
     dir: PathBuf,
     thread: Option<std::thread::JoinHandle<()>>,
-    /// 有界通道满 / writer 断开时丢弃的事件计数(drop-newest,可查)。
-    dropped: AtomicU64,
+    /// 有界通道满 / writer 断开或被淘汰 call 的尾随事件被丢弃时的总计数(可查)。
+    dropped: Arc<AtomicU64>,
+    /// writer 端因超过 `JSONL_PENDING_MAX` 提前以 `Incomplete` 落盘淘汰的调用计数。
+    pending_evicted: Arc<AtomicU64>,
+    /// Calls that lost an event to `dropped` or were evicted from `pending`.
+    /// Shared with the writer, which never marks such a call `complete`
+    /// (RFC-0023 completion barrier).
+    lossy: Arc<Mutex<HashSet<String>>>,
     /// 被标记为不一致的 call_id(C4-7:重复 attempt / update 未命中或歧义)。
     /// 存于 recorder 侧而非 `Recording` 字段——后者被 `replay.rs` 以全字段
     /// 字面量构造,新增 serde 字段会破坏其它模块编译,故用旁路集合标记。
@@ -651,28 +1010,38 @@ impl JsonlRecorder {
             })?;
         let w = BufWriter::new(file);
         let (tx, rx) = sync_channel::<RecordEvent>(JSONL_CHANNEL_CAPACITY);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let pending_evicted = Arc::new(AtomicU64::new(0));
         let inconsistent = Arc::new(Mutex::new(HashSet::new()));
-        let writer_inconsistent = inconsistent.clone();
+        let lossy = Arc::new(Mutex::new(HashSet::new()));
+        let damaged = DamagedCalls {
+            inconsistent: inconsistent.clone(),
+            lossy: lossy.clone(),
+            dropped: dropped.clone(),
+            pending_evicted: pending_evicted.clone(),
+        };
         let write_error = Arc::new(Mutex::new(None));
         let writer_write_error = write_error.clone();
         let handle = std::thread::Builder::new()
             .name("aimux-recording".into())
-            .spawn(move || writer_loop(rx, w, writer_inconsistent, writer_write_error))
+            .spawn(move || writer_loop(rx, w, damaged, writer_write_error))
             .map_err(|source| RecordingError::Spawn { source })?;
         Ok(Self {
             tx: Some(tx),
             dir,
             thread: Some(handle),
-            dropped: AtomicU64::new(0),
+            dropped,
+            pending_evicted,
+            lossy,
             inconsistent,
             write_error,
         })
     }
 
-    /// 在 `dir` 下创建录制器并启动 writer 线程(兼容入口:FFI `aimux_init_recording`
-    /// 及绑定均以 infallible `new` 调用,A9 要求保持兼容)。内部委托 [`JsonlRecorder::try_new`],
-    /// 失败时降级为无 writer 的 no-op recorder(`tx = None`,事件静默丢弃),
-    /// 行为等价于原先 `create_dir_all().ok()` + writer 打开文件失败早退。
+    /// Create a recorder in `dir` and start its writer thread.
+    /// Delegates to [`JsonlRecorder::try_new`]; on failure this infallible Rust
+    /// constructor returns a disabled recorder that silently discards events.
+    /// The ops `recorder.create` path uses `try_new` and reports initialization errors.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         Self::try_new(dir.clone()).unwrap_or_else(|_| Self::disabled(dir))
@@ -684,7 +1053,9 @@ impl JsonlRecorder {
             tx: None,
             dir,
             thread: None,
-            dropped: AtomicU64::new(0),
+            dropped: Arc::new(AtomicU64::new(0)),
+            pending_evicted: Arc::new(AtomicU64::new(0)),
+            lossy: Arc::new(Mutex::new(HashSet::new())),
             inconsistent: Arc::new(Mutex::new(HashSet::new())),
             write_error: Arc::new(Mutex::new(None)),
         }
@@ -693,16 +1064,32 @@ impl JsonlRecorder {
     /// 事件入队(有界 `try_send`;满或 writer 断开 → drop-newest 并计数)。
     fn send_ev(&self, ev: RecordEvent) {
         if let Some(tx) = &self.tx {
-            send_or_drop(tx, ev, &self.dropped);
+            send_or_drop(tx, ev, &self.dropped, &self.lossy);
         }
     }
 
-    /// 有界通道溢出 / writer 断开时丢弃的事件总数(A4,drop-newest 可查)。
+    /// 有界通道溢出 / writer 断开或已淘汰 call 的后续事件被丢弃的总数(A4,可查)。
+    #[must_use]
     pub fn dropped_count(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// writer 端因超过 `JSONL_PENDING_MAX` 被提前淘汰并以 `Incomplete` 落盘的调用总数。
+    #[must_use]
+    pub fn pending_evicted_count(&self) -> u64 {
+        self.pending_evicted.load(Ordering::Relaxed)
+    }
+
+    /// 因丢事件或被提前从 `pending` 淘汰而标记为有损 (`lossy`) 的 `call_id`(排序以稳定测试)。
+    #[must_use]
+    pub fn lossy_call_ids(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.lossy.lock().unwrap().iter().cloned().collect();
+        v.sort();
+        v
+    }
+
     /// 被标记为不一致的 call_id(C4-7,诊断用;排序以稳定测试)。
+    #[must_use]
     pub fn inconsistent_call_ids(&self) -> Vec<String> {
         let mut v: Vec<String> = self.inconsistent.lock().unwrap().iter().cloned().collect();
         v.sort();
@@ -741,11 +1128,13 @@ impl JsonlRecorder {
 
     /// recorder 侧可见的 writer 粘性首错(如 ENOSPC),无则 `None`。
     /// 与 writer 线程共享;首次写行/flush 失败时写入。
+    #[must_use]
     pub fn last_write_error(&self) -> Option<String> {
         self.write_error.lock().unwrap().clone()
     }
 
     /// 录制文件路径。
+    #[must_use]
     pub fn path(&self) -> PathBuf {
         self.dir.join("recordings.jsonl")
     }
@@ -765,11 +1154,24 @@ impl Drop for JsonlRecorder {
 }
 
 impl Recorder for JsonlRecorder {
+    fn record_decision_input(
+        &self,
+        call_id: &str,
+        options: &crate::decision_model::DecideOptions,
+        provider: &str,
+        model_id: &str,
+    ) {
+        self.send_ev(RecordEvent::Input {
+            call_id: call_id.to_owned(),
+            input: InputRecord::from_decision_options(options),
+            provider: ProviderRecord::from_model(provider, model_id),
+        });
+    }
     fn record_input(&self, call_id: &str, options: &CallOptions, provider: &str, model_id: &str) {
         self.send_ev(RecordEvent::Input {
             call_id: call_id.to_string(),
             input: InputRecord::from_call_options(options),
-            provider: ProviderRecord::minimal(provider, model_id),
+            provider: ProviderRecord::from_model(provider, model_id),
         });
     }
 
@@ -782,14 +1184,9 @@ impl Recorder for JsonlRecorder {
     }
 
     fn record_provider(&self, call_id: &str, snapshot: &ProviderRecord) {
-        // 核心边界统一强制脱敏 provider_options/profile(B6 评审),
-        // 不依赖 provider 端自觉。
-        let mut snap = snapshot.clone();
-        snap.provider_options = snap.provider_options.take().map(redact_json);
-        snap.profile = snap.profile.take().map(redact_json);
         self.send_ev(RecordEvent::Provider {
             call_id: call_id.to_string(),
-            provider: snap,
+            provider: snapshot.clone(),
         });
     }
 
@@ -820,7 +1217,7 @@ impl Recorder for JsonlRecorder {
     fn record_outcome(&self, call_id: &str, outcome: &OutcomeRecord) {
         self.send_ev(RecordEvent::Outcome {
             call_id: call_id.to_string(),
-            outcome: outcome.clone(),
+            outcome: outcome.redacted(),
         });
     }
 
@@ -841,35 +1238,177 @@ impl Recorder for JsonlRecorder {
     }
 }
 
-/// 兜底建条目:事件先于 Input 到达(纯层 B/乱序)时,以空 input 占位。
+/// JsonlRecorder writer 端未完成分片上限:防止异常未终结调用无界驻留内存。
+/// 超限时将最旧未完成条目以 `complete=false` (`OutcomeStatus::Incomplete`) 落盘淘汰。
+const JSONL_PENDING_MAX: usize = 128;
+const JSONL_EVICTED_TRACK_MAX: usize = 2048;
+
+#[derive(Default)]
+struct EvictedCallTracker {
+    set: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl EvictedCallTracker {
+    fn contains(&self, call_id: &str) -> bool {
+        self.set.contains(call_id)
+    }
+
+    fn insert(
+        &mut self,
+        call_id: String,
+        damaged: &DamagedCalls,
+        pending: &HashMap<String, Recording>,
+    ) {
+        if self.set.contains(&call_id) {
+            return;
+        }
+        while self.order.front().is_some_and(|id| !self.set.contains(id)) {
+            self.order.pop_front();
+        }
+        if self.order.len() > JSONL_EVICTED_TRACK_MAX.saturating_mul(2) {
+            self.order.retain(|id| self.set.contains(id));
+            if self.order.capacity() > JSONL_EVICTED_TRACK_MAX.saturating_mul(4) {
+                self.order
+                    .shrink_to(JSONL_EVICTED_TRACK_MAX.saturating_mul(2));
+            }
+        }
+        while self.set.len() >= JSONL_EVICTED_TRACK_MAX {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if self.set.remove(&old) && !pending.contains_key(&old) {
+                damaged.unmark_lossy(&old);
+            }
+        }
+        self.order.push_back(call_id.clone());
+        self.set.insert(call_id);
+    }
+}
+
+/// Select the next pending `call_id` to evict when `pending` reaches capacity:
+/// 1. Oldest empty placeholder (`!has_input() && exchanges.is_empty()`).
+/// 2. Oldest entry missing `InputRecord` or whose transport/outcome has already
+///    terminated (`!has_input() || transport_closed || outcome.status != Pending`).
+/// 3. Oldest active in-flight call (FIFO fallback when all entries are active).
+fn pop_next_pending_eviction_id(
+    pending: &HashMap<String, Recording>,
+    pending_order: &mut VecDeque<String>,
+) -> Option<String> {
+    while pending_order
+        .front()
+        .is_some_and(|id| !pending.contains_key(id))
+    {
+        pending_order.pop_front();
+    }
+    if let Some(pos) = pending_order
+        .iter()
+        .position(|id| pending.get(id).is_some_and(Recording::is_empty_placeholder))
+    {
+        return pending_order.remove(pos);
+    }
+    if let Some(pos) = pending_order.iter().position(|id| {
+        pending
+            .get(id)
+            .is_some_and(Recording::is_inactive_or_missing_input)
+    }) {
+        return pending_order.remove(pos);
+    }
+    while let Some(id) = pending_order.pop_front() {
+        if pending.contains_key(&id) {
+            return Some(id);
+        }
+    }
+    pending.keys().next().cloned()
+}
+
+/// 兜底建条目:事件先于 Input 到达(纯层 B/乱序)时,以空 input 占位,并受 `JSONL_PENDING_MAX` 约束。
 fn entry_or_init<'a>(
+    w: &mut impl Write,
     pending: &'a mut HashMap<String, Recording>,
+    pending_order: &mut VecDeque<String>,
+    evicted_calls: &mut EvictedCallTracker,
     call_id: &str,
+    damaged: &DamagedCalls,
+    write_error: &Mutex<Option<String>>,
 ) -> &'a mut Recording {
-    pending.entry(call_id.to_string()).or_insert_with(|| {
-        Recording::new(
-            call_id,
-            InputRecord {
-                prompt: Vec::new(),
-                options: serde_json::Value::Null,
-            },
-            ProviderRecord::minimal("", ""),
-        )
-    })
+    if !pending.contains_key(call_id) {
+        evict_jsonl_pending_if_needed(
+            w,
+            pending,
+            pending_order,
+            evicted_calls,
+            damaged,
+            write_error,
+        );
+        pending_order.push_back(call_id.to_string());
+        pending.insert(
+            call_id.to_string(),
+            Recording::new(
+                call_id,
+                InputRecord {
+                    operation: Default::default(),
+                    prompt: Vec::new(),
+                    options: serde_json::Value::Null,
+                },
+                ProviderRecord::from_model("", ""),
+            ),
+        );
+    }
+    pending.get_mut(call_id).expect("just inserted or present")
+}
+
+fn evict_jsonl_pending_if_needed(
+    w: &mut impl Write,
+    pending: &mut HashMap<String, Recording>,
+    pending_order: &mut VecDeque<String>,
+    evicted_calls: &mut EvictedCallTracker,
+    damaged: &DamagedCalls,
+    write_error: &Mutex<Option<String>>,
+) {
+    while pending_order
+        .front()
+        .is_some_and(|id| !pending.contains_key(id))
+    {
+        pending_order.pop_front();
+    }
+    if pending_order.len() > JSONL_PENDING_MAX.saturating_mul(2) {
+        pending_order.retain(|id| pending.contains_key(id));
+        if pending_order.capacity() > JSONL_PENDING_MAX.saturating_mul(4) {
+            pending_order.shrink_to(JSONL_PENDING_MAX.saturating_mul(2));
+        }
+    }
+    while pending.len() >= JSONL_PENDING_MAX {
+        let Some(old) = pop_next_pending_eviction_id(pending, pending_order) else {
+            break;
+        };
+        if let Some(mut rec) = pending.remove(&old) {
+            damaged.note_pending_evicted(&old);
+            evicted_calls.insert(old, damaged, pending);
+            rec.complete = false;
+            if rec.outcome.status == OutcomeStatus::Pending {
+                rec.outcome.status = OutcomeStatus::Incomplete;
+            }
+            write_line(w, rec, write_error);
+        }
+    }
 }
 
 /// writer 线程:按 call_id 合并分片;completion barrier 后写一行。
 ///
 /// 文件已由 [`JsonlRecorder::try_new`] 打开并作为 `BufWriter` 传入(A9/N4:
-/// 打开失败在 `try_new` 走 `Result`,而非此处静默早退)。`inconsistent` 为与
-/// recorder 共享的旁路集合,用于标记 C4-7 检测到的不一致 call_id。
+/// 打开失败在 `try_new` 走 `Result`,而非此处静默早退)。`damaged` 为与
+/// recorder 共享的旁路集合:C4-7 检测到的不一致 call_id 由这里标记,丢过事件的
+/// call_id 由发送端标记;两者写出时都不标 `complete`。
 fn writer_loop(
     rx: Receiver<RecordEvent>,
     mut w: impl Write,
-    inconsistent: Arc<Mutex<HashSet<String>>>,
+    damaged: DamagedCalls,
     write_error: Arc<Mutex<Option<String>>>,
 ) {
     let mut pending: HashMap<String, Recording> = HashMap::new();
+    let mut pending_order: VecDeque<String> = VecDeque::new();
+    let mut evicted_calls = EvictedCallTracker::default();
 
     while let Ok(ev) = rx.recv() {
         match ev {
@@ -878,38 +1417,111 @@ fn writer_loop(
                 input,
                 provider,
             } => {
+                if !pending.contains_key(&call_id) && evicted_calls.contains(&call_id) {
+                    damaged.note_dropped_evicted_event(&call_id);
+                    continue;
+                }
                 // C4-6:Input 仅在当前 provider 仍为空占位时填充最小 provider,
                 // 避免乱序(Provider 先到)时把已写入的完整快照覆盖回最小值。
-                let rec = pending
-                    .entry(call_id.clone())
-                    .or_insert_with(|| Recording::new(&call_id, input.clone(), provider.clone()));
-                rec.input = input;
-                if rec.provider.provider.is_empty() {
-                    rec.provider = provider;
+                if let Some(rec) = pending.get_mut(&call_id) {
+                    rec.input = input;
+                    if rec.provider.provider.is_empty() {
+                        rec.provider = provider;
+                    }
+                } else {
+                    evict_jsonl_pending_if_needed(
+                        &mut w,
+                        &mut pending,
+                        &mut pending_order,
+                        &mut evicted_calls,
+                        &damaged,
+                        &write_error,
+                    );
+                    pending_order.push_back(call_id.clone());
+                    pending.insert(call_id.clone(), Recording::new(&call_id, input, provider));
                 }
+                try_finalize(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
             }
             RecordEvent::Session {
                 call_id,
                 session_id,
                 step,
             } => {
-                let rec = entry_or_init(&mut pending, &call_id);
+                if !pending.contains_key(&call_id) && evicted_calls.contains(&call_id) {
+                    damaged.note_dropped_evicted_event(&call_id);
+                    continue;
+                }
+                let rec = entry_or_init(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &mut evicted_calls,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
                 rec.session_id = Some(session_id);
                 rec.step = Some(step);
-                try_finalize(&mut w, &mut pending, &call_id, &write_error);
+                try_finalize(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
             }
             // C4-6:用 entry_or_init(而非 get_mut)兜底建条目,保证乱序
             // (先于 Input 到达)的 Provider 快照不丢。
             RecordEvent::Provider { call_id, provider } => {
-                entry_or_init(&mut pending, &call_id).provider = provider;
+                if !pending.contains_key(&call_id) && evicted_calls.contains(&call_id) {
+                    damaged.note_dropped_evicted_event(&call_id);
+                    continue;
+                }
+                entry_or_init(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &mut evicted_calls,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                )
+                .provider = provider;
             }
             RecordEvent::Exchange { call_id, exchange } => {
-                // C4-7:同 (call_id, attempt) 重复 → 合并骨架并标记 inconsistent。
-                let rec = entry_or_init(&mut pending, &call_id);
-                if insert_exchange(rec, exchange) {
-                    mark_inconsistent(&inconsistent, &call_id);
+                if !pending.contains_key(&call_id) && evicted_calls.contains(&call_id) {
+                    damaged.note_dropped_evicted_event(&call_id);
+                    continue;
                 }
-                try_finalize(&mut w, &mut pending, &call_id, &write_error);
+                // C4-7:同 (call_id, attempt) 重复 → 合并骨架并标记 inconsistent。
+                let rec = entry_or_init(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &mut evicted_calls,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
+                if insert_exchange(rec, exchange) {
+                    mark_inconsistent(&damaged.inconsistent, &call_id);
+                }
+                try_finalize(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
             }
             RecordEvent::ExchangeUpdate {
                 call_id,
@@ -918,29 +1530,89 @@ fn writer_loop(
                 response,
                 error,
             } => {
+                if !pending.contains_key(&call_id) && evicted_calls.contains(&call_id) {
+                    damaged.note_dropped_evicted_event(&call_id);
+                    continue;
+                }
                 // C4-7:要求恰好一个匹配 attempt;0 或 >1 → 标记 inconsistent,
                 // 不静默 patch 第一条。
-                let rec = entry_or_init(&mut pending, &call_id);
+                let rec = entry_or_init(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &mut evicted_calls,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
                 if !matches!(
                     apply_exchange_update(rec, attempt, exchange_index, response, error),
                     UpdateMatch::Patched
                 ) {
-                    mark_inconsistent(&inconsistent, &call_id);
+                    mark_inconsistent(&damaged.inconsistent, &call_id);
                 }
-                try_finalize(&mut w, &mut pending, &call_id, &write_error);
+                try_finalize(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
             }
             RecordEvent::TransportClosed { call_id } => {
-                if let Some(rec) = pending.get_mut(&call_id) {
-                    rec.transport_closed = true;
-                    try_finalize(&mut w, &mut pending, &call_id, &write_error);
+                if !pending.contains_key(&call_id) && evicted_calls.contains(&call_id) {
+                    damaged.note_dropped_evicted_event(&call_id);
+                    continue;
                 }
+                // A call the writer no longer holds was already written; both
+                // the outcome wrapper and the HTTP layer declare closure, so a
+                // second event must not recreate an empty entry for it.
+                let Some(recording) = pending.get_mut(&call_id) else {
+                    continue;
+                };
+                recording.transport_closed = true;
+                try_finalize(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
             }
             RecordEvent::Outcome { call_id, outcome } => {
-                entry_or_init(&mut pending, &call_id).outcome = outcome;
-                try_finalize(&mut w, &mut pending, &call_id, &write_error);
+                if !pending.contains_key(&call_id) && evicted_calls.contains(&call_id) {
+                    damaged.note_dropped_evicted_event(&call_id);
+                    continue;
+                }
+                entry_or_init(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &mut evicted_calls,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                )
+                .outcome = outcome;
+                try_finalize(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &call_id,
+                    &damaged,
+                    &write_error,
+                );
             }
             RecordEvent::Flush { ack } => {
-                write_ready_all(&mut w, &mut pending, &write_error);
+                write_ready_all(
+                    &mut w,
+                    &mut pending,
+                    &mut pending_order,
+                    &damaged,
+                    &write_error,
+                );
                 if let Err(e) = w.flush() {
                     note_write_error(&write_error, &e);
                 }
@@ -969,26 +1641,101 @@ fn writer_loop(
     }
 }
 
-/// 若该 call 的所有分片到齐(barrier 满足)则写出,并标记 complete=true。
+/// Calls whose recording cannot be complete, shared between a
+/// [`JsonlRecorder`] and its writer: `inconsistent` (C4-7, marked by the
+/// writer), `lossy` (an event was dropped or the call was evicted from
+/// `pending`), and counters for dropped events and pending evictions.
+struct DamagedCalls {
+    inconsistent: Arc<Mutex<HashSet<String>>>,
+    lossy: Arc<Mutex<HashSet<String>>>,
+    dropped: Arc<AtomicU64>,
+    pending_evicted: Arc<AtomicU64>,
+}
+
+impl DamagedCalls {
+    /// Record that `call_id` was evicted from `pending` before completion:
+    /// mark it `lossy` and increment `pending_evicted`.
+    fn note_pending_evicted(&self, call_id: &str) {
+        self.pending_evicted.fetch_add(1, Ordering::Relaxed);
+        self.mark_lossy(call_id);
+    }
+
+    /// Record that a trailing event for an already-evicted `call_id` was dropped:
+    /// increment `dropped` and ensure `call_id` stays marked `lossy`.
+    fn note_dropped_evicted_event(&self, call_id: &str) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+        self.mark_lossy(call_id);
+    }
+
+    fn mark_lossy(&self, call_id: &str) {
+        if let Ok(mut set) = self.lossy.lock()
+            && !set.contains(call_id)
+        {
+            set.insert(call_id.to_string());
+        }
+    }
+
+    fn unmark_lossy(&self, call_id: &str) {
+        if let Ok(mut set) = self.lossy.lock() {
+            set.remove(call_id);
+        }
+    }
+
+    /// Whether `call_id` lost an event or was marked inconsistent. Its
+    /// `lossy` mark is cleared: the call is being written now.
+    fn take(&self, call_id: &str) -> bool {
+        let lossy = self
+            .lossy
+            .lock()
+            .map(|mut set| set.remove(call_id))
+            .unwrap_or(true);
+        let inconsistent = self
+            .inconsistent
+            .lock()
+            .map(|set| set.contains(call_id))
+            .unwrap_or(true);
+        lossy || inconsistent
+    }
+}
+
+/// 若该 call 的所有分片到齐(barrier 满足)则写出;丢过事件或被标记不一致的
+/// call 写为 `complete=false`,其余标记 complete=true。
 fn try_finalize(
     w: &mut impl Write,
     pending: &mut HashMap<String, Recording>,
+    pending_order: &mut VecDeque<String>,
     call_id: &str,
+    damaged: &DamagedCalls,
     write_error: &Mutex<Option<String>>,
 ) {
     if pending.get(call_id).map(Recording::ready).unwrap_or(false)
         && let Some(mut rec) = pending.remove(call_id)
     {
+        while pending_order
+            .front()
+            .is_some_and(|id| !pending.contains_key(id))
+        {
+            pending_order.pop_front();
+        }
+        if pending_order.len() > JSONL_PENDING_MAX.saturating_mul(2) {
+            pending_order.retain(|id| pending.contains_key(id));
+            if pending_order.capacity() > JSONL_PENDING_MAX.saturating_mul(4) {
+                pending_order.shrink_to(JSONL_PENDING_MAX.saturating_mul(2));
+            }
+        }
         if !rec.exchanges.is_empty() || rec.transport_closed {
-            rec.complete = true;
+            rec.complete = !damaged.take(call_id);
         }
         write_line(w, rec, write_error);
     }
 }
 
+/// flush:写出所有 barrier 已满足的 call,`complete` 规则同 [`try_finalize`]。
 fn write_ready_all(
     w: &mut impl Write,
     pending: &mut HashMap<String, Recording>,
+    pending_order: &mut VecDeque<String>,
+    damaged: &DamagedCalls,
     write_error: &Mutex<Option<String>>,
 ) {
     let ids: Vec<String> = pending
@@ -998,17 +1745,19 @@ fn write_ready_all(
         .collect();
     for id in ids {
         if let Some(mut rec) = pending.remove(&id) {
-            rec.complete = true;
+            rec.complete = !damaged.take(&id);
             write_line(w, rec, write_error);
         }
     }
+    pending_order.retain(|id| pending.contains_key(id));
 }
 
 fn write_line(w: &mut impl Write, rec: Recording, write_error: &Mutex<Option<String>>) {
     match serde_json::to_string(&rec) {
         Ok(mut line) => {
             // 每行落盘,保证崩溃前已写行可见;失败记入粘性错误槽,
-            // 由 try_flush 显式暴露。
+            // 由 try_flush 显式暴露。换行与记录同一次写出:大记录会先填满
+            // 缓冲,若换行另写,重叠的 recorder 会插在两者之间。
             line.push('\n');
             if let Err(e) = w.write_all(line.as_bytes()).and_then(|()| w.flush()) {
                 note_write_error(write_error, &e);
@@ -1112,11 +1861,22 @@ fn mark_inconsistent(set: &Mutex<HashSet<String>>, call_id: &str) {
 // ── 有界 channel send(A4:drop-newest + 计数)─────────────────────────────
 
 /// 有界 `try_send`:满(drop-newest)或 writer 断开时丢弃事件并递增 `dropped`,
-/// 保持热路径非阻塞且失败可查(而非静默 `let _ = tx.send(...)`)。
-fn send_or_drop(tx: &SyncSender<RecordEvent>, ev: RecordEvent, dropped: &AtomicU64) {
+/// 保持热路径非阻塞且失败可查(而非静默 `let _ = tx.send(...)`)。丢弃事件所属
+/// 的 call 记入 `lossy`,writer 不会把它写成 `complete=true`。
+fn send_or_drop(
+    tx: &SyncSender<RecordEvent>,
+    ev: RecordEvent,
+    dropped: &AtomicU64,
+    lossy: &Mutex<HashSet<String>>,
+) {
     if let Err(err) = tx.try_send(ev) {
-        // err 持有未入队事件,随 err 析构丢弃;仅计数,保持非阻塞。
-        drop(err);
+        // err 持有未入队事件:记下它的 call_id 后丢弃,保持非阻塞。
+        let (TrySendError::Full(ev) | TrySendError::Disconnected(ev)) = err;
+        if let Some(call_id) = ev.call_id()
+            && let Ok(mut set) = lossy.lock()
+        {
+            set.insert(call_id.to_string());
+        }
         dropped.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -1324,10 +2084,11 @@ impl RingInner {
                 Recording::new(
                     call_id,
                     InputRecord {
+                        operation: Default::default(),
                         prompt: Vec::new(),
                         options: serde_json::Value::Null,
                     },
-                    ProviderRecord::minimal("", ""),
+                    ProviderRecord::from_model("", ""),
                 ),
             );
         }
@@ -1346,8 +2107,17 @@ impl RingInner {
         {
             self.pending_order.pop_front();
         }
+        if self.pending_order.len() > self.pending_max.saturating_mul(2) {
+            self.pending_order
+                .retain(|id| self.pending.contains_key(id));
+            if self.pending_order.capacity() > self.pending_max.saturating_mul(4) {
+                self.pending_order
+                    .shrink_to(self.pending_max.saturating_mul(2));
+            }
+        }
         while self.pending.len() >= self.pending_max {
-            let Some(old) = self.pending_order.pop_front() else {
+            let Some(old) = pop_next_pending_eviction_id(&self.pending, &mut self.pending_order)
+            else {
                 break;
             };
             if let Some(mut rec) = self.pending.remove(&old) {
@@ -1362,12 +2132,28 @@ impl RingInner {
     }
 
     /// 合并一个已 ready 的分片(barrier 满足则入 ring)。
+    /// A call marked inconsistent is stored with `complete=false`.
     fn finalize(&mut self, call_id: &str) {
         if self.pending.get(call_id).is_some_and(Recording::ready)
             && let Some(mut rec) = self.pending.remove(call_id)
         {
+            while self
+                .pending_order
+                .front()
+                .is_some_and(|id| !self.pending.contains_key(id))
+            {
+                self.pending_order.pop_front();
+            }
+            if self.pending_order.len() > self.pending_max.saturating_mul(2) {
+                self.pending_order
+                    .retain(|id| self.pending.contains_key(id));
+                if self.pending_order.capacity() > self.pending_max.saturating_mul(4) {
+                    self.pending_order
+                        .shrink_to(self.pending_max.saturating_mul(2));
+                }
+            }
             if !rec.exchanges.is_empty() || rec.transport_closed {
-                rec.complete = true;
+                rec.complete = !self.inconsistent.contains(call_id);
             }
             self.push(rec);
         }
@@ -1376,7 +2162,17 @@ impl RingInner {
     /// FIFO ring 追加;超容淘汰最旧并计数。
     fn push(&mut self, rec: Recording) {
         if self.completed.len() >= self.cap {
-            self.completed.pop_front();
+            if let Some(evicted) = self.completed.pop_front()
+                && !self.pending.contains_key(&evicted.call_id)
+                && !self.completed.iter().any(|r| r.call_id == evicted.call_id)
+            {
+                self.inconsistent.remove(&evicted.call_id);
+                if self.inconsistent.capacity() > self.cap.saturating_mul(4)
+                    && self.inconsistent.len() <= self.cap
+                {
+                    self.inconsistent.shrink_to(self.cap.saturating_mul(2));
+                }
+            }
             self.dropped += 1;
         }
         self.completed.push_back(rec);
@@ -1394,6 +2190,20 @@ impl Default for RingRecorder {
 }
 
 impl Recorder for RingRecorder {
+    fn record_decision_input(
+        &self,
+        call_id: &str,
+        options: &crate::decision_model::DecideOptions,
+        provider: &str,
+        model_id: &str,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        let rec = inner.entry_or_init_bounded(call_id);
+        rec.input = InputRecord::from_decision_options(options);
+        if rec.provider.provider.is_empty() {
+            rec.provider = ProviderRecord::from_model(provider, model_id);
+        }
+    }
     fn record_input(&self, call_id: &str, options: &CallOptions, provider: &str, model_id: &str) {
         let mut inner = self.inner.lock().unwrap();
         // C4-6 + A3:有界建条目;Input 仅在 provider 仍为空占位时填最小 provider,
@@ -1401,7 +2211,7 @@ impl Recorder for RingRecorder {
         let rec = inner.entry_or_init_bounded(call_id);
         rec.input = InputRecord::from_call_options(options);
         if rec.provider.provider.is_empty() {
-            rec.provider = ProviderRecord::minimal(provider, model_id);
+            rec.provider = ProviderRecord::from_model(provider, model_id);
         }
     }
 
@@ -1415,13 +2225,9 @@ impl Recorder for RingRecorder {
     }
 
     fn record_provider(&self, call_id: &str, snapshot: &ProviderRecord) {
-        // 与 JsonlRecorder 一致的边界强制脱敏,不依赖 provider 端自觉。
-        let mut snap = snapshot.clone();
-        snap.provider_options = snap.provider_options.take().map(redact_json);
-        snap.profile = snap.profile.take().map(redact_json);
         let mut inner = self.inner.lock().unwrap();
         // C4-6:entry_or_init_bounded 兜底建条目,保证乱序 Provider 快照不丢。
-        inner.entry_or_init_bounded(call_id).provider = snap;
+        inner.entry_or_init_bounded(call_id).provider = snapshot.clone();
     }
 
     fn record_exchange(&self, call_id: &str, exchange: &HttpExchange) {
@@ -1456,7 +2262,7 @@ impl Recorder for RingRecorder {
 
     fn record_outcome(&self, call_id: &str, outcome: &OutcomeRecord) {
         let mut inner = self.inner.lock().unwrap();
-        inner.entry_or_init_bounded(call_id).outcome = outcome.clone();
+        inner.entry_or_init_bounded(call_id).outcome = outcome.redacted();
         inner.finalize(call_id);
     }
 
@@ -1478,7 +2284,7 @@ impl Recorder for RingRecorder {
             .collect();
         for id in ids {
             if let Some(mut rec) = inner.pending.remove(&id) {
-                rec.complete = true;
+                rec.complete = !inner.inconsistent.contains(&id);
                 inner.push(rec);
             }
         }
@@ -1548,11 +2354,56 @@ impl<S> RecordingOutcomeStream<S> {
     }
 }
 
-impl<S> futures::Stream for RecordingOutcomeStream<S>
+enum StreamOutcome<'a> {
+    Finish(
+        crate::types::FinishReasonUnified,
+        crate::types::LanguageModelUsage,
+    ),
+    Error(&'a crate::AiMuxError),
+    Other,
+}
+
+trait RecordingStreamPart {
+    fn recording_outcome(&self) -> StreamOutcome<'_>;
+}
+
+impl<C, A, R> RecordingStreamPart for crate::stream_part::StreamPart<C, A, R> {
+    fn recording_outcome(&self) -> StreamOutcome<'_> {
+        match self {
+            Self::Finish {
+                finish_reason,
+                usage,
+                ..
+            } => StreamOutcome::Finish(
+                finish_reason.unified,
+                crate::types::as_language_model_usage(usage),
+            ),
+            Self::Error { error } => StreamOutcome::Error(error),
+            _ => StreamOutcome::Other,
+        }
+    }
+}
+
+impl RecordingStreamPart for crate::stream_part::TextStreamPart {
+    fn recording_outcome(&self) -> StreamOutcome<'_> {
+        match self {
+            Self::Finish {
+                finish_reason,
+                total_usage,
+                ..
+            } => StreamOutcome::Finish(*finish_reason, total_usage.clone()),
+            Self::Error { error } => StreamOutcome::Error(error),
+            _ => StreamOutcome::Other,
+        }
+    }
+}
+
+impl<S, P> futures::Stream for RecordingOutcomeStream<S>
 where
-    S: futures::Stream<Item = Result<crate::stream_part::StreamPart, crate::AiMuxError>> + Unpin,
+    S: futures::Stream<Item = Result<P, crate::AiMuxError>> + Unpin,
+    P: RecordingStreamPart,
 {
-    type Item = Result<crate::stream_part::StreamPart, crate::AiMuxError>;
+    type Item = Result<P, crate::AiMuxError>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -1562,31 +2413,18 @@ where
         let inner = std::pin::Pin::new(&mut this.inner);
         match inner.poll_next(cx) {
             std::task::Poll::Ready(Some(Ok(part))) => {
-                match &part {
-                    crate::stream_part::StreamPart::Finish {
-                        finish_reason,
-                        usage,
-                        ..
-                    } => {
+                match part.recording_outcome() {
+                    StreamOutcome::Finish(finish_reason, usage) => {
                         let this = self.as_mut().get_mut();
                         if let Some(mut pending) = this.pending.take() {
                             // Provider error 已定性;尾随 Finish 补上 usage。
-                            pending.usage = serde_json::to_value(usage).ok();
+                            pending.usage = serde_json::to_value(&usage).ok();
                             this.record(&pending);
                         } else {
-                            let outcome = OutcomeRecord {
-                                status: OutcomeStatus::Success,
-                                finish_reason: serde_json::to_value(finish_reason.unified)
-                                    .ok()
-                                    .and_then(|v| v.as_str().map(std::string::ToString::to_string)),
-                                error: None,
-                                error_value: None,
-                                usage: serde_json::to_value(usage).ok(),
-                            };
-                            this.record(&outcome);
+                            this.record(&OutcomeRecord::success(finish_reason, &usage));
                         }
                     }
-                    crate::stream_part::StreamPart::Error { error } => {
+                    StreamOutcome::Error(error) => {
                         let this = self.as_mut().get_mut();
                         if !this.recorded && this.pending.is_none() {
                             this.pending = Some(OutcomeRecord {
@@ -1594,6 +2432,7 @@ where
                                 finish_reason: None,
                                 error: Some(error.to_string()),
                                 error_value: serde_json::to_value(error).ok(),
+                                decision_result: None,
                                 usage: None,
                             });
                         }
@@ -1610,6 +2449,7 @@ where
                             finish_reason: None,
                             error: Some(e.to_string()),
                             error_value: serde_json::to_value(&e).ok(),
+                            decision_result: None,
                             usage: None,
                         });
                     }
@@ -1622,6 +2462,7 @@ where
                         finish_reason: None,
                         error: Some(e.to_string()),
                         error_value: serde_json::to_value(&e).ok(),
+                        decision_result: None,
                         usage: None,
                     };
                     this.record(&outcome);
@@ -1635,6 +2476,7 @@ where
                         finish_reason: None,
                         error: None,
                         error_value: None,
+                        decision_result: None,
                         usage: None,
                     };
                     this.record(&outcome);
@@ -1654,6 +2496,7 @@ impl<S> Drop for RecordingOutcomeStream<S> {
                 finish_reason: None,
                 error: None,
                 error_value: None,
+                decision_result: None,
                 usage: None,
             };
             self.record(&outcome);
@@ -1709,8 +2552,38 @@ mod tests {
 
     fn provider_error_part() -> Result<crate::stream_part::StreamPart, crate::AiMuxError> {
         Ok(crate::stream_part::StreamPart::Error {
-            error: crate::AiMuxError::Other("provider error".into()),
+            error: crate::AiMuxError::other("provider error"),
         })
+    }
+
+    #[tokio::test]
+    async fn a_recording_context_is_current_only_inside_its_scope_and_stream() {
+        use futures::StreamExt as _;
+
+        let recorder: Arc<dyn Recorder> =
+            Arc::new(CaptureRecorder(std::sync::Mutex::new(Vec::new())));
+        let context = RecordingContext::new("call-1", recorder);
+        let call_id = || RecordingContext::current().map(|context| context.call_id);
+        assert_eq!(call_id(), None);
+
+        let (inside, hidden) = RecordingContext::scope(Some(context.clone()), async {
+            let hidden = RecordingContext::scope(None, async { call_id() }).await;
+            (call_id(), hidden)
+        })
+        .await;
+        assert_eq!(inside.as_deref(), Some("call-1"));
+        assert_eq!(hidden, None);
+
+        let child = context.child("router[0]:p/m");
+        let seen: Vec<_> = RecordingContext::scope_stream(
+            Some(child),
+            futures::stream::iter(0..2)
+                .map(|_| RecordingContext::current().and_then(|context| context.step())),
+        )
+        .collect()
+        .await;
+        assert_eq!(seen, vec![Some("router[0]:p/m".to_owned()); 2]);
+        assert_eq!(call_id(), None);
     }
 
     #[tokio::test]
@@ -1767,16 +2640,13 @@ mod tests {
             provider_metadata: None,
         });
         let mut stream = capture_stream(
-            vec![
-                Err(crate::AiMuxError::JsonParse("bad frame".into())),
-                finish,
-            ],
+            vec![Err(crate::AiMuxError::json_parse("bad frame")), finish],
             &recorder,
         );
 
         assert!(matches!(
             stream.next().await,
-            Some(Err(crate::AiMuxError::JsonParse(_)))
+            Some(Err(crate::AiMuxError::JsonParse { .. }))
         ));
         assert!(recorder.0.lock().unwrap().is_empty());
         assert!(matches!(
@@ -1799,7 +2669,9 @@ mod tests {
             crate::language_model_message::convert_to_language_model_prompt(
                 &[crate::message::ModelMessage::user("ping")],
                 None,
-            ),
+                None,
+            )
+            .unwrap(),
         )
     }
 
@@ -1819,12 +2691,11 @@ mod tests {
     #[test]
     fn input_record_serializes_options_without_internal_fields() {
         let mut opts = sample_options();
-        opts.call_id = Some("call-test".into());
-        opts.abort_signal = None;
+        opts.abort_signal = Some(crate::AbortSignal::new());
         let rec = InputRecord::from_call_options(&opts);
         let v = &rec.options;
-        assert!(v.get("call_id").is_none());
-        assert!(v.get("abort_signal").is_none());
+        assert!(v.get("callId").is_none());
+        assert!(v.get("abortSignal").is_none());
     }
 
     #[test]
@@ -1841,11 +2712,14 @@ mod tests {
             "Authorization",
             "x-api-key",
             "apiKey",
+            "X-Prodia-Key",
+            "Ocp-Apim-Subscription-Key",
+            "ocp_apim_subscription_key",
         ] {
             assert!(is_sensitive_key(key), "{key} must be redacted");
         }
         // Usage counters carry no credentials and must stay loggable.
-        for key in ["max_tokens", "input_tokens", "output_tokens", "model"] {
+        for key in ["maxTokens", "inputTokens", "outputTokens", "model"] {
             assert!(!is_sensitive_key(key), "{key} must stay visible");
         }
     }
@@ -1859,17 +2733,19 @@ mod tests {
                 "x-goog-api-key": "gkey",
                 "x-amz-security-token": "sts-tok"
             },
-            "provider_options": { "headers": { "Cookie": "s=1" } },
-            "body_overrides": {
-                "api_key": "sk-secret",
-                "token": "bearer-secret",
-                "access_token": "oauth-secret"
+            "providerOptions": {
+                "headers": { "Cookie": "s=1" },
+                "openai": {
+                    "api_key": "sk-secret",
+                    "token": "bearer-secret",
+                    "access_token": "oauth-secret"
+                }
             },
             // 用量字段名含 "token" 子串,但非凭据——contains("token") 曾误伤。
             "usage": {
-                "max_output_tokens": 4096,
-                "prompt_tokens": 10,
-                "completion_tokens": 20
+                "maxOutputTokens": 4096,
+                "inputTokens": 10,
+                "outputTokens": 20
             },
             "temperature": 0.5,
         });
@@ -1877,15 +2753,17 @@ mod tests {
         assert_eq!(r["headers"]["Authorization"], "[REDACTED]");
         assert_eq!(r["headers"]["x-goog-api-key"], "[REDACTED]");
         assert_eq!(r["headers"]["x-amz-security-token"], "[REDACTED]");
-        assert_eq!(r["headers"]["X-Key"], "ok");
-        assert_eq!(r["provider_options"]["headers"]["Cookie"], "[REDACTED]");
-        assert_eq!(r["body_overrides"]["api_key"], "[REDACTED]");
-        assert_eq!(r["body_overrides"]["token"], "[REDACTED]");
-        assert_eq!(r["body_overrides"]["access_token"], "[REDACTED]");
+        // A name ending in `key` is redacted even where it is not a credential:
+        // over-redaction is the safe side.
+        assert_eq!(r["headers"]["X-Key"], "[REDACTED]");
+        assert_eq!(r["providerOptions"]["headers"]["Cookie"], "[REDACTED]");
+        assert_eq!(r["providerOptions"]["openai"]["api_key"], "[REDACTED]");
+        assert_eq!(r["providerOptions"]["openai"]["token"], "[REDACTED]");
+        assert_eq!(r["providerOptions"]["openai"]["access_token"], "[REDACTED]");
         // 含 "token" 子串的用量字段不再被误脱敏(回归 contains("token"))。
-        assert_eq!(r["usage"]["max_output_tokens"], 4096);
-        assert_eq!(r["usage"]["prompt_tokens"], 10);
-        assert_eq!(r["usage"]["completion_tokens"], 20);
+        assert_eq!(r["usage"]["maxOutputTokens"], 4096);
+        assert_eq!(r["usage"]["inputTokens"], 10);
+        assert_eq!(r["usage"]["outputTokens"], 20);
         assert_eq!(r["temperature"], 0.5);
     }
 
@@ -1894,13 +2772,139 @@ mod tests {
         let rec = Recording::new(
             "call-1",
             InputRecord::from_call_options(&sample_options()),
-            ProviderRecord::minimal("openai", "gpt-4o"),
+            ProviderRecord::from_model("openai", "gpt-4o"),
         );
         let json = serde_json::to_string(&rec).unwrap();
         let back: Recording = serde_json::from_str(&json).unwrap();
         assert_eq!(back.call_id, "call-1");
         assert_eq!(back.schema, RECORDING_SCHEMA);
         assert_eq!(back.provider.provider, "openai");
+    }
+
+    #[test]
+    fn recording_operation_round_trips_kebab_case() {
+        for (operation, wire) in [
+            (RecordingOperation::LanguageModel, "language-model"),
+            (RecordingOperation::Decision, "decision"),
+        ] {
+            let value = serde_json::to_value(operation).unwrap();
+            assert_eq!(value, serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<RecordingOperation>(value).unwrap(),
+                operation
+            );
+        }
+
+        let input = InputRecord::from_call_options(&sample_options());
+        let value = serde_json::to_value(input).unwrap();
+        assert!(value.get("operation").is_none());
+    }
+
+    /// Recordings are written as schema 2, as master writes them. Schemas 1
+    /// and 2 (what released versions write) are read; any other schema,
+    /// including the never-released 3, is refused with a clear error.
+    #[test]
+    fn schema_two_is_written_and_released_schemas_are_read() {
+        let rec = Recording::new(
+            "call-1",
+            InputRecord::from_call_options(&sample_options()),
+            ProviderRecord::from_model("openai.chat", "gpt-4o"),
+        );
+        let json = serde_json::to_value(&rec).unwrap();
+        assert_eq!(json["schema"], 2);
+        for schema in [1, 2] {
+            let mut value = json.clone();
+            value["schema"] = schema.into();
+            let back: Recording = serde_json::from_value(value).unwrap();
+            assert_eq!(back.schema, schema);
+        }
+        for schema in [0, 3, 4] {
+            let mut value = json.clone();
+            value["schema"] = schema.into();
+            let err = serde_json::from_value::<Recording>(value)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("unsupported recording schema {schema}")),
+                "{err}"
+            );
+        }
+    }
+
+    /// Fields only this version writes are optional when reading, fields
+    /// only master writes are ignored, master's snake_case envelope keys are
+    /// read (this version writes them camelCase), and a prompt this version
+    /// cannot read loads as empty with the reason kept for replay.
+    #[test]
+    fn a_master_shaped_record_loads() {
+        let system = serde_json::json!([{
+            "role": "system",
+            "content": [{"type": "text", "text": "Be brief."}],
+            "provider_options": null
+        }]);
+        let line = serde_json::json!({
+            "schema": 2,
+            "call_id": "c",
+            "recorded_at": "2026-10-13T00:00:00.000Z",
+            "input": {"prompt": system, "options": {"prompt": system}},
+            "provider": {
+                "provider": "openai",
+                "model_id": "gpt-4o",
+                "base_url": "https://api.openai.com/v1",
+                "profile": null,
+                "provider_options": null
+            },
+            "exchanges": [{
+                "attempt": 1,
+                "exchange_index": 1,
+                "request": {"method": "POST", "url": "https://api.openai.com/v1/chat/completions", "headers": []},
+                "response": {"status": 200, "headers": [], "stream_chunks": 3, "ttfb_ms": 5},
+                "timing": {"latency_ms": 9, "ttfb_ms": 5}
+            }],
+            "outcome": {
+                "status": "success",
+                "finish_reason": "stop",
+                "error": null,
+                "error_value": {"kind": "x"},
+                "decision_result": {"answers": {}},
+                "usage": null
+            },
+            "transport_closed": true,
+            "session_id": "s"
+        });
+        let rec: Recording = serde_json::from_value(line).unwrap();
+        assert_eq!(rec.call_id, "c");
+        assert_eq!(rec.recorded_at, "2026-10-13T00:00:00.000Z");
+        assert_eq!(rec.provider.provider_id, "");
+        assert_eq!(rec.provider.model_id, "gpt-4o");
+        assert!(rec.provider.registry_id().is_err());
+        assert!(rec.input.prompt.is_empty());
+        assert!(rec.input.unreadable_prompt().is_some());
+        assert!(!rec.complete);
+        assert!(rec.transport_closed);
+        assert_eq!(rec.session_id.as_deref(), Some("s"));
+        let exchange = &rec.exchanges[0];
+        assert_eq!(exchange.exchange_index, 1);
+        let response = exchange.response.as_ref().unwrap();
+        assert_eq!(
+            (response.stream_chunks, response.ttfb_ms),
+            (Some(3), Some(5))
+        );
+        assert_eq!(
+            (exchange.timing.latency_ms, exchange.timing.ttfb_ms),
+            (9, Some(5))
+        );
+        assert_eq!(rec.outcome.finish_reason.as_deref(), Some("stop"));
+        assert!(rec.outcome.error_value.is_some() && rec.outcome.decision_result.is_some());
+
+        // Written back with this version's camelCase keys, still schema 2.
+        let written = serde_json::to_value(&rec).unwrap();
+        assert_eq!(written["schema"], 2);
+        assert_eq!(written["callId"], "c");
+        assert_eq!(written["provider"]["modelId"], "gpt-4o");
+        assert_eq!(written["exchanges"][0]["timing"]["latencyMs"], 9);
+        assert_eq!(written["outcome"]["finishReason"], "stop");
+        assert!(written.get("call_id").is_none());
     }
 
     #[test]
@@ -1917,6 +2921,7 @@ mod tests {
                 finish_reason: Some("stop".into()),
                 error: None,
                 error_value: None,
+                decision_result: None,
                 usage: None,
             },
         );
@@ -1942,10 +2947,11 @@ mod tests {
         let mut rec = Recording::new(
             "call-x",
             InputRecord {
+                operation: Default::default(),
                 prompt: Vec::new(),
                 options: serde_json::Value::Null,
             },
-            ProviderRecord::minimal("openai", "gpt-4o"),
+            ProviderRecord::from_model("openai", "gpt-4o"),
         );
         rec.transport_closed = true;
         rec.outcome = OutcomeRecord {
@@ -1953,6 +2959,7 @@ mod tests {
             finish_reason: Some("stop".into()),
             error: None,
             error_value: None,
+            decision_result: None,
             usage: None,
         };
         assert!(!rec.ready(), "empty-prompt placeholder must not finalize");
@@ -1974,6 +2981,7 @@ mod tests {
                 finish_reason: Some("stop".into()),
                 error: None,
                 error_value: None,
+                decision_result: None,
                 usage: None,
             },
         );
@@ -2010,15 +3018,14 @@ mod tests {
         let (tx, rx) = sync_channel(16);
         let write_error = Arc::new(Mutex::new(None));
         let handle = {
-            let inconsistent = Arc::new(Mutex::new(HashSet::new()));
             let w_err = write_error.clone();
-            std::thread::spawn(move || writer_loop(rx, FailingWriter, inconsistent, w_err))
+            std::thread::spawn(move || writer_loop(rx, FailingWriter, damaged_calls(), w_err))
         };
 
         tx.send(RecordEvent::Input {
             call_id: "c1".into(),
             input: InputRecord::from_call_options(&sample_options()),
-            provider: ProviderRecord::minimal("openai", "gpt-4o"),
+            provider: ProviderRecord::from_model("openai", "gpt-4o"),
         })
         .unwrap();
         tx.send(RecordEvent::TransportClosed {
@@ -2032,6 +3039,7 @@ mod tests {
                 finish_reason: Some("stop".into()),
                 error: None,
                 error_value: None,
+                decision_result: None,
                 usage: None,
             },
         })
@@ -2071,6 +3079,7 @@ mod tests {
                 finish_reason: Some("stop".into()),
                 error: None,
                 error_value: None,
+                decision_result: None,
                 usage: None,
             },
         );
@@ -2082,7 +3091,7 @@ mod tests {
         assert_eq!(parsed.session_id.as_deref(), Some("sess-abc"));
         assert_eq!(parsed.step, Some(3));
         // 序列化时 null 省略:只有归组的调用才带这两个字段。
-        assert!(content.contains("\"session_id\":\"sess-abc\""));
+        assert!(content.contains("\"sessionId\":\"sess-abc\""));
         assert!(content.contains("\"step\":3"));
     }
 
@@ -2092,10 +3101,10 @@ mod tests {
         let rec = Recording::new(
             "call-1",
             InputRecord::from_call_options(&sample_options()),
-            ProviderRecord::minimal("openai", "gpt-4o"),
+            ProviderRecord::from_model("openai", "gpt-4o"),
         );
         let json = serde_json::to_string(&rec).unwrap();
-        assert!(!json.contains("session_id"), "ungrouped must omit: {json}");
+        assert!(!json.contains("sessionId"), "ungrouped must omit: {json}");
         assert!(!json.contains("\"step\""), "ungrouped must omit: {json}");
 
         // 旧 jsonl(无 session 字段)仍能反序列化(serde default)。
@@ -2103,7 +3112,7 @@ mod tests {
             let mut r = serde_json::to_value(&rec).unwrap();
             r.as_object_mut()
                 .unwrap()
-                .insert("transport_closed".into(), serde_json::json!(true));
+                .insert("transportClosed".into(), serde_json::json!(true));
             r
         })
         .unwrap();
@@ -2161,6 +3170,7 @@ mod tests {
                 finish_reason: None,
                 error: None,
                 error_value: None,
+                decision_result: None,
                 usage: None,
             },
         );
@@ -2231,6 +3241,7 @@ mod tests {
                 finish_reason: None,
                 error: Some("mid-stream".into()),
                 error_value: None,
+                decision_result: None,
                 usage: None,
             },
         );
@@ -2277,6 +3288,7 @@ mod tests {
                 finish_reason: None,
                 error: None,
                 error_value: None,
+                decision_result: None,
                 usage: None,
             },
         );
@@ -2357,6 +3369,7 @@ mod tests {
             finish_reason: Some("stop".into()),
             error: None,
             error_value: None,
+            decision_result: None,
             usage: None,
         }
     }
@@ -2542,15 +3555,212 @@ mod tests {
         // 容量 1 + 不消费:第 1 条入队,后两条 Full → drop-newest 并计数。
         let (tx, rx) = sync_channel::<RecordEvent>(1);
         let dropped = AtomicU64::new(0);
-        let ev = || RecordEvent::TransportClosed {
-            call_id: "c".into(),
+        let lossy = Mutex::new(HashSet::new());
+        let ev = |call_id: &str| RecordEvent::TransportClosed {
+            call_id: call_id.into(),
         };
-        send_or_drop(&tx, ev(), &dropped);
-        send_or_drop(&tx, ev(), &dropped);
-        send_or_drop(&tx, ev(), &dropped);
+        send_or_drop(&tx, ev("a"), &dropped, &lossy);
+        send_or_drop(&tx, ev("b"), &dropped, &lossy);
+        send_or_drop(&tx, ev("c"), &dropped, &lossy);
         assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        // The calls that lost an event are remembered; the queued one is not.
+        let mut lossy: Vec<String> = lossy.into_inner().unwrap().into_iter().collect();
+        lossy.sort();
+        assert_eq!(lossy, ["b", "c"]);
         assert!(rx.try_recv().is_ok()); // 第 1 条仍在
         assert!(rx.try_recv().is_err()); // 无更多
+    }
+
+    fn damaged_calls() -> DamagedCalls {
+        DamagedCalls {
+            inconsistent: Arc::new(Mutex::new(HashSet::new())),
+            lossy: Arc::new(Mutex::new(HashSet::new())),
+            dropped: Arc::new(AtomicU64::new(0)),
+            pending_evicted: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// A writer target the test can read back while the writer thread owns it.
+    #[derive(Clone, Default)]
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SharedBuf {
+        /// `complete` of each written recording, by call id.
+        fn complete_by_call(&self) -> HashMap<String, bool> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let rec: Recording = serde_json::from_str(line).unwrap();
+                    (rec.call_id, rec.complete)
+                })
+                .collect()
+        }
+    }
+
+    fn input_event(call_id: &str) -> RecordEvent {
+        RecordEvent::Input {
+            call_id: call_id.into(),
+            input: InputRecord::from_call_options(&sample_options()),
+            provider: ProviderRecord::from_model("openai", "gpt-4o"),
+        }
+    }
+
+    /// The rest of a call after its input: one finished exchange, the
+    /// outcome and the transport close. The writer finalizes the call on the
+    /// last of them when the input arrived first.
+    fn rest_of_call(call_id: &str) -> Vec<RecordEvent> {
+        vec![
+            RecordEvent::Exchange {
+                call_id: call_id.into(),
+                exchange: sample_exchange(),
+            },
+            RecordEvent::Outcome {
+                call_id: call_id.into(),
+                outcome: success_outcome(),
+            },
+            RecordEvent::TransportClosed {
+                call_id: call_id.into(),
+            },
+        ]
+    }
+
+    /// S2-5 (doc §4.3 completion barrier): a call that lost an event to the
+    /// full queue is written with `complete=false`, both when its last event
+    /// finalizes it (`try_finalize`) and when a flush writes it
+    /// (`write_ready_all`, the input arriving last). An intact call in the
+    /// same writer stays `complete=true`.
+    #[test]
+    fn a_call_that_lost_an_event_is_never_complete() {
+        let (tx, rx) = sync_channel::<RecordEvent>(1);
+        let damaged = damaged_calls();
+        let dropped = AtomicU64::new(0);
+        // The queue holds one event and the writer is not running yet, so the
+        // session events of "finalized" and "flushed" are dropped.
+        tx.send(input_event("finalized")).unwrap();
+        for call_id in ["finalized", "flushed"] {
+            let session = RecordEvent::Session {
+                call_id: call_id.into(),
+                session_id: "s".into(),
+                step: 0,
+            };
+            send_or_drop(&tx, session, &dropped, &damaged.lossy);
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+
+        let out = SharedBuf::default();
+        let writer = {
+            let out = out.clone();
+            let write_error = Arc::new(Mutex::new(None));
+            std::thread::spawn(move || writer_loop(rx, out, damaged, write_error))
+        };
+        for ev in rest_of_call("finalized") {
+            tx.send(ev).unwrap();
+        }
+        tx.send(input_event("intact")).unwrap();
+        for ev in rest_of_call("intact") {
+            tx.send(ev).unwrap();
+        }
+        for ev in rest_of_call("flushed") {
+            tx.send(ev).unwrap();
+        }
+        tx.send(input_event("flushed")).unwrap();
+        let (ack_tx, ack_rx) = sync_channel(0);
+        tx.send(RecordEvent::Flush { ack: ack_tx }).unwrap();
+        ack_rx.recv().unwrap().unwrap();
+
+        let complete = out.complete_by_call();
+        assert_eq!(complete.get("finalized"), Some(&false), "{complete:?}");
+        assert_eq!(complete.get("flushed"), Some(&false), "{complete:?}");
+        assert_eq!(complete.get("intact"), Some(&true), "{complete:?}");
+        drop(tx);
+        writer.join().unwrap();
+    }
+
+    /// S2-5: a call marked inconsistent (C4-7: a duplicate attempt, or an
+    /// update that matches no exchange) is written with `complete=false` on
+    /// both write paths.
+    #[test]
+    fn an_inconsistent_call_is_never_complete() {
+        let (tx, rx) = sync_channel::<RecordEvent>(64);
+        let damaged = damaged_calls();
+        let out = SharedBuf::default();
+        let writer = {
+            let out = out.clone();
+            let write_error = Arc::new(Mutex::new(None));
+            std::thread::spawn(move || writer_loop(rx, out, damaged, write_error))
+        };
+        let duplicate = |call_id: &str| RecordEvent::Exchange {
+            call_id: call_id.into(),
+            exchange: sample_exchange(),
+        };
+        // Finalized by its last event: a duplicate exchange first.
+        tx.send(input_event("finalized")).unwrap();
+        tx.send(duplicate("finalized")).unwrap();
+        for ev in rest_of_call("finalized") {
+            tx.send(ev).unwrap();
+        }
+        // Written by the flush: an update that matches no exchange, input last.
+        tx.send(RecordEvent::ExchangeUpdate {
+            call_id: "flushed".into(),
+            attempt: 7,
+            exchange_index: 0,
+            response: resp_status(200),
+            error: None,
+        })
+        .unwrap();
+        for ev in rest_of_call("flushed") {
+            tx.send(ev).unwrap();
+        }
+        tx.send(input_event("flushed")).unwrap();
+        let (ack_tx, ack_rx) = sync_channel(0);
+        tx.send(RecordEvent::Flush { ack: ack_tx }).unwrap();
+        ack_rx.recv().unwrap().unwrap();
+
+        let complete = out.complete_by_call();
+        assert_eq!(complete.get("finalized"), Some(&false), "{complete:?}");
+        assert_eq!(complete.get("flushed"), Some(&false), "{complete:?}");
+        drop(tx);
+        writer.join().unwrap();
+    }
+
+    /// S2-5 for the ring: an inconsistent call is stored with
+    /// `complete=false` when it finalizes and when a flush collects it.
+    #[test]
+    fn ring_inconsistent_call_is_never_complete() {
+        let ring = RingRecorder::new();
+        // Finalized by its last event, after a duplicate exchange.
+        ring.record_input("finalized", &sample_options(), "openai", "gpt-4o");
+        ring.record_exchange("finalized", &sample_exchange());
+        ring.record_exchange("finalized", &sample_exchange());
+        ring.record_outcome("finalized", &success_outcome());
+        ring.record_transport_closed("finalized");
+        // Collected by flush: an update that matches nothing, input last.
+        ring.record_exchange_update("flushed", 7, 0, &resp_status(200), None);
+        ring.record_outcome("flushed", &success_outcome());
+        ring.record_transport_closed("flushed");
+        ring.record_input("flushed", &sample_options(), "openai", "gpt-4o");
+        ring.flush();
+        drive_full_call(&ring, "intact");
+
+        let complete: HashMap<String, bool> = ring
+            .completed()
+            .into_iter()
+            .map(|rec| (rec.call_id, rec.complete))
+            .collect();
+        assert_eq!(complete.get("finalized"), Some(&false), "{complete:?}");
+        assert_eq!(complete.get("flushed"), Some(&false), "{complete:?}");
+        assert_eq!(complete.get("intact"), Some(&true), "{complete:?}");
     }
 
     #[test]
@@ -2590,7 +3800,7 @@ mod tests {
         rec.record_transport_closed("c");
         assert!(rec.try_flush().is_ok());
         let content = std::fs::read_to_string(rec.path()).unwrap();
-        assert!(content.contains("\"call_id\":\"c\""));
+        assert!(content.contains("\"callId\":\"c\""));
         let _ = std::fs::remove_dir_all(&dir);
 
         // 非法目录 → new 降级(tx=None)→ try_flush 返回 WriterGone。
@@ -2630,14 +3840,7 @@ mod tests {
     // ── C4-6:Provider 先于 Input 不丢 ─────────────────────────────────────
 
     fn full_provider() -> ProviderRecord {
-        ProviderRecord {
-            provider: "openai".into(),
-            model_id: "gpt-4o".into(),
-            base_url: Some("https://api.openai.com".into()),
-            api_key_source: "env:OPENAI_API_KEY".into(),
-            profile: None,
-            provider_options: None,
-        }
+        ProviderRecord::new("openai", "openai.chat", "gpt-4o")
     }
 
     #[test]
@@ -2652,12 +3855,11 @@ mod tests {
         ring.export_jsonl(&mut buf).unwrap();
         let parsed: Recording =
             serde_json::from_str(std::str::from_utf8(&buf).unwrap().trim()).unwrap();
-        assert_eq!(parsed.provider.provider, "openai");
         assert_eq!(
-            parsed.provider.base_url.as_deref(),
-            Some("https://api.openai.com"),
-            "full snapshot preserved, not overwritten by minimal"
+            parsed.provider.provider, "openai.chat",
+            "explicit record preserved, not overwritten by the input-derived one"
         );
+        assert_eq!(parsed.provider.provider_id, "openai");
         assert_eq!(parsed.provider.model_id, "gpt-4o");
     }
 
@@ -2673,11 +3875,8 @@ mod tests {
         rec.flush();
         let content = std::fs::read_to_string(rec.path()).unwrap();
         let parsed: Recording = serde_json::from_str(content.trim()).unwrap();
-        assert_eq!(
-            parsed.provider.base_url.as_deref(),
-            Some("https://api.openai.com")
-        );
-        assert_eq!(parsed.provider.provider, "openai");
+        assert_eq!(parsed.provider.provider_id, "openai");
+        assert_eq!(parsed.provider.provider, "openai.chat");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2718,10 +3917,11 @@ mod tests {
         Recording::new(
             call_id,
             InputRecord {
+                operation: Default::default(),
                 prompt: Vec::new(),
                 options: serde_json::Value::Null,
             },
-            ProviderRecord::minimal("", ""),
+            ProviderRecord::from_model("", ""),
         )
     }
 
@@ -2860,6 +4060,161 @@ mod tests {
         rec.record_exchange("c", &sample_exchange()); // 重复 attempt 0
         rec.flush();
         assert!(rec.inconsistent_call_ids().contains(&"c".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn replacing_a_stalled_recorder_releases_the_state_lock_before_cleanup() {
+        struct StalledRecorder {
+            entered: std::sync::mpsc::Sender<bool>,
+            resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl Recorder for StalledRecorder {
+            fn record_input(&self, _: &str, _: &CallOptions, _: &str, _: &str) {}
+            fn record_provider(&self, _: &str, _: &ProviderRecord) {}
+            fn record_exchange(&self, _: &str, _: &HttpExchange) {}
+            fn record_exchange_update(
+                &self,
+                _: &str,
+                _: u32,
+                _: u32,
+                _: &ResponseRecord,
+                _: Option<String>,
+            ) {
+            }
+            fn record_outcome(&self, _: &str, _: &OutcomeRecord) {}
+            fn flush(&self) {}
+        }
+        impl Drop for StalledRecorder {
+            fn drop(&mut self) {
+                let _ = self.entered.send(RECORDER.try_read().is_ok());
+                let _ = self
+                    .resume
+                    .get_mut()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(3));
+            }
+        }
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        init_recording(Some(Arc::new(StalledRecorder {
+            entered: entered_tx,
+            resume: std::sync::Mutex::new(resume_rx),
+        })));
+        let replacement = std::thread::spawn(|| init_recording(None));
+        let unlocked_in_drop = entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let concurrent_snapshot_unlocked = RECORDER.try_read().is_ok();
+        resume_tx.send(()).unwrap();
+        replacement.join().unwrap();
+        assert!(unlocked_in_drop);
+        assert!(concurrent_snapshot_unlocked);
+    }
+
+    #[test]
+    fn jsonl_pending_overflow_evicts_placeholders_before_active_calls() {
+        let dir =
+            std::env::temp_dir().join(format!("aimux-rec-priority-evict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rec = JsonlRecorder::new(&dir);
+
+        // Start an active in-flight streaming call FIRST (oldest in pending_order).
+        rec.record_input("active-1", &sample_options(), "openai", "gpt-4o");
+        let mut inflight_ex = sample_exchange();
+        inflight_ex.finalized = false;
+        inflight_ex.response = None;
+        rec.record_exchange("active-1", &inflight_ex);
+
+        // Flood with JSONL_PENDING_MAX + 5 orphan placeholder events (no Input, no Exchange).
+        let orphan_total = JSONL_PENDING_MAX + 5;
+        for i in 0..orphan_total {
+            rec.record_session(&format!("orphan-{i}"), "sess-1", i as u32);
+        }
+
+        // Now complete active-1. Because placeholders were evicted ahead of active-1,
+        // active-1 must still be in pending and finalize as complete=true.
+        rec.record_exchange_update("active-1", 0, 0, &resp_status(200), None);
+        rec.record_outcome("active-1", &success_outcome());
+        rec.record_transport_closed("active-1");
+        rec.flush();
+
+        // 1 active + (JSONL_PENDING_MAX + 5) orphans = JSONL_PENDING_MAX + 6 -> 6 orphans evicted.
+        assert_eq!(rec.pending_evicted_count(), 6);
+        assert_eq!(rec.dropped_count(), 0);
+        let lossy = rec.lossy_call_ids();
+        assert!(!lossy.contains(&"active-1".to_string()));
+        for i in 0..6 {
+            assert!(
+                lossy.contains(&format!("orphan-{i}")),
+                "orphan-{i} should be marked lossy on eviction"
+            );
+        }
+
+        let content = std::fs::read_to_string(rec.path()).unwrap();
+        let rows: Vec<Recording> = content
+            .lines()
+            .map(|l| serde_json::from_str::<Recording>(l).unwrap())
+            .collect();
+        let active_rows: Vec<&Recording> =
+            rows.iter().filter(|r| r.call_id == "active-1").collect();
+        assert_eq!(active_rows.len(), 1, "active-1 written exactly once");
+        assert!(active_rows[0].complete, "active-1 must complete intact");
+        assert_eq!(active_rows[0].outcome.status, OutcomeStatus::Success);
+
+        drop(rec);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn jsonl_late_events_including_input_for_evicted_call_are_dropped_and_counted() {
+        let dir = std::env::temp_dir().join(format!(
+            "aimux-rec-evicted-late-input-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rec = JsonlRecorder::new(&dir);
+
+        // Create an out-of-order placeholder for "evicted-0", then overflow JSONL_PENDING_MAX
+        // with active calls so "evicted-0" is evicted to disk as Incomplete.
+        rec.record_session("evicted-0", "sess-0", 0);
+        for i in 0..JSONL_PENDING_MAX {
+            rec.record_input(&format!("call-{i}"), &sample_options(), "openai", "gpt-4o");
+        }
+        rec.flush();
+        assert_eq!(rec.pending_evicted_count(), 1);
+        assert!(rec.lossy_call_ids().contains(&"evicted-0".to_string()));
+
+        // Now send late Input + Exchange + Outcome + TransportClosed for "evicted-0".
+        // None of them may re-insert "evicted-0" or write a duplicate row, and all 4
+        // must be counted in dropped_count().
+        rec.record_input("evicted-0", &sample_options(), "openai", "gpt-4o");
+        rec.record_exchange("evicted-0", &sample_exchange());
+        rec.record_outcome("evicted-0", &success_outcome());
+        rec.record_transport_closed("evicted-0");
+        rec.flush();
+
+        assert_eq!(
+            rec.dropped_count(),
+            4,
+            "all 4 late events (including Input) for evicted-0 must be counted as dropped"
+        );
+        assert!(rec.lossy_call_ids().contains(&"evicted-0".to_string()));
+
+        drop(rec);
+        let content = std::fs::read_to_string(dir.join("recordings.jsonl")).unwrap();
+        let evicted_rows: Vec<Recording> = content
+            .lines()
+            .map(|l| serde_json::from_str::<Recording>(l).unwrap())
+            .filter(|r| r.call_id == "evicted-0")
+            .collect();
+        assert_eq!(
+            evicted_rows.len(),
+            1,
+            "late Input must not produce a second partial row for evicted-0"
+        );
+        assert!(!evicted_rows[0].complete);
+        assert_eq!(evicted_rows[0].outcome.status, OutcomeStatus::Incomplete);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

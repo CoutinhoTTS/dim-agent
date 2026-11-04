@@ -1,0 +1,3004 @@
+[
+  {
+    "type": "stream-start",
+    "warnings": []
+  },
+  {
+    "id": "98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+    "modelId": "grok-4-fast-reasoning",
+    "timestamp": "2025-11-03T17:09:45.000Z",
+    "type": "response-metadata"
+  },
+  {
+    "id": "fc_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8_0",
+    "toolName": "web_search",
+    "type": "tool-input-start"
+  },
+  {
+    "delta": "{\"query\":\"what is xAI\",\"num_results\":5}",
+    "id": "fc_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8_0",
+    "type": "tool-input-delta"
+  },
+  {
+    "id": "fc_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8_0",
+    "type": "tool-input-end"
+  },
+  {
+    "input": "{\"query\":\"what is xAI\",\"num_results\":5}",
+    "providerExecuted": true,
+    "toolCallId": "fc_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8_0",
+    "toolName": "web_search",
+    "type": "tool-call"
+  },
+  {
+    "result": {},
+    "toolCallId": "fc_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8_0",
+    "toolName": "web_search",
+    "type": "tool-result"
+  },
+  {
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-start",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "x",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " is",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " an",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " American",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " artificial",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " intelligence",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " company",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " founded",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " by",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Elon",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Musk",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " July",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " ",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "202",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "3",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Its",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " mission",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " is",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " \"",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "understand",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " true",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " nature",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " of",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " universe",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "\"",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " by",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " advancing",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " scientific",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " discovery",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " through",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " The",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " company",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " is",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " based",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " San",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Francisco",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Bay",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Area",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " focuses",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " on",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " developing",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " advanced",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " models",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " including",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Gro",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "k",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " chatbot",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "integrated",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " X",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " platform",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " formerly",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Twitter",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ").\n\n",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Key",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " points",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ":\n",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Found",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ers",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Team",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Led",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " by",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Elon",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Musk",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " a",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " team",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " of",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " engineers",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " researchers",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " from",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " companies",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " like",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Open",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Google",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Deep",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Mind",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Tesla",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Products",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " x",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " has",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " released",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Gro",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "k",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "1",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "an",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " open",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-source",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " large",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " language",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " model",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ")",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " subsequent",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " versions",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " like",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Gro",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "k",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "1",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "5",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Gro",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "k",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "2",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " which",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " power",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " conversational",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tools",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Funding",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Raised",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " significant",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " venture",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " capital",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " including",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " a",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " $",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "6",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " billion",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Series",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " B",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " round",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " ",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "202",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "4",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " valuing",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " company",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " at",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " around",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " $",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "24",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " billion",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Philosophy",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Emphas",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "izes",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " curiosity",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-driven",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " development",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " a",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " focus",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " on",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " truth",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-seeking",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " avoiding",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " overly",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " restrictive",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " safety",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " measures",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " compared",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " competitors",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n\n",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Note",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ":",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " \"",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "X",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "\"",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " can",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " also",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " refer",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " \"",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Explain",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "able",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",\"",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " a",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " field",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " machine",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " learning",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " that",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " makes",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " AI",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " decisions",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " transparent",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " interpre",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "table",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " humans",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " If",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " that's",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " what",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " you",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " meant",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " let",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " me",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " know",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " for",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " more",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " details",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "!",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " For",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " latest",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " updates",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " check",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " x",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".ai",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "id": "id-0",
+    "sourceType": "url",
+    "title": "https://en.wikipedia.org/wiki/XAI_%28company%29",
+    "type": "source",
+    "url": "https://en.wikipedia.org/wiki/XAI_%28company%29"
+  },
+  {
+    "id": "id-1",
+    "sourceType": "url",
+    "title": "https://x.ai/company",
+    "type": "source",
+    "url": "https://x.ai/company"
+  },
+  {
+    "id": "id-2",
+    "sourceType": "url",
+    "title": "https://www.ibm.com/think/topics/explainable-ai",
+    "type": "source",
+    "url": "https://www.ibm.com/think/topics/explainable-ai"
+  },
+  {
+    "id": "id-3",
+    "sourceType": "url",
+    "title": "https://www.owkin.com/a-z-of-ai-for-healthcare/xai",
+    "type": "source",
+    "url": "https://www.owkin.com/a-z-of-ai-for-healthcare/xai"
+  },
+  {
+    "id": "id-4",
+    "sourceType": "url",
+    "title": "https://x.ai/",
+    "type": "source",
+    "url": "https://x.ai/"
+  },
+  {
+    "id": "id-5",
+    "sourceType": "url",
+    "title": "https://en.wikipedia.org/wiki/XAI_%28company%29",
+    "type": "source",
+    "url": "https://en.wikipedia.org/wiki/XAI_%28company%29"
+  },
+  {
+    "id": "id-6",
+    "sourceType": "url",
+    "title": "https://x.ai/company",
+    "type": "source",
+    "url": "https://x.ai/company"
+  },
+  {
+    "id": "id-7",
+    "sourceType": "url",
+    "title": "https://www.ibm.com/think/topics/explainable-ai",
+    "type": "source",
+    "url": "https://www.ibm.com/think/topics/explainable-ai"
+  },
+  {
+    "id": "id-8",
+    "sourceType": "url",
+    "title": "https://www.owkin.com/a-z-of-ai-for-healthcare/xai",
+    "type": "source",
+    "url": "https://www.owkin.com/a-z-of-ai-for-healthcare/xai"
+  },
+  {
+    "id": "id-9",
+    "sourceType": "url",
+    "title": "https://x.ai/",
+    "type": "source",
+    "url": "https://x.ai/"
+  },
+  {
+    "id": "text-msg_98a8d4aa-fc8b-fd93-e673-d5a8f1c9cee8:0",
+    "type": "text-end"
+  },
+  {
+    "finishReason": {
+      "raw": "completed",
+      "unified": "stop"
+    },
+    "type": "finish",
+    "usage": {
+      "inputTokens": {
+        "cacheRead": 1578,
+        "noCache": 297,
+        "total": 1875
+      },
+      "outputTokens": {
+        "reasoning": 397,
+        "text": 298,
+        "total": 695
+      },
+      "raw": {
+        "input_tokens": 1875,
+        "input_tokens_details": {
+          "cached_tokens": 1578
+        },
+        "num_server_side_tools_used": 1,
+        "num_sources_used": 0,
+        "output_tokens": 695,
+        "output_tokens_details": {
+          "reasoning_tokens": 397
+        },
+        "total_tokens": 2570
+      }
+    }
+  }
+]
