@@ -379,7 +379,9 @@ builds a connection outside publication calls the same function first: the `mcp.
 temporary-binding sites, and `mcp.auth.start`/`mcp.auth.logout` with the catalog's credential key.
 `ConnectionConfig` carries the expanded value only, so nothing expands twice. A `cwd` is expanded
 before it is joined. A plugin entry's `cwd` is not expanded: it is confined to the plugin directory
-at registration, a reference there has no use, and the existing refusal stays.
+at registration, a reference there has no use, and the existing refusal stays. A temporary binding
+is the client's own document, so both of its sites expand with `Origin::User`, where no field is
+guarded and no credential names are read.
 
 A document shared with other users or the repository is not trusted to read the daemon's own
 credentials. A user entry expands every reference. A plugin entry is guarded in every guarded

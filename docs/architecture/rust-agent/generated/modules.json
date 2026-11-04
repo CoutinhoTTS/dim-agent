@@ -21000,6 +21000,7 @@
         "path config::effective",
         "path config::merge_secret",
         "path config::split_entry",
+        "path config::unresolved",
         "path config::viewed",
         "path config::workspace",
         "use config::McpEntryError",
@@ -22072,16 +22073,6 @@
         "use super::server::McpTool",
         "use super::server::ToolScope",
         "use super::server::ViewFailure"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::temporary",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path CredentialVariables",
-        "path CredentialVariablesHost",
-        "use dim_agent_capabilities::host::CredentialVariables",
-        "use dim_agent_capabilities::host::CredentialVariablesHost"
       ]
     },
     {
