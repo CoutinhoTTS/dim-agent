@@ -1,6 +1,6 @@
 # Rust 会话存储格式
 
-The current native format is **v33**, with worktree directory and Session usage records, source-owned `settings_documents`,
+The current native format is **v34**, with a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
@@ -9,11 +9,11 @@ omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, a delegation's Agent owner and
 member leader, a Session's creation origin, Session file grants, command output
 ownership and the two context reading switches on timeline events. Startup
-requires the exact v33 SQL schema and a single
-format marker of 33 before writable PRAGMAs, or the exact v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
+requires the exact v34 SQL schema and a single
+format marker of 34 before writable PRAGMAs, or the exact v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v33 one step after
-another ([#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
+which the same startup transaction upgrades in place to v34 one step after
+another ([#1099 v34 decision](#1099-v34-格式决定), [#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
@@ -26,7 +26,7 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v33, and v16 request rows stay readable as written.
+valid in v34, and v16 request rows stay readable as written.
 除格式自身的 SQL 外，每次打开都接受派生索引：`timeline_history_anchors`
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
 [latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
@@ -36,7 +36,7 @@ valid in v33, and v16 request rows stay readable as written.
 读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
 `CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
 `timeline_events` 重新推导，读同一份事件不因它们有无而不同，因此不属于格式：启动门禁的
-精确结构比较忽略这些名字，格式标记不变（当前 v33）；其余任何多余对象仍按原规则拒绝。代价是早于
+精确结构比较忽略这些名字，格式标记不变（当前 v34）；其余任何多余对象仍按原规则拒绝。代价是早于
 该变更的二进制不认识这些名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
 索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
@@ -64,12 +64,12 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 
 | 情形 | 判据 | 说明的结论 |
 | --- | --- | --- |
-| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 33） | 本构建读不了这个更新格式的库 |
+| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 34） | 本构建读不了这个更新格式的库 |
 | 标记与结构不符 | 结构是本构建认识的形状（当前格式或某个升级起点），但标记行不是该版本的唯一值 | 标记和结构不一致；不诊断为“降级” |
 | 无法识别 | 结构不是本构建认识的形状，且可读的单一标记在本构建接受的范围内（`MIN_FORMAT ≤ version ≤ FORMAT`，已移除的 v14 除外），或没有可读的单一标记 | 结构无法识别；读出标记时一并给出 |
 | 过旧或不再准入 | 结构不是本构建认识的形状，且可读的单一标记低于 `MIN_FORMAT`，或为已移除的 v14 | 该格式不再被这个构建读取 |
 
-正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 33），不写字面量）。
+正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 34），不写字面量）。
 更新格式：
 
 ```text
@@ -127,7 +127,7 @@ Cannot open native store <path>.
 - **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写说明。成功打开（含升级成功）时，存储 owner 删除遗留说明；删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
 - **位置**：说明是库的同级文件，不是新数据库格式，也不是 `daemon.log` 的一部分。CLI 启动的守护进程使用 `<native home>/dimcode.sqlite`，所以 CLI 读取 `<native home>/dimcode.sqlite.startup`。直接以 `--database` 启动的守护进程把说明写在它的库旁，CLI 的启动路径不读取。
 - **不自动恢复**：不删除、重建、降级、重置标记或复制库；`--home PATH` 只建立另一个环境。终端说明只给兼容构建和 `--home` 两条路；开发说明继续使用 `./dev` 的隔离 home。
-- **验证**：`storage_flow` 用一次性库覆盖全部分支：v34 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v32 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v33 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+- **验证**：`storage_flow` 用一次性库覆盖全部分支：v35 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v32 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v34 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
 
 ## SQLite 运行参数与空间回收
 
@@ -147,13 +147,13 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 
 删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构后执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和。`VACUUM` 重写整个库，需要约等于库大小的临时空间；守护进程持锁时该命令拒绝执行，也不升级或创建库。
 
-## Current v33 tables
+## Current v34 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 33)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 34)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -175,7 +175,7 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 | `agents.is_default` | `INTEGER` | 否 | — | `CHECK(is_default IN (0, 1))`；唯一的 1 由 `agents_default_unique` 保证至多一个，至少一个由目录校验保证 |
 | `agents.owner_session_id` | `TEXT` | 是 | — | 外键到 `agent_sessions(session_id)`；非空表示该 leader Session 拥有这个私有 Agent，NULL 表示公开 Agent；写入后不变 |
 | `session_catalog.session_id` | `TEXT` | No | — | Primary key, foreign key to `agent_sessions`; one row from creation |
-| `session_catalog.updated_at_ms` | `INTEGER` | No | — | Last committed `main` event time, or creation time for an empty Session |
+| `session_catalog.updated_at_ms` | `INTEGER` | No | — | Time of the newest Session-activity event on `main` (issue #1099), or creation time for a Session with none |
 | `session_catalog.preview` | `TEXT` | Yes | — | First user text in the batch-complete preview window |
 | `session_catalog.cwd` | `TEXT` | No | — | Creation configuration workspace |
 | `agent_sessions.session_id` | `TEXT` | 否 | — | 主键，原 Session ID |
@@ -396,6 +396,17 @@ ProjectionCheckpoint = {
 - **旧快照**：v3 及更早的快照不被选中（候选查询按 `interpreter` 过滤）、不转换、不回填，随 Session 删除或回滚消失；读取回退完整事实重放，completed 事实与 replacement 不受影响。
 - **resume 落在合并输出行**：没有保留条目时 `projection_checkpoint` 回退到上下文的最后一个事件，其种类不受限，可能是位于合并 `output` 行内的 `step/text` 或 `step/thinking`，这些行的 `timeline_events.event_id` 为 NULL。读取按 ID 经查询查找该事件（ID 选择会检查合并行内的记录），查不到时用记录的位置；两条路径都从同一事件开始重放，结果与完整重放一致。
 - **验证**：`storage_flow.rs` 的 `a_resume_inside_a_merged_output_row_restores_the_full_context` 在一次性库中让两个增量合并成一行，核对 resume 落在该行的第二个事件上、恢复的上下文等于完整重放；`a_v3_snapshot_is_bypassed_and_left_as_stored` 核对 v3 快照不被选中且行字节不变；`timeline_flow.rs` 的 `a_checkpoint_resumes_at_the_event_its_id_names` 与 `a_resume_id_the_store_does_not_hold_keeps_the_recorded_position` 核对按 ID 续读与按位置兜底。既有快照命中、缺失、损坏、摘要不符、越界回退事实重放的流程测试不变并通过。
+
+### #1099 v34 格式决定
+
+[客户端 Session 目录](session-catalog.md#32-order-cursor-and-paging)（#1099）的格式决定：升级到 **v34**，从 v33 原地升级。这是一次只改数据的一步：不加表、列、索引，也不改持久化 JSON。
+
+- **规则**：`session_catalog.updated_at_ms` 是该 Session `main` 上最新一条活动事件的 `create_at`，没有活动事件时取 `agent_sessions.created_at_ms`。活动是 Session 自己的活动：带用户部分的 `input/message`、`turn/end`、`branch/create`（父分支记下分支 prompt）与 `session/forked`；其余一切都是家事事件——宿主注入的 `input/message`（没有用户部分）、`branch/resume`、`branch/start`、`branch/ended`、`branch/end`、`branch/create-failed`、每一类 `context`/`prompt`/`model`/`step`/`tool`/`approval`/`stop`/`exec`/`permission`/`collaboration` 事件，以及扩展事件——不移动这一行。判断只此一处，SQL 过滤与各写入方都从同一份种类表构造（[目录 §3.2](session-catalog.md#32-order-cursor-and-paging)）。
+- **为什么修**：v23 起这列跟着"最后一次提交的最后一个事件"走。`session.attach`/恢复写入的 `branch/resume`、分支生命周期事件、配置与压缩批次，都会在没有用户活动时把 Session 抬到最前；恢复选择面板于是把"只是被恢复过"的 Session 排在用户刚说过话的 Session 前面。活动事件才是列表要回答的次序。
+- **读取或转换路径**：在现有的 `IMMEDIATE` 启动准入事务内，对结构恰为 v33、标记相符的库执行 `catalog::backfill`：每个 Session 已有的行保留（v23 起创建即写行），`refresh` 按本条规则重写 `updated_at_ms`，行缺失的 Session 以创建时间补写；不触碰任何其他行。更早的受支持格式先执行既有各步，再执行本步。失败回滚，整库不变。
+- **写入方**：写 `main` 批次的同一事务只在批次含活动事件时更新这一行，写该批次最新一条活动事件的 `create_at`；只含家事事件的批次不碰这一行（热路径不加读）。`session.fork` 在分叉事务内写 `session/forked`（活动），`refresh` 与回填同一规则，`0` 处分叉取创建时间。没有原生存储的守护进程经 `AgentIndex::session_summary` 用同一谓词对已装载 Session 求最新活动事件，两条列表不会给出不同答案（[目录 §3.3](session-catalog.md#33-sessionsummaries)）。
+- **单向**：v33 守护进程以现有"unsupported SQLite schema … preserved"错误拒绝 v34 库；不降级。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v33 to v34; earlier dimcode versions cannot open it.`
+- **验证**：`storage_flow.rs` 的一次性 v33 库核对结构、标记与其余行逐行不变，`updated_at_ms` 被重写为最新活动事件的 `create_at`（尾部的 `branch/resume` 不再抬高它），没有活动事件的 Session 落在创建时间（`a_v33_store_recomputes_the_catalog_activity_time_on_upgrade`）；`upgrades_in_place_once` 各版本仍逐行核对。`transport_flow` 核对用户消息、完成的 turn 与非零处分叉都移动这一行，恢复（`branch/resume`）不移动，`session.summaries` 与 `session.catalog` 就同一值作答（`catalog_activity_time_follows_user_activity_not_housekeeping`、`an_unload_writes_nothing_and_the_restore_only_resumes` 与目录流程测试）。
 
 ### S5a v15 格式决定
 
@@ -714,13 +725,13 @@ ProjectionCheckpoint = {
 
 - **新增一张表与两个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)` 与局部索引 `session_catalog_with_preview(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL`。`agent_store_format` 的约束改为 `CHECK (version = 23)`。
   - 每个 Session 至多一行，从创建起与 `agent_sessions` 一一对应；写入、回滚与删除见下面的规则。
-  - `updated_at_ms` 是该 Session `main` 上最后一次提交的最后一个事件的 `create_at`。
+  - `updated_at_ms` 是该 Session `main` 上最新一条活动事件的 `create_at`：活动是 Session 自己的活动——带用户部分的 `input/message`、`turn/end`、`branch/create`（父分支记下分支 prompt）与 `session/forked`——其余事件都是家事事件，不移动这一行；没有活动事件的 Session 停在 `created_at_ms`。[#1099 v34 格式决定](#1099-v34-格式决定) 按本规则重写既有行，并取代本节"最后一次提交的最后一个事件"的写法。
   - `preview` 是窗口里第一条带用户部分的 `input/message` 的文字：各文本块以换行连接，超过 120 个字符时截到 120 个字符并以 `…` 结尾。窗口是 `main` 上起始于前 256 个事件内的各个批次，与今天的读取一样按批次完整——承载第 256 个事件的批次整批读入，因此该批次里紧接 256 之后的用户输入也在窗口内。该消息的文字为空（例如只有图片）时为 NULL，之后的消息不再填它；窗口里没有这样的消息时也为 NULL。决定一旦做出，包括决定为 NULL，就不再改变。
   - `cwd` 是 `agent_sessions.config` 的工作目录。目录查询按工作区过滤并回复它，所以不必为每个 Session 解码配置 JSON。
   - `session_catalog_by_activity` 服务按活动时间的键集分页；`session_catalog_with_preview` 服务只要非空预览的读取，因此前面有多少没有预览的行都不影响那条读取的代价。
 - **创建即写行**：`session.create` 在写 `agent_sessions` 的同一事务里写下这一行：`updated_at_ms` 为 `created_at_ms`，`preview` 为 NULL，`cwd` 取自创建的配置。因此新 Session 从创建那一刻起就按目录列出，与今天的 `session.summaries` 相同：创建时间、没有预览。
-- **同一事务写入**：SessionStore 在提交 `main` 每个批次的同一个写入事务里写这一行，写下该批次的最后一个事件，因此这一行与事件不会有一半可见。`updated_at_ms` 跟着批次走；`preview` 只在仍未决定时按上面的规则写入，之后的批次只更新 `updated_at_ms`。实时写入没有单独的规则：一个批次带用户消息、该消息在上面按批次完整的窗口内、且窗口里没有更早的带用户部分的 `input/message` 时，它写入 `preview`（文字为空时写 NULL）。这个判断用与回填相同的窗口读一次已提交事件——读取的批次止于第 256 个事件所在的批次；Session 的 `main` 事件不足 256 个时，止于它最后一个已提交批次——且只在 `preview` 仍为 NULL 时发生；因此回填行与实时行逐列相同。
-- **删除、回滚与分叉**：删除与创建回滚在 S5c 的同一事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内写新行，与按 F 的事件回填逐列相同：`updated_at_ms` 是该事务写入的最后一个事件的 `create_at`——`0` 以外的分叉就是 `at + 1` 处那条 `session/forked`，其 `create_at` 是分叉当时的时刻；`0` 处分叉不写事件，取创建时间——`preview` 是同一按批次完整的窗口里第一条用户输入的文字或 NULL，`0` 处分叉为 NULL。
+- **同一事务写入**：SessionStore 在提交 `main` 每个批次、且批次里含有活动事件的同一个写入事务里写这一行，写下该批次最新一条活动事件的 `create_at`；只含家事事件的批次不碰这一行。因此这一行与事件不会有一半可见。`preview` 只在仍未决定时按上面的规则写入，之后的批次只更新 `updated_at_ms`。实时写入没有单独的规则：一个批次带用户消息、该消息在上面按批次完整的窗口内、且窗口里没有更早的带用户部分的 `input/message` 时，它写入 `preview`（文字为空时写 NULL）。这个判断用与回填相同的窗口读一次已提交事件——读取的批次止于第 256 个事件所在的批次；Session 的 `main` 事件不足 256 个时，止于它最后一个已提交批次——且只在 `preview` 仍为 NULL 时发生；因此回填行与实时行逐列相同。
+- **删除、回滚与分叉**：删除与创建回滚在 S5c 的同一事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内写新行，与按 F 的事件回填逐列相同：`updated_at_ms` 是该事务写入的最新一条活动事件的 `create_at`——`0` 以外的分叉就是 `at + 1` 处那条 `session/forked`，其 `create_at` 是分叉当时的时刻；`0` 处分叉不写事件，取创建时间——`preview` 是同一按批次完整的窗口里第一条用户输入的文字或 NULL，`0` 处分叉为 NULL。
 - **不记分类**：本步不记录子 Session 或创建来源。[#557](https://github.com/arcships/dim/issues/557) 的分类字段连同它自己的格式决定一起加入，与上文不记分叉来源相同。
 - **不能留在 v22**：启动要求精确的 SQL 结构，v22 的守护进程会拒绝多出表和索引的库，不满足"旧读取器能正确解释新值"的保持条件。
 - **读取或转换路径**：在现有的启动准入事务（`IMMEDIATE`，写入型 PRAGMA 之前）内处理：
@@ -729,14 +740,14 @@ ProjectionCheckpoint = {
   - 标记相符的 v21、v20、v19、v18、v17、v16、v15 或 v13 库，在同一事务内先走已有各步，再走本步，直接成为 v23。
   - 恰为 v23 的库直接打开。
   - 其他库（标记不符的 v22 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
-- **回填的一次性代价**：回填为每个 Session 读一次 `main`：最后一个已提交批次给出 `updated_at_ms`，起始于前 256 个事件内的批次里找第一条用户输入作为 `preview`；没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL 预览，与创建时写下的一行相同。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。
+- **回填的一次性代价**：回填为每个 Session 读一次 `main`：按上面的活动规则取最新一条活动事件给出 `updated_at_ms`，没有活动事件的 Session 得到 `created_at_ms`；起始于前 256 个事件内的批次里找第一条用户输入作为 `preview`，找不到时得到 NULL 预览，都与创建时写下的一行相同。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。[#1099 v34 格式决定](#1099-v34-格式决定) 复用同一个回填，只重写 `updated_at_ms`。
 - **单向**：不做备份，与之前各步相同。旧守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝升级后的库。
 - **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v22 to v23; earlier dimcode versions cannot open it.`
 - **验证**：
   - 用 v22 结构和完整记录示例构建一次性 v22 库，升级后核对结构恰为 v23、标记为 23、业务行逐行不变，`session_catalog` 每个 Session 一行且与事件一致，没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL。
   - v21、v20、v19、v18、v17、v16、v15、v13 库一次升级到 v23。
   - 标记不符或升级到一半的结构被拒绝并保留。
-  - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最后一个事件走，`preview` 不被覆盖。
+  - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最新一条活动事件走，`preview` 不被覆盖。
   - 预览的窗口与最终性：承载第 256 个事件的批次里紧接 256 之后的用户输入升级后即为预览；第一条用户消息在起始于 256 之后的批次里的 Session 升级后没有预览，此后的批次也不写它；第一条用户消息只有图片的 Session 保持 NULL，之后的消息不填它。
   - `session.create` 写下的一行有创建时间与 NULL 预览，创建回滚后没有这一行。
   - 删除与分叉在各自的事务内维护这一行；非零处分叉的一行以该事务最后写入的 `session/forked` 的 `create_at` 为 `updated_at_ms`，`0` 处分叉的一行为创建时间与 NULL。
@@ -812,7 +823,7 @@ ProjectionCheckpoint = {
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v33）
+## 完整记录示例（v34）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -825,7 +836,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 33}],
+  "agent_store_format": [{"version": 34}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],
