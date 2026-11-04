@@ -370,8 +370,10 @@ Full table: Appendix B.
 | Where | What the model sees | Form | Placement and survival |
 | --- | --- | --- | --- |
 | Calling Session | `schedule` declaration | Tool declaration in adopted configuration (every Session; usable only in interactive leaders) | Configuration; survives compaction |
+| Calling Session | `wakeup` declaration | Tool declaration in adopted configuration (every Session; usable only in interactive leaders) | Configuration; survives compaction |
 | Calling Session | `schedule` result | `ToolResult.content` | Batch result position; summary only after compaction |
 | Run Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`, then the prompt as user content | Raw marker block + user text of one Queue input | At its `input/consumed` position; unkeyed, so only via summary after compaction; child branches inherit it if consumed before the cut |
+| Woken Session | `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`, then the prompt as user content | Raw marker block + user text of one Queue input | At its `input/consumed` position; unkeyed (§10) |
 | Saving branch | `<dim-scheduler kind="report" job="..." run="...">`, then the run's outcome, the known Session id and the history path (A.6) | Raw marker block of one Steer input through existing `sessions.input` | At its consumed position; unkeyed; a failed or lost report is not resent |
 
 Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and their handlers refuse with an error result. Prior runs in a `reuse` Session remain history like any input. Job/run records reach a calling model through `ToolResult.content` or a consumed outcome report; there is no automatic context injection of the store, timers or diagnostics.
@@ -385,23 +387,25 @@ A text is protocol or policy as [model-facing prompts §4](../model-prompts.md#4
 | `schedule` declaration, schema | Protocol: the action set, `job_id`, `enabled`, `limit` and the `job` object with its fields |
 | `schedule` declaration, description | Protocol: "Manage scheduled jobs across this host, including other workspaces." states the tool's reach; "Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch." and "An omitted policy keeps its stored value, whose default can change with the saving origin." state runtime guarantees. Policy: "Inspect the old-to-new authority transition in the result." is guidance about how to work |
 | `schedule` result | Protocol: the `schedule: <code>` first line and its message, `schedule is available only in interactive leader Sessions.`, `schedule: cancelled before handover`, and the two unloading notices. The codes are `schedule_invalid`, `schedule_not_found`, `schedule_conflict`, `service_unavailable`, `service_reloading` and `invalid_data`; the model reads them and acts on them |
-| Run markers | Protocol: the element `dim-scheduler`, its kinds `scheduled-run` and `report`, the attributes `job` and `run`, and the input each opens. The scheduled-run body is the job's name and the text after it is the prompt saved for the job; the report body states the run's outcome, the Session id when there is one, and where the run's history is |
+| `wakeup` declaration, description | Protocol: "The wakeup fires one turn on the same Session with the given prompt, preserving its history and branch; it can be listed and cancelled from any client, and an expired or cancelled wakeup is never replayed." states what the tool does and the replay rule; the first sentence names the action |
+| `wakeup` result | Protocol: the `wakeup: created` first line and the `wakeup: <code>` first line of an error, `wakeup is available only in interactive leader Sessions.`, and the two unloading notices; the record fields are the protocol's identifiers |
+| Run markers | Protocol: the element `dim-scheduler`, its kinds `scheduled-run`, `report` and `wakeup`, the attributes `job` and `run`, and the input each opens. The scheduled-run body is the job's name and the text after it is the prompt saved for the job; the wakeup body is the wakeup id and the text after it is the prompt the wakeup was saved with; the report body states the run's outcome, the Session id when there is one, and where the run's history is |
 | Run outcome report, body | Protocol: "Scheduled job …, run …: <state> (<detail>).", the Session id when there is one, and the outcome vocabulary a run can report. Policy: "Inspect schedule.history for this job." is guidance about how to work, on the body's last line; the method name it states is protocol |
 
 The report's body keeps its sentences and is escaped as one text with `escaped(...)`, as the Workflow report's is, so a job id or an outcome detail that carries markup cannot open or close the tag; the attributes are escaped the same way.
 
 The policy text is a factory member: `description` replaces the declaration's description and `report_guidance` replaces the report's guidance line (Appendix G); the product sets neither, so the built-in texts are in force. A member holds one text — a whole description, or one line of guidance — and the flow tests pin any protocol sentence it contains: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)). `report_guidance` must be one line, and the configuration enforces it: the guide entry (§5.2) tells the model the report's last line is guidance and not part of the scheduler's account, so a value with a line break is refused when the plugin is installed. A profile that changes it keeps it to one line.
 
-Both kinds carry the guide entry: the Scheduler Session part registers one entry for `dim-scheduler` from `apply`, session-scoped, so a request in the run Session the scheduled-run marker opens, and a request in the saving branch the report lands on, each carry the entry from that Session's part ([Prompt §6.2](Prompt.md#62-the-writers)).
+All three kinds carry the guide entry: the Scheduler Session part registers one entry for `dim-scheduler` from `apply`, session-scoped, so a request in the run Session the scheduled-run marker opens, a request in the woken Session the wakeup marker opens, and a request in the saving branch the report lands on, each carry the entry from that Session's part ([Prompt §6.2](Prompt.md#62-the-writers)).
 
 A history resumed from before the report marker keeps its bare report as written: nothing rewrites history, so a resumed branch replays the older untagged text and the channel rule's exception list does not grow for it ([model-facing prompts §6.1](../model-prompts.md#61-what-it-covers)).
 
 ### 5.2 The guide entry
 
-One entry covers both kinds, and its text is code ([Prompt §5](Prompt.md#5-facts-that-reproduce-it)):
+One entry covers all three kinds, and its text is code ([Prompt §5](Prompt.md#5-facts-that-reproduce-it)):
 
 ```
-<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next.
+<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next. And <dim-scheduler kind="wakeup">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id.
 ```
 
 Every sentence is protocol, and each states one thing the model needs in order to place the tags:
@@ -411,6 +415,7 @@ Every sentence is protocol, and each states one thing the model needs in order t
 - "In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel." — the scheduled-run input's shape and the channel its prompt arrives in.
 - "In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request." — the report's shape and its trust class.
 - "The report's last line is not part of that account: it is guidance on what to do next." — the closing line's class: guidance on what to do next, not part of the account above it.
+- "And <dim-scheduler kind=\"wakeup\">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id." — the wakeup tag's kind, the one-shot delivery and the body (§10).
 
 It follows the exec notification's entry (`<dim-notification>`, order 10, [WorkspaceTools](../../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec)) in form and length: a runtime notice whose attributes carry the identifiers of a run.
 
@@ -419,6 +424,8 @@ It follows the exec notification's entry (`<dim-notification>`, order 10, [Works
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `schedule` | Tool registered with `toolRegistry` (Session), risk `persistent_configuration` | Model manages jobs |
+| `wakeup` | Tool registered with `toolRegistry` (Session), risk `persistent_configuration` | The model schedules a wakeup for its own Session (§10) |
+| `session.wakeup.create/list/cancel` | `sessionMethods` (Session, namespace `session.wakeup`) | Clients create, read and cancel one Session's wakeups (§10) |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, namespace `schedule`) | Operators manage jobs |
 | Run outcome delivery | One Steer attempt to the saving branch; no resend (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
 | CLI entry | `dimcode scheduled <verb>` and the `/scheduled` panel ([management surfaces](../cli-commands.md#management-surfaces)) | Operators manage jobs from the terminal over these methods: one job per panel entry, with toggle, edit, add, remove, run and history; the subcommands are the same adapter with no Session |
@@ -474,6 +481,61 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 ## 9. Requirements raised to mechanism owners
 
 The only mechanism additions are the runtime assembly entries the binding uses: `AgentBuilder::optional_plugin` (an optional process row), `PluginRows` returned by `plugin_rows`, and `PartRegistry::register` for the Session part. Existing C3/C4, S2, Settings and pluginFiles mechanisms remain the baseline. Appendix F distinguishes the specified bindings from package acceptance; implementation adds no optional-service API, notification protocol, runtime event or infrastructure requirement beyond those assembly entries.
+
+## 10. Session-scoped wakeup
+
+A wakeup is a one-shot scheduled `input/message` into an existing Session: create, list and cancel through the `session.wakeup` methods, or through the `wakeup` tool in an interactive leader Session. It is not a Job: it captures no policy, launches nothing, has no deadline, and never appears in `schedule.list` or in the run history.
+
+### 10.1 Owner and record
+
+The Scheduler process part owns wakeups for the reason §1 gives for jobs: the trigger is a host-side timer that must fire while the target Session is idle or unloaded and while no client is connected, and the record must survive client exit and daemon restart. A Session part owns none of that ([ADR 002](../../adr/002-plugin-scope.md) D1); the Session side is only the C1 surface that forwards to the process owner through a keyed service, as `SchedulerSession`→`ScheduleJobs` forwards the `schedule` tool ([session-boundary](../contracts/session-boundary.md) D2's "client method about a Session" row).
+
+Records live in the Scheduler's own [`pluginFiles`](../../../crates/dim-app-server/README.md#trusted-plugin-storage) scope as `scheduler/wakeups.json`: its own inner v1 document inside the host's unchanged `{version: 1, text}` envelope, written with the same `withLock` and `file.replace` transaction as `scheduler/runs.json` (A.7). `runs.json` is untouched and nothing is migrated.
+
+| Field | Meaning |
+| --- | --- |
+| `wakeup_id` | The record's identity; the tool and the methods return it |
+| `session_id`, `branch_id` | The target; the record never changes them |
+| `at` | The canonical UTC instant the input is written (A.1's timestamp form) |
+| `prompt` | The delivered text (non-empty, at most 32 KiB as a job prompt) |
+| `state` | `scheduled`, `fired`, `cancelled` or `expired`; the three terminal states carry `settled_at` |
+| `created_at`, `settled_at?` | Canonical UTC timestamps |
+
+A missing file holds no records. A file that is not valid v1 — malformed JSON, an unknown version, a repeated id or an inconsistent record — fails the row like an invalid run store, and its bytes stay unchanged.
+
+### 10.2 Methods and tool
+
+`session.wakeup` is a leaf `sessionMethods` namespace registered by the Scheduler Session part ([session-boundary A.1](../contracts/session-boundary.md)). Rpc restores an unloaded Session for each call, so list and cancel keep working when the target is cold.
+
+| Method | Parameters | Reply |
+| --- | --- | --- |
+| `session.wakeup.create` | `{sessionId, branchId, at, prompt}` | `{wakeupId}` |
+| `session.wakeup.list` | `{sessionId, branchId?}` | `{wakeups: [{wakeupId, at, prompt, state}]}`, newest first; `branchId` defaults to `main` |
+| `session.wakeup.cancel` | `{sessionId, wakeupId}` | `{}` when the call settles a `scheduled` record; `{state}` when the record had already reached a terminal state |
+
+`at` is an absolute RFC 3339 instant. Fields are camelCase and `deny_unknown_fields`, and an empty string is `invalid_params` like the neighbouring Session methods. Errors: `invalid_params` for a malformed `at`, an empty field or an unknown field; `wakeup_not_found` for a cancel naming no record of the calling Session (another Session's id answers like an unknown one); Rpc's own `session_closed` for a Session id that names no Session; and the method table's `unknown_method`, `service_reloading` or `service_unavailable` while the Scheduler row is absent, reloading or failed.
+
+The `wakeup` tool takes `{at, prompt}` and defaults the Session and branch to the caller. Its handler refuses non-interactive Sessions and Collaboration members like the `schedule` tool, and a refusal writes nothing.
+
+### 10.3 Firing and the cancel boundary
+
+The timer evaluates wakeups as part of the same one-second pass as job windows; there is no second scheduler and no Job-engine path. A `scheduled` record whose instant is observed within the grace window fires once: the process owner writes one Queue input through the public `sessions.input` with `submissionId` `wakeup:<wakeup_id>`, a first raw block `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`, and the prompt as content. Nothing else is called: no `sessions.launch`, no `sessions.stop`, no `withdraw`, no deadline.
+
+The target's own InputQueue and turn scheduler decide what the input becomes: an idle Session gets a turn, a running one queues the input behind it one turn per `turn/end`, and an unloaded Session is restored by the acquire inside `sessions.input`. The Session keeps its id, its `main` branch and its whole Timeline; a fork is a different Session id and inherits nothing.
+
+The record is settled `fired` only after the input's write is published. That write is the cancel/fire boundary: a `session.wakeup.cancel` that settles the record first prevents the input from being written, and one that arrives after the write reports `fired` and is not an error. A record whose target Session is gone (`session_closed` or `branch_missing`) is settled `cancelled` and never relaunches a Session. Any other write failure leaves the record `scheduled`: the next pass retries with the same submission id, which a branch accepts once, or the grace window expires it.
+
+### 10.4 Restart and expiry
+
+A record survives an idle unload of the target and a daemon restart. The rule is enforced by the timer's per-second pass, which starts with the row: on start it re-evaluates every `scheduled` record. An instant still inside the 60 s grace (A.4's window rule) fires; an older one becomes `expired` and is never replayed; a record whose Session is gone becomes `cancelled`. An instant already past the grace at create is recorded `expired` immediately. Expiry never restores, launches or stops anything.
+
+**Retention.** A terminal record has no consumer after it settles: `list` is its only reader, and a record nobody listed is already unrecoverable, so the bound costs no information the design promises. A terminal record is removed once it has been terminal for more than seven days; the timer pass removes it in the same write that settles the pass's other outcomes, so the file never grows without bound, the per-second pass never parses more than it must, and `list` reads exactly what is stored. The pass reads the file once per second, takes one clock reading, and writes at most once per pass.
+
+### 10.5 Goal and Collaboration
+
+A wakeup in an active Goal flows in like a user input: it is an ordinary Queue input, its `turn/end` is one more Goal decision point, it does not alter the Goal state, and it does not consume the continuation budget, which counts only Goal's own continuation inputs ([Goal §2](Goal.md#2-data-and-state)). In a Collaboration member Session the tool refuses; a wakeup created through the methods remains an ordinary input and interleaves with the leader's delegations by sequence like any other input.
+
+Rule check: the timer writes only `input/message` through the public `sessions` service (§4 rule 1); the wakeup input reaches the model only as a consumed Queue input (§4 rule 6); nothing structural or business lives in core — the record is Scheduler's own business store (D4) and the surface is the specified `sessionMethods` namespace (D5); and no ADR is needed because D1's scope rule and D2's client-method row already decide the placement.
 
 ## Appendix A. Interface details
 

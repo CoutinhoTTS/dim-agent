@@ -1681,6 +1681,17 @@
       ]
     },
     {
+      "id": "dim_agent_scheduler::wakeups",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/wakeups.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
+      ]
+    },
+    {
       "id": "dim_agent_types",
       "crate": "dim_agent_types",
       "parent": null,
@@ -16625,6 +16636,15 @@
       ]
     },
     {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::wakeups",
+      "references": [
+        "mod wakeups",
+        "path Wakeups",
+        "use wakeups::Wakeups"
+      ]
+    },
+    {
       "from": "dim_agent_scheduler::binding_flow",
       "to": "dim_agent_scheduler::support",
       "references": [
@@ -16902,6 +16922,14 @@
     },
     {
       "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler::wakeups",
+      "references": [
+        "path crate::wakeups::Wakeups",
+        "path crate::wakeups::read"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
       "to": "dim_agent_types::permission",
       "references": [
         "path PermissionPolicy",
@@ -16997,6 +17025,25 @@
     },
     {
       "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::invalid",
+        "path RpcError::unknown_method",
+        "path SessionMethods",
+        "path dim_agent_capabilities::methods::Handler",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
       "to": "dim_agent_capabilities::prompt_guide",
       "references": [
         "path GuideEntries",
@@ -17051,6 +17098,17 @@
         "use crate::methods::Caller",
         "use crate::methods::ScheduleJobs",
         "use crate::methods::ToolRequest"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_scheduler::wakeups",
+      "references": [
+        "path WakeupRequest",
+        "path Wakeups",
+        "path crate::wakeups::Wakeup",
+        "use crate::wakeups::WakeupRequest",
+        "use crate::wakeups::Wakeups"
       ]
     },
     {
@@ -17164,6 +17222,54 @@
         "use dim_client::Client",
         "use dim_client::ConnectionConfig",
         "use dim_client::Server"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_scheduler::document",
+      "references": [
+        "path MAX_PROMPT_BYTES",
+        "path canonical_instant",
+        "path format_instant",
+        "use crate::document::MAX_PROMPT_BYTES",
+        "use crate::document::canonical_instant",
+        "use crate::document::format_instant"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_scheduler::engine",
+      "references": [
+        "path GRACE_SECONDS",
+        "path sessions",
+        "use crate::engine::GRACE_SECONDS",
+        "use crate::engine::escaped",
+        "use crate::engine::sessions"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_scheduler::methods",
+      "references": [
+        "path Shared",
+        "use crate::methods::Shared"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_scheduler::runs",
+      "references": [
+        "path SchedulerError",
+        "path SchedulerError::invalid_data",
+        "path SchedulerError::new",
+        "use crate::runs::SchedulerError"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_app_server::plugin_files",
+      "references": [
+        "path dim_app_server::plugin_files::PluginFileTransactions"
       ]
     },
     {

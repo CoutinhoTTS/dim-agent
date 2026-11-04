@@ -331,8 +331,10 @@ sequenceDiagram
 | 位置 | 模型看到的内容 | 形式 | 位置与存续 |
 | --- | --- | --- | --- |
 | 调用方 Session | `schedule` 声明 | 已采用配置中的工具声明（每个 Session；只在交互式 leader 中可用） | 配置；压缩后保留 |
+| 调用方 Session | `wakeup` 声明 | 已采用配置中的工具声明（每个 Session；只在交互式 leader 中可用） | 配置；压缩后保留 |
 | 调用方 Session | `schedule` 结果 | `ToolResult.content` | 批次结果位置；压缩后仅存于摘要 |
 | 运行 Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`，随后是作为用户内容的提示词 | 一个 Queue 输入的 raw 标记块 + 用户文本 | 位于其 `input/consumed` 位置；无 key，因此压缩后只经由摘要；若在切点前已消费，子分支会继承 |
+| 被唤醒 Session | `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`，随后是作为用户内容的提示词 | 一个 Queue 输入的 raw 标记块 + 用户文本 | 位于其 `input/consumed` 位置；无 key（§10） |
 | 保存方分支 | `<dim-scheduler kind="report" job="..." run="...">`，随后是运行结局、已知 Session id 与历史读取路径（A.6） | 经现有 sessions.input 写的一个 Steer 输入的 raw 标记块 | 位于其消费位置；无 key；失败或丢失后不补发 |
 
 运行 Session 是非交互的：ask_user 与 schedule 仍声明，处理函数返回错误；reuse 的先前运行保留为普通输入历史。任务/运行记录经 ToolResult.content 或已消费的结果报告到达调用模型，不自动把存储、定时器或诊断注入上下文。
@@ -346,32 +348,35 @@ sequenceDiagram
 | `schedule` 声明的 inputSchema | Protocol：动作集合、`job_id`、`enabled`、`limit` 以及 `job` 对象及其字段 |
 | `schedule` 声明的 description | Protocol："Manage scheduled jobs across this host, including other workspaces." 说明工具的作用范围；"Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch." 与 "An omitted policy keeps its stored value, whose default can change with the saving origin." 陈述运行时保证。Policy："Inspect the old-to-new authority transition in the result." 是工作方式指引 |
 | `schedule` 结果 | Protocol：首行 `schedule: <code>` 与其消息、`schedule is available only in interactive leader Sessions.`、`schedule: cancelled before handover`，以及两条卸载通知。代码为 `schedule_invalid`、`schedule_not_found`、`schedule_conflict`、`service_unavailable`、`service_reloading` 和 `invalid_data`；模型读取并按之行事 |
-| 运行标记 | Protocol：元素 `dim-scheduler`、其 kind `scheduled-run` 与 `report`、属性 `job` 与 `run`，以及各自开辟的输入。scheduled-run 的正文是任务名，其后的文本是为该任务保存的提示词；report 的正文陈述运行结局、已知时的 Session id，以及运行历史所在 |
+| `wakeup` 声明的 description | Protocol："The wakeup fires one turn on the same Session with the given prompt, preserving its history and branch; it can be listed and cancelled from any client, and an expired or cancelled wakeup is never replayed." 陈述工具行为与重放规则；首句命名动作 |
+| `wakeup` 结果 | Protocol：首行 `wakeup: created` 与错误的首行 `wakeup: <code>`、`wakeup is available only in interactive leader Sessions.`，以及两条卸载通知；记录字段是 protocol 的标识符 |
+| 运行标记 | Protocol：元素 `dim-scheduler`、其 kind `scheduled-run`、`report` 与 `wakeup`、属性 `job` 与 `run`，以及各自开辟的输入。scheduled-run 的正文是任务名，其后的文本是为该任务保存的提示词；wakeup 的正文是 wakeup id，其后的文本是保存该唤醒时用的提示词；report 的正文陈述运行结局、已知时的 Session id，以及运行历史所在 |
 | 运行结果报告的正文 | Protocol：`Scheduled job …, run …: <state> (<detail>).`、已知时的 Session id 与运行可报告的结局词表。Policy：`Inspect schedule.history for this job.` 是工作方式指引，位于正文最后一行；它所写的方名属 protocol |
 
 报告的正文保留其句子，并以 `escaped(...)` 作为一整段文本转义，与 Workflow 报告的做法相同，因此带有标记文字的任务 id 或结局细节无法开启或关闭该标记；属性同样转义。
 
 policy 文本是出厂配置成员：`description` 替换声明的 description，`report_guidance` 替换结果报告的指引行（附录 G）；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一行指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 scheduler 对这次运行结局的记述，因此含换行的值会在安装插件时被拒绝。改动它的 profile 也保持它只有一行。
 
-两个 kind 都带有 guide 条目：Scheduler 的 Session 部件在 `apply` 中为 `dim-scheduler` 注册一个条目，按 session 范围生效，因此 scheduled-run 标记所开辟的运行 Session 中的请求、以及报告落到的保存方分支所在的 Session 中的请求，各自带上本 Session 部件的该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
+三个 kind 都带有 guide 条目：Scheduler 的 Session 部件在 `apply` 中为 `dim-scheduler` 注册一个条目，按 session 范围生效，因此 scheduled-run 标记所开辟的运行 Session 中的请求、wakeup 标记所开辟的被唤醒 Session 中的请求、以及报告落到的保存方分支所在的 Session 中的请求，各自带上本 Session 部件的该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
 
 在报告标记出现之前的历史按原样保留：没有任何东西重写历史，所以恢复的分支回放的是旧的裸文本，通道规则的例外清单不因它而增加（[面向模型的提示词 §6.1](../model-prompts.md#61-覆盖什么)）。
 
 ### 5.2 guide 条目
 
-一个条目覆盖两个 kind，其文本是代码（[Prompt §5](Prompt.md#5-复现它的事实)）：
+一个条目覆盖三个 kind，其文本是代码（[Prompt §5](Prompt.md#5-复现它的事实)）：
 
 ```
-<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next.
+<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next. And <dim-scheduler kind="wakeup">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id.
 ```
 
-每一句都是 protocol，各自说明模型定位这两个标记所需的一件事：
+每一句都是 protocol，各自说明模型定位这些标记所需的一件事：
 
-- 「a scheduled job's saved prompt, delivered when the job runs, and … how that run ended」——两个标记各是什么。
+- 「a scheduled job's saved prompt, delivered when the job runs, and … how that run ended」——各个标记是什么。
 - 「job names the job, run names the run, in both.」——属性。
 - 「In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel.」——scheduled-run 输入的形状，以及其提示词到达的通道。
 - 「In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request.」——报告的正文形状，及其信任类别。
 - 「The report's last line is not part of that account: it is guidance on what to do next.」——结尾行的归类：它是对接下来做什么的指引，不属于它上面的记述。
+- 「And <dim-scheduler kind=\"wakeup\">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id.」——wakeup 标记的 kind、一次性投递与正文（§10）。
 
 它在形式与长度上沿用 exec 通知的条目（`<dim-notification>`，序号 10，[WorkspaceTools](../../../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec)）：一个用属性携带一次运行标识的运行时通知。
 
@@ -380,6 +385,8 @@ policy 文本是出厂配置成员：`description` 替换声明的 description�
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
 | `schedule` | 注册到 `toolRegistry` 的工具（Session），风险 `persistent_configuration` | 模型管理任务 |
+| `wakeup` | 注册到 `toolRegistry` 的工具（Session），风险 `persistent_configuration` | 模型为自己的 Session 安排唤醒（§10） |
+| `session.wakeup.create/list/cancel` | `sessionMethods`（Session，命名空间 `session.wakeup`） | 客户端创建、读取与取消一个 Session 的唤醒（§10） |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods`（进程，命名空间 `schedule`） | 运维方管理任务 |
 | 运行结果投递 | 向保存方分支尝试一个 Steer，不补发（A.6） | Scheduler 自有通知；持久记录为 schedule.history |
 | CLI 入口 | `dimcode scheduled <verb>` 与 `/scheduled` 面板（[管理界面](../cli-commands.md#管理界面)） | 运维方在终端经这些方法管理任务：面板中每个任务一个条目，提供 toggle、edit、add、remove、run 与 history；子命令是同一适配器，无需 Session |
@@ -432,6 +439,61 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 ## 9. 向机制所有者提出的需求
 
 唯一新增机制是绑定用到的运行时装配入口：`AgentBuilder::optional_plugin`（可选进程行）、`plugin_rows` 返回的 `PluginRows`，以及用于 Session 部分的 `PartRegistry::register`。以现有 C3/C4、S2、Settings、pluginFiles 为前提；附录 F 区分已明确的绑定和包验收，实现除这些装配入口外不增加可选服务 API、通知协议、运行时事件或基础设施需求。
+
+## 10. Session 作用域的一次性唤醒
+
+唤醒（wakeup）是一次性的、按计划投向现有 Session 的 `input/message`：经 `session.wakeup` 方法创建、列出与取消，或在交互式 leader Session 中经 `wakeup` 工具调用。它不是 Job：不捕获策略、不 launch 任何东西、没有截止期，也从不出现于 `schedule.list` 或运行历史。
+
+### 10.1 所有者与记录
+
+唤醒由 Scheduler 进程部分拥有，理由与 §1 给任务的理由相同：触发器是宿主侧定时器，必须在目标 Session 空闲或已卸载、且没有任何客户端连接时仍能触发，记录必须越过客户端退出与守护进程重启而存在。Session 部分不拥有其中任何一项（[ADR 002](../../adr/002-plugin-scope.md) D1）；Session 侧只是经 keyed service 转发到进程所有者的 C1 表面，正如 `SchedulerSession`→`ScheduleJobs` 转发 `schedule` 工具一样（[session-boundary](../contracts/session-boundary.md) D2 的"关于 Session 的客户端方法"行）。
+
+记录存放于 Scheduler 自己的 [`pluginFiles`](../../../../crates/dim-app-server/README.md#trusted-plugin-storage) 作用域下的 `scheduler/wakeups.json`：宿主不变的 `{version: 1, text}` 信封内的、自身的内层 v1 文档，与 `scheduler/runs.json`（A.7）使用同一个 `withLock` 与 `file.replace` 事务写入。`runs.json` 原样不动，不做任何迁移。
+
+| 字段 | 含义 |
+| --- | --- |
+| `wakeup_id` | 记录身份；工具与方法返回它 |
+| `session_id`, `branch_id` | 目标；记录永不改变它们 |
+| `at` | 写输入的规范 UTC 时刻（A.1 的时间戳形式） |
+| `prompt` | 投递的文本（非空，与任务提示词一样至多 32 KiB） |
+| `state` | `scheduled`、`fired`、`cancelled` 或 `expired`；三种终态带 `settled_at` |
+| `created_at`, `settled_at?` | 规范 UTC 时间戳 |
+
+文件缺失意味着没有记录。不是合法 v1 的文件——畸形 JSON、未知版本、重复 id 或不一致的记录——与非法运行存储一样使行失败，字节原样保留。
+
+### 10.2 方法与工具
+
+`session.wakeup` 是 Scheduler 的 Session 部件注册的叶子 `sessionMethods` 命名空间（[session-boundary A.1](../contracts/session-boundary.md)）。Rpc 对每个调用恢复已卸载的 Session，因此目标处于冷态时 list 与 cancel 仍可用。
+
+| 方法 | 参数 | 回复 |
+| --- | --- | --- |
+| `session.wakeup.create` | `{sessionId, branchId, at, prompt}` | `{wakeupId}` |
+| `session.wakeup.list` | `{sessionId, branchId?}` | `{wakeups: [{wakeupId, at, prompt, state}]}`，新的在前；`branchId` 缺省为 `main` |
+| `session.wakeup.cancel` | `{sessionId, wakeupId}` | 本调用把 `scheduled` 记录置终态时回复 `{}`；记录已到终态时回复 `{state}` |
+
+`at` 是绝对的 RFC 3339 时刻。字段为 camelCase 且 `deny_unknown_fields`，空字符串与相邻 Session 方法一样是 `invalid_params`。错误：`invalid_params` 对应畸形 `at`、空字段或未知字段；`wakeup_not_found` 对应 cancel 指定的记录不属于调用方 Session（另一个 Session 的 id 与未知 id 回答相同）；Rpc 自己的 `session_closed` 对应不存在的 Session id；Scheduler 行缺失、重载或失败时，方法表给出 `unknown_method`、`service_reloading` 或 `service_unavailable`。
+
+`wakeup` 工具接受 `{at, prompt}`，Session 与分支缺省为调用方。其处理函数像 `schedule` 工具一样拒绝非交互 Session 与 Collaboration 成员，拒绝时不写任何东西。
+
+### 10.3 触发与取消边界
+
+定时器把唤醒求值与任务窗口放在同一个每秒一趟的通道里；没有第二个调度器，也不经过 Job 引擎路径。`scheduled` 记录的时刻在宽限窗口内被观察到时触发一次：进程所有者经公共 `sessions.input` 写一个 Queue 输入，`submissionId` 为 `wakeup:<wakeup_id>`，首个 raw 块为 `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`，提示词作为内容。除此之外什么都不调：没有 `sessions.launch`、没有 `sessions.stop`、没有 `withdraw`、没有截止期。
+
+目标自己的 InputQueue 与回合调度器决定输入变成什么：空闲 Session 起一个回合，运行中的在 `turn/end` 后每回合一个地排队，已卸载的 Session 由 `sessions.input` 内部的 acquire 恢复。Session 保持其 id、`main` 分支与整条 Timeline；fork 是不同的 Session id，不继承任何东西。
+
+记录只在输入的写入发布后才置为 `fired`。取消/触发边界就是那次写入：先置终态的 `session.wakeup.cancel` 阻止输入被写，写入之后到达的 cancel 报告 `fired` 且不是错误。目标 Session 已不存在（`session_closed` 或 `branch_missing`）的记录置为 `cancelled`，绝不重建 Session。任何其他写失败都让记录保持 `scheduled`：下一趟以同一 submission id 重试，而分支对每个 id 只接受一次，或由宽限窗口将其过期。
+
+### 10.4 重启与过期
+
+记录越过目标空闲卸载与守护进程重启而存在。该规则由定时器的每秒通道（随行启动）强制执行：启动时重新求值每条 `scheduled` 记录。仍在 60 s 宽限（A.4 的窗口规则）内的时刻触发；更早的置为 `expired` 且永不重放；Session 已不存在的记录置为 `cancelled`。创建时已超过宽限的时刻立即记为 `expired`。过期从不会恢复、launch 或停止任何东西。
+
+**保留。** 终态记录在落定后没有消费者：`list` 是它唯一的读者，而没人列出的记录本就不可恢复，因此这个界并不损失设计承诺的信息。终态已超过七天的记录被移除；定时器通道在与本次其他结局相同的一次写入中移除它们，因此文件永无界增长、每秒通道绝不多解析它必须解析的内容，`list` 读到的正是存储中的内容。通道每秒读一次文件、取一次时钟读数、每趟至多写一次。
+
+### 10.5 Goal 与 Collaboration
+
+活跃 Goal 中的唤醒像用户输入一样流入：它是普通 Queue 输入，其 `turn/end` 只是 Goal 的一个决策点，不改变 Goal 状态，也不消耗延续预算——预算只数 Goal 自己的延续输入（[Goal §2](Goal.md#2-数据与状态)）。在 Collaboration 成员 Session 中工具拒绝；经方法创建的唤醒仍是普通输入，与其他输入一样按 sequence 与 leader 的委派交错。
+
+规则检查：定时器只经公共 `sessions` 服务写 `input/message`（§4 规则 1）；唤醒输入只作为已消费的 Queue 输入到达模型（§4 规则 6）；core 中不新增任何结构或业务——记录是 Scheduler 自己的业务存储（D4），表面是指定的 `sessionMethods` 命名空间（D5）；无需 ADR，因为 D1 的作用域规则与 D2 的客户端方法行已决定归属。
 
 ## 附录 A. 接口细节
 
