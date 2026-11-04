@@ -16,7 +16,11 @@ Read [version preparation](../../../docs/release/README.md#version-preparation) 
 - An explicit end-to-end publication request may authorize all stages. Honor authorization already given; do not ask again at each stage.
 - A skill review or configuration check never runs a release. `publish-alpha.mjs --dry-run` builds the targets; it is not a read-only version check.
 
-## Select the version
+## Prepare the next GitHub alpha from main
+
+Dispatch `gh workflow run release.yml --ref main` for an authorized GitHub alpha build. The workflow skips an already released source and allocates the next alpha across npm packages and Git tags. It stamps that version into the self-hosted build checkouts, tags their source commit and uploads the original native and npm archives to the prerelease draft. Review the draft and publish it when authorized. npm publication is a separate manual dispatch against that published tag.
+
+## Select the version for a version PR
 
 1. Inspect the working tree, current branch, `origin/main`, remote tags, open release PRs and existing GitHub Releases. Fetch `origin/main` and tags without changing unrelated work. Continue an existing PR for the same preparation task rather than opening a duplicate. Resume the matching release branch or immutable Release when the request is a retry.
 2. Read registry versions for `dimcode-alpha`, `dimcode-web`, every `dimcode-<platform>` in `npm/package.json`, and legacy `dimcode`. Use `npm view PACKAGE versions --json --registry=https://registry.npmjs.org`; only an explicit E404 means an absent package. Authentication or network failures do not mean a version is free.
@@ -65,7 +69,7 @@ git diff --check
 - Confirm the eight packages' trusted publishers and the `npm-release` environment using the linked npm setup instructions. No npm write credentials go to self-hosted jobs.
 - `gh workflow run npm-publish.yml --ref main -f release_tag=vVERSION` performs verification on the self-hosted Linux runner. It schedules no GitHub-hosted job. Do not dispatch it just to review skill/configuration changes.
 - Actual publication requires an explicit npm-publication request, `NPM_ALPHA_PUBLISH_ENABLED=true`, and the same command with `-f publish=true`. Keep the switch unset or `false` during setup and ordinary verification; do not silently enable it for a preparation request.
-- The hosted job independently downloads the original tarballs and manifest from the GitHub Release and validates their bytes and registry state again. It publishes without building or repacking: six platform packages and `dimcode-web`, then `dimcode-alpha`, all on `alpha`. It does not publish `dimcode` or change `latest`/`beta`. Check registry versions/dist-tags and retain the workflow's publication receipt.
+- The hosted job independently downloads the original tarballs and manifest from the GitHub Release and validates their bytes and registry state again. It publishes without building or repacking: six platform packages and `dimcode-web`, then `dimcode-alpha`, all on `alpha`. It does not publish `dimcode` or change `latest`/`beta`. Follow the read-only installation and npmmirror acceptance job. Retain the workflow's publication receipt.
 
 ## Recovery
 
