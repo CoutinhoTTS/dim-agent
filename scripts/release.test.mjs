@@ -107,14 +107,14 @@ test('staging the default plugins update is incremental and never leaves a half 
   const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
   const first=update();
   assert.equal(first.status,0,first.stderr);
-  assert.match(first.stdout,/npm ci: goal, workflow/);
-  assert.deepEqual(installs().map(installName).sort(),['goal','workflow']);
+  assert.match(first.stdout,/npm ci: goal/);
+  assert.deepEqual(installs().map(installName),['goal']);
   assert.equal(readRecord().schemaVersion,1);
-  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['goal','plugin-authoring','workflow']);
+  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['goal','plugin-authoring']);
   const second=update();
   assert.equal(second.status,0,second.stderr);
   assert.match(second.stdout,/npm ci: none/);
-  assert.equal(installs().length,2);
+  assert.equal(installs().length,1);
   const sourceFile=path.join(output,'plugins/goal/index.ts');
   const original=readFileSync(sourceFile,'utf8');
   rmSync(sourceFile);
@@ -125,16 +125,16 @@ test('staging the default plugins update is incremental and never leaves a half 
   writeFileSync(record,`${JSON.stringify(changed)}\n`);
   const reinstalled=update();
   assert.equal(reinstalled.status,0,reinstalled.stderr);
-  assert.equal(installs().length,3);
+  assert.equal(installs().length,2);
   assert.equal(installName(installs().at(-1)),'goal');
   const removed=readRecord();
-  removed.plugins.retired={hash:null,dir:'plugins/retired'};
+  removed.plugins.workflow={hash:null,dir:'plugins/workflow'};
   writeFileSync(record,`${JSON.stringify(removed)}\n`);
-  mkdirSync(path.join(output,'plugins/retired'),{recursive:true});
-  writeFileSync(path.join(output,'plugins/retired/index.ts'),'export {}');
+  mkdirSync(path.join(output,'plugins/workflow/node_modules'),{recursive:true});
+  writeFileSync(path.join(output,'plugins/workflow/index.ts'),'export {}');
   assert.equal(update().status,0);
-  assert.equal(existsSync(path.join(output,'plugins/retired')),false);
-  assert.equal(readRecord().plugins.retired,undefined);
+  assert.equal(existsSync(path.join(output,'plugins/workflow')),false);
+  assert.equal(readRecord().plugins.workflow,undefined);
   writeFileSync(path.join(output,'plugins/goal/marker'),'kept');
   const failing=readRecord();
   failing.plugins.goal.hash='stale again';
@@ -150,6 +150,16 @@ test('staging the default plugins update is incremental and never leaves a half 
 
 test('the record follows the disk when an update fails part-way', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
+  const checkout=path.join(temporary,'checkout');
+  mkdirSync(path.join(checkout,'scripts'),{recursive:true});
+  cpSync(path.join(root,'scripts/stage-plugins.mjs'),path.join(checkout,'scripts/stage-plugins.mjs'));
+  for (const name of ['goal','workflow']) {
+    const plugin=path.join(checkout,'runtime/plugins',name);
+    mkdirSync(plugin,{recursive:true});
+    writeFileSync(path.join(plugin,'package.json'),'{}');
+    writeFileSync(path.join(plugin,'package-lock.json'),'{}');
+  }
+  writeFileSync(path.join(checkout,'runtime/default-plugins.json'),JSON.stringify({plugins:{goal:'plugins/goal',workflow:'plugins/workflow'}}));
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   const log=path.join(temporary,'npm.log');
@@ -160,7 +170,7 @@ test('the record follows the disk when an update fails part-way', {skip:process.
   const record=path.join(output,'.stage-plugins.json');
   const readRecord=()=>JSON.parse(readFileSync(record,'utf8'));
   const installs=()=>existsSync(log)?readFileSync(log,'utf8').trim().split('\n').filter(Boolean):[];
-  const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
+  const update=()=>spawnSync(process.execPath,[path.join(checkout,'scripts/stage-plugins.mjs'),output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
   assert.equal(update().status,0);
   const changed=readRecord();
   changed.plugins.goal.hash='stale goal';
@@ -275,16 +285,14 @@ test('two concurrent updates serialize on the stage lock', {skip:process.platfor
   const [firstRun,secondRun]=await Promise.all([first.done,second.done]);
   assert.equal(firstRun.status,0,firstRun.err);
   assert.equal(secondRun.status,0,secondRun.err);
-  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,2);
+  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,1);
   assert.match(secondRun.err,/Waiting for another staging run/);
   assert.match(secondRun.out,/npm ci: none/);
   const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json')));
   assert.equal(record.schemaVersion,1);
-  assert.deepEqual(Object.keys(record.plugins).sort(),['goal','plugin-authoring','workflow']);
-  for (const name of ['goal','workflow']) {
-    assert(existsSync(path.join(output,'plugins',name,'node_modules')),name);
-    assert.match(record.plugins[name].hash,/^[0-9a-f]{64}$/);
-  }
+  assert.deepEqual(Object.keys(record.plugins).sort(),['goal','plugin-authoring']);
+  assert(existsSync(path.join(output,'plugins/goal/node_modules')));
+  assert.match(record.plugins.goal.hash,/^[0-9a-f]{64}$/);
   assert.equal(record.plugins['plugin-authoring'].hash,null);
   assert.deepEqual([...leftovers(output,'plugins/goal','partial'),...leftovers(output,'plugins/goal','previous')],[]);
 });
@@ -480,8 +488,8 @@ test('a recorded parent directory does not remove the plugins inside it', {skip:
   writeFileSync(record,`${JSON.stringify(data)}\n`);
   const updated=run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(updated.status,0,updated.stderr);
-  for (const name of ['goal','workflow']) {
-    assert(existsSync(path.join(output,'plugins',name,'index.ts')),name);
+  for (const name of ['goal','plugin-authoring']) {
+    assert(existsSync(path.join(output,'plugins',name,'dim-plugin.json')),name);
   }
   const after=JSON.parse(readFileSync(record));
   assert.equal('retired' in after.plugins,false);
@@ -505,7 +513,7 @@ test('a platform-specific plugin package is refused for a portable stage', {skip
   assert.equal(existsSync(output),false);
 });
 
-test('the current default plugins pass the portable check', {skip:process.platform==='win32'}, (t)=>{
+test('the current default plugins pass the portable check without Workflow', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
@@ -513,7 +521,9 @@ test('the current default plugins pass the portable check', {skip:process.platfo
   const output=path.join(temporary,'staged');
   const staged=run('stage-plugins.mjs',[output,'--portable'],{PATH:`${bin}:${process.env.PATH}`});
   assert.equal(staged.status,0,staged.stderr);
-  assert(existsSync(path.join(output,'default-plugins.json')));
+  const defaults=JSON.parse(readFileSync(path.join(output,'default-plugins.json')));
+  assert.deepEqual(Object.keys(defaults.plugins).sort(),['goal','plugin-authoring']);
+  assert.deepEqual(readdirSync(path.join(output,'plugins')).sort(),['goal','plugin-authoring']);
 });
 
 test('stages public native payload, packs it and rejects modified content', {skip:process.platform==='win32'}, (t)=>{
@@ -562,9 +572,11 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   assert.match(noPlugins.stderr,/--plugins/);
   assert.equal(existsSync(path.join(temporary,'no-plugins')),false);
   const plugins=path.join(temporary,'plugins');
-  mkdirSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis'),{recursive:true});
-  writeFileSync(path.join(plugins,'default-plugins.json'),'{"plugins":{"goal":"plugins/goal"}}');
-  writeFileSync(path.join(plugins,'plugins/goal/index.ts'),'export {}');
+  const npmBin=path.join(temporary,'npm-bin');
+  mkdirSync(npmBin);
+  writeFileSync(path.join(npmBin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules/@arcships/rutis"\nexit 0\n',{mode:0o755});
+  const selected=run('stage-plugins.mjs',[plugins],{PATH:`${npmBin}:${process.env.PATH}`});
+  assert.equal(selected.status,0,selected.stderr);
   writeFileSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis/package.json'),'{}');
   assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'empty'),version,commit,'--plugins',bin]).status,0);
   const stage=path.join(temporary,'stage');
@@ -576,6 +588,8 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins,'--rust-notices',stubRustNotices(temporary)]);
   assert.equal(staged.status,0,staged.stderr);
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
+  assert.equal(Object.keys(manifest.files).some(file=>file.startsWith('plugins/workflow/')),false);
+  assert.equal(JSON.parse(readFileSync(path.join(stage,'default-plugins.json'))).plugins.workflow,undefined);
   for (const file of ['default-plugins.json','plugins/goal/index.ts','plugins/goal/node_modules/@arcships/rutis/package.json']) assert(manifest.files[file],file);
   const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
   assert.equal(packed.status,0,packed.stderr);
@@ -584,6 +598,10 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   const native=path.join(temporary,'packed',packedManifest.nativeArchives[0].file);
   assert(entries(npm).includes('package/plugins/goal/node_modules/@arcships/rutis/package.json'));
   assert(entries(native).includes(`dimcode-${manifest.platform}/default-plugins.json`));
+  for (const archive of [native,npm]) {
+    assert.equal(entries(archive).some(file=>file.includes('/plugins/workflow/')),false);
+    assert(entries(archive).some(file=>file.includes('/plugins/plugin-authoring/')));
+  }
   const metadata=spawnSync('tar',['-xOzf',npm,'package/package.json'],{encoding:'utf8'});
   assert.deepEqual(JSON.parse(metadata.stdout).files.slice(-2),['default-plugins.json','plugins']);
 });

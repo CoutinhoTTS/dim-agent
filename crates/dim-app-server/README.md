@@ -167,6 +167,32 @@ back exactly as it was read. A file that is not JSON and a non-object `mcpServer
 whole document, with the decoder's line and column and no value. A client that predates `invalid`
 still reads every valid `servers` row and shows nothing about the broken entries.
 
+A stdio or remote entry may state `timeout`: an integer number of milliseconds from 1000 to
+86400000 that bounds that entry's `tools/call` requests. Without one a tool call waits up to ten
+minutes; every other request keeps its sixty-second exchange limit, and starting a server keeps its
+own deadline. Any other value, including `null`, is the entry's own error under the one-by-one
+rule. A timeout fails the call with an error that names the limit and its source and sends
+`notifications/cancelled` for the request, and the management read shows the value when it is
+stated ([MCP configuration management](../../docs/design/appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)).
+
+An entry's `command`, each argument, each `env` value, `cwd`, the remote `url`, each header value
+and the bearer token may carry `${NAME}` or `${NAME:-default}`; any other `$` text is literal, a
+variable set to the empty string counts as set, and a default ends at the first `}`. The daemon
+expands a reference from its own environment when it builds the effective configuration a
+connection runs, and the stored document keeps the text the user wrote. A reference the
+environment does not set keeps its text too: the entry loads and its connection fails with the
+usual transport error. A user entry expands every reference. A plugin entry is guarded in every
+guarded field, and a workspace entry is guarded in the members that come from `.mcp.json`: there a
+protected name in the remote `url`, a header value or the bearer token expands to the empty string
+whether it is set or not, and its default is ignored. A protected name is one of the daemon's
+model provider, cloud, proxy, code hosting or package registry variable, a name with the
+`DIM_`/`DIMCODE_` prefix or one of those exact names, matched without case, or a variable the
+model profile names for a provider key. Stdio fields are not guarded, because enabling a workspace stdio entry already
+runs it with the user's authority, and a plugin entry's `cwd` is not expanded. `mcp.catalog` rows
+and the configuration view carry `referencedVariables` and `unsetVariables`, sorted names only; a
+protected name in a guarded field is referenced and never unset, and an invalid entry and a probe
+result carry neither.
+
 Edits are source-local. No atomic user/project scope migration is offered; the Web editor fixes
 the selected entry's source rather than copying secrets into another scope. OAuth sign-in,
 confidential-client input and attempt cancellation follow the [OAuth contract](../../docs/design/appserver/mcp-oauth.md#9-interfaces).
@@ -240,8 +266,9 @@ loopback HTTP; an entry's optional `oauth` object (`clientId`, `callbackPort`,
 - `mcp.auth.start({source, id, cwd?, clientSecret?})` needs an enabled entry. It discovers the
   authorization server through Protected Resource Metadata (or `oauth.authServerMetadataUrl` when
   the server publishes none), registers a client when needed, and returns
-  `{attemptId, authorizationUrl, redirectUri, resource, issuer, expiresAt}`. The redirect URI is
-  `http://localhost:{callbackPort}/callback` (default 1456); the daemon runs no listener.
+  `{attemptId, authorizationUrl, redirectUri, resource, issuer, expiresAt}`. `resource` is the
+  entry's expanded endpoint. The redirect URI is `http://localhost:{callbackPort}/callback`
+  (default 1456); the daemon runs no listener.
 - `mcp.auth.complete({attemptId, callbackUrl})` takes the full callback URL, captured by the
   client's loopback listener or pasted by the user, validates it and exchanges the code. A wrong
   redirect, `state` or `iss` leaves the attempt pending.

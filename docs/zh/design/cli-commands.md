@@ -722,7 +722,7 @@ MCP 不新增种类。它的条目就是生效目录——各服务器按 id 合
 
 toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用状态，所以比较并交换只覆盖这段窗口；它只作用于一个 id，不会覆盖来源中别处的改动。用户条目的启用状态是本地记录；项目条目一开始是停用的，只有 toggle 或 `dimcode mcp enable|disable` 会启用它。edit 先读 `mcp.configuration` 取得条目的 revision 与文档，再写 `mcp.update`，绝不用 `mcp.save`：save 接收完整配置，而读取会隐藏机密，往返一次就会把它们抹掉。
 
-编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
+编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。它还可以给出 `timeout`——该条目的工具调用时限，毫秒，1000 到 86400000；给 `null` 清除它，按十分钟默认值执行（[MCP 管理 §D20](appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)）。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
 
 ```json
 {"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}
@@ -733,6 +733,8 @@ toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用
 ```json
 {"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
 ```
+
+新建的定义同样可以给出 `timeout`，查看时会显示给出的值。
 
 add 用目录的来源 revision——`userRevision`，来源为 `project` 时用 `projectRevision`——写 `mcp.save`，并拒绝目录中已列出的 id，因为一次 save 会替换该条目。新建文档就是一个条目，带它的来源与 `mcp.save` 接收的定义：
 

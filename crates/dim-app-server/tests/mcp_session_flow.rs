@@ -28,7 +28,7 @@ use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     convert::Infallible,
     path::{Path, PathBuf},
     sync::{
@@ -68,6 +68,15 @@ struct Remote {
     expire_once: AtomicBool,
     /// Adds a tool when the client has connected a second time.
     grown: AtomicBool,
+    /// The `x-generation` and `Authorization` every request carried.
+    seen: Mutex<Vec<(String, String)>>,
+    /// Holds both `lookup/item` attempts: the first answers 404 after 1.5 s,
+    /// and the retry answers successfully after another 2.8 s.
+    hold_retry: AtomicBool,
+    /// The id of every `lookup/item` request the server received.
+    lookup_ids: Mutex<Vec<Value>>,
+    /// The params of every `notifications/cancelled` the server received.
+    cancelled: Mutex<Vec<Value>>,
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -91,7 +100,27 @@ impl Remote {
             session_check: AtomicBool::new(false),
             expire_once: AtomicBool::new(false),
             grown: AtomicBool::new(false),
+            seen: Mutex::default(),
+            hold_retry: AtomicBool::new(false),
+            lookup_ids: Mutex::default(),
+            cancelled: Mutex::default(),
         })
+    }
+
+    /// The generation and authorization each request carried so far.
+    fn seen(&self) -> Vec<(String, String)> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// The id of every `lookup/item` request the server received so far.
+    fn lookup_ids(&self) -> Vec<Value> {
+        self.lookup_ids.lock().unwrap().clone()
+    }
+
+    /// The params of every `notifications/cancelled` the server received so
+    /// far.
+    fn cancelled(&self) -> Vec<Value> {
+        self.cancelled.lock().unwrap().clone()
     }
 }
 async fn rpc(
@@ -99,10 +128,30 @@ async fn rpc(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    let method = body["method"].as_str().unwrap_or_default().to_owned();
     let Some(id) = body.get("id") else {
+        if method == "notifications/cancelled" {
+            remote
+                .cancelled
+                .lock()
+                .unwrap()
+                .push(body["params"].clone());
+        }
         return StatusCode::ACCEPTED.into_response();
     };
-    let method = body["method"].as_str().unwrap();
+    remote.seen.lock().unwrap().push((
+        headers
+            .get("x-generation")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned(),
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned(),
+    ));
+    let method = method.as_str();
     let checked = remote.session_check.load(Ordering::SeqCst);
     let current_session = format!("s{}", remote.session.load(Ordering::SeqCst));
     if checked
@@ -171,16 +220,20 @@ async fn rpc(
             }
         }
         "tools/call" => {
-            remote
-                .calls
-                .lock()
-                .unwrap()
-                .push(body["params"]["name"].as_str().unwrap().into());
-            if body["params"]["name"] == "lookup/item"
-                && remote.expire_once.swap(false, Ordering::SeqCst)
-            {
+            let name = body["params"]["name"].as_str().unwrap();
+            remote.calls.lock().unwrap().push(name.into());
+            if name == "lookup/item" {
+                remote.lookup_ids.lock().unwrap().push(body["id"].clone());
+            }
+            if name == "lookup/item" && remote.expire_once.swap(false, Ordering::SeqCst) {
+                if remote.hold_retry.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                }
                 remote.session.fetch_add(1, Ordering::SeqCst);
                 return StatusCode::NOT_FOUND.into_response();
+            }
+            if name == "lookup/item" && remote.hold_retry.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2800)).await;
             }
             if body["params"]["name"] == "chart" {
                 if remote.app_hold.load(Ordering::SeqCst) {
@@ -202,7 +255,10 @@ async fn rpc(
             } else {
                 let a = body["params"]["arguments"]["a"].as_i64().unwrap();
                 let b = body["params"]["arguments"]["b"].as_i64().unwrap();
-                let generation = headers.get("x-generation").unwrap().to_str().unwrap();
+                let generation = headers
+                    .get("x-generation")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
                 json!({"content":[{"type":"text","text":format!("{generation}:{}", a-b)}]})
             }
         }
@@ -364,6 +420,14 @@ async fn authorize_project(host: &MinimalHost, home: &Path) {
         .await
         .unwrap();
 }
+/// The credential variable names a test host reports to MCP.
+struct CredentialNames(BTreeSet<String>);
+impl dim_agent_capabilities::host::CredentialVariables for CredentialNames {
+    fn credential_variables(&self) -> BTreeSet<String> {
+        self.0.clone()
+    }
+}
+
 impl Env {
     async fn new() -> Self {
         Self::with(|_, _| {}).await
@@ -394,6 +458,15 @@ impl Env {
     async fn with_config(
         configure: impl FnOnce(&mut AgentBuilder, &Arc<Remote>),
         configuration: impl FnOnce(&str, &Path) -> Value,
+    ) -> Self {
+        Self::with_config_protected(configure, configuration, BTreeSet::new()).await
+    }
+
+    /// `credential_names` is the set the daemon's credential owner reports.
+    async fn with_config_protected(
+        configure: impl FnOnce(&mut AgentBuilder, &Arc<Remote>),
+        configuration: impl FnOnce(&str, &Path) -> Value,
+        credential_names: BTreeSet<String>,
     ) -> Self {
         let remote = Remote::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -442,7 +515,15 @@ impl Env {
         mcp::install(&mut builder);
         mcp_host_rows(&mut builder, &home);
         configure(&mut builder, &remote);
-        let agent = MinimalHost::start(&builder).await.unwrap();
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide(CredentialVariablesHost(Arc::new(CredentialNames(
+                credential_names,
+            ))))
+            .map_err(|error| AgentError::Build(error.to_string()))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         authorize_project(&agent, &home).await;
         let directory = agent.root().get::<McpService>().unwrap();
         Self {
@@ -675,6 +756,25 @@ async fn temporary(
         .reply
         .await
         .unwrap()
+}
+
+/// One management call on the host, as a local client would make it.
+async fn management(
+    agent: &MinimalHost,
+    method: &str,
+    params: Value,
+) -> std::result::Result<Value, dim_agent_capabilities::methods::RpcError> {
+    agent
+        .root()
+        .get::<dim_app_server::methods::ManagementMethods>()
+        .expect("management methods are installed")
+        .provider(method)
+        .expect("the method is registered")
+        .accept(method.into(), params, CancellationToken::new(), |_| {})
+        .expect("the method is accepted")
+        .reply
+        .await
+        .expect("the method replies")
 }
 
 #[tokio::test]
@@ -1065,6 +1165,114 @@ async fn enabled_project_entry_serves_tools_and_disabling_stops_it_in_every_sess
     );
     assert!(results(&session).await.last().unwrap().contains("isError"));
     state(&session, McpSourceState::Disabled).await;
+    env.close().await;
+}
+
+/// #952: an entry's references expand from the daemon's environment when the
+/// Session connects, not when the document is read.
+#[tokio::test]
+async fn expansion_from_the_daemon_environment_at_connect() {
+    let env = Env::with_config(
+        |_, _| {},
+        |url, _| {
+            unsafe {
+                std::env::set_var("MCP_TEST_952_URL", url);
+                std::env::set_var("MCP_TEST_952_TOKEN", "made-up-token");
+            }
+            json!({"mcpServers":{"docs":{
+                "type":"http",
+                "url":"${MCP_TEST_952_URL}",
+                "auth":{"type":"bearer","token":"${MCP_TEST_952_TOKEN}"}
+            }}})
+        },
+    )
+    .await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let seen = env.remote.seen();
+    assert!(
+        seen.iter()
+            .any(|(_, authorization)| authorization == "Bearer made-up-token"),
+        "the connection did not carry the expanded bearer token: {seen:?}"
+    );
+    env.close().await;
+}
+
+/// #952: the user's own document is not guarded, so a protected name expands
+/// there.
+#[tokio::test]
+async fn expansion_in_the_user_document_is_not_guarded() {
+    let env = Env::with_config(
+        |_, _| {},
+        |url, _| {
+            unsafe {
+                std::env::set_var("DIMCODE_TEST_952_USER_TOKEN", "made-up-user-value");
+            }
+            json!({"mcpServers":{"docs":{
+                "type":"http",
+                "url":url,
+                "headers":{"X-Generation":"${DIMCODE_TEST_952_USER_TOKEN}"}
+            }}})
+        },
+    )
+    .await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    assert!(
+        env.remote
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(generation, _)| generation == "made-up-user-value"),
+        "the user entry did not expand the protected name"
+    );
+    env.close().await;
+}
+
+/// #952: a workspace `.mcp.json` cannot expand a protected name into a remote
+/// header, even when the daemon has it set.
+#[tokio::test]
+async fn expansion_in_a_workspace_document_is_guarded() {
+    unsafe {
+        std::env::set_var(
+            "DIMCODE_TEST_952_WORKSPACE_TOKEN",
+            "made-up-workspace-value",
+        );
+    }
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type":"http",
+                "url":env.url,
+                "headers":{"X-Generation":"${DIMCODE_TEST_952_WORKSPACE_TOKEN}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let seen = env.remote.seen();
+    assert!(
+        seen.iter().any(|(generation, _)| generation.is_empty()),
+        "the workspace entry did not empty the protected name: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|(generation, _)| generation == "made-up-workspace-value"),
+        "the workspace entry expanded the protected name"
+    );
     env.close().await;
 }
 
@@ -2086,7 +2294,15 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
         builder
             .plugin(|_| Ok(Box::new(AimuxPlugin)))
             .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
-        let agent = MinimalHost::start(&builder).await.unwrap();
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide(CredentialVariablesHost(Arc::new(CredentialNames(
+                BTreeSet::new(),
+            ))))
+            .map_err(|error| AgentError::Build(error.to_string()))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         authorize_project(&agent, &home).await;
 
         let session = agent
@@ -2562,5 +2778,778 @@ async fn an_expired_session_is_a_new_generation_with_a_new_tool_list() {
     let grown = declared(request.tools.as_deref().unwrap(), "grown");
     assert!(grown.name.starts_with("mcp_docs_"));
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
+    env.close().await;
+}
+
+/// #952: a probe expands references from the daemon's environment before it
+/// contacts the server. A configuration supplied by the client is user text.
+#[tokio::test]
+async fn a_probe_expands_references_in_a_client_configuration() {
+    let env = Env::new().await;
+    unsafe {
+        std::env::set_var("MCP_TEST_952_PROBE_URL", &env.url);
+        std::env::set_var("MCP_TEST_952_PROBE_TOKEN", "made-up-probe-value");
+    }
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "user",
+            "id": "probe",
+            "configuration": {
+                "type": "http",
+                "url": "${MCP_TEST_952_PROBE_URL}",
+                "headers": {"X-Generation": "${MCP_TEST_952_PROBE_TOKEN}"}
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    assert!(
+        env.remote
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(generation, _)| generation == "made-up-probe-value"),
+        "the probe did not carry the expanded header"
+    );
+    assert!(!probe.to_string().contains("made-up-probe-value"));
+    env.close().await;
+}
+
+/// #952: a temporary binding expands references from the daemon's environment.
+/// Its configuration is client text, so no field is guarded.
+#[tokio::test]
+async fn a_temporary_binding_expands_references_unguarded() {
+    let env = Env::new().await;
+    unsafe {
+        std::env::set_var("MCP_TEST_952_TEMP_URL", &env.url);
+        std::env::set_var("MCP_TEST_952_TEMP_TOKEN", "made-up-temp-value");
+    }
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let binding = uuid::Uuid::new_v4().to_string();
+    temporary(
+        &session,
+        "session.mcp_temporary.attach",
+        json!({
+            "bindingId": binding,
+            "servers": {"client": {
+                "type": "http",
+                "url": "${MCP_TEST_952_TEMP_URL}",
+                "headers": {"X-Generation": "${MCP_TEST_952_TEMP_TOKEN}"}
+            }}
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        env.remote
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(generation, _)| generation == "made-up-temp-value"),
+        "the temporary connection did not carry the expanded header"
+    );
+    temporary(
+        &session,
+        "session.mcp_temporary.detach",
+        json!({"bindingId": binding}),
+    )
+    .await
+    .unwrap();
+    env.close().await;
+}
+
+/// #952: the daemon's own credential names are guarded in a workspace entry
+/// even when they are not on the fixed list, and still expand in the user's
+/// own document.
+#[tokio::test]
+async fn expansion_guards_a_configured_api_key_env() {
+    unsafe {
+        std::env::set_var("TEST_PROVIDER_KEY", "made-up-provider-key");
+    }
+    let env = Env::with_config_protected(
+        |_, _| {},
+        |url, _| {
+            json!({"mcpServers":{"docs":{
+                "type":"http",
+                "url":url,
+                "headers":{"X-Generation":"${TEST_PROVIDER_KEY}"}
+            }}})
+        },
+        BTreeSet::from(["TEST_PROVIDER_KEY".to_owned()]),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "keyed",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type":"http",
+                "url":env.url,
+                "headers":{"X-Generation":"${TEST_PROVIDER_KEY}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "keyed",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let seen = env.remote.seen();
+            let guarded = seen.iter().any(|(generation, _)| generation.is_empty());
+            let user = seen
+                .iter()
+                .any(|(generation, _)| generation == "made-up-provider-key");
+            if guarded && user {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both entries connect");
+    env.close().await;
+}
+
+/// #952: a probe of a workspace entry guards a protected name the same way
+/// the entry's own connection does.
+#[tokio::test]
+async fn a_probe_expands_references_with_the_entry_origin() {
+    unsafe {
+        std::env::set_var("DIMCODE_TEST_952_PROBE_TOKEN", "made-up-probe-guard");
+    }
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "probe",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type":"http",
+                "url":env.url,
+                "headers":{"X-Generation":"${DIMCODE_TEST_952_PROBE_TOKEN}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "probe",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source":"project","id":"probe","cwd":env.home.join("project")}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let seen = env.remote.seen();
+    assert!(
+        seen.iter().any(|(generation, _)| generation.is_empty()),
+        "the probe did not guard the protected name: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|(generation, _)| generation == "made-up-probe-guard"),
+        "the probe expanded the protected name"
+    );
+    env.close().await;
+}
+
+/// #952: names from a workspace file and from the user overlay are both
+/// reported, while a connection guards the file text and expands the overlay.
+#[tokio::test]
+async fn mcp_configuration_names_references_from_the_overlay_but_keeps_file_guards() {
+    unsafe {
+        std::env::set_var("DIMCODE_TEST_952_FILE", "made-up-file-value");
+        std::env::set_var("DIMCODE_TEST_952_OVERLAY", "made-up-overlay-value");
+    }
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "mixed",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": env.url,
+                "headers": {"Authorization": "Bearer ${DIMCODE_TEST_952_OVERLAY}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let catalog = env.directory.catalog(Some(1), &cancel).await.unwrap();
+    env.directory
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "mixed".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    env.update(
+        SettingsScope::Project(1),
+        "mixed",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": env.url,
+                "headers": {"X-Generation": "${DIMCODE_TEST_952_FILE}"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "mixed",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+
+    let catalog = env.directory.catalog(Some(1), &cancel).await.unwrap();
+    let mixed = catalog.servers.get("mixed").unwrap();
+    assert_eq!(
+        mixed.referenced_variables,
+        BTreeSet::from([
+            "DIMCODE_TEST_952_FILE".to_owned(),
+            "DIMCODE_TEST_952_OVERLAY".to_owned(),
+        ])
+    );
+    assert!(mixed.unset_variables.is_empty());
+    let configuration = management(
+        &env.agent,
+        "mcp.configuration",
+        json!({"source": "project", "id": "mixed", "cwd": env.home.join("project")}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        configuration["configuration"]["referencedVariables"],
+        json!(["DIMCODE_TEST_952_FILE", "DIMCODE_TEST_952_OVERLAY"])
+    );
+    assert_eq!(configuration["configuration"]["unsetVariables"], json!([]));
+
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let seen = env.remote.seen();
+            let overlay = seen
+                .iter()
+                .any(|(_, authorization)| authorization == "Bearer made-up-overlay-value");
+            let file = seen.iter().any(|(generation, _)| generation.is_empty());
+            if overlay && file {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the mixed entry connects");
+    env.close().await;
+}
+
+/// #952: an unset reference keeps its text; the catalog names it and the
+/// entry still loads.
+#[tokio::test]
+async fn an_unset_reference_keeps_its_text_and_the_catalog_names_it() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "unset",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": "${MCP_TEST_952_UNSET_URL}/mcp"
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let catalog = env.directory.catalog(Some(1), &cancel).await.unwrap();
+    let unset = catalog.servers.get("unset").unwrap();
+    assert_eq!(
+        unset.referenced_variables,
+        BTreeSet::from(["MCP_TEST_952_UNSET_URL".to_owned()])
+    );
+    assert_eq!(
+        unset.unset_variables,
+        BTreeSet::from(["MCP_TEST_952_UNSET_URL".to_owned()])
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(env.home.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["mcpServers"]["unset"]["url"],
+        "${MCP_TEST_952_UNSET_URL}/mcp"
+    );
+    assert!(
+        env.directory
+            .catalog(Some(1), &cancel)
+            .await
+            .unwrap()
+            .servers
+            .contains_key("unset")
+    );
+
+    // #952 review: a reference that leaves no parseable URL must not turn the
+    // whole source into a configuration error; only the entry's connection
+    // fails, and the probe names the unset variable.
+    let user_revision = catalog.user_revision.clone();
+    let application = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let application = env.directory.application(McpSource::User);
+            if application.error.is_some()
+                || application.applied_revision.as_deref() == Some(user_revision.as_str())
+            {
+                return application;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the user source settles");
+    assert_eq!(
+        application.applied_revision.as_deref(),
+        Some(user_revision.as_str()),
+        "{application:?}"
+    );
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source": "user", "id": "unset"}),
+    )
+    .await
+    .expect("an unset reference is a probe outcome, not a refused request");
+    assert_eq!(probe["status"], "failed", "{probe}");
+    assert!(
+        probe["message"]
+            .as_str()
+            .unwrap()
+            .contains("MCP_TEST_952_UNSET_URL"),
+        "{probe}"
+    );
+
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    let mcp = session.session_service::<McpSession>().unwrap();
+    let mut changed = mcp.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(McpSourceState::Failed { .. }) =
+                changed.borrow_and_update().servers.get("unset")
+            {
+                return;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the unset reference fails its connection");
+    env.close().await;
+}
+
+/// #952 review: an unset reference in a remote URL leaves its source applied
+/// and fails only its connection, and a probe names the unset variable instead
+/// of answering a configuration error.
+#[tokio::test]
+async fn an_unset_url_reference_keeps_its_source_applied_and_the_probe_names_it() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "unresolved",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": "https://${MCP_TEST_952_UNSET_HOST}/mcp"
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let user_revision = env
+        .directory
+        .catalog(Some(1), &cancel)
+        .await
+        .unwrap()
+        .user_revision;
+    let application = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let application = env.directory.application(McpSource::User);
+            if application.error.is_some()
+                || application.applied_revision.as_deref() == Some(user_revision.as_str())
+            {
+                return application;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the user source settles");
+    assert_eq!(
+        application.applied_revision.as_deref(),
+        Some(user_revision.as_str()),
+        "{application:?}"
+    );
+
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source": "user", "id": "unresolved"}),
+    )
+    .await
+    .expect("an unset reference is a probe outcome, not a refused request");
+    assert_eq!(probe["status"], "failed", "{probe}");
+    assert!(
+        probe["message"]
+            .as_str()
+            .unwrap()
+            .contains("MCP_TEST_952_UNSET_HOST"),
+        "{probe}"
+    );
+    env.close().await;
+}
+
+/// #952: a project entry's `cwd` is expanded before it is joined to the
+/// workspace, so the probe runs in the directory the published connection
+/// uses instead of a literal directory below the workspace.
+#[tokio::test]
+async fn a_probe_runs_a_project_cwd_where_the_published_connection_runs() {
+    let tools = std::env::temp_dir().join(format!("dim-mcp-cwd-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(tools.join("bin")).unwrap();
+    let tools = tools.canonicalize().unwrap();
+    unsafe {
+        std::env::set_var("DIMCODE_TEST_REVIEW_CWD", tools.to_str().unwrap());
+    }
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "command": "node",
+                "args": [
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/mcp-reconnect.cjs"),
+                    "normal"
+                ],
+                "cwd": "${DIMCODE_TEST_REVIEW_CWD}/bin",
+                "env": {
+                    "MCP_STATE_FILE": env.home.join("starts"),
+                    "MCP_PID_FILE": env.home.join("pids")
+                }
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source":"project","id":"docs","cwd":env.home.join("project")}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+
+    // The same entry publishes the same directory: the Session adopts its tools.
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.close().await;
+    std::fs::remove_dir_all(tools).unwrap();
+}
+
+/// #952: a probe patch replaces the stored overlay's members exactly once.
+/// An overlay-held `args`, `env`, `headers`, `url` and bearer that the patch
+/// sets or removes reach the probed server as patched.
+#[tokio::test]
+async fn a_probe_patch_replaces_the_stored_overlay_once() {
+    let env = Env::new().await;
+    let patched = Remote::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let patched_url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let patched_server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/mcp", post(rpc))
+                .with_state(patched.clone()),
+        )
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future(),
+    );
+
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-reconnect.cjs");
+    let args_file = env.home.join("local-args.json");
+    env.update(
+        SettingsScope::User,
+        "local",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "command": "node",
+                "args": [script, "stored"],
+                "cwd": env.home,
+                "env": {
+                    "MCP_PID_FILE": env.home.join("local-pid"),
+                    "MCP_ARGS_FILE": args_file,
+                    "MCP_TEST_VALUE": "stored"
+                }
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::User,
+        "docs",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": env.url,
+                "headers": {"X-Generation": "stored"},
+                "auth": {"type": "bearer", "token": "stored-token"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    for id in ["local", "docs"] {
+        let cancel = CancellationToken::new();
+        let catalog = env.directory.catalog(Some(1), &cancel).await.unwrap();
+        env.directory
+            .move_entry(
+                McpSource::User,
+                McpSource::Project(1),
+                id.into(),
+                catalog.user_revision,
+                catalog.project_revision.unwrap(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        env.update(SettingsScope::Project(1), id, McpChange::SetEnabled(true))
+            .await;
+    }
+
+    // A patch sets every overlay-held member; the probe must see these values.
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "project", "id": "local", "cwd": env.home.join("project"),
+            "patch": {"args": [script, "patched"], "env": {"MCP_TEST_VALUE": "patched"}}
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let recorded: Value = serde_json::from_slice(&std::fs::read(&args_file).unwrap()).unwrap();
+    assert_eq!(recorded["argv"], json!(["patched"]));
+    assert_eq!(recorded["value"], "patched");
+
+    let before = patched.seen().len();
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "project", "id": "docs", "cwd": env.home.join("project"),
+            "patch": {
+                "url": patched_url,
+                "headers": {"X-Generation": "patched"},
+                "bearer": {"action": "set", "token": "patched-token"}
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let seen = patched.seen();
+    let requests = &seen[before..];
+    assert!(!requests.is_empty(), "the patched URL was not contacted");
+    assert!(
+        requests
+            .iter()
+            .all(|(generation, authorization)| generation == "patched"
+                && authorization == "Bearer patched-token"),
+        "{requests:?}"
+    );
+
+    // A patch removes every overlay-held member; the stored values must not
+    // come back through a second overlay merge.
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "project", "id": "local", "cwd": env.home.join("project"),
+            "patch": {"args": [script], "env": {"MCP_TEST_VALUE": null}}
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let recorded: Value = serde_json::from_slice(&std::fs::read(&args_file).unwrap()).unwrap();
+    assert_eq!(recorded["argv"], json!([]));
+    assert!(recorded["value"].is_null(), "{recorded}");
+
+    let before = patched.seen().len();
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "project", "id": "docs", "cwd": env.home.join("project"),
+            "patch": {
+                "url": patched_url,
+                "headers": {"X-Generation": null},
+                "bearer": {"action": "remove"}
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let seen = patched.seen();
+    assert!(
+        seen[before..]
+            .iter()
+            .all(|(generation, authorization)| generation.is_empty() && authorization.is_empty()),
+        "{:?}",
+        &seen[before..]
+    );
+
+    stop.cancel();
+    patched_server.await.unwrap().unwrap();
+    env.close().await;
+}
+
+/// #953: the management read shows an entry's `timeout` when it is set,
+/// `mcp.update` sets and clears it, and an invalid value is the entry's own
+/// field error.
+#[tokio::test]
+async fn management_reads_sets_and_clears_the_tool_call_timeout() {
+    let env = Env::new().await;
+    let read = || {
+        management(
+            &env.agent,
+            "mcp.configuration",
+            json!({"source":"user","id":"docs"}),
+        )
+    };
+    let before = read().await.unwrap();
+    assert!(before["configuration"].get("timeout").is_none(), "{before}");
+    management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":before["revision"],"patch":{"timeout":1000}}),
+    )
+    .await
+    .unwrap();
+    let after = read().await.unwrap();
+    assert_eq!(after["configuration"]["timeout"], 1000, "{after}");
+    management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":after["revision"],"patch":{"timeout":null}}),
+    )
+    .await
+    .unwrap();
+    let cleared = read().await.unwrap();
+    assert!(
+        cleared["configuration"].get("timeout").is_none(),
+        "{cleared}"
+    );
+    let refused = management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":cleared["revision"],"patch":{"timeout":86400001}}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.data.unwrap().app_error, "mcp_invalid_config");
+    assert!(refused.message.contains("timeout"), "{}", refused.message);
+    assert!(!refused.message.contains("86400001"), "{}", refused.message);
+    env.close().await;
+}
+
+/// #953: a tool call has one deadline measured from its start and shared by
+/// its 404 retry. The retry answers after the deadline, so a shared deadline
+/// fails the call before that answer; a fresh one would return it.
+#[tokio::test]
+async fn a_tool_call_deadline_is_shared_by_its_404_retry() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "docs",
+        McpChange::Put(
+            serde_json::from_value(json!({"type":"http","url":env.url,"timeout":3000})).unwrap(),
+        ),
+    )
+    .await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.remote.expire_once.store(true, Ordering::SeqCst);
+    env.remote.session_check.store(true, Ordering::SeqCst);
+    env.remote.hold_retry.store(true, Ordering::SeqCst);
+    *env.model.actions.lock().unwrap() = VecDeque::from([
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+        Action::Text,
+    ]);
+    session
+        .submit("go".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), session.idle("main"))
+        .await
+        .expect("the 30 s hang guard fired; the turn never ended")
+        .unwrap();
+
+    let result = results(&session).await.last().unwrap().clone();
+    assert!(result.contains("3000 ms"), "{result}");
+    assert!(result.contains("the entry's timeout"), "{result}");
+    let lookup_ids = env.remote.lookup_ids();
+    assert_eq!(
+        lookup_ids.len(),
+        2,
+        "the timeout did not happen during the retry: {lookup_ids:?}"
+    );
+    let cancelled = env.remote.cancelled();
+    assert_eq!(
+        cancelled.len(),
+        1,
+        "the call did not send one cancellation notice: {cancelled:?}"
+    );
+    assert_eq!(cancelled[0]["requestId"], lookup_ids[1], "{cancelled:?}");
+
     env.close().await;
 }

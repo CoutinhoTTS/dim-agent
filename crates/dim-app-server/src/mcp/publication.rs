@@ -4,11 +4,12 @@ use super::config::{
     self, McpPluginServers, McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings,
 };
 use super::{
-    McpAuth, McpConnection, McpError, McpSource, Result,
+    McpAuth, McpConnection, McpError, McpSource, Result, daemon_environment,
     server::{McpRuntime, McpServer, McpServerError, McpServerPlugin, McpServerState},
     sources_in_precedence,
 };
 use crate::settings::{SettingsScope, SettingsService};
+use dim_agent_capabilities::host::{CredentialVariables, CredentialVariablesHost};
 use dim_agent_runtime::{
     Modules, Names, SessionLifecycle, SessionLoader, SessionPhase, StateCell,
     names::ServiceCatalog, register_part,
@@ -218,17 +219,20 @@ impl Publication {
 
 pub struct McpPublication {
     settings: Key<SettingsService>,
+    credentials: Key<CredentialVariablesHost>,
 }
 struct Worker {
     port: Arc<Publication>,
     commands: mpsc::Receiver<Command>,
     released: watch::Receiver<()>,
     settings_changed: watch::Receiver<()>,
+    credentials: Arc<dyn CredentialVariables>,
 }
 impl McpPublication {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
+            credentials: names.key()?,
         })
     }
     /// Registers the process row, keyed from `catalog`, and returns its name.
@@ -257,6 +261,7 @@ impl Worker {
     async fn run(mut self, settings: Arc<SettingsService>, stop: CancellationToken) -> Result<()> {
         let mut projection = Projection {
             port: self.port.clone(),
+            credentials: self.credentials.clone(),
             sources: BTreeMap::new(),
             generations: BTreeMap::new(),
             disconnected: BTreeMap::new(),
@@ -338,11 +343,12 @@ impl DynPlugin for McpPublication {
         "McpPublication"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.settings.erase()]
+        vec![self.settings.erase(), self.credentials.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let settings = ctx.require_at(&self.settings)?;
+            let credentials = ctx.require_at(&self.credentials)?;
             let (commands, receiver) = mpsc::channel(64);
             let (released, releases) = watch::channel(());
             let port = Arc::new(Publication {
@@ -355,6 +361,7 @@ impl DynPlugin for McpPublication {
                 commands: receiver,
                 released: releases,
                 settings_changed: config::settings_changes(ctx)?,
+                credentials: credentials.0.clone(),
             };
             ctx.provide_as::<Publication>(port)?;
             let stop = ctx.cancellation_token();
@@ -395,6 +402,7 @@ struct Generation {
 }
 struct Projection {
     port: Arc<Publication>,
+    credentials: Arc<dyn CredentialVariables>,
     sources: BTreeMap<McpSource, Source>,
     generations: BTreeMap<String, Generation>,
     disconnected: BTreeMap<(McpSource, String), String>,
@@ -460,7 +468,7 @@ impl Projection {
                 None => settings
                     .read::<McpPluginServers>(SettingsScope::User, cancel)
                     .await
-                    .map(|snapshot| (snapshot.revision, snapshot.document.entries().collect())),
+                    .map(|snapshot| (snapshot.revision, snapshot.document.entries())),
             };
             let (revision, servers) = match read {
                 Ok(read) => read,
@@ -502,27 +510,38 @@ impl Projection {
             if project_unresolved {
                 error = Some("MCP configuration could not be resolved");
             }
-            for (id, mut config) in servers {
+            let protected = self.credentials.credential_variables();
+            for (id, config) in servers {
                 if project_unresolved {
                     continue;
                 }
-                if let Some(workspace) = &workspace
-                    && let Some(secret) = secrets.get(workspace, &id)
-                    && config::merge_secret(&mut config, secret).is_err()
-                {
-                    error = Some("MCP configuration could not be resolved");
-                    continue;
-                }
-                let config = match source.scope() {
-                    Some(scope) => config::effective(settings, scope, &id, config, &enablement),
-                    None => Ok(config),
+                let secret = workspace
+                    .as_ref()
+                    .and_then(|workspace| secrets.get(workspace, &id));
+                let origin = match source {
+                    McpSource::User => config::Origin::User,
+                    McpSource::Plugins => config::Origin::Plugin,
+                    McpSource::Project(_) => config::Origin::Workspace { overlay: secret },
                 };
-                let Ok(config) = config else {
+                let expansion = config::connected(
+                    settings,
+                    config,
+                    config::Connection {
+                        scope: source.scope(),
+                        id: &id,
+                        secret,
+                        origin,
+                        enablement: &enablement,
+                        environment: &daemon_environment,
+                        protected: &protected,
+                    },
+                );
+                let Ok(expansion) = expansion else {
                     error = Some("MCP configuration could not be resolved");
                     continue;
                 };
                 if !self.disconnected.contains_key(&(source, id.clone())) {
-                    current.insert(id, config);
+                    current.insert(id, expansion.configuration);
                 }
             }
             let degraded = (unreadable && matches!(source, McpSource::Project(_)))
@@ -573,6 +592,7 @@ impl Projection {
             .map(|(source, intent)| {
                 let inactive = intent.current.iter().any(|(id, configuration)| {
                     enabled(configuration)
+                        && !unresolved_url(configuration)
                         && McpServerPlugin::new(id, configuration.clone(), Key::of()).is_err()
                 }) || self.application_failed.keys().any(
                     |(_, failed_source, id)| {
@@ -763,6 +783,15 @@ fn enabled(config: &McpServerSettings) -> bool {
         }
     }
 }
+/// A remote URL that still names an unset reference cannot be judged before
+/// a connection expands it: the source stays applied and only the entry's
+/// connection reports the failure (D19).
+fn unresolved_url(settings: &McpServerSettings) -> bool {
+    matches!(
+        settings,
+        McpServerSettings::Remote { url, .. } if !config::unresolved(url).is_empty()
+    )
+}
 fn connection(port: &Publication, generation: &Generation) -> Arc<McpConnection> {
     Arc::new(McpConnection {
         service: generation.service.clone(),
@@ -782,6 +811,13 @@ mod tests {
         time::Duration,
     };
     use tokio::sync::Notify;
+
+    struct NoCredentials;
+    impl CredentialVariables for NoCredentials {
+        fn credential_variables(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+    }
 
     #[derive(Default)]
     struct Faults {
@@ -850,6 +886,8 @@ mod tests {
             )
             .unwrap();
             let root = Ctx::root().unwrap();
+            root.provide(CredentialVariablesHost(Arc::new(NoCredentials)))
+                .unwrap();
             let faults = Arc::new(Faults::default());
             let catalog = crate::catalog();
             let mut builtins = Modules::new();

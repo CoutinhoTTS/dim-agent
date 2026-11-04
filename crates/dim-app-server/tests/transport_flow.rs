@@ -2222,13 +2222,13 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         let local = |catalog: &Value| catalog["result"]["servers"].as_array().unwrap().iter().find(|entry| entry["id"] == "local").cloned();
         if restart {
             let listed = client.rpc("mcp.catalog", json!({"cwd":project})).await;
-            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":true,"transport":"stdio"})));
+            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":true,"transport":"stdio","referencedVariables":[],"unsetVariables":[]})));
         } else {
             std::fs::create_dir_all(&project).unwrap();
             std::fs::write(project.join(".mcp.json"), json!({"mcpServers":{"local":{"command":"never-run-this-test-command","enabled":true}}}).to_string()).unwrap();
             let original = std::fs::read(project.join(".mcp.json")).unwrap();
             let listed = client.rpc("mcp.catalog", json!({"cwd":project})).await;
-            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":false,"transport":"stdio"})));
+            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":false,"transport":"stdio","referencedVariables":[],"unsetVariables":[]})));
             assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":project,"id":"local","source":"project","expectedVersion":listed["result"]["projectRevision"],"enabled":true})).await);
             assert_eq!(std::fs::read(project.join(".mcp.json")).unwrap(), original);
             let workspace = std::fs::canonicalize(&project).unwrap();
@@ -2236,7 +2236,7 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
             assert_eq!(record, json!({"enabled":{(workspace.to_str().unwrap()):["local"]}}));
         }
         if restart {
-            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http"}]));
+            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http","referencedVariables":[],"unsetVariables":[]}]));
             assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"managed-fixture","expectedVersion":expected})).await);
             let empty = client.rpc("mcp.catalog", json!({})).await;
             assert_ok(&empty);
