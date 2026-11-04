@@ -543,10 +543,7 @@ impl TimelineTree {
             if from > head {
                 break;
             }
-            let page = self
-                .store
-                .query(&key, &query, from, head)
-                .await?;
+            let page = self.store.query(&key, &query, from, head).await?;
             for event in &page.events {
                 match &event.kind {
                     EventKind::BranchStart(_) => started = true,
