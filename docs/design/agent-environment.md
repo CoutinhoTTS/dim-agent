@@ -15,7 +15,7 @@ The model reads the working directory, home, shell, platform, time zone, date an
 
 A Session can be attached by several clients at once, can outlive every client, and can have its settings changed from another client or another process. The model's behaviour depends on those facts: whether to ask, what output the operator can see, what boundary a command will run under, and whether to wait for an answer. Today it works from stale assumptions.
 
-The goal is one reusable pattern: an owner publishes a fact as a prompt source, the model reads it as state, and a branch adopts changes without a new context path.
+Presence follows the prompt-source pattern below. Settings use one-time snapshots and one `settings` tool instead ([EnvironmentSettings](plugins/EnvironmentSettings.md), [AgentSettings](plugins/AgentSettings.md)); they are not a prompt source.
 
 ## 2. Facts and their owners
 
@@ -39,7 +39,7 @@ A fact enters this list only when the model can act on it. A setting or a client
 
 ## 3. Delivery pattern
 
-Each fact is delivered the way Skills already delivers its list ([Skills §Session](../architecture/rust-agent/plugins/Skills.md)):
+Presence is delivered the way Skills already delivers its list ([Skills §Session](../architecture/rust-agent/plugins/Skills.md)):
 
 1. The **owner** registers one prompt source with the Session's `PromptRegistry` from a Session part's `apply`; the registration ends with that part.
 2. Prompt turns a `State` source into one `<dim-state source="…">` Append input. The body is final text produced by the owner, escaped by the owner. The source declares its `order`.
@@ -68,7 +68,7 @@ Current prompt sources are Session-wide in practice. `targets()` fixes `PromptSc
 | Fact | Trigger | Boundary |
 | --- | --- | --- |
 | Clients | the owner's `ClientsChanged` fact; branch open | One snapshot per change; not per attach/detach |
-| Settings | the owner's `settings.changed` event; branch open | One snapshot per change; coalesce |
+| Settings | the `settings.changed` event and branch open | One snapshot per change; origin Session first, other Sessions refresh at `turn/start` |
 | Client view | operator input; branch open | Only if promoted to the model; a boolean, not per-switch |
 | Existing environment, date, instructions | PromptSources' check, including [#986](https://github.com/arcships/dim/issues/986)'s request-boundary direction | Unchanged |
 
@@ -167,10 +167,10 @@ The format follows [design rules §4 rule 8](../architecture/rust-agent/principl
 
 ### 12.5 Settings owners
 
-**Owner:** each settings owner.
+**Setting modules:** each setting module owns its values, its snapshot body and its `settings` tool handler. The tool is [AgentSettings](plugins/AgentSettings.md); the snapshot is [EnvironmentSettings](plugins/EnvironmentSettings.md).
 
 - Declare whether its setting is model-facing, and if so expose the effective value through its own state source with the owner's wording.
-- Declare whether the setting is agent-writable; the write path is [AgentSettings](plugins/AgentSettings.md). Security-boundary settings default to not writable.
+- Provide a snapshot body for values the model should know, and a `settings` handler only where the module allows a change. Security-boundary settings default to not writable.
 
 ## 13. Rule check
 
@@ -186,7 +186,7 @@ The format follows [design rules §4 rule 8](../architecture/rust-agent/principl
 | §4 rule 7 Public events and services | The new `sessionClientsHost` service is public and named; the facts use existing prompt sources and `ConfigureControl`. |
 | §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. The App Server host and the capability parts are plugin-level. If a branch-scoped source is needed, it is raised to Prompt/PromptSources, not implemented here. |
 | §4 rule 9 Timeline holds only decision facts | Presence, settings and view do not enter the Timeline; they are process/Session state. |
-| §4 rule 10 Adopted inputs | The model reads only `<dim-state>` inputs produced by Prompt; no runtime context injection. |
+| §4 rule 10 Adopted inputs | The model reads `<dim-state>` inputs appended to the branch; settings snapshots are appended directly, not through a second context path. |
 | ADR 002 D1 Scope | Clients and settings are Session/process facts; the branch part only adopts; the line view is a client report. |
 | ADR 002 D2 No wiring module | The App Server host is its own connection state; the capability parts own their projection. |
 | ADR 002 D3 Dependencies | The Session part depends on the process host; the branch part depends on Session/branch services; no core depends on the optional feature. |

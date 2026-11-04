@@ -22,9 +22,9 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [Prompt](Prompt.md) | — | `guideEntries`: the input guide's frame, the entries in force and their composition | `Prompt`: the System its publisher adopts carries the composition over the entries in force, and a host-prepared request carries the same composition, placed by Loop | #548 |
 | [PromptSources](PromptSources.md) | — | the named sources, their policy texts at the factory configuration, and the state and rule entries | — | #548 |
 | [EnvironmentClients](EnvironmentClients.md) | App Server read-only `sessionClientsHost` counts (Connection and UiHost) | `dim/environment/clients` source and registration | adoption on the owner's change signal and branch open | #1019 |
-| [EnvironmentSettings](EnvironmentSettings.md) | — (reads the owner's `ExecutionSettingsHost`) | `dim/settings/execution` source and registration | adoption on the owner's change signal and branch open | #1020 |
+| [EnvironmentSettings](EnvironmentSettings.md) | — (reads each setting module's read port) | settings snapshots as `<dim-state>` inputs | one snapshot at branch open and on a Settings change | #1020 |
 | [ClientView](ClientView.md) | per-connection viewed-line record in App Server | — | — | #1021, deferred for model state |
-| [AgentSettings](AgentSettings.md) | — | per-owner settings tools (owner-validated writes) | — | #1022 |
+| [AgentSettings](AgentSettings.md) | — | one `settings` tool: `list`, `get`, `set` | — | #1022 |
 | [Recall](Recall.md) | — | `recall` tool (tells the model its branch's history: turns, a turn, one thing in full, search) | — | M2; #129 |
 | [Hooks](Hooks.md) | `HooksSettings` in App Server: sources `hooks` (user), `hooks-projects` and `hooks-plugins`, the project file `.dimcode/hooks.json` read through FileStorage, `hooks.*` methods and plugin registration | hook catalog, runner, a submit check registered with `submitChecks` for the user-input entries (`UserPromptSubmit`) | tool advice, permission requests, post-tool (`PostToolUse`, `PostToolUseFailure`), Stop and Session-start hooks | M1; #755, #756, #757, #758 |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
