@@ -337,7 +337,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 原因（列出每个来源和它的错误）的 `failed`。
 
 行下方列出在等这个运行时的插件行——因为它是 `off` 或 `down` 而处于 Pending 的那些
-（[PluginManager §2.5](plugins/PluginManager.md#25-runtimes)）——这样"goal 为什么不工作"和它的
+（[PluginManager §2.5](plugins/PluginManager.md#25-runtimes)）——这样"workflow 为什么不工作"和它的
 解决办法在同一个地方。失败时每个来源一行，与 `runtime.list` 报的一致。
 
 ```text
@@ -346,7 +346,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   3 个插件在等 node：goal、scheduler、workflow                            │
+│   1 个插件在等 node：workflow                                             │
 ╰─ Enter 安装或应用 · s 来源 · a 自动 · r 重试 · Esc 关闭 ──────────────────╯
 ```
 
@@ -364,7 +364,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │               https://npmmirror.com/mirrors/node/v24.21.0/…：404          │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   3 个插件在等 node：goal、scheduler、workflow                            │
+│   1 个插件在等 node：workflow                                             │
 ╰─ Enter 重试 · s 把 node 换成 system · Esc 关闭 ───────────────────────────╯
 ```
 
@@ -411,9 +411,9 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ```text
 /plugins
 ╭─ 插件 ────────────────────────────────────────────────────────────────────╮
-│ › goal           on     pending · 等待 node 运行时                        │
+│ › goal           on     ready · 内置                                      │
 │   session-title  on     ready · 内置                                     │
-│   scheduler      on     pending · 等待 node 运行时                        │
+│   scheduler      on     ready · 内置                                      │
 │   workflow       on     pending · 等待 node 运行时                        │
 ╰─ Enter 打开 /runtime · o 开/关 · r 重载 · Esc 关闭 ───────────────────────╯
 ```

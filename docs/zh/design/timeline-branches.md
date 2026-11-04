@@ -43,7 +43,7 @@
 
 | # | 场景 | 状态 |
 | --- | --- | --- |
-| S1 | **插件开的线。** 插件按自己的设计开线。例如 [Pursuit](plugins/Pursuit.md) 的评审者：它是 host 来源的子分支，切在执行者那一轮结束处，结论以输入的形式写回（已实现，[#422](https://github.com/arcships/dim/issues/422)；`runtime/plugins/goal`） | 已交付。本设计给它加上身份块（§7.1）。Goal 对评审者的识别和结束随之改变（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） |
+| S1 | **插件开的线。** 插件按自己的设计开线。例如 [Pursuit](plugins/Pursuit.md) 的评审者：它是 host 来源的子分支，切在执行者那一轮结束处，结论以输入的形式写回（已实现，[#422](https://github.com/arcships/dim/issues/422)；`crates/dim-goal`） | 已交付。本设计给它加上身份块（§7.1）。Goal 对评审者的识别和结束随之改变（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） |
 | S2 | **agent 从 main 开线。** 例如：main 继续读代码时，在两条线上分别验证一个 bug 的两种假设；main 实现的同时，让一条线随改动逐个评审；main 继续工作时，让一条线调研某个 API 或代码的某个区域；在另外的文件上尝试第二种做法 | 本设计 |
 | S3 | **用户从历史某点开线、比较、采纳。** `session.branch_create` 已经能开 host 线。有了本设计，用户可以跟随这些线、与它们对话、结束它们。比较和采纳需要单独设计：采纳一条线，对 main 的上下文和共享的工作区意味着什么 | 以后，在本设计之后 |
 
@@ -571,7 +571,7 @@ BranchLine 的服务只由同一插件里的工具读取。
 9. 两条线编辑同一个文件：后编辑的那条得到 `file_modified_since_read`（已有行为）。
 10. v1、v2 客户端看不到新事件。v3 历史包含它们，`hello.features` 列出 `session.branch_end`。
 
-Goal 流程，放在 `goal.test.mjs` 和 `transport_flow/goal.rs` 中（§7.4）：
+Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 
 11. 用 `session.branch_create` 开出的线，开启输入带身份块，表现与 `main` 完全相同：在这条线上 `set`、它的续跑，以及之后一次重置计数的操作者输入。
 12. 在新的开启输入下创建的 Pursuit 评审者能被识别，它的结论会被应用。工作线的计数不变。

@@ -296,7 +296,7 @@ recovery from it:
 | Rpc `session.submit`, protocol v3 ([connection/tree.rs](../../../crates/dim-app-server/src/connection/tree.rs)) | An optional UUID | — |
 | Agents `sessions.input` (§6.2) | A required, non-empty id, `<source>:<uuid>` by convention | — |
 | The branch Timeline ([core/timeline.rs](../../../crates/dim-agent-runtime/src/core/timeline.rs)), through `Session::input` and `Session::lookup` (`sessions.input`, `sessions.lookup`, Rpc's `session.submit` and `session.input_lookup`) | — | Accepts each id once per branch; `accepted`, `unknown` or `ambiguous` for lookup |
-| Goal branch parts ([goal.ts](../../../runtime/plugins/goal/goal.ts)) | `goal:<uuid>`, through `Branch::input` | Nothing |
+| Goal parts ([crates/dim-goal](../../../crates/dim-goal)) | `goal:<uuid>`, through `TreeCommands::input` | Nothing |
 | Workflow ([engine.ts](../../../runtime/plugins/workflow/engine.ts)) | `workflow:<uuid>` for each stage input and report, stored in its run file before the write | A retry, by the same or a replacement generation, resubmits the same id and settles from the reply |
 | Scheduler ([A.5](../plugins/Scheduler.md#a5-timeline-and-capability-mechanics); runtime in draft [#317](https://github.com/arcships/dim/pull/317)) | `scheduler:<run_id>` and `scheduler-report:<run_id>` | `submitted` or `lost`, never a second write; a report is never written twice |
 | `dimcode` and the Rust TUI ([#312](https://github.com/arcships/dim/pull/312)) | A new UUID for each submit | Nothing yet: an uncertain submit is reported to the user, not looked up |

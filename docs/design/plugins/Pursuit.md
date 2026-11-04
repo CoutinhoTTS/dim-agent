@@ -1,6 +1,6 @@
 # Pursuit
 
-Status: Implemented ([#422](https://github.com/arcships/dim/issues/422), milestone M2; the maintainer's confirmation is recorded in [§12](#12-ready-confirmation)). §13 is an amendment decided with [#427](https://github.com/arcships/dim/issues/427) and implemented with its line end. Scope: an amendment of [Goal](Goal.md)'s Session and branch parts; no new Capability ([ADR 002](../../adr/002-plugin-scope.md)). Language: TypeScript, in Goal's package `runtime/plugins/goal` ([Goal §10](Goal.md#10-implementation)). Depends on: Goal (P5, implemented by [#199](https://github.com/arcships/dim/pull/199)), C5 ([branch TypeScript binding](../branch-typescript.md)); both delivered. Milestone M2, not part of the current plan ([roadmap](../roadmap.md) D3).
+Status: Implemented ([#422](https://github.com/arcships/dim/issues/422), milestone M2; the maintainer's confirmation is recorded in [§12](#12-ready-confirmation)). §13 is an amendment decided with [#427](https://github.com/arcships/dim/issues/427) and implemented with its line end. Scope: an amendment of [Goal](Goal.md)'s Session and branch parts; no new Capability ([ADR 002](../../adr/002-plugin-scope.md)). Language: Rust, in Goal's crate ([Goal §10](Goal.md#10-implementation)). Depends on: Goal (P5, implemented by [#199](https://github.com/arcships/dim/pull/199)), C5 ([branch TypeScript binding](../branch-typescript.md)); both delivered. Milestone M2, not part of the current plan ([roadmap](../roadmap.md) D3).
 
 Requirement ([feature list](../../feature-list.md), Agent behavior): keep working toward an explicit objective and record its completion or blockage, **with completion judged by an evaluator instead of the model doing the work**.
 
@@ -39,9 +39,9 @@ Clients read it all from the working branch's events ([Goal A.3](Goal.md#a3-read
 
 | Part | Change |
 | --- | --- |
-| `session.ts` | `session.goal.set` accepts `judge?: "model" \| "evaluator"` (default `model`; other values `invalid_params`) and marks the `set` objective block `judge="evaluator"` |
-| `goal.ts` | The fold reads `judge` (from the `set`, kept by `edit`); under the evaluator judge a worker `completed` block is a request and leaves the status unchanged, `active` while the goal runs (the exception in Goal A16). The request is neither `set` nor `resume`, so it does not move `A`: the count stays the continuations after `max(A, last_operator)` ([Goal §2](Goal.md#2-data-and-state)). Goal's `decided` also counts the `branch/create` for `goal:evaluate:N` as `N`'s decision. The decisions and texts below |
-| `branch.ts` | Adds the Dispatcher keys `branch/create` and `branch/create-failed`; creates the evaluator; on an evaluator branch, takes the evaluator role (§4.2) |
+| `session.rs` | `session.goal.set` accepts `judge?: "model" \| "evaluator"` (default `model`; other values `invalid_params`) and marks the `set` objective block `judge="evaluator"` |
+| `fold.rs` | The fold reads `judge` (from the `set`, kept by `edit`); under the evaluator judge a worker `completed` block is a request and leaves the status unchanged, `active` while the goal runs (the exception in Goal A16). The request is neither `set` nor `resume`, so it does not move `A`: the count stays the continuations after `max(A, last_operator)` ([Goal §2](Goal.md#2-data-and-state)). Goal's `decided` also counts the `branch/create` for `goal:evaluate:N` as `N`'s decision. The decisions and texts below |
+| `branch.rs` | Adds the Dispatcher keys `branch/create` and `branch/create-failed`; creates the evaluator; on an evaluator branch, takes the evaluator role (§4.2) |
 
 No new service, Settings field or event type, and no new injection beyond Goal's `sessionLifecycle` (§13). The evaluator branch is an ordinary host-sourced child; its first Queue input is the prompt ([TimelineTree `first_input`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs)). Goal there has no goal of its own and writes the start `clear` as on any child ([Goal §3.4](Goal.md#34-a-new-branch-clears-the-inherited-goal)), so it never continues.
 
@@ -122,7 +122,7 @@ The evaluator is an ordinary child branch with the working branch's permission p
 
 ## 9. Acceptance
 
-Flows with a fake model for worker and evaluator, in `goal.test.mjs` and `transport_flow/goal.rs`:
+Flows with a fake model for worker and evaluator, in the crate's flow tests under `crates/dim-goal/tests`:
 
 1. Evaluator judge: continuations are Goal's. The worker reports `completed`; the status stays `active`; at that turn's end one evaluator is created at `N` with `goal:evaluate:N` and no continuation is written. `DONE` gives `completed` by the evaluator.
 2. `CONTINUE` with a two-line list gives the conclusion and one continuation (`count` + 1 over the continuations after `max(A, last_operator)`; neither the worker's request nor the conclusion moves `A` or resets the count, and C5 applies as at any turn end); `BLOCKED` gives `blocked`; at `maxContinuations`, `CONTINUE` gives pause (`limit`).
@@ -182,9 +182,9 @@ Interfaces:
 - The branch TypeScript binding exposes `end(id, source)` and `TimelineInfo.source` in the places that expose `create` and `input` today:
   - the generated `npm/branch-services.d.ts`;
   - the `treeCommands` row of the [binding table](../branch-typescript.md);
-  - Goal's own `TreeCommands` type in `branch.ts`.
+  - Goal's own `TreeCommands` binding in `branch.rs`.
 
-Acceptance, with a fake model, in `goal.test.mjs` and `transport_flow/goal.rs`:
+Acceptance, with a fake model, in the crate's flow tests under `crates/dim-goal/tests`:
 
 1. The evaluator is recognized from its source. A host line whose prompt has the same first line but whose operation id is different takes no role.
 2. After `DONE`, `CONTINUE`, `BLOCKED` or `failed` is decided, `E` is ended exactly once, with source `goal:evaluate:N`, and `B` records `branch/ended` for it.

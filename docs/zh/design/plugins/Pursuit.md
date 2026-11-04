@@ -1,6 +1,6 @@
 # Pursuit
 
-状态：已实现（[#422](https://github.com/arcships/dim/issues/422)，里程碑 M2；维护者的确认记录在 [§12](#12-ready-确认)）。§13 是随 [#427](https://github.com/arcships/dim/issues/427) 决定的修订，随其线结束一起实现。作用域：对 [Goal](Goal.md) 的 Session 部分与分支部分的修订，不新增 Capability（[ADR 002](../../adr/002-plugin-scope.md)）。语言：TypeScript，放在 Goal 的包 `runtime/plugins/goal` 里（[Goal §10](Goal.md#10-实现)）。依赖：Goal（P5，已由 [#199](https://github.com/arcships/dim/pull/199) 实现）、C5（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）；都已交付。里程碑 M2，不在当前计划内（[路线图](../../../design/roadmap.md) D3）。
+状态：已实现（[#422](https://github.com/arcships/dim/issues/422)，里程碑 M2；维护者的确认记录在 [§12](#12-ready-确认)）。§13 是随 [#427](https://github.com/arcships/dim/issues/427) 决定的修订，随其线结束一起实现。作用域：对 [Goal](Goal.md) 的 Session 部分与分支部分的修订，不新增 Capability（[ADR 002](../../adr/002-plugin-scope.md)）。语言：Rust，放在 Goal 的 crate 里（[Goal §10](Goal.md#10-实现)）。依赖：Goal（P5，已由 [#199](https://github.com/arcships/dim/pull/199) 实现）、C5（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）；都已交付。里程碑 M2，不在当前计划内（[路线图](../../../design/roadmap.md) D3）。
 
 需求（[功能列表](../../../feature-list.md)，Agent 行为）：朝明确的目标持续工作，记录完成或受阻，**并且由评审者而不是干活的模型判断是否完成**。
 
@@ -39,9 +39,9 @@
 
 | 部分 | 修改 |
 | --- | --- |
-| `session.ts` | `session.goal.set` 接受 `judge?: "model" \| "evaluator"`（默认 `model`；其他值返回 `invalid_params`），在 `set` 目标块上标记 `judge="evaluator"` |
-| `goal.ts` | 折叠读取 `judge`（来自 `set`，`edit` 保留）；评审裁判下，干活模型的 `completed` 块是请求，不改变状态，目标运行时为 `active`（Goal A16 中的例外）。请求既不是 `set` 也不是 `resume`，所以不移动 `A`：计数仍是 `max(A, last_operator)` 之后的续跑数（[Goal §2](Goal.md#2-数据与状态)）。Goal 的 `decided` 也把 `goal:evaluate:N` 的 `branch/create` 算作 `N` 的决定。以及下面的决策和文本 |
-| `branch.ts` | Dispatcher key 新增 `branch/create` 和 `branch/create-failed`；创建评审分支；在评审分支上承担评审角色（§4.2） |
+| `session.rs` | `session.goal.set` 接受 `judge?: "model" \| "evaluator"`（默认 `model`；其他值返回 `invalid_params`），在 `set` 目标块上标记 `judge="evaluator"` |
+| `fold.rs` | 折叠读取 `judge`（来自 `set`，`edit` 保留）；评审裁判下，干活模型的 `completed` 块是请求，不改变状态，目标运行时为 `active`（Goal A16 中的例外）。请求既不是 `set` 也不是 `resume`，所以不移动 `A`：计数仍是 `max(A, last_operator)` 之后的续跑数（[Goal §2](Goal.md#2-数据与状态)）。Goal 的 `decided` 也把 `goal:evaluate:N` 的 `branch/create` 算作 `N` 的决定。以及下面的决策和文本 |
+| `branch.rs` | Dispatcher key 新增 `branch/create` 和 `branch/create-failed`；创建评审分支；在评审分支上承担评审角色（§4.2） |
 
 不新增服务、Settings 字段或事件类型，新增的注入只有 Goal 的 `sessionLifecycle`（§13）。评审分支是普通的 host 来源子分支；它的第一条 Queue 输入是提示词（[TimelineTree `first_input`](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs)）。那里的 Goal 没有属于自己的目标，并像在任何子分支上一样写入起始 `clear`（[Goal §3.4](Goal.md#34-新分支清除继承的目标)），所以它不会续跑。
 
@@ -122,7 +122,7 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 
 ## 9. 验收
 
-干活的模型和评审者都用假模型，放在 `goal.test.mjs` 和 `transport_flow/goal.rs`：
+干活的模型和评审者都用假模型，放在 `crates/dim-goal/tests` 的流程测试中：
 
 1. 评审裁判：续跑是 Goal 的。干活的模型报告 `completed`；状态保持 `active`；该回合结束时在 `N` 处创建一个带 `goal:evaluate:N` 的评审分支，不写续跑。`DONE` 得到评审者判定的 `completed`。
 2. 带两行清单的 `CONTINUE` 得到结论和一次续跑（在 `max(A, last_operator)` 之后的续跑上 `count` + 1；干活模型的请求和结论都不移动 `A`，也不重置计数，C5 与任何回合结束时一样适用）；`BLOCKED` 得到 `blocked`；达到 `maxContinuations` 时 `CONTINUE` 得到暂停（`limit`）。
@@ -182,9 +182,9 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 - 分支 TypeScript 绑定在现在暴露 `create`、`input` 的地方暴露 `end(id, source)` 和 `TimelineInfo.source`：
   - 生成的 `npm/branch-services.d.ts`；
   - [绑定表](../../../design/branch-typescript.md)中的 `treeCommands` 一行；
-  - Goal 在 `branch.ts` 里自己的 `TreeCommands` 类型。
+  - Goal 在 `branch.rs` 里自己的 `TreeCommands` 绑定。
 
-验收，使用假模型，放在 `goal.test.mjs` 和 `transport_flow/goal.rs` 中：
+验收，使用假模型，放在 `crates/dim-goal/tests` 的流程测试中：
 
 1. 评审者从来源被识别。prompt 首行相同、但 operation id 不同的 host 线不担任任何角色。
 2. `DONE`、`CONTINUE`、`BLOCKED` 或 `failed` 决定之后，`E` 恰好被结束一次，来源是 `goal:evaluate:N`，`B` 上记录它的 `branch/ended`。

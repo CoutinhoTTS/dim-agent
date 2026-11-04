@@ -43,7 +43,7 @@ The rule from design rules §2 still holds. When the work needs a different iden
 
 | # | Scenario | Status |
 | --- | --- | --- |
-| S1 | **Plugin lines.** A plugin opens a line under its own design. Example: [Pursuit](plugins/Pursuit.md)'s evaluator, a host-sourced child cut at the worker's turn end, whose conclusion goes back as input (implemented, [#422](https://github.com/arcships/dim/issues/422); `runtime/plugins/goal`) | Delivered. This design adds the identity block (§7.1). Goal's recognition and end of the evaluator change with it ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) |
+| S1 | **Plugin lines.** A plugin opens a line under its own design. Example: [Pursuit](plugins/Pursuit.md)'s evaluator, a host-sourced child cut at the worker's turn end, whose conclusion goes back as input (implemented, [#422](https://github.com/arcships/dim/issues/422); `crates/dim-goal`) | Delivered. This design adds the identity block (§7.1). Goal's recognition and end of the evaluator change with it ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) |
 | S2 | **The agent opens lines from main.** Examples: test two hypotheses for a bug on two lines while main keeps reading; implement on main while a line reviews each change as it lands; research an API or one area of the code while main continues; try a second approach on separate files | This design |
 | S3 | **The user opens a line from a history point, compares it, adopts it.** `session.branch_create` already opens host lines. With this design the user can follow those lines, talk to them and end them. Compare and adopt need a design of their own: what adopting a line means for main's context and for a shared workspace | Later, after this design |
 
@@ -571,7 +571,7 @@ These are flows with a fake model, in `branch_flow.rs`, `flows.rs` and the App S
 9. Two lines edit the same file: the second gets `file_modified_since_read` (existing behavior).
 10. v1 and v2 clients do not see the new kinds. v3 history includes them, and `hello.features` lists `session.branch_end`.
 
-Goal flows, in `goal.test.mjs` and `transport_flow/goal.rs` (§7.4):
+Goal flows, in the crate's flow tests under `crates/dim-goal/tests` (§7.4):
 
 11. A line opened with `session.branch_create`, whose opening input carries the identity block, behaves exactly as `main` does: `set` on that line, its continuations, and a later operator input that resets the count.
 12. A Pursuit evaluator created under the new opening input is recognized and its conclusion is applied. The working line's count is unchanged.
