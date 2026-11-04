@@ -283,6 +283,18 @@ async fn a_reuse_job_binds_its_first_session_and_later_runs_reuse_it() {
 
     let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
     assert_eq!(listed["jobs"][0]["session_id"], json!(bound), "{listed}");
+    let diagnostics = server.diagnostics();
+    let scheduler = diagnostics
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "Scheduler")
+        .unwrap();
+    assert!(
+        scheduler.injects.iter().any(|dependency| dependency.key
+            == rutis_bridge::session::host_key("sessions").erase()
+            && dependency.status == rutis::host::diagnostics::DependencyStatus::Ready),
+        "Scheduler's sessions dependency must be resolved in the composed runtime"
+    );
 
     server.restart("Agents").await.unwrap();
 
