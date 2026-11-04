@@ -289,16 +289,10 @@ pub(crate) fn convert(
             .or_default()
             .insert("max_completion_tokens".into(), json!(max_tokens as u32));
     }
+    // Anthropic can only continue stored thinking when this request asks for
+    // thinking; with it off every stored thinking part is left out, exactly
+    // as a part without continuation data for this protocol would be.
     if *kind == ProviderKind::Anthropic
-        && options.prompt.iter().any(|message| {
-            matches!(
-                message,
-                LanguageModelMessage::Assistant { content, .. }
-                    if content
-                        .iter()
-                        .any(|part| matches!(part, AssistantPart::Reasoning(_)))
-            )
-        })
         && !options
             .provider_options
             .as_ref()
@@ -308,11 +302,19 @@ pub(crate) fn convert(
             .and_then(Value::as_str)
             .is_some_and(|kind| matches!(kind, "enabled" | "adaptive"))
     {
-        return Err(error(
-            request,
-            "config",
-            "Anthropic thinking continuation requires enabled or adaptive thinking",
-        ));
+        let mut dropped = 0;
+        for message in &mut options.prompt {
+            if let LanguageModelMessage::Assistant { content, .. } = message {
+                content.retain(|part| {
+                    let keep = !matches!(part, AssistantPart::Reasoning(_));
+                    dropped += usize::from(!keep);
+                    keep
+                });
+            }
+        }
+        for _ in 0..dropped {
+            warn_dropped(kind);
+        }
     }
     let call_id = request
         .metadata
@@ -787,7 +789,7 @@ fn metadata_protocol(metadata: &ContentMetadata) -> ProviderKind {
 }
 
 /// Attaches the native continuation fields a stored part carries, and says
-/// whether the part belongs in the request. A thinking part without
+/// whether the part belongs in the request. A thinking part without usable
 /// continuation data for this protocol stays in the Timeline and in display,
 /// but is not sent back: the endpoint cannot continue it, and an empty or
 /// invented signature is rejected by a strict Anthropic implementation.
@@ -822,17 +824,11 @@ fn continuation(
                 ProviderKind::Anthropic
                     | ProviderKind::OpenaiResponses
                     | ProviderKind::XaiResponses
+                    | ProviderKind::Bedrock
             )
         {
             warn_dropped(kind);
             return Ok(false);
-        }
-        if thinking && *kind == ProviderKind::Bedrock {
-            return Err(error(
-                request,
-                path,
-                "thinking requires native continuation metadata",
-            ));
         }
         return Ok(true);
     };

@@ -246,13 +246,22 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
             api_key: None,
             preset: None,
         });
-        assert!(
-            host.0
-                .invoke(Arc::new(request), cross, CancellationToken::new())
-                .await
-                .is_err()
-        );
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        // Stored Bedrock continuation data never reaches another protocol:
+        // the request is built without it instead of failing.
+        let mut foreign = host
+            .0
+            .invoke(Arc::new(request), cross, CancellationToken::new())
+            .await
+            .expect("another protocol's metadata must not fail the request");
+        while let Some(chunk) = foreign.next().await {
+            // The mock answers in Bedrock's framing; only the request matters.
+            let _ = chunk;
+        }
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 3);
+        let foreign = String::from_utf8(sent[2].body.clone()).unwrap();
+        assert!(!foreign.contains("signature-A"), "{foreign}");
+        assert!(!foreign.contains("redactedContent"), "{foreign}");
         for config in [
             json!({"topK":7}),
             json!({"reasoning":{"effort":"high"}}),
@@ -294,7 +303,7 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
                 .await
                 .is_err()
         );
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
         let url_image = ModelRequest::new(
             "bedrock",
             "model-url-image",
@@ -327,7 +336,7 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
                 ..
             })
         ));
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
         let cancellation = CancellationToken::new();
         let mut cancelled = host
             .0
@@ -727,16 +736,26 @@ async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
     );
     assert_eq!(body["store"], false);
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
-    assert!(
-        host.0
-            .invoke(
-                Arc::new(request),
-                connection(ModelProtocol::OpenaiResponses),
-                CancellationToken::new()
-            )
-            .await
-            .is_err()
-    );
+    // xAI continuation data does not reach the OpenAI Responses protocol: the
+    // request is built without the reasoning item instead of failing.
+    let mut foreign = host
+        .0
+        .invoke(
+            Arc::new(request),
+            connection(ModelProtocol::OpenaiResponses),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("another protocol's metadata must not fail the request");
+    while let Some(chunk) = foreign.next().await {
+        // The mock answers in xAI's framing; only the request matters.
+        let _ = chunk;
+    }
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 3);
+    let foreign = String::from_utf8(sent[2].body.clone()).unwrap();
+    assert!(!foreign.contains("rs-native"), "{foreign}");
+    assert!(!foreign.contains("opaque-native"), "{foreign}");
     for protocol in [ModelProtocol::Xai, ModelProtocol::XaiResponses] {
         for config in [
             ModelConfig {
@@ -769,7 +788,7 @@ async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
             );
         }
     }
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
     let mut held = Vec::new();
     for protocol in [ModelProtocol::Xai, ModelProtocol::XaiResponses] {
         let mut request =
@@ -2755,10 +2774,24 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             assert!(events.iter().any(|event|matches!(&event.kind,EventKind::ModelContent(_))),"{kind}");
             if kind == "anthropic" {
                 let host = agent.root().get::<ModelHost>().unwrap();
-                let request=Arc::new(ModelRequest::new("local",server.model_id(),vec![Message {role:Role::Assistant,content:MessageContent::Parts(vec![MessagePart::Thinking {thinking:"signed".into(),start_time:None,end_time:None,provider_metadata:Some(ContentMetadata::Anthropic {signature:"original-signature".into()})}])}]));
+                // Thinking off: stored signed thinking is left out of the
+                // request instead of failing it.
+                let request=Arc::new(ModelRequest::new("local",server.model_id(),vec![
+                    Message::text(Role::User,"question"),
+                    Message {role:Role::Assistant,content:MessageContent::Parts(vec![
+                        MessagePart::Thinking {thinking:"signed".into(),start_time:None,end_time:None,provider_metadata:Some(ContentMetadata::Anthropic {signature:"original-signature".into()})},
+                        MessagePart::Text {text:"kept".into(),start_time:None,end_time:None,provider_metadata:None},
+                    ])}
+                ]));
                 let connection=ModelConnection::Http(HttpModelConnection {protocol:ModelProtocol::Anthropic,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:None,api_key:None,preset:None});
-                let Err(error)=host.0.invoke(request,connection,CancellationToken::new()).await else {panic!("signed thinking was silently dropped")};
-                assert!(error.to_string().contains("requires enabled or adaptive"));
+                let before=server.endpoint.requests.lock().unwrap().len();
+                let mut stream=host.0.invoke(request,connection,CancellationToken::new()).await.expect("stored thinking with thinking off must not fail the request");
+                while let Some(chunk)=stream.next().await{chunk.unwrap();}
+                let requests=server.endpoint.requests.lock().unwrap();
+                assert_eq!(requests.len(),before+1);
+                let sent=requests.last().unwrap().2.to_string();
+                assert!(!sent.contains("original-signature"),"the signature reached the request: {sent}");
+                assert!(sent.contains("kept"),"{sent}");
             }
             agent.close().await.unwrap();server.close().await;
         }
@@ -3016,6 +3049,98 @@ async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
         agent.close().await.unwrap();
         claude.close().await;
         chat.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+/// #1038: a Session whose Chat model stored thinking without continuation
+/// data moves to Bedrock. The turn completes and the thinking is left out of
+/// the Bedrock request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_bedrock_leaves_stored_chat_thinking_out_of_the_turn() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let server = MockServer::start().await;
+        let body = [
+            bedrock_frame("messageStart", json!({"role": "assistant"})),
+            bedrock_frame(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"text": "answer"}}),
+            ),
+            bedrock_frame("contentBlockStop", json!({"contentBlockIndex": 0})),
+            bedrock_frame("messageStop", json!({"stopReason": "end_turn"})),
+            bedrock_frame(
+                "metadata",
+                json!({"usage": {"inputTokens": 5, "outputTokens": 3}}),
+            ),
+        ]
+        .concat();
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/vnd.amazon.eventstream")
+                    .set_body_bytes(body),
+            )
+            .mount(&server)
+            .await;
+        let root = rutis::Ctx::root().unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        // The history a Chat model leaves behind: thinking without data.
+        let request = ModelRequest::new(
+            "bedrock",
+            "anthropic.model",
+            vec![
+                Message::text(Role::User, "question"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        MessagePart::Thinking {
+                            thinking: "why".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: None,
+                        },
+                        MessagePart::Text {
+                            text: "earlier answer".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: None,
+                        },
+                    ]),
+                },
+                Message::text(Role::User, "again"),
+            ],
+        );
+        let mut output = host
+            .0
+            .invoke(
+                Arc::new(request),
+                ModelConnection::Bedrock(BedrockModelConnection {
+                    base_url: server.uri(),
+                    network: Default::default(),
+                    headers: Default::default(),
+                    auth: BedrockAuth::Bearer("bearer".into()),
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("missing Bedrock thinking data must not fail the request");
+        let mut text = String::new();
+        while let Some(chunk) = output.next().await {
+            if let ModelChunk::Text(delta) = chunk.unwrap() {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(text, "answer");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let sent = String::from_utf8(requests[0].body.clone()).unwrap();
+        assert!(!sent.contains("reasoningContent"), "{sent}");
+        assert!(sent.contains("earlier answer"), "{sent}");
+        root.shutdown().await.unwrap();
     })
     .await
     .unwrap();

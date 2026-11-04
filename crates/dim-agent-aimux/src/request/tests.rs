@@ -843,10 +843,7 @@ fn stored_foreign_continuation_data_builds_as_if_absent() {
     .unwrap();
     let content = replied(&prepared);
     assert_no_continuation_data(content);
-    assert!(
-        !content.iter().any(is_reasoning),
-        "{content:?}"
-    );
+    assert!(!content.iter().any(is_reasoning), "{content:?}");
     assert_eq!(text_of(content), ["earlier answer"]);
 
     // A thinking part from the Responses protocol does not block an Anthropic
@@ -909,6 +906,66 @@ fn stored_foreign_continuation_data_builds_as_if_absent() {
             error.to_string().contains("does not fit this content kind"),
             "{error}"
         );
+    }
+}
+
+/// #1038: Anthropic leaves stored thinking out when thinking is off, and
+/// replays the stored signature when it is on.
+#[test]
+fn anthropic_replays_stored_thinking_only_with_thinking_on() {
+    let prepared = convert(
+        &switch_request(anthropic_thinking_reply(), Value::Null),
+        &ProviderKind::Anthropic,
+        None,
+    )
+    .unwrap_or_else(|error| panic!("thinking off must build: {error}"));
+    let content = replied(&prepared);
+    assert_no_continuation_data(content);
+    assert!(!content.iter().any(is_reasoning), "{content:?}");
+    assert_eq!(text_of(content), ["earlier answer"]);
+
+    let prepared = convert(
+        &switch_request(anthropic_thinking_reply(), thinking_on()),
+        &ProviderKind::Anthropic,
+        None,
+    )
+    .unwrap();
+    let content = replied(&prepared);
+    let reasoning = content
+        .iter()
+        .find_map(|part| match part {
+            AssistantPart::Reasoning(part) => Some(&part.provider_options),
+            _ => None,
+        })
+        .expect("thinking is replayed");
+    assert_eq!(
+        reasoning.as_ref().unwrap()["anthropic"]["signature"],
+        json!("signature-from-claude")
+    );
+    assert_eq!(text_of(content), ["earlier answer"]);
+}
+
+/// #1038: Bedrock leaves a stored thinking part out when it has no data for
+/// Bedrock, whether it has none at all or another protocol's.
+#[test]
+fn bedrock_leaves_stored_thinking_without_its_data_out() {
+    for assistant in [
+        anthropic_thinking_reply(),
+        json!([
+            {"type": "thinking", "thinking": "why"},
+            {"type": "text", "text": "earlier answer"}
+        ]),
+    ] {
+        let prepared = convert(
+            &switch_request(assistant, Value::Null),
+            &ProviderKind::Bedrock,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let content = replied(&prepared);
+        assert_no_continuation_data(content);
+        assert!(!content.iter().any(is_reasoning), "{content:?}");
+        assert_eq!(text_of(content), ["earlier answer"]);
     }
 }
 
