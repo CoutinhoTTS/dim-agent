@@ -3785,6 +3785,56 @@ async fn a_host_lines_end_says_nothing_to_main() {
     .await;
     assert!(blocks_with(&events, "<dim-branch-ended").is_empty());
     assert!(line_block(&events).is_none());
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let facts = local_events(&session, &host).await;
+    let anchor = facts[facts.len() - 2].clone();
+    let query = TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        include_publishing: true,
+        from_event: Some(anchor.id.clone()),
+        from_sequence: None,
+        order_by: Default::default(),
+        direction: TimelineQueryDirection::Descending,
+        kinds: vec![],
+        flags: vec![],
+        event_id: None,
+        predicate: None,
+        limit: std::num::NonZeroU64::new(2).unwrap(),
+        offset: 1,
+    };
+    let page = tree.query(host.clone(), query.clone()).await.unwrap();
+    assert_eq!(page.through, facts.last().unwrap().sequence);
+    assert_eq!(page.events.len(), 2);
+    assert_eq!(page.events[0].id, facts[facts.len() - 3].id);
+    assert!(
+        page.events
+            .iter()
+            .all(|event| event.sequence < anchor.sequence)
+    );
+    assert!(matches!(
+        tree.query(
+            host.clone(),
+            TimelineQuery {
+                scope: TimelineQueryScope::Chain,
+                ..query.clone()
+            }
+        )
+        .await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    assert!(
+        tree.query(
+            host,
+            TimelineQuery {
+                from_event: Some("missing".into()),
+                ..query
+            }
+        )
+        .await
+        .unwrap()
+        .events
+        .is_empty()
+    );
     soon(agent.close()).await.unwrap();
 }
 
