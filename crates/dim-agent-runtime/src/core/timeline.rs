@@ -502,17 +502,6 @@ impl Timeline {
         }
         Ok(through)
     }
-    /// This branch's events in `start..=end` that the store does not hold yet:
-    /// every event above the published head is still in the hot window, which
-    /// also keeps published events until they are dispatched.
-    fn publishing(&self, start: u64, end: u64) -> Vec<Arc<AgentEvent>> {
-        let data = self.0.data.lock().unwrap();
-        data.hot
-            .iter()
-            .filter(|record| record.event.sequence >= start && record.event.sequence <= end)
-            .map(|record| record.event.clone())
-            .collect()
-    }
     /// The event a context checkpoint is anchored at. It is one fact, so it is
     /// read as one event and never as a range that reaches the cut: this
     /// branch's hot window while it holds the event, otherwise a one-event
@@ -577,13 +566,25 @@ impl Timeline {
     /// fact is returned once. A caller that holds live events releases the ones
     /// above the cutoff ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
     pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
-        let published = self.sequence();
-        let through = if query.include_publishing {
-            self.committed()
-        } else {
-            published
+        let (published, through, tail) = {
+            let data = self.0.data.lock().unwrap();
+            let through = if query.include_publishing {
+                data.allocated
+            } else {
+                data.published
+            };
+            let tail = (through > data.published).then(|| {
+                data.hot
+                    .iter()
+                    .filter(|record| {
+                        record.event.sequence > data.published && record.event.sequence <= through
+                    })
+                    .map(|record| record.event.clone())
+                    .collect::<Vec<_>>()
+            });
+            (data.published, through, tail)
         };
-        self.query_page(query, published, through).await
+        self.query_page(query, published, through, tail).await
     }
     /// [`Self::query`] with this branch clipped at `published` and, when
     /// `through` names a committed sequence above it, the branch's own facts in
@@ -596,15 +597,12 @@ impl Timeline {
         query: TimelineQuery,
         published: u64,
         through: u64,
+        tail: Option<Vec<Arc<AgentEvent>>>,
     ) -> Result<TimelineQueryReply> {
         use TimelineQueryDirection::Descending;
 
         query.validate()?;
-        let tail = if through > published {
-            Some((self.publishing(published + 1, through), through))
-        } else {
-            None
-        };
+        let tail = tail.map(|events| (events, through));
         let clips: Vec<(String, u64)> = match query.scope {
             TimelineQueryScope::Branch => vec![(self.0.key.branch_id.clone(), published)],
             TimelineQueryScope::Chain => self

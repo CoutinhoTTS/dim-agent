@@ -338,8 +338,9 @@ the tree's read at the fixed head it owns: `TreeCommands::query` for both
 directions and `TreeCommands::batch_end` for the page's ends
 ([ADR 021](../../adr/021-reads-follow-the-state-owner.md) D2,
 [timeline read ownership §2](../timeline-read-ownership.md#2-owners-and-their-reads)).
-A line that ends while its window is read switches to the tree and answers from
-there; the waiting read then sees the end and the events up to the fixed head.
+A line that ends while its window is read answers `BranchEnded`; the read is
+not handed over mid-flight, and the client retries, which finds the line ended
+and reads it through the tree at the fixed head.
 The App Server has no store read on this path. The window requires the native store: a host without one
 (`ServerConfig.database_path: None`) advertises no
 `session.history.latestTurn` and answers a window request
