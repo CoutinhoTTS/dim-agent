@@ -1139,6 +1139,12 @@ impl McpServer {
             if cancel.is_cancelled() {
                 return Err(ViewFailure::Refused(McpServerError::Cancelled));
             }
+            // Connecting counts against the limit, and a request sent after
+            // the deadline would only be cancelled at once. Nothing left the
+            // connection, so this is a refusal, not an unanswered request.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ViewFailure::Refused(limit.timeout()));
+            }
             let mut handle = peer
                 .send_cancellable_request(request.clone(), PeerRequestOptions::no_options())
                 .await

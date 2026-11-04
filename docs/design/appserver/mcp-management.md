@@ -443,7 +443,8 @@ A timeout fails the call with an error that names the limit and where it came fr
 `timeout` or the default, and keeps the existing `Timeout` failure class, so retry behaviour and
 the error code are unchanged; only the message carries the limit. The limit is one deadline
 measured from the call's start and shared by the session-expiry retry, so the call fails at its
-limit whichever attempt is running. dim sends
+limit whichever attempt is running; connecting counts against it, and a call whose limit has
+passed before its request leaves fails with the same timeout and sends nothing. dim sends
 `notifications/cancelled` for that request id with the same sentence as its reason, so a server
 knows the work it is still doing is unwanted. A user's interrupt cancels at once, as before, and
 sends the same notice; that path already sent it, and a test now pins it.

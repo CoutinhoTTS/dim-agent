@@ -160,6 +160,8 @@ struct Remote {
     release_delete: Notify,
     repeating: AtomicBool,
     nullable: AtomicBool,
+    /// Makes the handshake take longer than a short entry `timeout`.
+    slow_initialize: AtomicBool,
     session: AtomicUsize,
     session_check: AtomicBool,
     expire_once: AtomicBool,
@@ -182,6 +184,7 @@ impl Remote {
             release_delete: Notify::new(),
             repeating: AtomicBool::new(false),
             nullable: AtomicBool::new(false),
+            slow_initialize: AtomicBool::new(false),
             session: AtomicUsize::new(0),
             session_check: AtomicBool::new(false),
             expire_once: AtomicBool::new(false),
@@ -214,6 +217,9 @@ async fn rpc(
     let result = match method {
         "initialize" => {
             remote.initializes.fetch_add(1, Ordering::SeqCst);
+            if remote.slow_initialize.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            }
             response_session = format!("s{}", remote.session.fetch_add(1, Ordering::SeqCst) + 1);
             json!({"protocolVersion":message["params"]["protocolVersion"],"capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"local-mcp","version":"1"}})
         }
@@ -735,6 +741,59 @@ async fn a_tool_call_waits_its_entry_timeout_and_tells_the_server() {
     let reason = notices[0]["reason"].as_str().unwrap();
     assert!(reason.contains("1000 ms"), "{reason}");
     assert!(reason.contains("the entry's timeout"), "{reason}");
+    fixture.close().await;
+    stop.cancel();
+    server.await.unwrap().unwrap();
+}
+
+/// #953 D20: connecting counts against the call's limit. A call whose limit
+/// passed while the connection was starting fails with the entry's timeout
+/// and the request never leaves, so the server sees no call and no
+/// cancellation.
+#[tokio::test]
+async fn a_call_whose_deadline_passed_while_connecting_sends_nothing() {
+    let remote = Remote::new();
+    remote.slow_initialize.store(true, Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/mcp", post(rpc).get(events).delete(delete))
+                .with_state(remote.clone()),
+        )
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future(),
+    );
+    let fixture = Fixture::configured(json!({
+        "type":"http","url":url,"auth":{"type":"bearer","token":"fixture-only"},"timeout":1000
+    }))
+    .await;
+    let cancel = CancellationToken::new();
+    // Acquiring the entry opens nothing; the call starts the connection, and
+    // this fixture's handshake outlasts the entry's one-second limit.
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let error = connection
+        .call("echo".into(), Default::default(), &cancel)
+        .await
+        .unwrap_err();
+    assert!(started.elapsed() >= Duration::from_millis(1000));
+    let message = error.to_string();
+    assert!(message.contains("1000 ms"), "{message}");
+    assert!(message.contains("the entry's timeout"), "{message}");
+    // A request sent after the deadline would still reach the fixture; give
+    // one time to arrive before asserting that none did.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(remote.initializes.load(Ordering::SeqCst), 1);
+    assert_eq!(remote.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(remote.cancelled.load(Ordering::SeqCst), 0);
     fixture.close().await;
     stop.cancel();
     server.await.unwrap().unwrap();
