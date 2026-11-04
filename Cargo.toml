@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-agent-capabilities", "crates/dim-agent-aimux", "crates/dim-agent-attachments", "crates/dim-agent-questions", "crates/dim-app-server", "crates/dim-client", "crates/dim-acp", "crates/dim-cli", "crates/dim-oauth", "crates/dim-session-title", "crates/dimcode", "crates/dim-migration", "xtask", "tests/extension-a", "tests/extension-b", "tests/integration"]
+members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-agent-capabilities", "crates/dim-agent-aimux", "crates/dim-agent-attachments", "crates/dim-agent-questions", "crates/dim-agent-scheduler", "crates/dim-app-server", "crates/dim-client", "crates/dim-acp", "crates/dim-cli", "crates/dim-oauth", "crates/dim-session-title", "crates/dimcode", "crates/dim-migration", "xtask", "tests/extension-a", "tests/extension-b", "tests/integration"]
 exclude = ["vendor/aimux", "vendor/grok-build"]
 
 [workspace.package]
