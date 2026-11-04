@@ -8571,14 +8571,6 @@
     },
     {
       "from": "dim_agent_capabilities::environment_clients",
-      "to": "dim_agent_runtime::assembly",
-      "references": [
-        "path AgentBuilder",
-        "use dim_agent_runtime::AgentBuilder"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::environment_clients",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionIdentity",
@@ -8609,9 +8601,11 @@
       "from": "dim_agent_capabilities::environment_clients",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path Feature",
-        "path Feature::new",
-        "use dim_agent_runtime::Feature"
+        "path PartRegistry",
+        "path PartScope::Branch",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
       ]
     },
     {
@@ -17525,13 +17519,6 @@
     },
     {
       "from": "dim_app_server::cli",
-      "to": "dim_agent_capabilities::environment_clients",
-      "references": [
-        "path dim_agent_capabilities::environment_clients::install"
-      ]
-    },
-    {
-      "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::file_access",
       "references": [
         "path dim_agent_capabilities::file_access::install"
@@ -18474,7 +18461,8 @@
         "path dim_agent_capabilities::environment_clients::ClientsChanged",
         "path dim_agent_capabilities::environment_clients::SessionClientsHost",
         "path dim_agent_capabilities::environment_clients::SessionClientsSource",
-        "path dim_agent_capabilities::environment_clients::clients_changes"
+        "path dim_agent_capabilities::environment_clients::clients_changes",
+        "path dim_agent_capabilities::environment_clients::register_parts"
       ]
     },
     {
@@ -18587,6 +18575,13 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::PartRegistry"
       ]
     },
     {

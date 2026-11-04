@@ -1616,6 +1616,7 @@ pub(crate) struct ConnectionPlugin {
     control: Key<ServerControl>,
     ui: Key<crate::ui_host::UiHost>,
     clients: Key<dim_agent_capabilities::environment_clients::SessionClientsHost>,
+    parts: Key<dim_agent_runtime::PartRegistry>,
 }
 impl ConnectionPlugin {
     pub fn new(names: &Names<'_>, config: Arc<ServerConfig>) -> rutis::Result<Self> {
@@ -1624,6 +1625,7 @@ impl ConnectionPlugin {
             control: names.key()?,
             ui: names.key()?,
             clients: names.key()?,
+            parts: names.key()?,
         })
     }
 }
@@ -1642,12 +1644,13 @@ impl DynPlugin for ConnectionPlugin {
         "Connection"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.control.erase(), self.ui.erase()]
+        vec![self.control.erase(), self.ui.erase(), self.parts.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let control = ctx.require_at(&self.control)?;
             let ui = ctx.require_at(&self.ui)?;
+            let parts = ctx.require_at(&self.parts)?;
             let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui));
             hub.set_client_emitter(ctx.clone());
             let owner = hub.clone();
@@ -1656,6 +1659,7 @@ impl DynPlugin for ConnectionPlugin {
                 Ok(())
             })?;
             ctx.provide_as::<ConnectionHub>(hub.clone())?;
+            dim_agent_capabilities::environment_clients::register_parts(ctx, &parts)?;
             ctx.provide_at(
                 self.clients.clone(),
                 Arc::new(
