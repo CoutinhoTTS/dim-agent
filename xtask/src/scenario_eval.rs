@@ -113,9 +113,9 @@
 //!
 //! A source checkout installs those packages first: `npm ci --prefix
 //! runtime --ignore-scripts` for the rutis runtime, and `npm ci --prefix
-//! runtime/plugins/<name> --ignore-scripts` for `goal`,
-//! `workflow` and `scheduler`, the default plugins that ship a
-//! `package.json` (`plugin-authoring` ships only a Skill).
+//! runtime/plugins/<name> --ignore-scripts` for `workflow`, the default
+//! plugin that ships a `package.json` (`plugin-authoring` ships only a
+//! Skill).
 //!
 //! A candidate for a TypeScript plugin's text replaces a member of that
 //! plugin's factory configuration, which is its manifest `config`: the

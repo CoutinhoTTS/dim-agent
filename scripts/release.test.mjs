@@ -107,26 +107,26 @@ test('staging the default plugins update is incremental and never leaves a half 
   const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
   const first=update();
   assert.equal(first.status,0,first.stderr);
-  assert.match(first.stdout,/npm ci: goal, workflow/);
-  assert.deepEqual(installs().map(installName).sort(),['goal','workflow']);
+  assert.match(first.stdout,/npm ci: workflow/);
+  assert.deepEqual(installs().map(installName).sort(),['workflow']);
   assert.equal(readRecord().schemaVersion,1);
-  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['goal','plugin-authoring','workflow']);
+  assert.deepEqual(Object.keys(readRecord().plugins).sort(),['plugin-authoring','workflow']);
   const second=update();
   assert.equal(second.status,0,second.stderr);
   assert.match(second.stdout,/npm ci: none/);
-  assert.equal(installs().length,2);
-  const sourceFile=path.join(output,'plugins/goal/index.ts');
+  assert.equal(installs().length,1);
+  const sourceFile=path.join(output,'plugins/workflow/index.ts');
   const original=readFileSync(sourceFile,'utf8');
   rmSync(sourceFile);
   assert.equal(update().status,0);
   assert.equal(readFileSync(sourceFile,'utf8'),original);
   const changed=readRecord();
-  changed.plugins.goal.hash='stale';
+  changed.plugins.workflow.hash='stale';
   writeFileSync(record,`${JSON.stringify(changed)}\n`);
   const reinstalled=update();
   assert.equal(reinstalled.status,0,reinstalled.stderr);
-  assert.equal(installs().length,3);
-  assert.equal(installName(installs().at(-1)),'goal');
+  assert.equal(installs().length,2);
+  assert.equal(installName(installs().at(-1)),'workflow');
   const removed=readRecord();
   removed.plugins.retired={hash:null,dir:'plugins/retired'};
   writeFileSync(record,`${JSON.stringify(removed)}\n`);
@@ -135,54 +135,67 @@ test('staging the default plugins update is incremental and never leaves a half 
   assert.equal(update().status,0);
   assert.equal(existsSync(path.join(output,'plugins/retired')),false);
   assert.equal(readRecord().plugins.retired,undefined);
-  writeFileSync(path.join(output,'plugins/goal/marker'),'kept');
+  writeFileSync(path.join(output,'plugins/workflow/marker'),'kept');
   const failing=readRecord();
-  failing.plugins.goal.hash='stale again';
+  failing.plugins.workflow.hash='stale again';
   writeFileSync(record,`${JSON.stringify(failing)}\n`);
   npm(1);
   const failed=update();
   assert.notEqual(failed.status,0);
-  assert.match(failed.stderr,/Cannot stage goal/);
-  assert.equal(readFileSync(path.join(output,'plugins/goal/marker'),'utf8'),'kept');
-  assert.deepEqual(leftovers(output,'plugins/goal','partial'),[]);
-  assert.equal(readRecord().plugins.goal.hash,'stale again');
+  assert.match(failed.stderr,/Cannot stage workflow/);
+  assert.equal(readFileSync(path.join(output,'plugins/workflow/marker'),'utf8'),'kept');
+  assert.deepEqual(leftovers(output,'plugins/workflow','partial'),[]);
+  assert.equal(readRecord().plugins.workflow.hash,'stale again');
 });
 
 test('the record follows the disk when an update fails part-way', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
+  const checkout=path.join(temporary,'checkout');
+  mkdirSync(path.join(checkout,'scripts'),{recursive:true});
+  cpSync(path.join(root,'scripts/stage-plugins.mjs'),path.join(checkout,'scripts/stage-plugins.mjs'));
+  mkdirSync(path.join(checkout,'runtime'),{recursive:true});
+  const writeDefaults=(plugins)=>writeFileSync(path.join(checkout,'runtime/default-plugins.json'),`${JSON.stringify({plugins})}\n`);
+  writeDefaults({first:'plugins/first',second:'plugins/second'});
+  for (const name of ['first','second']) {
+    mkdirSync(path.join(checkout,'runtime/plugins',name),{recursive:true});
+    writeFileSync(path.join(checkout,'runtime/plugins',name,'package.json'),`{"name":"${name}"}\n`);
+    writeFileSync(path.join(checkout,'runtime/plugins',name,'package-lock.json'),`${JSON.stringify({name,lockfileVersion:3,packages:{'':{name}}})}\n`);
+    writeFileSync(path.join(checkout,'runtime/plugins',name,'index.ts'),'export {};\n');
+  }
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   const log=path.join(temporary,'npm.log');
-  const fail=path.join(temporary,'fail-workflow');
-  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\ncase "$PWD" in *workflow*) [ -e "${fail}" ] && exit 1 ;; esac\nexit 0\n`,{mode:0o755});
+  const fail=path.join(temporary,'fail-second');
+  writeFileSync(path.join(bin,'npm'),`#!/bin/bash\nprintf '%s\\n' "$PWD" >> "${log}"\nmkdir -p "$PWD/node_modules"\ncase "$PWD" in *second*) [ -e "${fail}" ] && exit 1 ;; esac\nexit 0\n`,{mode:0o755});
   const env={PATH:`${bin}:${process.env.PATH}`};
+  const script=path.join(checkout,'scripts/stage-plugins.mjs');
   const output=path.join(temporary,'staged');
   const record=path.join(output,'.stage-plugins.json');
   const readRecord=()=>JSON.parse(readFileSync(record,'utf8'));
   const installs=()=>existsSync(log)?readFileSync(log,'utf8').trim().split('\n').filter(Boolean):[];
-  const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
+  const update=()=>spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
   assert.equal(update().status,0);
   const changed=readRecord();
-  changed.plugins.goal.hash='stale goal';
-  changed.plugins['workflow'].hash='stale workflow';
+  changed.plugins.first.hash='stale first';
+  changed.plugins.second.hash='stale second';
   writeFileSync(record,`${JSON.stringify(changed)}\n`);
   writeFileSync(fail,'');
   const failed=update();
   assert.notEqual(failed.status,0);
-  assert.match(failed.stderr,/Cannot stage workflow/);
+  assert.match(failed.stderr,/Cannot stage second/);
   const afterFailure=readRecord();
-  assert.match(afterFailure.plugins.goal.hash,/^[0-9a-f]{64}$/);
-  assert.equal(afterFailure.plugins['workflow'].hash,'stale workflow');
-  assert.deepEqual(installs().slice(-2).map(installName),['goal','workflow']);
+  assert.match(afterFailure.plugins.first.hash,/^[0-9a-f]{64}$/);
+  assert.equal(afterFailure.plugins.second.hash,`stale second`);
+  assert.deepEqual(installs().slice(-2).map(installName),['first','second']);
   rmSync(fail);
   const count=installs().length;
   const fixed=update();
   assert.equal(fixed.status,0,fixed.stderr);
   assert.equal(installs().length,count+1);
-  assert.equal(installName(installs().at(-1)),'workflow');
+  assert.equal(installName(installs().at(-1)),'second');
   const afterFix=readRecord();
-  assert.equal(afterFix.plugins.goal.hash,afterFailure.plugins.goal.hash);
-  assert.match(afterFix.plugins['workflow'].hash,/^[0-9a-f]{64}$/);
+  assert.equal(afterFix.plugins.first.hash,afterFailure.plugins.first.hash);
+  assert.match(afterFix.plugins.second.hash,/^[0-9a-f]{64}$/);
 });
 
 test('a failed swap leaves the live plugin whole until its replacement lands', {skip:process.platform==='win32'}, async (t)=>{
@@ -195,23 +208,23 @@ test('a failed swap leaves the live plugin whole until its replacement lands', {
   const output=path.join(temporary,'staged');
   const first=run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(first.status,0,first.stderr);
-  const goal=path.join(output,'plugins/goal');
-  const modules=path.join(goal,'node_modules');
+  const live=path.join(output,'plugins/workflow');
+  const modules=path.join(live,'node_modules');
   assert(existsSync(modules));
   const record=path.join(output,'.stage-plugins.json');
   const recordBefore=readFileSync(record,'utf8');
-  const source=readFileSync(path.join(goal,'index.ts'),'utf8');
+  const source=readFileSync(path.join(live,'index.ts'),'utf8');
   const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
   assert.throws(()=>updateStage(output,{
     rename:(from,to)=>{
-      if(to===goal&&from.includes('.partial')) throw new Error('injected rename failure');
+      if(to===live&&from.includes('.partial')) throw new Error('injected rename failure');
       renameSync(from,to);
     },
-  }),/Cannot stage goal/);
+  }),/Cannot stage workflow/);
   assert(existsSync(modules),'the live dependencies stay in place');
-  assert.equal(readFileSync(path.join(goal,'index.ts'),'utf8'),source);
+  assert.equal(readFileSync(path.join(live,'index.ts'),'utf8'),source);
   assert.equal(readFileSync(record,'utf8'),recordBefore);
-  assert.deepEqual([...leftovers(output,'plugins/goal','partial'),...leftovers(output,'plugins/goal','previous')],[]);
+  assert.deepEqual([...leftovers(output,'plugins/workflow','partial'),...leftovers(output,'plugins/workflow','previous')],[]);
   const next=run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(next.status,0,next.stderr);
   assert.match(next.stdout,/npm ci: none/);
@@ -226,20 +239,20 @@ test('an update recovers the stage a killed run left behind', {skip:process.plat
   const env={PATH:`${bin}:${process.env.PATH}`};
   const output=path.join(temporary,'staged');
   assert.equal(run('stage-plugins.mjs',[output,'--update'],env).status,0);
-  const goal=path.join(output,'plugins/goal');
-  renameSync(goal,`${goal}.previous.999999`);
-  mkdirSync(`${goal}.partial.999999`);
-  writeFileSync(path.join(`${goal}.partial.999999`,'leftover'),'x');
+  const live=path.join(output,'plugins/workflow');
+  renameSync(live,`${live}.previous.999999`);
+  mkdirSync(`${live}.partial.999999`);
+  writeFileSync(path.join(`${live}.partial.999999`,'leftover'),'x');
   const record=path.join(output,'.stage-plugins.json');
   const recordBefore=readFileSync(record,'utf8');
   const installed=readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length;
   const recovered=run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(recovered.status,0,recovered.stderr);
   assert.match(recovered.stdout,/npm ci: none/);
-  assert(existsSync(path.join(goal,'index.ts')));
-  assert(existsSync(path.join(goal,'node_modules')));
+  assert(existsSync(path.join(live,'index.ts')));
+  assert(existsSync(path.join(live,'node_modules')));
   assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,installed);
-  assert.deepEqual([...leftovers(output,'plugins/goal','partial'),...leftovers(output,'plugins/goal','previous')],[]);
+  assert.deepEqual([...leftovers(output,'plugins/workflow','partial'),...leftovers(output,'plugins/workflow','previous')],[]);
   assert.equal(readFileSync(record,'utf8'),recordBefore);
 });
 
@@ -275,18 +288,18 @@ test('two concurrent updates serialize on the stage lock', {skip:process.platfor
   const [firstRun,secondRun]=await Promise.all([first.done,second.done]);
   assert.equal(firstRun.status,0,firstRun.err);
   assert.equal(secondRun.status,0,secondRun.err);
-  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,2);
+  assert.equal(readFileSync(log,'utf8').trim().split('\n').filter(Boolean).length,1);
   assert.match(secondRun.err,/Waiting for another staging run/);
   assert.match(secondRun.out,/npm ci: none/);
   const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json')));
   assert.equal(record.schemaVersion,1);
-  assert.deepEqual(Object.keys(record.plugins).sort(),['goal','plugin-authoring','workflow']);
-  for (const name of ['goal','workflow']) {
+  assert.deepEqual(Object.keys(record.plugins).sort(),['plugin-authoring','workflow']);
+  for (const name of ['workflow']) {
     assert(existsSync(path.join(output,'plugins',name,'node_modules')),name);
     assert.match(record.plugins[name].hash,/^[0-9a-f]{64}$/);
   }
   assert.equal(record.plugins['plugin-authoring'].hash,null);
-  assert.deepEqual([...leftovers(output,'plugins/goal','partial'),...leftovers(output,'plugins/goal','previous')],[]);
+  assert.deepEqual([...leftovers(output,'plugins/workflow','partial'),...leftovers(output,'plugins/workflow','previous')],[]);
 });
 
 test('a lock whose owner is gone is taken over', {skip:process.platform==='win32'}, (t)=>{
@@ -316,7 +329,7 @@ test('a lock with no owner is taken over without waiting', {skip:process.platfor
   const {updateStage}=await import(pathToFileURL(path.join(root,'scripts/stage-plugins.mjs')).href);
   updateStage(output,{waitMilliseconds:400,pollMilliseconds:50});
   assert.equal(existsSync(lock),false);
-  assert(existsSync(path.join(output,'plugins/goal/index.ts')));
+  assert(existsSync(path.join(output,'plugins/workflow/index.ts')));
 });
 
 test('a lock owned by this process is stale', {skip:process.platform==='win32'}, async (t)=>{
@@ -338,7 +351,7 @@ test('temporaries of a live run survive and are removed once it has exited', {sk
   const update=()=>run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(update().status,0);
   const child=sleeper(t);
-  const partial=`${path.join(output,'plugins/goal')}.partial.${child.pid}`;
+  const partial=`${path.join(output,'plugins/workflow')}.partial.${child.pid}`;
   const recordTemporary=path.join(output,`.stage-plugins.json.tmp.${child.pid}`);
   mkdirSync(partial,{recursive:true});
   writeFileSync(path.join(partial,'live.txt'),'live');
@@ -442,7 +455,7 @@ test('a recorded directory outside the stage is refused before anything changes'
   assert.match(refused.stderr,/retired/);
   assert.match(refused.stderr,/outside/);
   assert.equal(readFileSync(path.join(outside,'keep.txt'),'utf8'),'kept');
-  assert(existsSync(path.join(output,'plugins/goal/index.ts')));
+  assert(existsSync(path.join(output,'plugins/workflow/index.ts')));
   assert.equal(readFileSync(record,'utf8'),before);
 });
 
@@ -463,7 +476,7 @@ test('a recorded stage root is refused before anything changes', {skip:process.p
   assert.notEqual(refused.status,0);
   assert.match(refused.stderr,/retired/);
   assert.equal(readFileSync(record,'utf8'),before);
-  assert(existsSync(path.join(output,'plugins/goal/index.ts')));
+  assert(existsSync(path.join(output,'plugins/workflow/index.ts')));
 });
 
 test('a recorded parent directory does not remove the plugins inside it', {skip:process.platform==='win32'}, (t)=>{
@@ -480,7 +493,7 @@ test('a recorded parent directory does not remove the plugins inside it', {skip:
   writeFileSync(record,`${JSON.stringify(data)}\n`);
   const updated=run('stage-plugins.mjs',[output,'--update'],env);
   assert.equal(updated.status,0,updated.stderr);
-  for (const name of ['goal','workflow']) {
+  for (const name of ['workflow']) {
     assert(existsSync(path.join(output,'plugins',name,'index.ts')),name);
   }
   const after=JSON.parse(readFileSync(record));
