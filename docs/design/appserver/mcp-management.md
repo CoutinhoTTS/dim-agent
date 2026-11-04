@@ -419,6 +419,12 @@ contains: without a reference it keeps its behaviour; with a reference and a `:/
 scheme and authority as written, in the reference's own case, and drops userinfo, path, query and
 fragment; and with a reference and no `://` it keeps the text before any `?` or `#`.
 
+While a remote entry's `url` still names an unset reference, `mcp.auth.logout` cannot build that
+entry's credential key and so cannot clear its stored sign-in; the key exists again once the
+variable is set. A withheld URL keeps the literal scheme check the secret record always had: text
+before the first reference that names a scheme other than `http` or `https` is refused when the
+record is written.
+
 ## 4. Contract
 
 Namespace `mcp`, process scope, served on local connections
