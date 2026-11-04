@@ -139,6 +139,7 @@ flowchart LR
   p22 -->|"dim_agent_capabilities::execution_settings::ExecutionSettingsHost"| p24
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p24
   p16 -->|"dim_app_server::settings::SettingsService"| p23
+  p40 -->|"dim_agent_runtime::parts::PartRegistry"| p22
   p16 -->|"dim_app_server::settings::SettingsService"| p22
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p21
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p21

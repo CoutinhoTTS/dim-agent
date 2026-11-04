@@ -411,11 +411,15 @@ impl Default for Options {
 /// The product profile: PromptSources and Skills with scripted hosts.
 struct EnvironmentPartsPlugin {
     parts: Key<PartRegistry>,
+    clients: bool,
+    execution: bool,
 }
 impl EnvironmentPartsPlugin {
-    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+    fn new(names: &Names<'_>, clients: bool, execution: bool) -> rutis::Result<Self> {
         Ok(Self {
             parts: names.key()?,
+            clients,
+            execution,
         })
     }
 }
@@ -429,7 +433,12 @@ impl DynPlugin for EnvironmentPartsPlugin {
     fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let parts = ctx.require_at(&self.parts)?;
-            dim_agent_capabilities::environment_clients::register_parts(ctx, &parts)?;
+            if self.clients {
+                dim_agent_capabilities::environment_clients::register_parts(ctx, &parts)?;
+            }
+            if self.execution {
+                dim_agent_capabilities::execution_settings::prompt::register_parts(ctx, &parts)?;
+            }
             Ok(Effect::Done)
         })
     }
@@ -470,11 +479,13 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(move || today.lock().unwrap().clone()),
         std::time::Duration::from_millis(10),
     );
-    if options.clients.is_some() {
-        builder.plugin(|names| Ok(Box::new(EnvironmentPartsPlugin::new(names)?)));
-    }
-    if options.execution.is_some() {
-        dim_agent_capabilities::environment_settings::install(&mut builder);
+    let (clients, execution) = (options.clients.is_some(), options.execution.is_some());
+    if clients || execution {
+        builder.plugin(move |names| {
+            Ok(Box::new(EnvironmentPartsPlugin::new(
+                names, clients, execution,
+            )?))
+        });
     }
     if options.require_without_install {
         for part in ["Skills", "SkillsBranch"] {

@@ -4,25 +4,25 @@
 //! provides `ExecutionSettingsHost`. This capability registers
 //! `dim/settings/execution` and adopts it when the Settings service reports a
 //! committed write; an assembly without the host registers nothing.
+use super::{ExecutionSettings, ExecutionSettingsHost};
 use crate::{
-    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     host::{HostError, HostFuture, LoadPrompt},
     prompt_registry::{PromptRegistry, targets},
     prompt_sources::sha256_version,
     settings::{SettingsChanged, settings_changes},
 };
 use dim_agent_runtime::{
-    AgentBuilder, ConfigureControl, ConfigureUpdate, Feature, Names, PromptSourceTarget,
+    ConfigureControl, ConfigureUpdate, Names, PartRegistry, PartScope, PromptSourceTarget,
 };
 use dim_agent_types::*;
-use rutis::Ctx;
+use rutis::{Ctx, Error};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 /// The prompt source of the execution switches.
-pub const SOURCE: &str = "dim/settings/execution";
+pub const PROMPT_SOURCE: &str = "dim/settings/execution";
 /// The Settings source whose committed writes wake the projection.
 const SETTINGS_SOURCE: &str = "execution";
 
@@ -72,27 +72,26 @@ impl LoadPrompt for SettingsSource {
     }
 }
 
-/// The feature's parts. The Session part registers the source only when the
-/// App Server has provided `ExecutionSettingsHost`.
-pub fn feature() -> Feature {
-    Feature::new("EnvironmentSettings")
-        .session("EnvironmentSettings", |names| {
-            Ok(Box::new(SettingsPlugin::new(names)?))
-        })
-        .branch("EnvironmentSettingsBranch", |names| {
-            Ok(Box::new(SettingsBranchPlugin::new(names)?))
-        })
+/// The Session and branch plugins this projection registers.
+pub const SESSION_PART: &str = "ExecutionSettingsPrompt";
+pub const BRANCH_PART: &str = "ExecutionSettingsPromptBranch";
+
+/// Registers the projection on behalf of the process plugin that owns
+/// `ExecutionSettingsHost`.
+pub fn register_parts(ctx: &Ctx, parts: &Arc<PartRegistry>) -> Result<(), Error> {
+    parts.register(ctx, PartScope::Session, SESSION_PART, |mount| {
+        Ok(Some(Box::new(ProjectionPlugin::new(mount.names)?)))
+    })?;
+    parts.register(ctx, PartScope::Branch, BRANCH_PART, |mount| {
+        Ok(Some(Box::new(ProjectionBranchPlugin::new(mount.names)?)))
+    })
 }
 
-pub fn install(builder: &mut AgentBuilder) {
-    builder.require_feature(feature());
-}
-
-struct SettingsPlugin {
+struct ProjectionPlugin {
     host: Option<Key<ExecutionSettingsHost>>,
     prompts: Key<PromptRegistry>,
 }
-impl SettingsPlugin {
+impl ProjectionPlugin {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             host: names
@@ -103,9 +102,9 @@ impl SettingsPlugin {
         })
     }
 }
-impl DynPlugin for SettingsPlugin {
+impl DynPlugin for ProjectionPlugin {
     fn name(&self) -> &str {
-        "EnvironmentSettings"
+        "ExecutionSettingsPrompt"
     }
     fn injects(&self) -> Vec<TypeKey> {
         let mut deps = vec![self.prompts.erase()];
@@ -119,17 +118,17 @@ impl DynPlugin for SettingsPlugin {
                 return Ok(Effect::Done);
             };
             let host = ctx.require_at(host)?;
-            prompts.register(ctx, SOURCE, Arc::new(SettingsSource { host }))?;
+            prompts.register(ctx, PROMPT_SOURCE, Arc::new(SettingsSource { host }))?;
             Ok(Effect::Done)
         })
     }
 }
 
-struct SettingsBranchPlugin {
+struct ProjectionBranchPlugin {
     host: Option<Key<ExecutionSettingsHost>>,
     configure: Key<dyn ConfigureControl>,
 }
-impl SettingsBranchPlugin {
+impl ProjectionBranchPlugin {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             host: names
@@ -140,9 +139,9 @@ impl SettingsBranchPlugin {
         })
     }
 }
-impl DynPlugin for SettingsBranchPlugin {
+impl DynPlugin for ProjectionBranchPlugin {
     fn name(&self) -> &str {
-        "EnvironmentSettingsBranch"
+        "ExecutionSettingsPromptBranch"
     }
     fn injects(&self) -> Vec<TypeKey> {
         let mut deps = vec![self.configure.erase()];
@@ -163,7 +162,7 @@ impl DynPlugin for SettingsBranchPlugin {
                     let configure = configure.clone();
                     owned.spawn(async move {
                         let update = ConfigureUpdate {
-                            sources: targets([SOURCE]),
+                            sources: targets([PROMPT_SOURCE]),
                             model: None,
                         };
                         if let Err(error) = configure.configure(update).await {

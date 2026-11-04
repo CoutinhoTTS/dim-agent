@@ -40,10 +40,10 @@ flowchart LR
   m36["dim_agent_capabilities::defaults"]
   m37["dim_agent_capabilities::environment_clients"]
   m38["dim_agent_capabilities::environment_clients::tests"]
-  m39["dim_agent_capabilities::environment_settings"]
-  m40["dim_agent_capabilities::environment_settings::tests"]
-  m41["dim_agent_capabilities::exec_stop"]
-  m42["dim_agent_capabilities::execution_settings"]
+  m39["dim_agent_capabilities::exec_stop"]
+  m40["dim_agent_capabilities::execution_settings"]
+  m41["dim_agent_capabilities::execution_settings::prompt"]
+  m42["dim_agent_capabilities::execution_settings::prompt::tests"]
   m43["dim_agent_capabilities::file_access"]
   m44["dim_agent_capabilities::file_storage"]
   m45["dim_agent_capabilities::file_storage::native"]
@@ -676,9 +676,8 @@ flowchart LR
   m26 --> m35
   m26 -.-> m36
   m26 --> m37
-  m26 -.-> m39
-  m26 --> m41
-  m26 --> m42
+  m26 --> m39
+  m26 --> m40
   m26 --> m43
   m26 --> m44
   m26 --> m48
@@ -839,7 +838,6 @@ flowchart LR
   m37 --> m54
   m37 --> m72
   m37 --> m73
-  m37 --> m118
   m37 --> m120
   m37 --> m121
   m37 --> m130
@@ -847,18 +845,18 @@ flowchart LR
   m37 --> m153
   m37 --> m155
   m38 --> m37
-  m39 -.-> m40
-  m39 --> m42
-  m39 --> m54
-  m39 --> m72
-  m39 --> m73
-  m39 --> m81
-  m39 --> m118
-  m39 --> m121
-  m39 --> m130
-  m39 --> m132
-  m39 --> m153
-  m41 --> m144
+  m39 --> m144
+  m40 -.-> m41
+  m41 --> m40
+  m41 -.-> m42
+  m41 --> m54
+  m41 --> m72
+  m41 --> m73
+  m41 --> m81
+  m41 --> m121
+  m41 --> m130
+  m41 --> m132
+  m41 --> m153
   m43 --> m54
   m43 --> m55
   m43 --> m80
@@ -936,7 +934,7 @@ flowchart LR
   m54 --> m152
   m54 --> m153
   m54 --> m155
-  m55 --> m42
+  m55 --> m40
   m55 --> m44
   m55 --> m56
   m55 --> m57
@@ -1119,7 +1117,7 @@ flowchart LR
   m82 --> m130
   m82 --> m132
   m82 --> m144
-  m84 --> m41
+  m84 --> m39
   m84 --> m43
   m84 --> m54
   m84 --> m55
@@ -1704,8 +1702,6 @@ flowchart LR
   m168 --> m27
   m168 --> m33
   m168 --> m36
-  m168 --> m37
-  m168 --> m39
   m168 --> m43
   m168 --> m48
   m168 --> m49
@@ -1811,6 +1807,7 @@ flowchart LR
   m174 --> m121
   m174 --> m126
   m174 --> m130
+  m174 --> m132
   m174 --> m142
   m174 --> m144
   m174 --> m149
@@ -1880,11 +1877,13 @@ flowchart LR
   m179 --> m130
   m179 --> m203
   m179 --> m218
-  m180 --> m42
+  m180 --> m40
+  m180 --> m41
   m180 --> m55
   m180 --> m63
   m180 --> m81
   m180 --> m130
+  m180 --> m132
   m180 --> m203
   m180 --> m218
   m180 --> m236
