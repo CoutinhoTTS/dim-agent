@@ -864,7 +864,7 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     config.session_typescript = Some(parts);
     let (server, _requests, _) = start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let defaults = ["goal", "workflow", "scheduler"];
+    let defaults = ["goal", "workflow"];
     let list = running(&mut client, &defaults).await;
     for name in defaults {
         assert_eq!(item(&list, name)["use"], "default", "{list}");

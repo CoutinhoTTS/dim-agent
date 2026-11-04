@@ -24,6 +24,12 @@ const fn present(value: Option<&'static str>) -> Option<&'static str> {
     }
 }
 
+/// The product's native plugins, added to the App Server before assembly.
+fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
+    dim_session_title::install(builder);
+    dim_agent_scheduler::install(builder);
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -40,11 +46,9 @@ fn main() {
                 global: global.into(),
             })
         });
-        if let Err(error) = dim_app_server::cli::process_entry(
-            std::env::args().skip(2),
-            provider,
-            dim_session_title::install,
-        ) {
+        if let Err(error) =
+            dim_app_server::cli::process_entry(std::env::args().skip(2), provider, install)
+        {
             eprintln!("Error: {error}");
             std::process::exit(1);
         }

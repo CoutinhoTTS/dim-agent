@@ -333,7 +333,7 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let anchor = register_part(&mut builtins, builder.catalog(), move |names| {
         Ok(Box::new(Anchor::new(names, anchor_send.clone())?))
     })?;
-    let plugins = builder.plugin_rows(&mut builtins).await?;
+    let plugins = builder.plugin_rows(&mut builtins).await?.rows;
     let mut session_row = builder.install(&mut builtins, []).await?;
     session_row["config"]
         .as_array_mut()

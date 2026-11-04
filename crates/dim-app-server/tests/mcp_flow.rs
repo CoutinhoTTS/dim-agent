@@ -2430,3 +2430,78 @@ async fn a_write_never_stores_an_expanded_value() {
     assert!(kept.unset_variables.is_empty());
     fixture.close().await;
 }
+
+/// #952: a move into a project writes the reference URL's public skeleton and
+/// its full text to the overlay, for every shape a reference can take, and a
+/// read back returns the stored text.
+#[tokio::test]
+async fn a_moved_reference_url_is_split_between_the_skeleton_and_the_overlay() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let workspace = fs::canonicalize(fixture.home.join("project")).unwrap();
+    let workspace = workspace.to_str().unwrap();
+    for (index, (url, skeleton)) in [
+        (
+            "http://localhost:${MCP_PORT}/mcp",
+            "http://localhost:${MCP_PORT}",
+        ),
+        ("${MCP_BASE}/mcp?token=x", "${MCP_BASE}/mcp"),
+        ("${SCHEME}://host/mcp", "${SCHEME}://host"),
+        (
+            "https://${HOST:-localhost:8080}/sse",
+            "https://${HOST:-localhost:8080}",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("reference-{index}");
+        let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+        fixture
+            .mcp
+            .update(
+                SettingsScope::User,
+                catalog.user_revision,
+                id.clone(),
+                McpChange::Put(
+                    serde_json::from_value(json!({"type": "http", "url": url})).unwrap(),
+                ),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+        fixture
+            .mcp
+            .move_entry(
+                McpSource::User,
+                McpSource::Project(1),
+                id.clone(),
+                catalog.user_revision,
+                catalog.project_revision.unwrap(),
+                &cancel,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("the move of {url} failed: {error}"));
+
+        let project: Value =
+            serde_json::from_slice(&fs::read(fixture.home.join("project/.mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(project["mcpServers"][&id]["url"], skeleton, "{url}");
+        let secrets: Value =
+            serde_json::from_slice(&fs::read(fixture.home.join("mcp-secrets.json")).unwrap())
+                .unwrap();
+        assert_eq!(secrets["entries"][workspace][&id]["url"], url);
+
+        let entry = fixture
+            .mcp
+            .entry(McpSource::Project(1), id.clone(), &cancel)
+            .await
+            .unwrap();
+        let McpServerSettings::Remote { url: read_back, .. } = &entry.configuration else {
+            panic!("the moved entry is remote");
+        };
+        assert_eq!(read_back, url, "a read back returns the stored text");
+    }
+    fixture.close().await;
+}

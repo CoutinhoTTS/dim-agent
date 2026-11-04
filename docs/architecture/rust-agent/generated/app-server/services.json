@@ -2714,6 +2714,12 @@
         "removing": false
       },
       {
+        "service": "dim_app_server::plugin_files::PluginFileTransactions",
+        "provider": 10,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_app_server::provider::ProviderService",
         "provider": 14,
         "generation": 1,

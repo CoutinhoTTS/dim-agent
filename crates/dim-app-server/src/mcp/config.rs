@@ -947,7 +947,9 @@ impl McpSecretEntry {
         {
             return Err(SettingsError::Invalid("invalid MCP secret values"));
         }
-        if let Some(url) = &self.url {
+        if let Some(url) = &self.url
+            && !has_reference(url)
+        {
             let parsed = url::Url::parse(url)
                 .map_err(|_| SettingsError::Invalid("invalid MCP secret URL"))?;
             if parsed.scheme() != "http" && parsed.scheme() != "https" {

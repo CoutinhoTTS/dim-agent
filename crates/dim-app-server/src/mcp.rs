@@ -120,6 +120,10 @@ pub struct McpServerEntry {
     pub referenced_variables: BTreeSet<String>,
     /// Referenced names that are unset and have no default.
     pub unset_variables: BTreeSet<String>,
+    /// The expanded credential key of an entry that can use OAuth, carried
+    /// beside the entry so a shadowing entry never inherits the key of the
+    /// entry it shadows.
+    pub(crate) credential: Option<auth::CredentialKey>,
 }
 impl McpServerEntry {
     pub fn enabled(&self) -> bool {
@@ -263,9 +267,6 @@ pub struct McpCatalog {
     pub servers: BTreeMap<String, McpServerEntry>,
     /// Entries that did not decode, in the source that declares them.
     pub invalid: Vec<McpInvalidEntry>,
-    /// The expanded credential key of each server that can use OAuth, so a
-    /// state lookup matches the key the connection uses.
-    pub(crate) credentials: BTreeMap<String, auth::CredentialKey>,
 }
 
 /// One entry the catalog could not decode, with the entry's own error.
@@ -564,7 +565,6 @@ impl McpService {
                 project_revision: None,
                 servers: BTreeMap::new(),
                 invalid: Vec::new(),
-                credentials: BTreeMap::new(),
             };
             let mut invalid: BTreeMap<(McpSource, String), McpEntryError> = BTreeMap::new();
             let enablement = match project {
@@ -603,10 +603,8 @@ impl McpService {
                                 protected: &protected,
                             },
                         )?;
-                        if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration)
-                        {
-                            catalog.credentials.insert(id.clone(), key);
-                        }
+                        let credential =
+                            auth::credential_key(&id, &expansion.configuration).map(|(key, _)| key);
                         let (referenced_variables, unset_variables) =
                             (expansion.referenced, expansion.unset);
                         catalog.servers.insert(
@@ -616,6 +614,7 @@ impl McpService {
                                 configuration,
                                 referenced_variables,
                                 unset_variables,
+                                credential,
                             },
                         );
                     }
@@ -663,9 +662,8 @@ impl McpService {
                         secret,
                         &enablement,
                     )?;
-                    if let Some((key, _)) = auth::credential_key(&id, &expansion.configuration) {
-                        catalog.credentials.insert(id.clone(), key);
-                    }
+                    let credential =
+                        auth::credential_key(&id, &expansion.configuration).map(|(key, _)| key);
                     let (referenced_variables, unset_variables) =
                         (expansion.referenced, expansion.unset);
                     catalog.servers.insert(
@@ -675,6 +673,7 @@ impl McpService {
                             configuration,
                             referenced_variables,
                             unset_variables,
+                            credential,
                         },
                     );
                 }
@@ -736,12 +735,15 @@ impl McpService {
                         protected: &protected,
                     },
                 )?;
+                let credential =
+                    auth::credential_key(&id, &expansion.configuration).map(|(key, _)| key);
                 return Ok(McpResolvedEntry {
                     entry: McpServerEntry {
                         source,
                         configuration,
                         referenced_variables: expansion.referenced,
                         unset_variables: expansion.unset,
+                        credential,
                     },
                     secret: None,
                     expanded: expansion.configuration,
@@ -785,12 +787,15 @@ impl McpService {
                 secret.as_ref(),
                 &enablement,
             )?;
+            let credential =
+                auth::credential_key(&id, &expansion.configuration).map(|(key, _)| key);
             Ok(McpResolvedEntry {
                 entry: McpServerEntry {
                     source: source.into(),
                     configuration,
                     referenced_variables: expansion.referenced,
                     unset_variables: expansion.unset,
+                    credential,
                 },
                 secret,
                 expanded: expansion.configuration,
@@ -930,8 +935,9 @@ impl McpService {
     }
 
     /// The configuration a connection runs, from the declared one a client
-    /// reads and patches. `overlay` replaces the stored overlay only for the
-    /// guard question; the stored overlay is still what is merged.
+    /// reads and patches. The caller merges the stored overlay exactly once
+    /// into that configuration; `overlay` answers only which members are the
+    /// user's own text for the expansion guard.
     pub(crate) async fn connected(
         &self,
         scope: SettingsScope,
@@ -942,13 +948,11 @@ impl McpService {
     ) -> Result<config::Expanded> {
         let protected = self.protected();
         self.run(cancel, move |settings, cancel| async move {
-            let stored = secret(&settings, scope, &id, &cancel).await?;
             let enablement = enablement(&settings, scope, &cancel).await;
-            let guard = overlay.or(stored.clone());
             let origin = match scope {
                 SettingsScope::User => config::Origin::User,
                 SettingsScope::Project(_) => config::Origin::Workspace {
-                    overlay: guard.as_ref(),
+                    overlay: overlay.as_ref(),
                 },
             };
             Ok(config::connected(
@@ -957,7 +961,7 @@ impl McpService {
                 config::Connection {
                     scope: Some(scope),
                     id: &id,
-                    secret: stored.as_ref(),
+                    secret: None,
                     origin,
                     enablement: &enablement,
                     environment: &daemon_environment,
