@@ -10,6 +10,12 @@ mod methods;
 mod runs;
 mod session;
 
+#[cfg(test)]
+extern crate self as dim_agent_scheduler;
+#[cfg(test)]
+#[path = "../tests/support/binding_flow.rs"]
+mod binding_flow;
+
 use dim_agent_runtime::AgentBuilder;
 use rutis::host::DynPlugin;
 
