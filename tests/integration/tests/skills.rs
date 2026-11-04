@@ -478,6 +478,7 @@ async fn enablement_changes_the_list_and_loading() {
             source: SOURCE.into(),
             scope: SettingsScope::User,
             revision,
+            origin: None,
         })
         .unwrap();
     wait_view_change(&session, &before).await;

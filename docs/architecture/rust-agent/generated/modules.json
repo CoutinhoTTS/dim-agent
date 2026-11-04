@@ -461,17 +461,9 @@
       "file": "crates/dim-agent-capabilities/src/execution_settings/prompt.rs",
       "unexpandedMacros": [
         "format",
+        "json",
         "tracing::warn",
         "vec"
-      ]
-    },
-    {
-      "id": "dim_agent_capabilities::execution_settings::prompt::tests",
-      "crate": "dim_agent_capabilities",
-      "parent": "dim_agent_capabilities::execution_settings::prompt",
-      "file": "crates/dim-agent-capabilities/src/execution_settings/prompt.rs",
-      "unexpandedMacros": [
-        "assert_eq"
       ]
     },
     {
@@ -8641,6 +8633,14 @@
     },
     {
       "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::branch_input",
+      "references": [
+        "path append_own",
+        "use crate::branch_input::append_own"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
       "to": "dim_agent_capabilities::execution_settings",
       "references": [
         "path ExecutionSettings",
@@ -8651,40 +8651,11 @@
     },
     {
       "from": "dim_agent_capabilities::execution_settings::prompt",
-      "to": "dim_agent_capabilities::execution_settings::prompt::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::execution_settings::prompt",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path HostError::Cancelled",
-        "path HostError::failed",
-        "path HostFuture",
-        "path LoadPrompt",
-        "use crate::host::HostError",
-        "use crate::host::HostFuture",
-        "use crate::host::LoadPrompt"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::execution_settings::prompt",
-      "to": "dim_agent_capabilities::prompt_registry",
-      "references": [
-        "path PromptRegistry",
-        "path targets",
-        "use crate::prompt_registry::PromptRegistry",
-        "use crate::prompt_registry::targets"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::execution_settings::prompt",
-      "to": "dim_agent_capabilities::prompt_sources",
-      "references": [
-        "path sha256_version",
-        "use crate::prompt_sources::sha256_version"
+        "path ToolExecutionContext",
+        "path crate::host::HostFuture",
+        "use crate::host::ToolExecutionContext"
       ]
     },
     {
@@ -8699,14 +8670,45 @@
     },
     {
       "from": "dim_agent_capabilities::execution_settings::prompt",
-      "to": "dim_agent_runtime::contracts",
+      "to": "dim_agent_capabilities::tool_registry",
       "references": [
-        "path ConfigureControl",
-        "path ConfigureUpdate",
-        "path PromptSourceTarget",
-        "use dim_agent_runtime::ConfigureControl",
-        "use dim_agent_runtime::ConfigureUpdate",
-        "use dim_agent_runtime::PromptSourceTarget"
+        "path ToolContribution",
+        "path ToolHandler",
+        "path ToolRegistry",
+        "use crate::tool_registry::ToolContribution",
+        "use crate::tool_registry::ToolHandler",
+        "use crate::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::core::dispatcher",
+      "references": [
+        "path Dispatcher",
+        "use dim_agent_runtime::Dispatcher"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
       ]
     },
     {
@@ -8730,10 +8732,22 @@
     },
     {
       "from": "dim_agent_capabilities::execution_settings::prompt",
-      "to": "dim_agent_types::prompt",
+      "to": "dim_agent_types::events",
       "references": [
-        "path PromptDelivery::State",
-        "path PromptEntry"
+        "path InputMessageData",
+        "path InputMessageData::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path ToolSource::Extension"
       ]
     },
     {

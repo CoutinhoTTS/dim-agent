@@ -18,6 +18,7 @@ fn changed(env: &Env, revision: &str) {
             source: "execution".into(),
             scope: SettingsScope::User,
             revision: revision.into(),
+            origin: None,
         })
         .unwrap();
 }
