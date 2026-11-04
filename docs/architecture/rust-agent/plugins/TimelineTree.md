@@ -33,7 +33,9 @@ ending line. `TreeCommands::end`
 checks only the target: it exists, it is open, and it is not `main`; a line
 that ended writes nothing and answers `branch_ended`. `info` answers for an
 ended line too, and `page` reads an open or ended line from the store at its
-head. Candidate branches remain private until opening
+head, without rebuilding stored request bodies after it ends. `batch_end`
+checks a cursor against that line's published or ended head and its atomic
+batch boundaries. Candidate branches remain private until opening
 receipts/dispatch fences and initial input acceptance succeed. Creation retains
 its fixed ancestry cut even if a waiter disappears. One opening budget requests
 cancellation; rollback and accepted host work must still settle. Cleanup closes

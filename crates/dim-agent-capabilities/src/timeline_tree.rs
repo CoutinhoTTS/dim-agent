@@ -193,6 +193,36 @@ impl TreeCommands {
             .page(&id, after, limit)
             .await
     }
+    /// Checks that a position ends a complete batch on an open or ended line.
+    /// A position above the line's published or ended head is invalid input.
+    pub async fn batch_end(
+        &self,
+        id: String,
+        sequence: u64,
+    ) -> std::result::Result<(), AgentError> {
+        let tree = self
+            .tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+        let head = tree
+            .head(&id)
+            .ok_or_else(|| AgentError::UnknownBranch(id.clone()))?;
+        if sequence > head {
+            return Err(AgentError::InvalidInput("future Timeline sequence".into()));
+        }
+        if let Some(context) = tree.owned_context(&id) {
+            return context.timeline().batch_end(sequence).await;
+        }
+        tree.store
+            .batch_end(
+                &TimelineKey {
+                    session_id: tree.session_id.clone(),
+                    branch_id: id,
+                },
+                sequence,
+            )
+            .await
+    }
     /// The head a read of `id` ends at: fixed once ended, published while
     /// open.
     #[service(skip)]
@@ -747,7 +777,7 @@ impl TimelineTree {
         };
         Ok(self
             .store
-            .read_page(&key, after, limit, through)
+            .read_page_without_request_bodies(&key, after, limit, through)
             .await?
             .into_iter()
             .map(|record| record.event)

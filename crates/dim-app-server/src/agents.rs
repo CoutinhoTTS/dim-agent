@@ -773,11 +773,8 @@ impl AgentIndex {
     /// One page of `branch`'s own facts after `after`, at most `limit`, never
     /// past `through`, ending on an atomic batch.
     ///
-    /// A loaded line pages through its Session's query, which asks the store
-    /// whether the page's last fact ends a batch ([ADR 020 D4]); a line whose
-    /// Session this process does not hold, or an ended one when the host keeps
-    /// no store of its own, reads through a page read instead: the tree owns
-    /// the ended lines and serves them at their fixed head ([ADR 020 D6]).
+    /// The caller holds the Session. Live lines use its query; ended lines
+    /// use the tree that owns their fixed head and batch boundaries.
     pub(crate) async fn history_page(
         &self,
         id: &str,
@@ -786,30 +783,26 @@ impl AgentIndex {
         limit: usize,
         through: u64,
     ) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
-        if let Some((_, session)) = self.session(id)
-            && !session.is_unloading()
-        {
-            if session.ended_head(branch).is_none() {
-                match session_history_page(&session, branch, after, limit, through).await {
-                    Err(AgentError::BranchEnded(_)) => {}
-                    result => return result,
-                }
-            } else if self.session_store.is_none() {
-                let page = session
-                    .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
-                    .page(branch.to_owned(), after, limit)
-                    .await?;
-                return Ok(page
-                    .into_iter()
-                    .filter(|event| event.sequence <= through)
-                    .collect());
+        let (_, session) = self
+            .session(id)
+            .filter(|(_, session)| !session.is_unloading())
+            .ok_or_else(|| AgentError::Closed(id.into()))?;
+        if session.ended_head(branch).is_none() {
+            match session_history_page(&session, branch, after, limit, through).await {
+                Err(AgentError::BranchEnded(_)) => {}
+                result => return result,
             }
         }
-        self.session_store
-            .as_ref()
-            .ok_or_else(|| AgentError::Closed(id.into()))?
-            .read_page_without_request_bodies(id, branch, after, limit, through)
-            .await
+        let tree =
+            session.session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?;
+        tree.batch_end(branch.to_owned(), after).await?;
+        tree.batch_end(branch.to_owned(), through).await?;
+        Ok(tree
+            .page(branch.to_owned(), after, limit)
+            .await?
+            .into_iter()
+            .filter(|event| event.sequence <= through)
+            .collect())
     }
     /// The stored events of `event_ids` in one read; ids the store does not
     /// hold are absent.

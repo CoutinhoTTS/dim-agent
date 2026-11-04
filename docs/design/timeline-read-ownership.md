@@ -27,6 +27,11 @@ A caller does not choose a read because it is cheaper; it reads through the obje
 
 ## 3. Read paths
 
+The tree checks page cursors against the ended line's head and atomic batch
+boundaries. Its ended-line page does not rebuild stored request bodies that
+history readers discard. These rules apply in both native-store and in-memory
+hosts; the client read holds its acquired Session throughout the operation.
+
 ```mermaid
 flowchart LR
   subgraph open["open the interface"]
@@ -105,6 +110,7 @@ Session::query(...) / Branch::query(...)   // forward, published bound
 
 // ended line
 TreeCommands::page(id: String, after: u64, limit: u64) -> Result<Vec<Arc<AgentEvent>>>
+TreeCommands::batch_end(id: String, sequence: u64) -> Result<()>
 
 // branches and metadata
 TimelineStore::branches(session_id) -> Result<Vec<StoredBranch>>

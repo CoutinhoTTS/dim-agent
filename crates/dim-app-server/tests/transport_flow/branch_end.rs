@@ -47,7 +47,18 @@ fn end(session: &str, branch: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_user_ends_a_line_and_a_v3_client_reads_both_sides() {
-    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    read_both_sides(ServerConfig::default()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_user_ends_a_line_and_a_v3_client_reads_both_sides() {
+    let store = super::deletion::Store::new();
+    read_both_sides(store.config()).await;
+}
+
+async fn read_both_sides(config: ServerConfig) {
+    let native = config.database_path.is_some();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let created = client.rpc("session.create", create_with_branch()).await;
     assert_ok(&created);
@@ -58,7 +69,14 @@ async fn a_user_ends_a_line_and_a_v3_client_reads_both_sides() {
         .rpc("session.idle", json!({"sessionId":id,"branchId":child}))
         .await;
     assert_ok(&idle);
-    let ended = client.rpc("session.branch_end", end(&id, &child)).await;
+    let cutoff = session.sequence(&child).unwrap();
+    let mut reader = Client::new_version(&server, false, 3).await;
+    let read = json!({"sessionId":id,"branchId":child,"after":0,"limit":256,"through":cutoff});
+    let (racing, ended) = tokio::join!(
+        reader.rpc("session.history", read),
+        client.rpc("session.branch_end", end(&id, &child)),
+    );
+    assert_ok(&racing);
     assert_ok(&ended);
     assert_eq!(ended["result"], json!({}));
     let main = branch_events(&session, "main", ..).await.unwrap();
@@ -96,6 +114,65 @@ async fn a_user_ends_a_line_and_a_v3_client_reads_both_sides() {
         .await;
     assert_ok(&line);
     assert_eq!(line["result"]["done"], true);
+    let through = line["result"]["through"].as_u64().unwrap();
+    let mut after = 0;
+    let mut paged = Vec::new();
+    while after < through {
+        let page = client
+            .rpc(
+                "session.history",
+                json!({"sessionId":id,
+            "branchId":child,"after":after,"limit":1,"through":through}),
+            )
+            .await;
+        assert_ok(&page);
+        paged.extend(page["result"]["events"].as_array().unwrap().iter().cloned());
+        let next = page["result"]["nextAfter"].as_u64().unwrap();
+        assert!(next > after);
+        after = next;
+    }
+    assert_eq!(paged, *line["result"]["events"].as_array().unwrap());
+    let pinned = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":child,
+        "after":0,"limit":256,"through":cutoff}),
+        )
+        .await;
+    assert_ok(&pinned);
+    assert_eq!(pinned["result"]["nextAfter"], cutoff);
+    assert_eq!(pinned["result"], racing["result"]);
+    let tree = session
+        .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()
+        .unwrap();
+    let facts = tree.page(child.clone(), 0, 256).await.unwrap();
+    if native {
+        assert!(
+            facts.iter().any(|event| matches!(&event.kind,
+            EventKind::ModelCall(data) if data.request.messages.is_empty())),
+            "ended history must not rebuild stored request bodies"
+        );
+    }
+    let mut interior = None;
+    for sequence in 1..through {
+        if matches!(
+            tree.batch_end(child.clone(), sequence).await,
+            Err(dim_agent_runtime::AgentError::InvalidInput(_))
+        ) {
+            interior = Some(sequence);
+            break;
+        }
+    }
+    let interior = interior.expect("the model turn contains an atomic batch");
+    for params in [json!({"after":interior}), json!({"through":interior})] {
+        let mut request = json!({"sessionId":id,"branchId":child});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(params.as_object().unwrap().clone());
+        let invalid = client.rpc("session.history", request).await;
+        assert_eq!(invalid["error"]["code"], -32602, "{invalid}");
+    }
     assert!(
         line["result"]["events"]
             .as_array()
