@@ -3205,7 +3205,7 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
-        "json"
+        "write"
       ]
     },
     {
@@ -27465,8 +27465,10 @@
       "from": "dim_cli::export",
       "to": "dim_cli::session",
       "references": [
+        "path HistorySink",
         "path session::read_history",
-        "use crate::session"
+        "use crate::session",
+        "use crate::session::HistorySink"
       ]
     },
     {

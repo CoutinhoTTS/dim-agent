@@ -323,7 +323,7 @@ pub async fn chat(
     let mut questions = Questions::default();
     let result = async {
         display.muted = !interactive;
-        display.cursor = read_history(client, &session_id, 0, |value| {
+        display.cursor = read_history(client, &session_id, 0, &mut |value| {
             questions.history("main", &value);
             if options.json { Ok(()) } else { display.event(serde_json::from_value(value)?, true) }
         }).await?;
@@ -504,11 +504,28 @@ pub async fn chat(
     }
 }
 
+/// What a paged history read feeds: the read's fixed watermark, then each
+/// event in order.
+pub trait HistorySink {
+    /// The read's fixed watermark, before the first page's events. A sink that
+    /// writes it in a fixed position needs it; the others ignore it.
+    fn watermark(&mut self, _through: u64) -> Result<()> {
+        Ok(())
+    }
+    fn event(&mut self, event: Value) -> Result<()>;
+}
+
+impl<F: FnMut(Value) -> Result<()>> HistorySink for F {
+    fn event(&mut self, event: Value) -> Result<()> {
+        self(event)
+    }
+}
+
 pub async fn read_history(
     client: &mut Client,
     session_id: &str,
     mut after: u64,
-    mut consume: impl FnMut(Value) -> Result<()>,
+    sink: &mut impl HistorySink,
 ) -> Result<u64> {
     let mut through = None;
     loop {
@@ -519,9 +536,12 @@ pub async fn read_history(
         }
         let page: History = client.typed("session.history", params).await?;
         let next = page.next(after, through)?;
-        through = Some(page.through);
+        if through.is_none() {
+            sink.watermark(page.through)?;
+            through = Some(page.through);
+        }
         for event in page.events {
-            consume(event)?;
+            sink.event(event)?;
         }
         match next {
             Some(next) => after = next,
@@ -537,7 +557,7 @@ async fn configure(
     display: &mut Display,
 ) -> Result<()> {
     if !text.starts_with("/agent") {
-        display.cursor = read_history(client, session_id, display.cursor, |value| {
+        display.cursor = read_history(client, session_id, display.cursor, &mut |value| {
             display.event(serde_json::from_value(value)?, true)
         })
         .await?;
@@ -548,7 +568,7 @@ async fn configure(
         display.record(line)?;
     }
     if report.changed {
-        display.cursor = read_history(client, session_id, display.cursor, |value| {
+        display.cursor = read_history(client, session_id, display.cursor, &mut |value| {
             display.event(serde_json::from_value(value)?, true)
         })
         .await?;

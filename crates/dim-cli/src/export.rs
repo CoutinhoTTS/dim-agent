@@ -3,17 +3,17 @@ use crate::{
     args::{Options, SERVER_REQUIREMENT},
     client,
     client::Client,
-    session,
+    session::{self, HistorySink},
 };
 use dim_agent_types::{
     BranchCreateData, BranchCreateFailedData, ContentBlock, InputBlock, InputMessageData, TextData,
     ToolResultData, ToolUseData,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{BufWriter, Write},
     path::Path,
     process::Stdio,
     str::FromStr,
@@ -42,38 +42,222 @@ pub async fn write(
     format: Format,
     path: Option<&Path>,
 ) -> Result<()> {
-    let mut events = Vec::new();
-    let through = session::read_history(client, session_id, 0, |event| {
-        events.push(event);
-        Ok(())
-    })
-    .await?;
-    let text = match format {
-        Format::Json => {
-            serde_json::to_string_pretty(
-                &json!({"sessionId":session_id,"branchId":"main","through":through,"events":events}),
-            )? + "\n"
-        }
-        Format::Markdown => markdown(session_id, &events)?,
+    let Some(path) = path else {
+        let mut output = BufWriter::new(std::io::stdout().lock());
+        return stream(client, session_id, format, &mut output).await;
     };
-    if let Some(path) = path {
-        let mut file = create(path)?;
-        file.write_all(text.as_bytes())?;
-        file.flush()?;
-        let label = match format {
-            Format::Markdown => "Markdown",
-            Format::Json => "JSON",
-        };
-        eprintln!(
-            "Exported {label}: {}",
-            crate::sanitize::safe(&path.display().to_string())
-        );
-    } else {
-        let mut output = std::io::stdout().lock();
-        output.write_all(text.as_bytes())?;
-        output.flush()?;
+    let mut file = BufWriter::new(create(path)?);
+    let result = stream(client, session_id, format, &mut file).await;
+    drop(file);
+    match result {
+        Ok(()) => {
+            let label = match format {
+                Format::Markdown => "Markdown",
+                Format::Json => "JSON",
+            };
+            eprintln!(
+                "Exported {label}: {}",
+                crate::sanitize::safe(&path.display().to_string())
+            );
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(path);
+            Err(error)
+        }
     }
-    Ok(())
+}
+
+/// Writes the export to `out` as the read's pages arrive, so it holds one page
+/// instead of the whole history.
+async fn stream(
+    client: &mut Client,
+    session_id: &str,
+    format: Format,
+    out: &mut impl Write,
+) -> Result<()> {
+    match format {
+        Format::Json => {
+            let mut json = Json::new(out, session_id);
+            session::read_history(client, session_id, 0, &mut json).await?;
+            json.end()
+        }
+        Format::Markdown => {
+            let mut markdown = Markdown::new(out, session_id)?;
+            session::read_history(client, session_id, 0, &mut markdown).await?;
+            markdown.end()
+        }
+    }
+}
+
+/// Writes the JSON document as the pages arrive. `sessionId`, `branchId` and
+/// `through` precede `events`, so the document header is written when the read
+/// reports its watermark, before the first page's events.
+struct Json<'a, W: Write> {
+    out: &'a mut W,
+    session_id: &'a str,
+    /// Whether no event has been written yet: the first takes no separator,
+    /// and an array that stays empty closes on its opening line.
+    first: bool,
+}
+
+impl<'a, W: Write> Json<'a, W> {
+    fn new(out: &'a mut W, session_id: &'a str) -> Self {
+        Self {
+            out,
+            session_id,
+            first: true,
+        }
+    }
+    fn end(&mut self) -> Result<()> {
+        self.out
+            .write_all(if self.first { b"]\n}\n" } else { b"\n  ]\n}\n" })?;
+        self.out.flush()?;
+        Ok(())
+    }
+}
+
+impl<W: Write> HistorySink for Json<'_, W> {
+    fn watermark(&mut self, through: u64) -> Result<()> {
+        write!(
+            self.out,
+            "{{\n  \"sessionId\": {},\n  \"branchId\": \"main\",\n  \"through\": {through},\n  \"events\": [",
+            serde_json::to_string(self.session_id)?
+        )?;
+        Ok(())
+    }
+    fn event(&mut self, event: Value) -> Result<()> {
+        self.out
+            .write_all(if self.first { b"\n" } else { b",\n" })?;
+        self.first = false;
+        for (index, line) in serde_json::to_string_pretty(&event)?
+            .split('\n')
+            .enumerate()
+        {
+            if index > 0 {
+                self.out.write_all(b"\n")?;
+            }
+            self.out.write_all(b"    ")?;
+            self.out.write_all(line.as_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+/// Writes the Markdown document as the pages arrive.
+struct Markdown<'a, W: Write> {
+    out: &'a mut W,
+    /// The `text` or `thinking` run already opened, by name and request, so
+    /// consecutive deltas of one run share its heading.
+    text_request: Option<(String, String)>,
+}
+
+impl<'a, W: Write> Markdown<'a, W> {
+    fn new(out: &'a mut W, session_id: &str) -> Result<Self> {
+        write!(out, "# Session {session_id}\n\nBranch: main\n")?;
+        Ok(Self {
+            out,
+            text_request: None,
+        })
+    }
+    fn end(&mut self) -> Result<()> {
+        self.out.write_all(b"\n")?;
+        self.out.flush()?;
+        Ok(())
+    }
+    fn fence(&mut self, content: &str, language: &str) -> Result<()> {
+        let length = content
+            .split(|ch| ch != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        let delimiter = "`".repeat(3.max(length + 1));
+        write!(
+            self.out,
+            "\n{delimiter}{language}\n{content}\n{delimiter}\n"
+        )?;
+        Ok(())
+    }
+}
+
+impl<W: Write> HistorySink for Markdown<'_, W> {
+    fn event(&mut self, event: Value) -> Result<()> {
+        let kind = (event["type"].as_str(), event["name"].as_str());
+        let data = &event["data"];
+        match kind {
+            (Some("input"), Some("message")) => {
+                self.text_request = None;
+                let data = InputMessageData::deserialize(data)?;
+                if let Some(user) = data.user {
+                    self.out.write_all(b"\n\n### User\n\n")?;
+                    for block in user.content {
+                        match block {
+                            ContentBlock::Text { text } => self.out.write_all(text.as_bytes())?,
+                            ContentBlock::Image { source } => {
+                                write!(self.out, "\n[Image attachment: {}]\n", source.media_type)?
+                            }
+                        }
+                    }
+                }
+                for block in data.blocks {
+                    let InputBlock::Raw { text, .. } = block;
+                    self.out.write_all(b"\n\n### Runtime input\n")?;
+                    self.fence(&text, "text")?;
+                }
+            }
+            (Some("step"), Some(name @ ("text" | "thinking"))) => {
+                let data = TextData::deserialize(data)?;
+                let key = (name.to_owned(), data.request_id);
+                if self.text_request.as_ref() != Some(&key) {
+                    self.out.write_all(if name == "thinking" {
+                        b"\n\n### Reasoning\n\n"
+                    } else {
+                        b"\n\n### Assistant\n\n"
+                    })?;
+                    self.text_request = Some(key);
+                }
+                self.out.write_all(data.delta.as_bytes())?;
+            }
+            (Some("step"), Some("tool-use")) => {
+                self.text_request = None;
+                let data = ToolUseData::deserialize(data)?;
+                write!(
+                    self.out,
+                    "\n\n### Tool call: {} ({})\n",
+                    data.call.name, data.call.id
+                )?;
+                let input = serde_json::to_string_pretty(&data.call.input)?;
+                self.fence(&input, "json")?;
+            }
+            (Some("step"), Some("tool-result")) => {
+                self.text_request = None;
+                let data = ToolResultData::deserialize(data)?;
+                for result in data.results {
+                    write!(self.out, "\n\n### Tool result: {}\n", result.call_id)?;
+                    let value = serde_json::to_string_pretty(&result.result)?;
+                    self.fence(&value, "json")?;
+                }
+            }
+            (Some("branch"), Some("create")) => {
+                self.text_request = None;
+                let data = BranchCreateData::deserialize(data)?;
+                write!(
+                    self.out,
+                    "\n\nChild branch {} (contents not exported).\n",
+                    data.branch
+                )?;
+            }
+            (Some("branch"), Some("create-failed")) => {
+                self.text_request = None;
+                let data = BranchCreateFailedData::deserialize(data)?;
+                let (BranchCreateFailedData::Failed { branch, .. }
+                | BranchCreateFailedData::Cancelled { branch, .. }) = data;
+                write!(self.out, "\n\nChild branch {branch} was not created.\n")?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 /// Creates an export file: never an existing path, private on Unix.
@@ -153,106 +337,4 @@ async fn run_export(command: &mut tokio::process::Command) -> Result<()> {
         None => message.to_owned(),
     }
     .into())
-}
-
-fn fence(output: &mut String, content: &str, language: &str) {
-    let length = content
-        .split(|ch| ch != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
-    let delimiter = "`".repeat(3.max(length + 1));
-    output.push_str(&format!(
-        "\n{delimiter}{language}\n{content}\n{delimiter}\n"
-    ));
-}
-
-fn markdown(session_id: &str, events: &[Value]) -> Result<String> {
-    let mut output = format!("# Session {session_id}\n\nBranch: main\n");
-    let mut text_request = None;
-    for event in events {
-        let kind = (event["type"].as_str(), event["name"].as_str());
-        let data = &event["data"];
-        match kind {
-            (Some("input"), Some("message")) => {
-                text_request = None;
-                let data = InputMessageData::deserialize(data)?;
-                if let Some(user) = data.user {
-                    output.push_str("\n\n### User\n\n");
-                    for block in user.content {
-                        match block {
-                            ContentBlock::Text { text } => output.push_str(&text),
-                            ContentBlock::Image { source } => {
-                                output.push_str(&format!(
-                                    "\n[Image attachment: {}]\n",
-                                    source.media_type
-                                ));
-                            }
-                        }
-                    }
-                }
-                for block in data.blocks {
-                    let InputBlock::Raw { text, .. } = block;
-                    output.push_str("\n\n### Runtime input\n");
-                    fence(&mut output, &text, "text");
-                }
-            }
-            (Some("step"), Some(name @ ("text" | "thinking"))) => {
-                let data = TextData::deserialize(data)?;
-                let key = (name.to_owned(), data.request_id);
-                if text_request.as_ref() != Some(&key) {
-                    output.push_str(if name == "thinking" {
-                        "\n\n### Reasoning\n\n"
-                    } else {
-                        "\n\n### Assistant\n\n"
-                    });
-                    text_request = Some(key);
-                }
-                output.push_str(&data.delta);
-            }
-            (Some("step"), Some("tool-use")) => {
-                text_request = None;
-                let data = ToolUseData::deserialize(data)?;
-                output.push_str(&format!(
-                    "\n\n### Tool call: {} ({})\n",
-                    data.call.name, data.call.id
-                ));
-                fence(
-                    &mut output,
-                    &serde_json::to_string_pretty(&data.call.input)?,
-                    "json",
-                );
-            }
-            (Some("step"), Some("tool-result")) => {
-                text_request = None;
-                let data = ToolResultData::deserialize(data)?;
-                for result in data.results {
-                    output.push_str(&format!("\n\n### Tool result: {}\n", result.call_id));
-                    fence(
-                        &mut output,
-                        &serde_json::to_string_pretty(&result.result)?,
-                        "json",
-                    );
-                }
-            }
-            (Some("branch"), Some("create")) => {
-                text_request = None;
-                let data = BranchCreateData::deserialize(data)?;
-                output.push_str(&format!(
-                    "\n\nChild branch {} (contents not exported).\n",
-                    data.branch
-                ));
-            }
-            (Some("branch"), Some("create-failed")) => {
-                text_request = None;
-                let data = BranchCreateFailedData::deserialize(data)?;
-                let (BranchCreateFailedData::Failed { branch, .. }
-                | BranchCreateFailedData::Cancelled { branch, .. }) = data;
-                output.push_str(&format!("\n\nChild branch {branch} was not created.\n"));
-            }
-            _ => {}
-        }
-    }
-    output.push('\n');
-    Ok(output)
 }
