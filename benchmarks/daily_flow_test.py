@@ -77,39 +77,49 @@ def git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def write_harbor_job(job: Path, k: int, unscored: int = 0) -> None:
-    """A minimal, scoreable harbor job: one task run k times, all passing.
+def write_harbor_job(job: Path, k: int, unscored: int = 0,
+                     task_names: tuple[str, ...] = ("terminal-bench/a",),
+                     all_zero: bool = False) -> None:
+    """A minimal, scoreable harbor job: each task run k times, all passing.
 
     `unscored` drops the verifier result from that many trials, which is what a
     run looks like when the agent finished and nothing graded it — the shape the
     real 2026-09-14 baseline came back in, and the one the window must not be
-    advanced over.
+    advanced over. `all_zero` scores every trial 0, the shape of a build or
+    verifier that ran and failed everything.
+
+    Task names come from ``corpus_tasks``: harbor names its trials after the
+    ``[task] name`` in each task's ``task.toml``, which is prefixed differently
+    from the manifest directory key (``terminal-bench/...``, ``datacurve/...``).
+    The job and the corpus it claims have to agree on those names for the
+    completeness guard to have anything to say.
     """
-    trials = [
-        {
-            "trial_name": f"tb-a__{index}",
-            "task_name": "tb/a",
-            "task_checksum": "checksum-a",
-            "agent_info": {"name": "dim", "version": "0.5.1"},
-            "agent_result": {
-                "n_input_tokens": 1000, "n_output_tokens": 100,
-                "n_cache_tokens": 0,
-                "metadata": {"dim_turns": 9, "dim_usage_complete": True},
-            },
-            "verifier_result": {"rewards": {"reward": 1.0}},
-            "agent_execution": {
-                "started_at": "2026-09-14T03:10:13.067022Z",
-                "finished_at": "2026-09-14T03:18:42.779797Z",
-            },
-        }
-        for index in range(k)
-    ]
+    reward = 0.0 if all_zero else 1.0
+    trials = []
+    for name in task_names:
+        for index in range(k):
+            trials.append({
+                "trial_name": f"{name.replace('/', '-')}__{index}",
+                "task_name": name,
+                "task_checksum": f"checksum-{name}",
+                "agent_info": {"name": "dim", "version": "0.5.1"},
+                "agent_result": {
+                    "n_input_tokens": 1000, "n_output_tokens": 100,
+                    "n_cache_tokens": 0,
+                    "metadata": {"dim_turns": 9, "dim_usage_complete": True},
+                },
+                "verifier_result": {"rewards": {"reward": reward}},
+                "agent_execution": {
+                    "started_at": "2026-09-14T03:10:13.067022Z",
+                    "finished_at": "2026-09-14T03:18:42.779797Z",
+                },
+            })
     job.mkdir(parents=True, exist_ok=True)
     (job / "result.json").write_text(json.dumps({
         "id": "job-uuid",
         "n_total_trials": len(trials),
         "stats": {"evals": {"dim__glm-5.3__tasks": {
-            "reward_stats": {"reward": {"1.0": [t["trial_name"] for t in trials]}},
+            "reward_stats": {"reward": {f"{reward}": [t["trial_name"] for t in trials]}},
             "exception_stats": {},
         }}},
     }))
@@ -123,11 +133,17 @@ def write_harbor_job(job: Path, k: int, unscored: int = 0) -> None:
 
 
 def make_corpus(path: Path, *names: str) -> str:
-    """A corpus tree with a manifest that pins it; returns its tree digest."""
+    """A corpus tree with a manifest that pins it; returns its tree digest.
+
+    Each directory is named by the manifest key, but its ``task.toml`` carries a
+    ``[task] name`` prefixed the way harbor reports it, distinct from the
+    directory key — the production shape the completeness guard must match.
+    """
     tasks = {}
     for name in names:
         (path / name).mkdir(parents=True)
-        (path / name / "task.toml").write_text(f'[task]\nname = "{name}"\n')
+        (path / name / "task.toml").write_text(
+            f'[task]\nname = "terminal-bench/{name}"\n')
         tasks[name] = {"digest": digest_dir(path / name), "upstream": "test", "overlaid": []}
     pin = hashlib.sha256(json.dumps(tasks, sort_keys=True).encode()).hexdigest()
     (path / "MANIFEST.json").write_text(json.dumps({"tree_digest": pin, "tasks": tasks}))
@@ -210,8 +226,12 @@ class DailyFlowTest(unittest.TestCase):
              dirty: bool = False, no_model: bool = False,
              verifier_proxy: str | None = None,
              verifier_no_proxy: str | None = None,
+             tasks_dir: Path | None = None, job_tasks: int | None = None,
+             all_zero: bool = False, env: dict | None = None,
              with_sidecar: bool = False,
-             sidecar_k: int | None = None) -> int:
+             sidecar_k: int | None = None,
+             extra_tasks: tuple[str, ...] = ()) -> int:
+        tasks = tasks_dir or self.tasks
         if dirty:
             (self.tooling / "benchmarks" / "scratch.py").write_text("edit\n")
         k = {"daily": 1, "checkpoint": 3, "baseline": 3}[run_type]
@@ -224,7 +244,7 @@ class DailyFlowTest(unittest.TestCase):
             "--out", str(self.out),
             "--baselines-dir", str(self.baselines),
             "--ledger-dir", str(self.ledger),
-            "--tasks-dir", str(self.tasks),
+            "--tasks-dir", str(tasks),
             "--host", "eval@host", "--scratch", "/scratch",
             "--remote-python", "/venv/bin/python",
             "--prompt", str(self.prompt),
@@ -253,7 +273,11 @@ class DailyFlowTest(unittest.TestCase):
 
             The model identity comes back beside the job, because that is what
             the real fetch does — run_l2 captures it from the endpoint and rsync
-            brings it along. `no_model` is the case where it does not.
+            brings it along. `no_model` is the case where it does not. The job's
+            task names come from `corpus_tasks`, the same prefixed ``[task] name``
+            harbor reports; `job_tasks` truncates it to simulate a job that ran a
+            subset of the corpus, and `extra_tasks` appends names harbor could
+            never have run to exercise the outside-the-corpus refusal.
             `with_sidecar` also brings back the job config run_l2 wrote beside
             the results, which is what makes the frozen params measured rather
             than asserted.
@@ -264,7 +288,12 @@ class DailyFlowTest(unittest.TestCase):
             harbor = Path(out) / "harbor"
             if harbor.exists():
                 shutil.rmtree(harbor)
-            write_harbor_job(harbor, k, unscored=unscored)
+            names = list(daily_run.corpus_tasks(tasks))
+            if job_tasks is not None:
+                names = names[:job_tasks]
+            names += list(extra_tasks)
+            write_harbor_job(harbor, k, unscored=unscored,
+                             task_names=tuple(names), all_zero=all_zero)
             if with_sidecar:
                 config_text = '{"model": "glm-5.3"}'
                 (Path(out) / f"{run_id}-job.json").write_text(json.dumps({
@@ -285,6 +314,7 @@ class DailyFlowTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {
             "DIM_EVAL_VERIFIER_PROXY": verifier_proxy or "",
             "DIM_EVAL_VERIFIER_NO_PROXY": verifier_no_proxy or "",
+            **(env or {}),
         }), \
              mock.patch.object(sys, "argv", argv), \
              mock.patch.object(daily_run, "TOOLING_ROOT", self.tooling), \
@@ -677,7 +707,15 @@ class DailyFlowTest(unittest.TestCase):
         self.assertEqual(run.unjudged, (head,))
         self.assertEqual(ledger_tools.audit(self.ledger), [])
 
-    def test_a_checkpoint_that_matches_its_baseline_is_recorded_as_pass(self) -> None:
+    def test_a_checkpoint_that_matches_its_baseline_is_observed_until_armed(self) -> None:
+        """A clean comparison decides nothing while the gate is disarmed.
+
+        Every criterion on this corpus is awaiting recalibration, so none blocks.
+        Calling that `pass` moved every merge in the window into the escape-rate
+        denominator as one L2 had affirmatively cleared — cleared by a gate that
+        was never wired to anything. It records `observed` now; `pass` returns
+        exactly when a criterion is armed.
+        """
         self.state.write_text(json.dumps({"last_l2_head": self.base}))
         self._run(run_type="baseline")
         head = self._merge("one", "a.txt", "a\n")
@@ -688,9 +726,149 @@ class DailyFlowTest(unittest.TestCase):
         import ledger_tools
 
         runs = {r.run_type: r for r in ledger_tools.Ledger(self.ledger).runs()}
-        self.assertEqual(runs["checkpoint"].outcome, "pass")
+        # The baseline itself never compares, so it is `observed` too — the
+        # doc's promise about baseline records is pinned here, not just the
+        # checkpoint's.
+        self.assertEqual(runs["baseline"].outcome, "observed")
+        self.assertFalse(runs["baseline"].gate_armed)
+        self.assertTrue(runs["baseline"].measured)
+        self.assertEqual(runs["checkpoint"].outcome, "observed")
+        self.assertFalse(runs["checkpoint"].gate_armed)
         self.assertTrue(runs["checkpoint"].conclusive)
+        self.assertTrue(runs["checkpoint"].measured)
         self.assertEqual(runs["checkpoint"].covers, (head,))
+
+        # The same clean comparison with a criterion armed is a `pass` — and it
+        # is the only thing that is.
+        sys.path.insert(0, str(Path(daily_run.__file__).parent / "runner"))
+        import baseline
+        armed = baseline.Criterion(name="recalibrated", detail="test criterion",
+                                   ok=True, blocking=True)
+        self._merge("two", "b.txt", "b\n")
+        with mock.patch.object(baseline.Comparison, "criteria",
+                               lambda self: (armed,)):
+            self.assertEqual(self._run(mode="visible", run_type="checkpoint"), 0)
+        latest = max(ledger_tools.Ledger(self.ledger).runs(),
+                     key=lambda r: r.recorded_at)
+        self.assertEqual(latest.run_type, "checkpoint")
+        self.assertEqual(latest.outcome, "pass")
+        self.assertTrue(latest.gate_armed)
+
+    def test_a_window_seen_visible_still_runs_l2_after_a_flip_to_invisible(self) -> None:
+        """The verdict of record triggers L2, not the latest one.
+
+        A held window is re-judged whole. If the judge has changed its mind — a
+        new model, an edited prompt — every `visible` merge comes back
+        `invisible` while the ledger keeps the verdict it recorded. Keying the
+        L2 trigger on this run's records alone would close such a window as
+        "nothing model-visible" precisely because it had once been seen.
+        """
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        head = self._merge("feat", "a.txt", "a\n")
+        self.assertEqual(self._run(mode="visible", l2_exit=1),
+                         daily_run.EXIT_L2_FAILED)
+        self.assertEqual(self._state_head(), self.base)
+
+        self.built.clear()
+        self.ran.clear()
+        # A fresh cache: in production a re-judge happens because the decision's
+        # identity changed (judge model, prompt, policy), which is exactly what
+        # a new cache namespace stands in for here.
+        self.assertEqual(self._run(mode="invisible", l2_exit=1, extra=[
+            "--cache-dir", str(self.root / "cache2")]),
+            daily_run.EXIT_L2_FAILED)
+        # L2 ran again, on the kept verdict's account.
+        self.assertEqual(self.built, [head])
+
+        import ledger_tools
+        ledger = ledger_tools.Ledger(self.ledger)
+        self.assertEqual(ledger.merge(head).l1_verdict, "visible")
+        self.assertIn(head, ledger.runs()[-1].disputed)
+
+    def test_a_job_that_ran_no_corpus_tasks_holds_the_window(self) -> None:
+        """A job that came back empty measured nothing, and nothing it says may
+        move the window.
+
+        harbor's own problems() checks the tasks it ran; nothing in it notices
+        the tasks it never ran. The job is held to the corpus manifest, and a
+        subset — here the degenerate one — lands in `unscoreable`: re-running is
+        what fixes it, so the window waits.
+        """
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        head = self._merge("feat", "a.txt", "a\n")
+        self.assertEqual(self._run(mode="visible", job_tasks=0),
+                         daily_run.EXIT_INVALID)
+        self.assertEqual(self._state_head(), self.base)
+
+        manifest = self._manifest_for(head)
+        self.assertIn("corpus task(s)", manifest["l2"]["problems"][0])
+
+        import ledger_tools
+        run = ledger_tools.Ledger(self.ledger).runs()[0]
+        self.assertEqual((run.outcome, run.invalid_reason),
+                         ("invalid", "unscoreable"))
+
+    def test_a_job_that_ran_a_subset_of_the_corpus_holds_the_window(self) -> None:
+        """A partial job measured some tasks, and the ones it never ran keep the
+        window where it was — and the guard reports the intersection, not the
+        number of tasks the job happened to return.
+        """
+        tasks = self.root / "two-tasks"
+        make_corpus(tasks, "a", "b")
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        head = self._merge("feat", "a.txt", "a\n")
+        # The ghost name is what makes this test able to fail: one real task
+        # plus one outside the corpus means the job reports two tasks, so a
+        # version of the guard that counts reported tasks instead of the
+        # intersection prints covered 2/2 here and would not be caught.
+        self.assertEqual(self._run(mode="visible", tasks_dir=tasks, job_tasks=1,
+                                   extra_tasks=("terminal-bench/ghost",)),
+                         daily_run.EXIT_INVALID)
+        self.assertEqual(self._state_head(), self.base)
+
+        problem = self._manifest_for(head)["l2"]["problems"][0]
+        self.assertIn("covered 1/2 corpus task(s)", problem)
+        self.assertIn("terminal-bench/b", problem)
+        self.assertIn("terminal-bench/ghost",
+                      self._manifest_for(head)["l2"]["problems"][1])
+
+    def test_a_job_that_ran_tasks_outside_the_corpus_holds_the_window(self) -> None:
+        """A job that reported a task the corpus never pinned cannot be trusted
+        as a measurement of that corpus, even when every pinned task is present.
+        """
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        head = self._merge("feat", "a.txt", "a\n")
+        self.assertEqual(self._run(mode="visible",
+                                   extra_tasks=("terminal-bench/ghost",)),
+                         daily_run.EXIT_INVALID)
+        self.assertEqual(self._state_head(), self.base)
+
+        problem = self._manifest_for(head)["l2"]["problems"][0]
+        self.assertIn("outside the corpus", problem)
+        self.assertIn("terminal-bench/ghost", problem)
+
+    def test_an_all_zero_run_does_not_freeze_a_baseline(self) -> None:
+        """Every trial scored, and not one passed: on this corpus that has meant
+        a broken measurement, never a weak model (runner/assemble_tasks.py, the
+        Terminal-Bench config). A reference like that reads every later run as
+        an improvement, so it is refused — with a deliberate way out.
+        """
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        self.assertEqual(self._run(run_type="baseline", all_zero=True),
+                         daily_run.EXIT_INVALID)
+        self.assertEqual(list(self.baselines.glob("*.json")), [])
+        manifest = self._manifest()
+        self.assertIn("scored 0", manifest["settle_error"])
+
+        import ledger_tools
+        recorded = ledger_tools.Ledger(self.ledger).runs()[0]
+        self.assertEqual(recorded.invalid_reason, "settle_failed")
+
+        # The way out is explicit, and then the reference freezes.
+        self.assertEqual(self._run(
+            run_type="baseline", all_zero=True,
+            env={"DIM_EVAL_ALLOW_ZERO_BASELINE": "1"}), 0)
+        self.assertEqual(len(list(self.baselines.glob("*.json"))), 1)
 
     def test_a_scoring_failure_still_leaves_the_evidence_behind(self) -> None:
         """Reading the job can fail in ways this harness does not enumerate — the
@@ -1071,7 +1249,7 @@ class DailyFlowTest(unittest.TestCase):
         self.assertEqual(frozen["measured_versions"], ["0.5.1"])
         self.assertEqual(frozen["k"], 3)
         self.assertEqual(frozen["corpus_pin"], pin)
-        self.assertEqual(frozen["tasks"]["tb/a"]["passes"], 3)
+        self.assertEqual(frozen["tasks"]["terminal-bench/a"]["passes"], 3)
         self.assertEqual(self._manifest()["l2"]["baseline_written"],
                          str(self.baselines / f"{pin}.json"))
         # The identity that came back beside the results. Without it in here,
@@ -1210,8 +1388,8 @@ class DailyFlowTest(unittest.TestCase):
         tasks = self.root / "officeqa-tasks"
         pin = make_corpus(tasks, "UID0001")
         self.state.write_text(json.dumps({"last_l2_head": self.base}))
-        self.assertEqual(self._run(run_type="baseline", extra=[
-            "--tasks-dir", str(tasks), "--concurrency", "10"]), 0)
+        self.assertEqual(self._run(run_type="baseline", tasks_dir=tasks,
+                                   extra=["--concurrency", "10"]), 0)
 
         self.assertEqual(self.concurrency, [10])
         self.assertEqual([p.name for p in self.baselines.iterdir()], [f"{pin}.json"])
