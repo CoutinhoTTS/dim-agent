@@ -334,6 +334,540 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
     shell.shutdown().await;
 }
 
+/// One `session.exec.output.page` call with an explicit byte cursor and limit.
+async fn exec_output_page(shell: &mut Shell, params: &Value, cursor: u64, limit: u64) -> Value {
+    let mut params = params.clone();
+    let object = params.as_object_mut().unwrap();
+    object.insert("cursor".into(), json!(cursor));
+    object.insert("limit".into(), json!(limit));
+    shell.client.rpc("session.exec.output.page", params).await
+}
+
+/// The task id of the next `exec/started` notice, skipping other events.
+async fn next_exec_started(shell: &mut Shell) -> Value {
+    loop {
+        let event = shell.client.notice("session.event").await;
+        if event["params"]["event"]["type"] == "exec"
+            && event["params"]["event"]["name"] == "started"
+        {
+            return event["params"]["event"]["data"]["task_id"].clone();
+        }
+    }
+}
+
+/// `session.exec.output.page` beside the tail: a running task's growing file
+/// pages forward with a byte cursor that stays valid, an ended task's file
+/// pages after `exec/ended` with the preview's sanitization and no events or
+/// Session holds, and a task rebuilt after an idle unload pages from the
+/// retained file with its terminal still `exec/ended`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_exec_output_pages_running_finished_and_restored_tasks() {
+    let mut shell = Shell::launch_with(json!({
+        "tools":["exec"], "permissionPolicy":{"preset":"full-access"}
+    }))
+    .await;
+    let session = shell
+        .server
+        .agent()
+        .unwrap()
+        .get_session(&shell.sid)
+        .unwrap();
+    assert_ok(
+        &shell
+            .client
+            .rpc("session.attach", json!({"sessionId":shell.sid}))
+            .await,
+    );
+    let command = "while [ ! -f go1 ]; do sleep 0.01; done; printf 'alpha\\n'; while [ ! -f go2 ]; do sleep 0.01; done; printf 'beta\\001\\n'; while [ ! -f go3 ]; do sleep 0.01; done; printf 'gamma\\n'; while [ ! -f finish ]; do sleep 0.01; done; exit 0";
+    let text = format!(
+        "tool:exec {}",
+        json!({"command":command,"runInBackground":true,"timeoutMs":-1})
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":shell.sid,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    let task = next_exec_started(&mut shell).await;
+    session.idle("main").await.unwrap();
+    let params = json!({"sessionId":shell.sid,"branchId":"main","taskId":task});
+    // Before any output the registered file is empty: an empty page, no next
+    // cursor.
+    let empty = exec_output_page(&mut shell, &params, 0, 64).await;
+    assert_ok(&empty);
+    assert_eq!(
+        empty["result"],
+        json!({"text":"","bytes":0,"truncated":false})
+    );
+    std::fs::write(shell.work.join("go1"), b"go").unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = exec_output_page(&mut shell, &params, 0, 64).await;
+            assert_ok(&reply);
+            if reply["result"]["text"] == json!("alpha\n") {
+                break reply;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        first["result"],
+        json!({"text":"alpha\n","bytes":6,"truncated":false})
+    );
+    // A cursor already handed out rereads the same bytes.
+    let reread = exec_output_page(&mut shell, &params, 0, 64).await;
+    assert_ok(&reread);
+    assert_eq!(reread["result"], first["result"]);
+    std::fs::write(shell.work.join("go2"), b"go").unwrap();
+    // A short page carries no next cursor; the same cursor yields the new
+    // bytes once the file grows.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = exec_output_page(&mut shell, &params, 6, 64).await;
+            assert_ok(&reply);
+            if reply["result"]["text"] == json!("beta\n") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let beta = exec_output_page(&mut shell, &params, 6, 64).await;
+    assert_ok(&beta);
+    assert_eq!(
+        beta["result"],
+        json!({"text":"beta\n","bytes":6,"truncated":false})
+    );
+    std::fs::write(shell.work.join("go3"), b"go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = exec_output_page(&mut shell, &params, 6, 64).await;
+            assert_ok(&reply);
+            if reply["result"]["text"] == json!("beta\ngamma\n") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::write(shell.work.join("finish"), b"go").unwrap();
+    let end = loop {
+        let event = shell.client.notice("session.event").await;
+        if event["params"]["event"]["type"] == "exec" && event["params"]["event"]["name"] == "ended"
+        {
+            break event["params"]["event"]["data"].clone();
+        }
+    };
+    assert_eq!(end["task_id"], task);
+    assert_eq!(end["status"], "completed");
+    session.idle("main").await.unwrap();
+    // After `exec/ended` the file pages the same way; the read appends no
+    // event.
+    let sequence = session.sequence("main").unwrap();
+    let finished = exec_output_page(&mut shell, &params, 0, 64).await;
+    assert_ok(&finished);
+    assert_eq!(
+        finished["result"],
+        json!({"text":"alpha\nbeta\ngamma\n","bytes":18,"truncated":false})
+    );
+    // Concatenated pages equal the file, minus the control character the
+    // preview rule strips.
+    let file = std::fs::read(
+        shell
+            .home
+            .join("rust/outputs")
+            .join(&shell.sid)
+            .join(format!("{}.log", task.as_str().unwrap())),
+    )
+    .unwrap();
+    let file = String::from_utf8(file).unwrap();
+    let (mut text, mut cursor) = (String::new(), 0u64);
+    loop {
+        let reply = exec_output_page(&mut shell, &params, cursor, 5).await;
+        assert_ok(&reply);
+        let result = &reply["result"];
+        assert!(result["text"].as_str().unwrap().len() <= 5);
+        assert!(result["bytes"].as_u64().unwrap() <= 5);
+        text.push_str(result["text"].as_str().unwrap());
+        match result["nextCursor"].as_u64() {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+    assert_eq!(text, file.replace('\u{1}', ""));
+    assert!(!text.contains('\u{1}'));
+    assert_eq!(session.sequence("main").unwrap(), sequence);
+    // The reads leave no hold behind: the ended Session unloads idle, and a
+    // task rebuilt after the restore pages from the retained file.
+    assert!(shell.unload().await);
+    let restored = exec_output_page(&mut shell, &params, 0, 64).await;
+    assert_ok(&restored);
+    assert_eq!(
+        restored["result"],
+        json!({"text":"alpha\nbeta\ngamma\n","bytes":18,"truncated":false})
+    );
+    let stopped = shell.client.rpc("session.exec.stop", params.clone()).await;
+    assert_ok(&stopped);
+    assert_eq!(stopped["result"]["status"], "completed");
+    assert_eq!(
+        shell
+            .client
+            .rpc("session.exec.output", params.clone())
+            .await["error"]["data"]["appError"],
+        "exec_task_unknown"
+    );
+    shell.shutdown().await;
+}
+
+/// `session.exec.output.page` bounds and errors: the limit rejects 0 and
+/// clamps at the maximum, a page is exactly the requested byte range modulo
+/// a character boundary (a split character appears once, whole, in the next
+/// page), the tail's scoping holds for unknown task/branch/session, and a
+/// removed registered file answers the page method's own error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_exec_output_page_clamps_scopes_and_errors() {
+    let mut shell = Shell::launch_with(json!({
+        "tools":["exec"], "permissionPolicy":{"preset":"full-access"}
+    }))
+    .await;
+    let session = shell
+        .server
+        .agent()
+        .unwrap()
+        .get_session(&shell.sid)
+        .unwrap();
+    assert_ok(
+        &shell
+            .client
+            .rpc("session.attach", json!({"sessionId":shell.sid}))
+            .await,
+    );
+    // `012345678éX\n`: the two-byte char sits one byte before a page of 10.
+    let command =
+        "while [ ! -f go ]; do sleep 0.01; done; printf '012345678\\303\\251X\\n'; exit 0";
+    let text = format!(
+        "tool:exec {}",
+        json!({"command":command,"runInBackground":true,"timeoutMs":-1})
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":shell.sid,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    let task = next_exec_started(&mut shell).await;
+    session.idle("main").await.unwrap();
+    let params = json!({"sessionId":shell.sid,"branchId":"main","taskId":task});
+    std::fs::write(shell.work.join("go"), b"go").unwrap();
+    let status = loop {
+        let event = shell.client.notice("session.event").await;
+        if event["params"]["event"]["type"] == "exec" && event["params"]["event"]["name"] == "ended"
+        {
+            break event["params"]["event"]["data"]["status"].clone();
+        }
+    };
+    assert_eq!(status, "completed");
+    session.idle("main").await.unwrap();
+    // The page of 10 ends at the char start; the next page serves the split
+    // character whole, once.
+    let first = exec_output_page(&mut shell, &params, 0, 10).await;
+    assert_ok(&first);
+    assert_eq!(
+        first["result"],
+        json!({"text":"012345678","bytes":9,"nextCursor":9,"truncated":false})
+    );
+    let second = exec_output_page(&mut shell, &params, 9, 10).await;
+    assert_ok(&second);
+    assert_eq!(
+        second["result"],
+        json!({"text":"éX\n","bytes":4,"truncated":false})
+    );
+    assert!(!first["result"]["text"].as_str().unwrap().contains('é'));
+    assert!(second["result"]["text"].as_str().unwrap().starts_with('é'));
+    // A page at least as long as the file ends the walk.
+    let whole = exec_output_page(&mut shell, &params, 0, 14).await;
+    assert_ok(&whole);
+    assert_eq!(
+        whole["result"],
+        json!({"text":"012345678éX\n","bytes":13,"truncated":false})
+    );
+    // A budget that cuts the very first character serves it whole: the page
+    // still consumes it and the cursor moves, even at `limit: 1`.
+    let cut = exec_output_page(&mut shell, &params, 9, 1).await;
+    assert_ok(&cut);
+    assert_eq!(
+        cut["result"],
+        json!({"text":"é","bytes":2,"nextCursor":11,"truncated":false})
+    );
+    // Walking the whole file at `limit: 1` terminates and reassembles it.
+    let (mut text, mut cursor) = (String::new(), 9u64);
+    loop {
+        let reply = exec_output_page(&mut shell, &params, cursor, 1).await;
+        assert_ok(&reply);
+        let result = &reply["result"];
+        text.push_str(result["text"].as_str().unwrap());
+        match result["nextCursor"].as_u64() {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+    assert_eq!(text, "éX\n");
+    // A cursor inside a character, which the method never hands out, cannot
+    // be completed by any read: the page is empty and has no `nextCursor`,
+    // so a following walk ends.
+    let inside = exec_output_page(&mut shell, &params, 10, 1).await;
+    assert_ok(&inside);
+    assert_eq!(
+        inside["result"],
+        json!({"text":"","bytes":0,"truncated":false})
+    );
+    for invalid in [
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":task,"limit":0}),
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":task,"limit":-1}),
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":task,"cursor":-1}),
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":task,"cursor":1.5}),
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":task,"offset":1}),
+        json!({"sessionId":"","branchId":"main","taskId":task}),
+    ] {
+        let reply = shell.client.rpc("session.exec.output.page", invalid).await;
+        assert_eq!(
+            reply["error"]["data"]["appError"], "invalid_params",
+            "{reply}"
+        );
+    }
+    let child = session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            dim_agent_runtime::BranchOptions {
+                prompt: "child".into(),
+                source: dim_agent_types::BranchSource::Host {
+                    operation_id: "page-scope".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+    let other = shell
+        .client
+        .rpc("session.create", json!({"cwd":shell.work,"tools":[]}))
+        .await;
+    assert_ok(&other);
+    for wrong in [
+        json!({"sessionId":shell.sid,"branchId":child,"taskId":task}),
+        json!({"sessionId":other["result"]["sessionId"],"branchId":"main","taskId":task}),
+        json!({"sessionId":shell.sid,"branchId":"main","taskId":"missing"}),
+    ] {
+        let error = shell.client.rpc("session.exec.output.page", wrong).await;
+        assert_eq!(
+            error["error"]["data"]["appError"], "exec_task_unknown",
+            "{error}"
+        );
+    }
+    // A second task writes past the maximum page: the request clamps.
+    let command = "while [ ! -f big ]; do sleep 0.01; done; awk 'BEGIN { for (i=0; i<5500000; i++) printf \"x\" }'; exit 0";
+    let text = format!(
+        "tool:exec {}",
+        json!({"command":command,"runInBackground":true,"timeoutMs":-1})
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":shell.sid,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    let big = next_exec_started(&mut shell).await;
+    session.idle("main").await.unwrap();
+    std::fs::write(shell.work.join("big"), b"go").unwrap();
+    let status = loop {
+        let event = shell.client.notice("session.event").await;
+        if event["params"]["event"]["type"] == "exec"
+            && event["params"]["event"]["name"] == "ended"
+            && event["params"]["event"]["data"]["task_id"] == big
+        {
+            break event["params"]["event"]["data"]["status"].clone();
+        }
+    };
+    assert_eq!(status, "completed");
+    session.idle("main").await.unwrap();
+    let big_params = json!({"sessionId":shell.sid,"branchId":"main","taskId":big});
+    let clamped = exec_output_page(&mut shell, &big_params, 0, 4 * 1024 * 1024 + 1).await;
+    assert_ok(&clamped);
+    assert_eq!(clamped["result"]["bytes"], 4 * 1024 * 1024);
+    assert_eq!(
+        clamped["result"]["text"].as_str().unwrap().len(),
+        4 * 1024 * 1024
+    );
+    assert_eq!(clamped["result"]["truncated"], false);
+    assert_eq!(clamped["result"]["nextCursor"], 4 * 1024 * 1024);
+    let tail = exec_output_page(&mut shell, &big_params, 4 * 1024 * 1024, 4 * 1024 * 1024).await;
+    assert_ok(&tail);
+    assert_eq!(tail["result"]["bytes"], 5_500_000 - 4 * 1024 * 1024);
+    assert!(tail["result"].get("nextCursor").is_none());
+    // A four-byte character under a one-byte budget is the upper bound of
+    // the whole-character extension: bytes exceed the limit by at most 3.
+    let command =
+        "while [ ! -f face ]; do sleep 0.01; done; printf '\\360\\237\\230\\200\\n'; exit 0";
+    let text = format!(
+        "tool:exec {}",
+        json!({"command":command,"runInBackground":true,"timeoutMs":-1})
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":shell.sid,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    let face = next_exec_started(&mut shell).await;
+    session.idle("main").await.unwrap();
+    std::fs::write(shell.work.join("face"), b"go").unwrap();
+    let status = loop {
+        let event = shell.client.notice("session.event").await;
+        if event["params"]["event"]["type"] == "exec"
+            && event["params"]["event"]["name"] == "ended"
+            && event["params"]["event"]["data"]["task_id"] == face
+        {
+            break event["params"]["event"]["data"]["status"].clone();
+        }
+    };
+    assert_eq!(status, "completed");
+    session.idle("main").await.unwrap();
+    let face_params = json!({"sessionId":shell.sid,"branchId":"main","taskId":face});
+    let face_page = exec_output_page(&mut shell, &face_params, 0, 1).await;
+    assert_ok(&face_page);
+    assert_eq!(
+        face_page["result"],
+        json!({"text":"😀","bytes":4,"nextCursor":4,"truncated":false})
+    );
+    // A removed registered file is the page method's own error.
+    std::fs::remove_file(
+        shell
+            .home
+            .join("rust/outputs")
+            .join(&shell.sid)
+            .join(format!("{}.log", task.as_str().unwrap())),
+    )
+    .unwrap();
+    let gone = exec_output_page(&mut shell, &params, 0, 10).await;
+    assert_eq!(app_error(&gone), "exec_output_unavailable", "{gone}");
+    assert_eq!(
+        shell
+            .client
+            .rpc("session.close", json!({"sessionId":shell.sid}))
+            .await
+            .get("error"),
+        None
+    );
+    assert_eq!(
+        shell.client.rpc("session.exec.output.page", params).await["error"]["data"]["appError"],
+        "session_closed"
+    );
+    shell.shutdown().await;
+}
+
+/// The page method's namespace answers `service_reloading` while the owner
+/// reloads: the WorkspaceTools unload waits for an in-flight exec call (one
+/// whose background start is held open), and a task started after the reload
+/// pages normally in the new generation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reloading_workspace_tools_answers_the_page_method_with_service_reloading() {
+    let mut shell = Shell::launch_with(json!({
+        "tools":["exec"], "permissionPolicy":{"preset":"full-access"}
+    }))
+    .await;
+    let sid = shell.sid.clone();
+    assert_ok(
+        &shell
+            .client
+            .rpc("session.attach", json!({"sessionId":sid}))
+            .await,
+    );
+    let mut hold = dim_agent_capabilities::workspace_tools::background::testing::hold_start(
+        &shell.home.join("rust/outputs"),
+    );
+    let text = format!(
+        "tool:exec {}",
+        json!({"command":"echo hello","runInBackground":true,"timeoutMs":-1})
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    hold.arrived().await;
+    let restart = tokio::spawn(shell.restart_plugin("WorkspaceTools"));
+    let params = json!({"sessionId":sid,"branchId":"main","taskId":"held"});
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let reply = exec_output_page(&mut shell, &params, 0, 64).await;
+            if app_error(&reply) == "service_reloading" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the page method answers service_reloading while WorkspaceTools reloads");
+    drop(hold);
+    restart.await.unwrap().unwrap();
+    // The held start completes as the reload settles, so its own
+    // `exec/started` is the next one; the task this test pages is registered
+    // after the reload, in the new generation.
+    let held_task = next_exec_started(&mut shell).await;
+    let text = format!(
+        "tool:exec {}",
+        json!({"command":"echo after","runInBackground":true,"timeoutMs":-1})
+    );
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    let task = next_exec_started(&mut shell).await;
+    assert_ne!(task, held_task);
+    let params = json!({"sessionId":sid,"branchId":"main","taskId":task});
+    let reply = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = exec_output_page(&mut shell, &params, 0, 64).await;
+            if reply.get("error").is_none() && reply["result"]["text"] == json!("after\n") {
+                break reply;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply["result"]["text"], "after\n");
+    assert_eq!(reply["result"]["bytes"], 6);
+    shell.shutdown().await;
+}
+
 /// What a test reaches inside the most recent Session: a plugin context, to
 /// restart ShellInput alone, and the Session's branch tree, to close a branch
 /// through its facade, as no RPC does.
@@ -541,19 +1075,26 @@ impl Shell {
             work,
         }
     }
-    /// Restarts the Session's ShellInput plugin and nothing else.
-    fn restart_shell_input(
+    /// Restarts the Session plugin named `name` and nothing else.
+    fn restart_plugin(
         &self,
+        name: &str,
     ) -> rutis::host::BoxFuture<'static, Result<(), Arc<rutis::host::ErrorKind>>> {
         let session = self.server.agent().unwrap().get_session(&self.sid).unwrap();
         let plugins = session.diagnostics().unwrap().plugins;
         let id = plugins
             .iter()
-            .find(|plugin| plugin.name == "ShellInput")
+            .find(|plugin| plugin.name == name)
             .unwrap()
             .id;
         let ctx = self.probe.0.lock().unwrap().as_ref().unwrap().ctx.clone();
         ctx.view(id).unwrap().restart()
+    }
+    /// Restarts the Session's ShellInput plugin and nothing else.
+    fn restart_shell_input(
+        &self,
+    ) -> rutis::host::BoxFuture<'static, Result<(), Arc<rutis::host::ErrorKind>>> {
+        self.restart_plugin("ShellInput")
     }
     fn tree(&self) -> Arc<TreeCommands> {
         self.probe.0.lock().unwrap().as_ref().unwrap().tree.clone()

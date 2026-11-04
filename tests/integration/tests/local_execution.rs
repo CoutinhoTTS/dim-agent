@@ -1549,22 +1549,27 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     session.idle("main").await.unwrap();
     unload_once_released(&session).await;
     let id = session.id().to_owned();
-    let started = |task_id: &str| {
+    let orphan_path = harness.output_root.join("exec-orphan.log");
+    std::fs::write(&orphan_path, "partial\n").unwrap();
+    let started = |task_id: &str, output_path: &str| {
         EventKind::ExecStarted(ExecStartedData {
             turn_id: "t".into(),
             request_id: "r".into(),
             call_id: "c".into(),
             task_id: task_id.into(),
             description: task_id.into(),
-            output_path: format!("/tmp/{task_id}.log"),
+            output_path: output_path.into(),
         })
     };
     let lost = stored(
         &harness,
         &id,
         vec![
-            started("exec-orphan"),
-            started("exec-lost"),
+            started("exec-orphan", &orphan_path.to_string_lossy()),
+            started(
+                "exec-lost",
+                &harness.output_root.join("exec-lost.log").to_string_lossy(),
+            ),
             EventKind::ExecEnded(ExecEndedData {
                 task_id: "exec-lost".into(),
                 status: ExecStatus::Completed,
@@ -1595,8 +1600,44 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     let (orphan_event, orphan) = &ends[2];
     assert_eq!(orphan.task_id, "exec-orphan");
     assert_eq!(orphan.status, ExecStatus::Failed);
-    assert!(text(&orphan.result).contains(
-        "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: /tmp/exec-orphan.log."
+    assert!(text(&orphan.result).contains(&format!(
+        "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: {}.",
+        orphan_path.display()
+    )));
+    // A rebuilt task pages the file its own `exec/started` registered. Its
+    // recovery terminal has no `outputTruncated` flag, so truncation comes
+    // from the file's size there: this file is small.
+    let page = restored
+        .service::<BackgroundExec>("main")
+        .unwrap()
+        .output_page("exec-orphan", 0, 64)
+        .await
+        .unwrap();
+    assert_eq!(page.text, "partial\n");
+    assert_eq!(page.bytes, 8);
+    assert!(page.next_cursor.is_none());
+    assert!(!page.truncated);
+    // A read can land inside one write and see the file end inside a
+    // character; with no whole character to serve the page is empty and
+    // carries no `nextCursor` rather than indexing past the read.
+    std::fs::write(&orphan_path, [0xe2, 0x82]).unwrap();
+    let partial = restored
+        .service::<BackgroundExec>("main")
+        .unwrap()
+        .output_page("exec-orphan", 0, 64)
+        .await
+        .unwrap();
+    assert_eq!(partial.text, "");
+    assert_eq!(partial.bytes, 0);
+    assert!(partial.next_cursor.is_none());
+    // A task whose registered file is gone answers the read's own error.
+    assert!(matches!(
+        restored
+            .service::<BackgroundExec>("main")
+            .unwrap()
+            .output_page("exec-lost", 0, 64)
+            .await,
+        Err(workspace_tools::background::OutputPageError::Unavailable)
     ));
     restored.idle("main").await.unwrap();
     let mut woken: Vec<_> = notifications(&local_events(&restored).await)
