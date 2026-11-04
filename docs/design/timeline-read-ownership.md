@@ -19,7 +19,7 @@ It does not restate the query contract ([plugin contract §5.4](plugin-contract.
 | Read | Served by | Reads |
 | --- | --- | --- |
 | A live line's facts | `Timeline::query`, the checkpoint selection, the segments | its own hot window and the store, to the published head, plus the branch's not-yet-published facts when the request asks for them |
-| An ended line's page | `TimelineTree`, through the tree's service | the stored facts of a line whose `Timeline` is gone, at the fixed head the tree owns, up to the caller's `through`; its history is read forward, since a window page needs the line's Timeline |
+| An ended line's page | `TimelineTree`, through the tree's service | the stored facts of a line whose `Timeline` is gone, at the fixed head the tree owns, up to the caller's `through`, in either direction |
 | A collaboration peer's facts | the peer Session's `Timeline`; the read acquires the peer first | the same as any live line |
 | Branches and their metadata | the store port's branch listing and head; titles from `session.summaries` | branch records and title metadata, not events |
 | Session files, titles, grants, fork, delete | `SessionStore` | not events; its event reads are gone from the client path |
@@ -86,9 +86,9 @@ Not allowed:
 ## 6. Cross-module requirements
 
 - **Runtime (opening):** the shared decoded copy of a branch's opening is gone; the Timeline reads the store on every read ([#1063](https://github.com/arcships/dim/issues/1063), carried by `dim/1039-read-ownership`).
-- **Runtime (TimelineStore owner):** the ended line's page and the port's other reads are composed from `query` and `batch_end`; where the tree needs a selection the port cannot express, the port gains it in its own contract.
+- **Runtime (TimelineStore owner):** a window page is composed from `query` and `batch_end` for both directions; `TimelineTree::page` keeps the port's `read_page`, which already ends a page on a batch. Where the tree needs a selection the port cannot express, the port gains it in its own contract.
 - **App Server (session history owner):** `session.history` acquires the Session and never falls to `SessionStore` for a Session the process does not hold; an ended line is served by the tree whether or not the host keeps a store (carried by `dim/1039-read-ownership`). The client path has no call to `SessionStore`'s event reads; the window's page is the loaded line's query with `batch_end` for its two ends, and a flow test reads the history of an idle Session and observes the acquire rather than a store read. `idle-unload.md` acceptance 1 and 2 are rewritten: `summaries` reads metadata, and a history read acquires the Session.
-- **TimelineTree owner:** the restore reads of `branch/ended`, `branch/end`, `branch/create` and the creation check move to the port's query, so the tree reads selections instead of ranges and decodes only the events it selects ([#1064](https://github.com/arcships/dim/issues/1064), carried by `dim/1039-read-ownership`; `page` is composed from `query` and `batch_end`, not a new port method).
+- **TimelineTree owner:** the restore reads of `branch/ended`, `branch/end`, `branch/create` and the creation check move to the port's query, so the tree reads selections instead of ranges and decodes only the events it selects ([#1064](https://github.com/arcships/dim/issues/1064), carried by `dim/1039-read-ownership`).
 - **CLI (export owner):** `dim export` collects every page of the Session today; it writes each page as it arrives instead, and `chain_through` folds its prefix page by page ([#1065](https://github.com/arcships/dim/issues/1065)).
 
 ## 7. Rule check
@@ -111,6 +111,8 @@ Session::query(...) / Branch::query(...)   // forward, published bound
 
 // ended line
 TreeCommands::page(id: String, after: u64, limit: usize, through: u64) -> Result<Vec<Arc<AgentEvent>>>
+TreeCommands::query(id: String, TimelineQuery) -> Result<TimelineQueryReply>   // window anchors and pages
+TreeCommands::batch_end(id: String, sequence: u64) -> Result<()>                // a window page's ends
 
 // branches and metadata
 TimelineStore::branches(session_id) -> Result<Vec<StoredBranch>>
