@@ -2637,6 +2637,82 @@ async fn native_unsigned_thinking_completes_and_is_not_replayed() {
             agent.close().await.unwrap();
             server.close().await;
         }
+        // Bedrock: a stored unsigned block is metadata only, so the replay
+        // carries neither it nor a `reasoningContent` for it.
+        {
+            use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+            let server = MockServer::start().await;
+            let body = [
+                bedrock_frame("messageStart", json!({"role":"assistant"})),
+                bedrock_frame(
+                    "contentBlockDelta",
+                    json!({"contentBlockIndex":0,"delta":{"text":"kept"}}),
+                ),
+                bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+                bedrock_frame("messageStop", json!({"stopReason":"end_turn"})),
+                bedrock_frame(
+                    "metadata",
+                    json!({"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}),
+                ),
+            ]
+            .concat();
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/vnd.amazon.eventstream")
+                        .set_body_bytes(body),
+                )
+                .mount(&server)
+                .await;
+            let root = rutis::Ctx::root().unwrap();
+            root.plugin(AimuxPlugin).await.unwrap();
+            let host = root.get::<ModelHost>().unwrap();
+            let request = Arc::new(ModelRequest::new(
+                "local",
+                "arn:aws:bedrock:us-west-2:123:inference-profile/model-A",
+                vec![Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        MessagePart::Thinking {
+                            thinking: "unsigned".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: Some(ContentMetadata::Bedrock { signature: None }),
+                        },
+                        MessagePart::Text {
+                            text: "kept".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: None,
+                        },
+                    ]),
+                }],
+            ));
+            let connection = ModelConnection::Bedrock(BedrockModelConnection {
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                auth: BedrockAuth::Bearer("bedrock-secret".into()),
+            });
+            let mut stream = host
+                .0
+                .invoke(request, connection, CancellationToken::new())
+                .await
+                .unwrap();
+            while let Some(chunk) = stream.next().await {
+                chunk.unwrap();
+            }
+            let sent = server.received_requests().await.unwrap();
+            assert_eq!(sent.len(), 1);
+            let sent: Value = serde_json::from_slice(&sent[0].body).unwrap();
+            assert!(
+                !sent.to_string().contains("reasoningContent")
+                    && !sent.to_string().contains("unsigned"),
+                "{sent}"
+            );
+            assert!(sent.to_string().contains("kept"), "{sent}");
+            root.shutdown().await.unwrap();
+        }
     })
     .await
     .unwrap();

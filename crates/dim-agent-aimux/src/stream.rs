@@ -270,7 +270,8 @@ pub(crate) fn convert(
 
 /// The metadata of a reasoning block. A Bedrock reasoning block without a
 /// signature or redacted payload is still a Bedrock block, so it is stored as
-/// an unsigned one and replays that way.
+/// an unsigned one; the converter leaves such a block out of a replayed
+/// request, and the metadata only keeps its origin readable.
 fn reasoning_metadata(
     protocol: ModelProtocol,
     value: Option<&SharedProviderMetadata>,
