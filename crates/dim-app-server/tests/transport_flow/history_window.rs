@@ -291,7 +291,9 @@ async fn an_ended_lines_latest_turn_keeps_its_prompt_and_fixed_head() {
     let model = Arc::new(StreamingModel::default());
     let (server, _) = serve_streaming(&directory, model.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let created = client.rpc("session.create", create(json!([]))).await;
+    let created = client
+        .rpc("session.create", create(json!(["branch"])))
+        .await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
     turn(&mut client, &model, &id, "parent prompt", Plan::Chunks(1)).await;
