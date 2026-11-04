@@ -2549,6 +2549,14 @@ async fn a_stored_plugin_document_decodes_entry_by_entry() {
         bad.error.expected,
         "an integer number of milliseconds from 1000 to 86400000"
     );
+    let Err(McpError::InvalidEntry(error)) = fixture
+        .mcp
+        .entry(McpSource::Plugins, "demo:bad".into(), &cancel)
+        .await
+    else {
+        panic!("a path that contacts the server answers the entry's own error");
+    };
+    assert_eq!(error.field.as_deref(), Some("timeout"));
 
     fixture
         .mcp

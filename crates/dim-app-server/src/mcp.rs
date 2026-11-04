@@ -723,14 +723,17 @@ impl McpService {
         self.run(cancel, move |settings, cancel| async move {
             let protected = credentials.credential_variables();
             let Some(scope) = source.scope() else {
-                let configuration = settings
+                let (mut entries, mut invalid) = settings
                     .read::<McpPluginServers>(SettingsScope::User, &cancel)
                     .await?
                     .document
-                    .into_entries()
-                    .0
-                    .remove(&id)
-                    .ok_or(McpError::UnknownServer)?;
+                    .into_entries();
+                let Some(configuration) = entries.remove(&id) else {
+                    return match invalid.remove(&id) {
+                        Some(error) => Err(McpError::InvalidEntry(error)),
+                        None => Err(McpError::UnknownServer),
+                    };
+                };
                 let expansion = config::connected(
                     &settings,
                     configuration.clone(),
