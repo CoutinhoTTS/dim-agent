@@ -140,6 +140,7 @@ impl Connection {
             self.hub.web.release(&self.hub, &self.id).await;
         }
         self.hub.ui.release(&self.id);
+        self.hub.ui.finished(&self.id);
         let sessions: Vec<String> = self
             .attachments
             .lock()
@@ -1754,6 +1755,7 @@ impl ConnectionHub {
             .values()
             .filter_map(Weak::upgrade)
             .filter(|conn| conn.is_attached(session))
+            .filter(|conn| !self.ui.is_disposing(&conn.id))
             .collect();
         connections
             .into_iter()
