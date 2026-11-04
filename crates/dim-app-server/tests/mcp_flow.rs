@@ -5,7 +5,8 @@ use dim_app_server::{
     mcp::{
         McpChange, McpError, McpPlugin, McpService, McpSource,
         config::{
-            McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings, RemoteTransport,
+            McpPluginServers, McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings,
+            RemoteTransport,
         },
     },
     settings::{
@@ -2569,6 +2570,57 @@ async fn a_stored_plugin_document_decodes_entry_by_entry() {
         catalog.invalid.iter().all(|entry| entry.id != "demo:bad"),
         "the re-registration healed the entry"
     );
+
+    fixture.close().await;
+}
+
+/// #953: a plugin document registers its entries; the wrapper's own members
+/// are never the plugin's to set. A top-level `dir` and extension members are
+/// dropped, so the stored file names one directory, the next read succeeds and
+/// every plugin's entries still load.
+#[tokio::test]
+async fn a_plugin_document_cannot_set_the_wrappers_members() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let dir = fixture.home.join("plugin-dir");
+    fs::create_dir_all(&dir).unwrap();
+    fixture
+        .mcp
+        .register_plugin(
+            "demo".into(),
+            dir.clone(),
+            json!({
+                "mcpServers": {"good": {"command": "good-server"}},
+                "dir": "/somewhere/else",
+                "note": {"extension": true}
+            }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let text = fs::read_to_string(fixture.home.join("mcp-plugins.json")).unwrap();
+    assert_eq!(text.matches("\"dir\"").count(), 1, "{text}");
+    let stored: McpPluginServers = serde_json::from_str(&text).unwrap();
+    let document = &stored.plugins["demo"];
+    assert_eq!(document.dir, dir);
+    assert!(document.servers.contains("good"), "{text}");
+
+    let other = fixture.home.join("other-dir");
+    fs::create_dir_all(&other).unwrap();
+    fixture
+        .mcp
+        .register_plugin(
+            "other".into(),
+            other,
+            json!({"mcpServers": {"tool": {"command": "other-server"}}}),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    assert!(catalog.servers.contains_key("demo:good"));
+    assert!(catalog.servers.contains_key("other:tool"));
 
     fixture.close().await;
 }

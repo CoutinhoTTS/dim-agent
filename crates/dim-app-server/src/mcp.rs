@@ -433,13 +433,19 @@ impl McpService {
         document: serde_json::Value,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let valid = McpSettings::from_value(document).and_then(|document| {
+        let valid = McpSettings::from_value(document).and_then(|mut document| {
             // A plugin registers its MCP content as one unit, and dim does
             // not manage a plugin entry on its own. Refuse the document
             // with the first broken entry's error rather than drop it.
             if let Some(error) = document.invalid_entries().values().next() {
                 return Err(SettingsError::Document(error.to_string()));
             }
+            // The wrapper owns its members: `dir` and the file's shape are
+            // `McpPluginDocument`'s, and a plugin document's own top-level
+            // members are not part of the registration, as the typed map
+            // dropped them. Keeping one would write a second `dir` beside the
+            // wrapper's and make the whole file unreadable for every plugin.
+            document.extra.clear();
             let registration = McpPluginDocument {
                 dir,
                 servers: document,
