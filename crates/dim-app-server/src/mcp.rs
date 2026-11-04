@@ -384,6 +384,59 @@ impl Drop for McpConnection {
     }
 }
 
+/// One source entry with every derived field: the effective view a read
+/// shows, the overlay that supplied its withheld members, the expansion a
+/// connection runs, and the credential key of that expansion. Every read and
+/// every path that contacts a server uses this one order.
+fn resolved_entry(
+    settings: &SettingsService,
+    source: McpSource,
+    id: &str,
+    configuration: McpServerSettings,
+    secret: Option<&McpSecretEntry>,
+    enablement: &McpProjectEnablement,
+    protected: &BTreeSet<String>,
+) -> Result<McpResolvedEntry> {
+    let origin = match source {
+        McpSource::User => config::Origin::User,
+        McpSource::Plugins => config::Origin::Plugin,
+        McpSource::Project(_) => config::Origin::Workspace { overlay: secret },
+    };
+    let expansion = config::connected(
+        settings,
+        configuration.clone(),
+        config::Connection {
+            scope: source.scope(),
+            id,
+            secret,
+            origin,
+            enablement,
+            environment: &daemon_environment,
+            protected,
+        },
+    )?;
+    let configuration = config::viewed(
+        settings,
+        source.scope(),
+        id,
+        configuration,
+        secret,
+        enablement,
+    )?;
+    let credential = auth::credential_key(id, &expansion.configuration).map(|(key, _)| key);
+    Ok(McpResolvedEntry {
+        entry: McpServerEntry {
+            source,
+            configuration,
+            referenced_variables: expansion.referenced,
+            unset_variables: expansion.unset,
+            credential,
+        },
+        secret: secret.cloned(),
+        expanded: expansion.configuration,
+    })
+}
+
 pub struct McpService {
     settings: Arc<SettingsService>,
     credentials: Arc<dyn CredentialVariables>,
@@ -609,33 +662,17 @@ impl McpService {
                         .read::<McpPluginServers>(SettingsScope::User, &cancel)
                         .await?;
                     for (id, configuration) in plugins.document.entries() {
-                        let expansion = config::connected(
+                        let entry = resolved_entry(
                             &settings,
-                            configuration.clone(),
-                            config::Connection {
-                                scope: None,
-                                id: &id,
-                                secret: None,
-                                origin: config::Origin::Plugin,
-                                enablement: &McpProjectEnablement::default(),
-                                environment: &daemon_environment,
-                                protected: &protected,
-                            },
-                        )?;
-                        let credential =
-                            auth::credential_key(&id, &expansion.configuration).map(|(key, _)| key);
-                        let (referenced_variables, unset_variables) =
-                            (expansion.referenced, expansion.unset);
-                        catalog.servers.insert(
-                            id,
-                            McpServerEntry {
-                                source,
-                                configuration,
-                                referenced_variables,
-                                unset_variables,
-                                credential,
-                            },
-                        );
+                            source,
+                            &id,
+                            configuration,
+                            None,
+                            &enablement,
+                            &protected,
+                        )?
+                        .entry;
+                        catalog.servers.insert(id, entry);
                     }
                     continue;
                 };
@@ -656,45 +693,17 @@ impl McpService {
                     let secret = workspace
                         .as_ref()
                         .and_then(|workspace| secrets.get(workspace, &id));
-                    let origin = match scope {
-                        SettingsScope::User => config::Origin::User,
-                        SettingsScope::Project(_) => config::Origin::Workspace { overlay: secret },
-                    };
-                    let expansion = config::connected(
+                    let entry = resolved_entry(
                         &settings,
-                        configuration.clone(),
-                        config::Connection {
-                            scope: Some(scope),
-                            id: &id,
-                            secret,
-                            origin,
-                            enablement: &enablement,
-                            environment: &daemon_environment,
-                            protected: &protected,
-                        },
-                    )?;
-                    let configuration = config::viewed(
-                        &settings,
-                        Some(scope),
+                        source,
                         &id,
                         configuration,
                         secret,
                         &enablement,
-                    )?;
-                    let credential =
-                        auth::credential_key(&id, &expansion.configuration).map(|(key, _)| key);
-                    let (referenced_variables, unset_variables) =
-                        (expansion.referenced, expansion.unset);
-                    catalog.servers.insert(
-                        id,
-                        McpServerEntry {
-                            source,
-                            configuration,
-                            referenced_variables,
-                            unset_variables,
-                            credential,
-                        },
-                    );
+                        &protected,
+                    )?
+                    .entry;
+                    catalog.servers.insert(id, entry);
                 }
                 for (id, error) in invalid_entries {
                     invalid.insert((source, id.clone()), error);
@@ -741,32 +750,15 @@ impl McpService {
                     .find(|(entry, _)| *entry == id)
                     .map(|(_, configuration)| configuration)
                     .ok_or(McpError::UnknownServer)?;
-                let expansion = config::connected(
+                return resolved_entry(
                     &settings,
-                    configuration.clone(),
-                    config::Connection {
-                        scope: None,
-                        id: &id,
-                        secret: None,
-                        origin: config::Origin::Plugin,
-                        enablement: &McpProjectEnablement::default(),
-                        environment: &daemon_environment,
-                        protected: &protected,
-                    },
-                )?;
-                let credential =
-                    auth::credential_key(&id, &expansion.configuration).map(|(key, _)| key);
-                return Ok(McpResolvedEntry {
-                    entry: McpServerEntry {
-                        source,
-                        configuration,
-                        referenced_variables: expansion.referenced,
-                        unset_variables: expansion.unset,
-                        credential,
-                    },
-                    secret: None,
-                    expanded: expansion.configuration,
-                });
+                    source,
+                    &id,
+                    configuration,
+                    None,
+                    &McpProjectEnablement::default(),
+                    &protected,
+                );
             };
             let source = scope;
             let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
@@ -779,46 +771,15 @@ impl McpService {
             };
             let secret = secret(&settings, source, &id, &cancel).await?;
             let enablement = enablement(&settings, source, &cancel).await;
-            let origin = match source {
-                SettingsScope::User => config::Origin::User,
-                SettingsScope::Project(_) => config::Origin::Workspace {
-                    overlay: secret.as_ref(),
-                },
-            };
-            let expansion = config::connected(
+            resolved_entry(
                 &settings,
-                configuration.clone(),
-                config::Connection {
-                    scope: Some(source),
-                    id: &id,
-                    secret: secret.as_ref(),
-                    origin,
-                    enablement: &enablement,
-                    environment: &daemon_environment,
-                    protected: &protected,
-                },
-            )?;
-            let configuration = config::viewed(
-                &settings,
-                Some(source),
+                source.into(),
                 &id,
                 configuration,
                 secret.as_ref(),
                 &enablement,
-            )?;
-            let credential =
-                auth::credential_key(&id, &expansion.configuration).map(|(key, _)| key);
-            Ok(McpResolvedEntry {
-                entry: McpServerEntry {
-                    source: source.into(),
-                    configuration,
-                    referenced_variables: expansion.referenced,
-                    unset_variables: expansion.unset,
-                    credential,
-                },
-                secret,
-                expanded: expansion.configuration,
-            })
+                &protected,
+            )
         })
         .await
     }
