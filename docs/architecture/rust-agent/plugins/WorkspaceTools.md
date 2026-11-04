@@ -215,9 +215,14 @@ is written to.
 The read-only [`session.exec.output`](../../../design/background-task-output.md)
 method resolves the requested branch through TreeCommands and reads that branch's
 BackgroundExec capture. It accepts only `{sessionId, branchId, taskId}` and returns
-`{text}`. C1 owns admission and unload settlement on WorkspaceTools' original
-context. The method does not open a client-supplied or historical path, append
-events, acquire Session holds or start background work.
+`{text}`. It does not open a client-supplied or historical path, append events,
+acquire Session holds or start background work. Its sibling
+`session.exec.output.page` reads the task's registered output file by byte cursor
+with the same sanitization, as
+[the same design document](../../../design/background-task-output.md) describes;
+it opens the path the branch's own `exec/started` registers, never a
+caller-supplied one. C1 owns admission and unload settlement on WorkspaceTools'
+original context.
 
 - §1 and ADR 002 D1–D3: command construction belongs to HostPlatform; no new
   plugin, wiring layer, state owner or dependency is added.

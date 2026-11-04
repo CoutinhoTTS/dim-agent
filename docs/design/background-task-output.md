@@ -37,8 +37,8 @@ task retention, full-file browsing, or Workflow task presentation.
 ## 2. Client method
 
 WorkspaceTools registers the leaf namespace **`session.exec.output`** with the
-Session's `sessionMethods` from its `apply`; it declares one method of the same
-name:
+Session's `sessionMethods` from its `apply`; it declares the tail method of the
+same name below and the sibling `session.exec.output.page` after it:
 
 ```json
 {
@@ -60,7 +60,8 @@ The response uses exec's existing sanitized tail-preview rule: the last 2,000
 lines within its 50 KiB budget, including its existing terminal-newline behavior.
 It is a snapshot of captured output, not the entire file or a promise that the
 process has flushed its own buffers. The UI labels it as a tail preview.
-There is no caller-supplied path, byte range, cursor, size limit or subscription.
+The tail reply takes no caller-supplied path, byte range, cursor, size limit or
+subscription.
 
 The leaf namespace matters: the Session's method table refuses, at
 registration, a namespace that contains an exact built-in. `session.exec` would
@@ -89,6 +90,32 @@ the UI keeps its last preview, shows `Live output unavailable`, and stops
 refreshing without marking the task failed or ended. After receiving the real
 terminal event, it displays the existing final result. A read failure does not
 stop the command or change its task status.
+
+### Sibling method: the paged full output
+
+Alongside the tail, the same `session.exec.output` namespace declares
+`session.exec.output.page {sessionId, branchId, taskId, cursor?, limit?}`, which
+reads the task's registered output file (`exec/started.outputPath`) by byte
+cursor and answers `{text, bytes, nextCursor?, truncated}`. A page is bounded:
+`limit` rejects 0, defaults to 1 MiB, and clamps to 4 MiB; `text` is sanitized
+exactly like the preview; and a page ends on a character boundary, so a
+character the limit splits is served whole — at the start of the next page when
+the cut falls after other characters, and in the page itself when the budget
+cuts the very first character, so a page carries at most `limit` plus three
+bytes and consumes at least one character while the file has one. The file is append-only, so a `nextCursor` the
+method handed out always names a byte that never changes; `nextCursor` is absent
+once the file ended at that page, and a running task's growing file continues
+when the client retries the same cursor. `truncated` is `exec/ended`'s
+`outputTruncated`, the live capture's flag while the task runs, and the file's
+size at the 64 MiB cap only for a task whose owner restarted (no flag exists
+there). The method opens the path the branch's own `exec/started` fact
+registers — never a client-supplied path — so a task id from another branch or
+Session cannot select a file; a task whose file was cleaned answers
+`exec_output_unavailable`, distinct from the tail's `exec_task_unknown`. The
+`session.exec.output` tail keeps its preview rule and its
+`exec_task_unknown` once the live capture is cleared. The full-file browsing
+this method provides was left open by §1; it does not settle a daemon-hosted
+open/export method, retention, or member controls.
 
 ## 3. Ownership and lifecycle
 
