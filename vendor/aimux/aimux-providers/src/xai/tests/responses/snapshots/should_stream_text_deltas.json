@@ -1,0 +1,7552 @@
+[
+  {
+    "type": "stream-start",
+    "warnings": []
+  },
+  {
+    "id": "769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "modelId": "grok-code-fast-1",
+    "timestamp": "2025-11-22T23:18:20.000Z",
+    "type": "response-metadata"
+  },
+  {
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-start"
+  },
+  {
+    "delta": "First",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": ",",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " the",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " question",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " is",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": ":",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " \"",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "What",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " is",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " specifically",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " notable",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " about",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " the",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " style",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " of",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " Son",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "oran",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " food",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "?\"",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " This",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " seems",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " like",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " an",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " open",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "-ended",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " question",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " about",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " cuisine",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": ".",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " It's",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " not",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " closed",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "-ended",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " science",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "/math",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "/search",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": ",",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " so",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " I",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " should",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " make",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " it",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " maximally",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " informative",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": ",",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " structured",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": ",",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " and",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " easy",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " to",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " parse",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": ".",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " Use",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " sections",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " if",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": " appropriate",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": ".\n",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "\n\n## Investigating Sonoran Cuisine  \n- The question focuses on what makes Sonoran food's style notable, suggesting an exploration of its unique characteristics.",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "delta": "  \n- This is an open-ended question about cuisine, requiring a structured, informative response to highlight key aspects.",
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-delta"
+  },
+  {
+    "id": "reasoning-rs_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "rs_769f3302-64f9-4c72-2b48-860c87fd9b2a"
+      }
+    },
+    "type": "reasoning-end"
+  },
+  {
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-start",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "###",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Overview",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " of",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Son",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "oran",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Cuisine",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Son",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "oran",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cuisine",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " originates",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " from",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " state",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " of",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Sonora",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " northwest",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Mexico",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " blending",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " indigenous",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Spanish",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " American",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " influences",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " due",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " its",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " proximity",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " U",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".S",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " border",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " arid",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " desert",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " environment",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " It's",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " notably",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " rustic",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " flavorful",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " fusion",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-oriented",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " often",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " featuring",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " grilled",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " meats",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " fresh",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " produce",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " bold",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " spices",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " adapted",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " region's",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " hot",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " dry",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " climate",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Unlike",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " coastal",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Mexican",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cuisines",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " it",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " emphasizes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " hearty",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " protein",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-heavy",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " dishes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " influences",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " from",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " American",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Southwest",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " such",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " as",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " flour",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tortillas",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cheese",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "###",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Key",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Ingredients",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Techniques",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Me",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ats",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Proteins",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Grilled",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " or",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " roasted",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " meats",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " like",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " beef",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "car",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ne",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " as",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ada",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "),",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " pork",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " chicken",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " are",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " central",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " often",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " seasoned",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " simple",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " marin",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ades",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " of",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " lime",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " garlic",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " chili",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Mach",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "aca",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "d",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ried",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " shredded",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " beef",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ")",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " is",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " a",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " hallmark",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " preservation",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " technique",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " for",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " desert",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Ch",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "iles",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Sp",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ices",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Local",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " ch",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "iles",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "e",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".g",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".,",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Sonora",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "'s",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " chil",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "te",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "pin",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " a",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tiny",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " potent",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " pepper",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ")",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " add",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " heat",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " while",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cumin",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " oregano",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cilantro",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " provide",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " earthy",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " flavors",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Beans",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "f",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "rij",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "oles",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ")",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " corn",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " are",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " staples",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " often",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " prepared",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " simply",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " highlight",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " natural",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tastes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "T",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ort",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "illas",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " B",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "reads",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Flour",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tortillas",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " dominate",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " reflecting",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " American",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " influence",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " unlike",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " corn",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tortillas",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " many",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " other",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Mexican",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " regions",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Baking",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " grilling",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " are",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " common",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " an",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " emphasis",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " on",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " fresh",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " un",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "processed",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " ingredients",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Regional",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Staples",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Desert",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " elements",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " like",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " nop",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ales",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "c",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "actus",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " pads",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "),",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "opal",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "itos",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " wild",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " herbs",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " are",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " incorporated",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " for",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " texture",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " nutrition",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " showcasing",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " indigenous",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " roots",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "###",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Signature",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Dishes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Car",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ne",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " As",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ada",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " T",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "acos",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Thin",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ly",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " sliced",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " grilled",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " skirt",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " steak",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " served",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " on",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " flour",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tortillas",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " salsa",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " onions",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cilantro",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "—",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "often",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " eaten",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " beans",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " rice",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Son",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "oran",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Hot",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Dogs",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " A",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " fusion",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " dish",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " where",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " a",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " hot",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " dog",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " is",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " wrapped",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " bacon",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " grilled",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " topped",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " p",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "into",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " beans",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " onions",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tomatoes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " mayo",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " mustard",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cheese",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " a",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " sliced",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " bol",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "illo",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " roll",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " This",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " originated",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " border",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " towns",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " highlights",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Mexican",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-American",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " crossover",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Ch",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "im",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ich",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "angas",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Deep",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-fried",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " bur",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ritos",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " filled",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " meat",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cheese",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " beans",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " served",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " gu",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "acamole",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " sour",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cream",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "—a",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " nod",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Tex",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-M",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ex",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " influences",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "C",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ev",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "iche",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Seafood",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Coastal",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Son",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "oran",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " areas",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " feature",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " fresh",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cev",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "iche",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "cit",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "rus",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-mar",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "inated",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " fish",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ")",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " shrimp",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " dishes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " contrasting",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " land",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-based",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " inland",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cuisine",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " **",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Other",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Not",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ables",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "**:",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Gu",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ay",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "mas",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-style",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tam",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ales",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " meat",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " sauce",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ")",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cal",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "d",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "illo",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "a",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " beef",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " stew",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " potatoes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ")",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " emphasize",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " slow",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-c",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ooked",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " comfort",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " foods",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".\n\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "###",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Cultural",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Historical",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Influences",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "\n",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Son",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ora",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "'s",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " style",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " emerged",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " from",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " indigenous",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Ya",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "qui",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Mayo",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tribes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " who",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " used",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " desert",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " foraging",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " combined",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " with",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Spanish",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " colonial",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " methods",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " like",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cattle",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " ranch",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ing",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Post",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-M",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ex",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ican",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-American",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " War",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " migration",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " boosted",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " American",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " elements",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " creating",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " dishes",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " like",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " flour",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "-based",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " tacos",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Today",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " it's",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " celebrated",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " in",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cities",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " like",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Herm",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "os",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "illo",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Tucson",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "Arizona",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "),",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " influencing",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Southwestern",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " U",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".S",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " cuisine",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Festivals",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " like",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Sonora",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " International",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Gastr",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "onomic",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " Festival",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " highlight",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " its",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " evolution",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " it's",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " known",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " for",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " its",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " focus",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " on",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " quality",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " ingredients",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " over",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " elaborate",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " preparations",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " making",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " it",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " accessible",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " and",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " flavorful",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " for",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " everyday",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " meals",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " If",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " you're",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " exploring",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ",",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " local",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " markets",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " (",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "ti",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "angu",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": "is",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ")",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " are",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " the",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " best",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " places",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " to",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " experience",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " authentic",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": " flavors",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "delta": ".",
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-delta",
+    "providerMetadata": {
+      "xai": {
+        "itemId": "msg_769f3302-64f9-4c72-2b48-860c87fd9b2a",
+        "contentIndex": 0
+      }
+    }
+  },
+  {
+    "id": "text-msg_769f3302-64f9-4c72-2b48-860c87fd9b2a:0",
+    "type": "text-end"
+  },
+  {
+    "finishReason": {
+      "raw": "completed",
+      "unified": "stop"
+    },
+    "type": "finish",
+    "usage": {
+      "inputTokens": {
+        "cacheRead": 192,
+        "noCache": 24,
+        "total": 216
+      },
+      "outputTokens": {
+        "reasoning": 237,
+        "text": 626,
+        "total": 863
+      },
+      "raw": {
+        "input_tokens": 216,
+        "input_tokens_details": {
+          "cached_tokens": 192
+        },
+        "num_server_side_tools_used": 0,
+        "num_sources_used": 0,
+        "output_tokens": 863,
+        "output_tokens_details": {
+          "reasoning_tokens": 237
+        },
+        "total_tokens": 1079
+      }
+    }
+  }
+]

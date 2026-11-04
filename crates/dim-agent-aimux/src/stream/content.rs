@@ -1,3 +1,4 @@
+use aimux_core::shared::SharedProviderMetadata;
 use dim_agent_capabilities::host::{HostError, ModelProtocol};
 use dim_agent_types::{ContentMetadata, MessagePart};
 use serde_json::Value;
@@ -5,7 +6,7 @@ use serde_json::Value;
 /// Interpret only native continuation fields; unrelated diagnostics stay in aimux.
 pub(super) fn metadata(
     protocol: ModelProtocol,
-    value: Option<&Value>,
+    value: Option<&SharedProviderMetadata>,
 ) -> Result<Option<ContentMetadata>, HostError> {
     let namespace = match protocol {
         ModelProtocol::Bedrock => "bedrock",
@@ -33,7 +34,10 @@ pub(super) fn metadata(
         Ok(string(key)?.filter(|value| !value.is_empty()))
     };
     Ok(match protocol {
-        ModelProtocol::Bedrock => match (string("signature")?, string("redactedData")?) {
+        ModelProtocol::Bedrock => match (
+            string("signature")?,
+            string("redactedData")?.or(string("redactedContent")?),
+        ) {
             (Some(signature), None) => Some(ContentMetadata::Bedrock {
                 signature: Some(signature),
             }),
