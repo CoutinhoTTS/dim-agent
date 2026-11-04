@@ -1,10 +1,14 @@
+<div align="center">
+
 # Dim
 
-**Dim is a paradigm for general-purpose agents that grow into the environments they inhabit.** An event-driven Timeline connects what an agent senses to what it does next. The runtime is built entirely from plugins. A plugin written in Rust, TypeScript or Python can give the agent a new way to act and the vocabulary to understand when to use it.
+**Dim is a paradigm for general-purpose agents that grow into the environments they inhabit.**
 
-[![npm alpha version](https://img.shields.io/npm/v/dimcode-alpha/alpha.svg?label=npm%20alpha)](https://www.npmjs.com/package/dimcode-alpha?activeTab=versions)
-[![Node.js versions for npm installation](https://img.shields.io/node/v/dimcode-alpha/alpha.svg?label=node%20for%20npm)](#install)
-[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![npm alpha version](https://img.shields.io/npm/v/dimcode-alpha/alpha.svg?label=npm%20alpha)](https://www.npmjs.com/package/dimcode-alpha?activeTab=versions) [![Node.js versions for npm installation](https://img.shields.io/node/v/dimcode-alpha/alpha.svg?label=node%20for%20npm)](#install) [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+</div>
+
+An event-driven Timeline connects what an agent senses to what it does next. The runtime is built entirely from plugins. A plugin written in Rust, TypeScript or Python can give the agent a new way to act and the vocabulary to understand when to use it.
 
 Our aim is for Dim to take root on any device and grow beyond the one it starts on. Imagine a greenhouse probe reporting `18`. Its plugin explains that the reading means 18% soil moisture in bed three. The Timeline shows that the bed was watered ten minutes ago. Dim could wait for the water to reach the probe, check again, and write a plugin to alert the grower on their phone if the bed stays dry.
 
