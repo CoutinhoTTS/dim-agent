@@ -1,5 +1,6 @@
 //! Web through actual C4, Settings, Permission and ToolExecutor boundaries.
 use super::*;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_app_server::managed_provider::{
     AccountSnapshot, CredentialLease, ManagedCatalog, ManagedError, ManagedFuture, ManagedProvider,
     ManagedProviderRow, ProviderDescriptor, WebSearchHit, WebSearchRequest, WebSearchResponse,
@@ -139,8 +140,7 @@ async fn create_web(client: &mut Client, preset: &str, interactive: bool) -> Str
 }
 
 async fn result(session: &dim_agent_runtime::Session) -> ToolResult {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -467,8 +467,7 @@ async fn web_settings_permission_cancellation_and_restore() {
             );
             let cancelled = server.agent().unwrap().get_session(&cancelling).unwrap();
             assert_eq!(
-                cancelled
-                    .local("main", ..)
+                branch_events(&cancelled, "main", ..)
                     .await
                     .unwrap()
                     .iter()
@@ -583,8 +582,7 @@ async fn web_settings_permission_cancellation_and_restore() {
                 }
             }
         }
-        let results_before = session
-            .local("main", ..)
+        let results_before = branch_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -611,8 +609,7 @@ async fn web_settings_permission_cancellation_and_restore() {
             .unwrap()
             .unwrap();
         idle(&mut client, &id).await;
-        let results_after = session
-            .local("main", ..)
+        let results_after = branch_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -1012,8 +1009,7 @@ async fn web_fetch_times_out_when_the_response_never_finishes() {
     let (server, mut client, id, home, _model_requests) = boot_web().await;
     configure(&mut client, json!({"allowPrivateHosts":["127.0.0.1"]})).await;
     let session = server.agent().unwrap().get_session(&id).unwrap();
-    let before = session
-        .local("main", ..)
+    let before = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -1038,8 +1034,7 @@ async fn web_fetch_times_out_when_the_response_never_finishes() {
     tokio::time::resume();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let count = session
-                .local("main", ..)
+            let count = branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()

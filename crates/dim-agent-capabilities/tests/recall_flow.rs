@@ -17,6 +17,7 @@ use dim_agent_capabilities::{
     recall::{self, RECALL_TOOL, testing::Narrative},
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use serde_json::{Value, json};
@@ -127,8 +128,7 @@ async fn recall(session: &Session, branch: &str, arguments: Value) -> (String, b
 }
 
 async fn tool_results(session: &Session, branch: &str) -> Vec<ToolResult> {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -152,7 +152,7 @@ async fn wait_for_events(
     let mut seen = String::new();
     let waited = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let events = session.history(branch, None).await.unwrap();
+            let events = chain_events(session, branch, ..).await.unwrap();
             seen = events
                 .iter()
                 .map(|event| event.kind.key().to_owned())
@@ -216,7 +216,7 @@ async fn the_turn_index_lists_turns_latest_first_and_pages_back_to_nothing_earli
                 .unwrap();
             session.idle("main").await.unwrap();
         }
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let turns: Vec<_> = events
             .iter()
             .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
@@ -229,7 +229,7 @@ async fn the_turn_index_lists_turns_latest_first_and_pages_back_to_nothing_earli
         // A date line, 20 entries and the last line.
         assert_eq!(lines.len(), 22, "{page}");
         assert!(lines[0].ends_with(" (UTC)"), "{page}");
-        let calling = last_turn(&session.history("main", None).await.unwrap());
+        let calling = last_turn(&chain_events(&session, "main", ..).await.unwrap());
         assert!(
             lines[1].contains(&format!("{calling} turn: user \"tool:{RECALL_TOOL}\""))
                 && lines[1].contains("you called recall")
@@ -298,7 +298,7 @@ async fn a_turn_is_indexed_by_its_first_user_text_not_by_the_block_that_came_fir
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let turn = events
             .iter()
             .find(|event| matches!(event.kind, EventKind::TurnStart(_)))
@@ -353,7 +353,7 @@ async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interr
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let turns: Vec<_> = events
             .iter()
             .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
@@ -407,7 +407,7 @@ async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interr
         .await;
         session.stop("main", "user stop".into()).await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let interrupted = last_turn(&events);
         let (page, error) = recall(&session, "main", json!({ "open": interrupted })).await;
         assert!(!error, "{page}");
@@ -446,7 +446,7 @@ async fn one_thing_shows_its_full_input_and_result_paged_by_characters() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let call = events
             .iter()
             .find_map(|event| match &event.kind {
@@ -503,7 +503,7 @@ async fn one_thing_shows_its_full_input_and_result_paged_by_characters() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let input = id_of_input(&events, "carry three blocks");
         let (page, error) = recall(&session, "main", json!({ "open": input })).await;
         assert!(!error, "{page}");
@@ -562,7 +562,7 @@ async fn only_the_kinds_of_the_allowlist_are_told_and_nothing_in_context_is_miss
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let narrative = Narrative::new(&events);
 
         for event in &events {
@@ -777,7 +777,7 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
         session.idle(&child).await.unwrap();
 
         let inherited = {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             id_of_input(&events, "first parent task")
         };
         let (page, error) = recall(&session, &child, json!({ "open": inherited })).await;
@@ -893,13 +893,13 @@ async fn a_recall_call_writes_only_the_events_any_tool_call_writes() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let counted: std::collections::HashSet<_> =
             events.iter().map(|event| event.kind.key()).collect();
         let before = events.len();
         let (page, error) = recall(&session, "main", json!({})).await;
         assert!(!error, "{page}");
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         for event in &events[before..] {
             assert!(
                 counted.contains(event.kind.key()),
@@ -937,7 +937,7 @@ async fn the_read_only_preset_runs_recall_without_an_approval_request() {
         let (page, error) = recall(&session, "main", json!({})).await;
         assert!(!error, "{page}");
         assert!(page.contains("look back"), "{page}");
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             !events
                 .iter()
@@ -2918,12 +2918,25 @@ fn the_arguments_and_the_paginations_say_how_to_fix_the_call() {
     assert_eq!(page.lines().last(), Some("No more."));
 }
 
-/// A memory store that counts the events a page read decodes.
+/// A memory store that counts the events a query page returns, records the ids
+/// of one read's pages and can write a fact between two of them.
 #[derive(Default)]
 struct PageReads {
     memory: MemoryTimelineStore,
+    /// The events and pages the backwards, kind-filtered reads decoded, which
+    /// are the recall call's own; the preparation folds through the same read
+    /// but is not what these assert.
     events: std::sync::atomic::AtomicUsize,
     pages: std::sync::atomic::AtomicUsize,
+    /// The Session and branch a first page writes to, armed by the test
+    /// before the call whose selection must not move.
+    inject: std::sync::Mutex<Option<(Session, String)>>,
+    /// The id that page wrote.
+    injected: std::sync::Mutex<Option<String>>,
+    /// The kinds the first page named.
+    kinds: std::sync::Mutex<Vec<String>>,
+    /// The ids the pages returned in read order, while the pinned call runs.
+    read: std::sync::Mutex<Option<Vec<String>>>,
 }
 
 impl TimelineStore for PageReads {
@@ -2952,6 +2965,9 @@ impl TimelineStore for PageReads {
     fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
         self.memory.head(key)
     }
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
     fn append(
         &self,
         key: TimelineKey,
@@ -2967,24 +2983,6 @@ impl TimelineStore for PageReads {
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
         self.memory.read_segments(session_id, segments)
     }
-    fn read_kind_page<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        kinds: &'a [&'a str],
-        before: u64,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        Box::pin(async move {
-            let page = self
-                .memory
-                .read_kind_page(key, kinds, before, limit)
-                .await?;
-            self.events
-                .fetch_add(page.len(), std::sync::atomic::Ordering::SeqCst);
-            self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(page)
-        })
-    }
     fn trace<'a>(
         &'a self,
         key: &'a TimelineKey,
@@ -2999,7 +2997,47 @@ impl TimelineStore for PageReads {
         from: u64,
         through: u64,
     ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
-        self.memory.query(key, query, from, through)
+        Box::pin(async move {
+            let page = self.memory.query(key, query, from, through).await?;
+            let backwards = query.direction == TimelineQueryDirection::Descending
+                && query.event_id.is_none()
+                && !query.kinds.is_empty();
+            if backwards {
+                self.events
+                    .fetch_add(page.events.len(), std::sync::atomic::Ordering::SeqCst);
+                self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let first_page = backwards && query.offset == 0;
+            let pinned = if first_page {
+                let mut inject = self.inject.lock().unwrap();
+                match inject.as_ref() {
+                    Some((_, branch)) if branch == &key.branch_id => inject.take(),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if pinned.is_some() {
+                *self.kinds.lock().unwrap() = query.kinds.clone();
+                *self.read.lock().unwrap() = Some(Vec::new());
+            }
+            if let Some(ids) = self.read.lock().unwrap().as_mut()
+                && query.direction == TimelineQueryDirection::Descending
+                && !query.kinds.is_empty()
+            {
+                ids.extend(page.events.iter().map(|event| event.id.clone()));
+            }
+            if let Some((session, branch)) = pinned {
+                let event = session
+                    .input(
+                        InputMessageData::text("late task", Some(InputMode::Queue)),
+                        &branch,
+                    )
+                    .await?;
+                *self.injected.lock().unwrap() = Some(event.id.clone());
+            }
+            Ok(page)
+        })
     }
     fn save_snapshot<'a>(
         &'a self,
@@ -3025,6 +3063,19 @@ impl PageReads {
     fn pages(&self) -> usize {
         self.pages.load(std::sync::atomic::Ordering::SeqCst)
     }
+    /// Writes once to `branch` of `session` after the next first page.
+    fn pin_head(&self, session: &Session, branch: &str) {
+        *self.inject.lock().unwrap() = Some((session.clone(), branch.to_owned()));
+        *self.injected.lock().unwrap() = None;
+        self.kinds.lock().unwrap().clear();
+        *self.read.lock().unwrap() = None;
+    }
+    fn injected(&self) -> Option<String> {
+        self.injected.lock().unwrap().clone()
+    }
+    fn take_read(&self) -> Vec<String> {
+        self.read.lock().unwrap().take().unwrap_or_default()
+    }
 }
 
 /// Runs one `recall` call and checks that its answer is the answer folding
@@ -3039,7 +3090,7 @@ async fn recall_is_the_whole_fold(
     let before = reads.decoded();
     let (text, error) = recall(session, branch, arguments.clone()).await;
     let read = reads.decoded() - before;
-    let history = session.history(branch, None).await.unwrap();
+    let history = chain_events(session, branch, ..).await.unwrap();
     let pinned = &history[..history
         .iter()
         .rposition(|event| matches!(event.kind, EventKind::ToolResult(_)))
@@ -3063,6 +3114,51 @@ async fn recall_is_the_whole_fold(
     );
     assert_eq!(error, whole.is_error.unwrap_or(false), "{arguments}");
     (text, read)
+}
+
+/// The ids one descending read of `branch` selects below the head it pins, in
+/// page order: the whole chain that is pinned at the call's last tool result,
+/// newest first, in the kinds the first query names, without the event the
+/// store wrote between two pages.
+async fn selected_ids(session: &Session, branch: &str, reads: &PageReads) -> Vec<String> {
+    let history = chain_events(session, branch, ..).await.unwrap();
+    let pinned = &history[..history
+        .iter()
+        .rposition(|event| matches!(event.kind, EventKind::ToolResult(_)))
+        .expect("the recall call's result")];
+    let kinds = reads.kinds.lock().unwrap().clone();
+    let injected = reads.injected();
+    pinned
+        .iter()
+        .rev()
+        .filter(|event| Some(&event.id) != injected.as_ref())
+        .filter(|event| kinds.iter().any(|kind| kind == event.kind.key()))
+        .map(|event| event.id.clone())
+        .collect()
+}
+
+/// Checks that the pages of one call are one contiguous suffix below the head
+/// the call read first, and that the event written between two of them is not
+/// in them.
+async fn assert_one_suffix(session: &Session, reads: &PageReads, branch: &str) {
+    let read = reads.take_read();
+    let expected = selected_ids(session, branch, reads).await;
+    let injected = reads.injected().expect("the write between pages");
+    assert!(
+        !read.contains(&injected),
+        "a page returned the event written after its first page: {injected}"
+    );
+    assert!(
+        !read.is_empty() && read.len() <= expected.len(),
+        "the pages returned {} of {} selected events",
+        read.len(),
+        expected.len()
+    );
+    assert_eq!(
+        read,
+        expected[..read.len()],
+        "the pages are not one contiguous suffix below the head"
+    );
 }
 
 /// The `before=` id a page ends with.
@@ -3089,14 +3185,16 @@ async fn a_long_history_is_answered_from_bounded_pages_read_backwards() {
                 .unwrap();
             session.idle("main").await.unwrap();
         }
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             history.len() > 600,
             "the history is long: {}",
             history.len()
         );
 
+        reads.pin_head(&session, "main");
         let (index, read) = recall_is_the_whole_fold(&session, &reads, "main", json!({})).await;
+        assert_one_suffix(&session, &reads, "main").await;
         assert!(index.contains("Earlier: before="), "{index}");
         assert!(
             read < history.len() / 2,
@@ -3204,9 +3302,11 @@ async fn a_child_branch_pages_through_its_inherited_prefix() {
                 .unwrap();
             session.idle(&child).await.unwrap();
         }
-        let history = session.history(&child, None).await.unwrap();
+        let history = chain_events(&session, &child, ..).await.unwrap();
 
+        reads.pin_head(&session, &child);
         let (index, read) = recall_is_the_whole_fold(&session, &reads, &child, json!({})).await;
+        assert_one_suffix(&session, &reads, &child).await;
         assert!(index.contains("Earlier: before="), "{index}");
         assert!(
             read < history.len(),
@@ -3215,7 +3315,7 @@ async fn a_child_branch_pages_through_its_inherited_prefix() {
         );
 
         let inherited = {
-            let parent = session.history("main", None).await.unwrap();
+            let parent = chain_events(&session, "main", ..).await.unwrap();
             id_of_input(&parent, "first parent task")
         };
         let (page, _) =

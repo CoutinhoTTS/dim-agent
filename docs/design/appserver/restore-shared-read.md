@@ -44,7 +44,7 @@ return the same immutable facts; only the decoding repeats.
   idle do not change (§8).
 
 Unchanged: the Timeline as the per-branch time bus, the Dispatcher and its hot window, the capability rebuild
-contract, the signatures and results of `local`, `history`, `context` and `committed` (errors included), event types
+contract, the signatures and results of `local`, `history`, `committed` and the checkpoint selection (errors included), event types
 and frozen fixtures, capability and plugin code, storage and its format, and every protocol. No new event, service,
 method, configuration or public API; the `testing` feature adds a count for tests (§9).
 
@@ -106,6 +106,12 @@ rows):
 | Prompt, with an initial configuration (the product profile) | `read_context(event.sequence)` adopting, at the `branch/resume` event; `read_context(sequence())` publishing | as Prompt, through `branch/resume` | opening receipt of `branch/resume` |
 | Wait, BackgroundExec, Collaboration (product assembly, not in `restore_cost`) | `local(..=S)` | own `1..=S` | apply |
 
+The rows that name `read_context` are met by event-query pages since #942, not by the copy: `Timeline::query`, at the
+published or the branch's publishing facts, reads the store's pages directly, and the context projection folds through them
+(`history::read_context`, from a checkpoint's `resume` or from the chain's start). The copy serves the one read that
+remains on the Timeline — the checkpoint's anchor (`Timeline::checkpoint`) — and nothing on `Branch` or `Session`,
+which expose only the forwarding `query`, `batch_end` and `lookup`.
+
 One traced restore of a plain Session at 10,002 events (`restore_cost` with `RESTORE_COST_SPANS`, every store call
 with its range; readers inferred from their dependencies):
 
@@ -162,7 +168,7 @@ Each row names a contract, where it is written, and the mechanism that keeps it.
 | --- | --- | --- |
 | The Timeline is each branch's time bus; capabilities consume it through the Dispatcher and rebuild by reading it | [time bus](../../architecture/rust-agent/time-bus.md), [timeline-storage §1](../../architecture/rust-agent/timeline-storage.md#1-结构与所有权) | The copy lives behind the Timeline's read functions. The Dispatcher, its hot window and subscriptions are untouched |
 | Rebuild: fix `S = Timeline::committed()` in the rebuild gate, read `local(..=S)` (own events, no ancestor prefix); the read covers terminals the old generation wrote and has not published, without waiting for persistence or the Dispatcher | [single-tree, capability reload protocol](../../architecture/rust-agent/single-tree.md#能力重载协议) row "重建" | Capabilities call the same function with the same `S` and receive the same events. The copy covers only `1..=h`, which was stored before the Timeline existed; everything after `h`, including unpublished terminals, is read from the hot window and the store as today |
-| `local`, `history`, `context`, `context_with_checkpoint`, `committed`: signatures and semantics | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#4-读取) | Unchanged, errors included. `through` runs as today. A slice is selected by sequence, so it holds exactly the events a store read of that range returns, and it is served only after the store's end check (next row) |
+| `query`, `batch_end` and the checkpoint selection: signatures and semantics | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#4-读取) | Unchanged, errors included. `through` runs as today. A slice is selected by sequence, so it holds exactly the events a store read of that range returns, and it is served only after the store's end check (next row) |
 | A range may start inside an atomic batch; its end must be a batch boundary, or the read fails with `InvalidInput` | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) "分段读取" row; `TimelineStore::read` ([timeline_store.rs](../../../crates/dim-agent-runtime/src/timeline_store.rs)) | Today the stores check the end with `StoredEvent.batch_end`, and the restored hot window holds nothing for `1..=h`. The copy keeps each event's batch end from the fill and runs the same check on the end of every slice, own or ancestor, before serving it (§4.3) |
 | Events are facts once sequenced; order is the sequence only | [time bus §1, §2](../../architecture/rust-agent/time-bus.md#2-事件是总线上带序号的事实) | The copy depends on it: events `1..=h` and their batch ends never change, so a slice taken later, with its end check, equals a read taken later |
 | Only immutable facts are shared; no push replay; no capability snapshot; no shared capability state | [time bus §2](../../architecture/rust-agent/time-bus.md#2-事件是总线上带序号的事实) (each state has one owner, decided from the events it consumed); [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) (no business state for an optimization) | The copy holds the `Arc<AgentEvent>` values live dispatch hands every subscriber (`Committed(Arc<AgentEvent>)`), each with the batch end the store returned with it, and no capability state. Each reader calls the read itself and folds into its own state |
@@ -208,7 +214,7 @@ need to know which of these it is building.
 - **Events and batch ends.** An entry is one `StoredEvent` of the fill without its trace: the `Arc<AgentEvent>` and
   its `batch_end`, the last sequence of the atomic batch the event was committed in. The store's range check reads
   the batch end (§4.3), and the restored hot window has none for `1..=h`, so the copy keeps it, 8 bytes per event.
-  Traces are not kept: the reads served from this path (`local`, `history`, `context`) return events only; `trace`
+  Traces are not kept: the reads served from this path (`local`, `history`) return events only; `trace`
   keeps its own read. The `Arc`s are the store read's, so a reader that keeps an event keeps exactly what it would
   keep after its own read.
 - **Fixed.** Each part is filled at most once and never extended; `h` and the cuts are fixed when the Timeline is
@@ -216,10 +222,11 @@ need to know which of these it is building.
 
 ### 4.3 Serving a read
 
-Every committed-history read of a Timeline goes through one internal path that splits the request into its hot window
-part and stored parts; `local`, `history`, `context`, `context_with_checkpoint` and the wrappers on `Dispatcher`,
-`Branch` and `Session` all reach it. Only the stored parts change. Every stored-range read, own or ancestor, goes
-through one of two seams, and both run the same end check:
+Every committed-history read of a Timeline that reads stored events in ranges goes through one internal path that
+splits the request into its hot window part and stored parts; `local`, `history`, the checkpoint's anchor read and the
+wrappers on `Dispatcher`, `Branch` and `Session` all reach it. The event query is not one of them: it reads the store's
+pages directly. Only the stored parts change. Every stored-range read, own or ancestor, goes through one of two seams,
+and both run the same end check:
 
 ```text
 own stored part a..=b          (b <= published sequence, as today)
@@ -230,9 +237,9 @@ own stored part a..=b          (b <= published sequence, as today)
   any other range, own part not filled ................ store.read(a..=b)               as today
 
 ancestor parts [(branch, a..=b), ...]
-  reached from: the ancestor segments of history and context; history's single-segment
+  reached from: the ancestor segments of history; history's single-segment
   shortcut (one ancestor segment, such as a new child's history(Some(0))); the anchor
-  read of context_with_checkpoint, for an anchor on an ancestor
+  read of the checkpoint selection, for an anchor on an ancestor
   no opening, or a range outside the ancestry ........... store.read / read_segments    as today
   every ancestor, each 1..=cut ...... fill the ancestry once ─┐
   any other set, ancestry filled ............................─┴─> one slice per segment
@@ -240,9 +247,9 @@ ancestor parts [(branch, a..=b), ...]
 ```
 
 - **Every stored read.** The own seam serves every read of the branch's own stored events: `local`, the own segment
-  of `history` and `context`, and the anchor read of `context_with_checkpoint` (`records(branch, snapshot.sequence,
+  of `history`, and the anchor read of the checkpoint selection (`records(branch, snapshot.sequence,
   snapshot.sequence)`, or the segment read when the anchor row is inside an atomic batch) for an anchor on the branch
-  itself. The ancestor seam serves every read of an ancestor's: the ancestor segments of `history` and `context`, the
+  itself. The ancestor seam serves every read of an ancestor's: the ancestor segments of `history`, the
   single-segment shortcut of `history_records` (one segment is read through the per-branch read instead of
   `read_segments`; a new child's `history(Some(0))` is such a read), and the anchor read for an anchor on an ancestor.
   No other path in the Timeline reads stored events.
@@ -294,7 +301,7 @@ cached by key outside the Timeline.
 
 ### 4.6 Readers outside an opening
 
-Unchanged, because no copy exists: capability reloads in an active branch, model steps (`context`,
+Unchanged, because no copy exists: capability reloads in an active branch, model steps (the context fold,
 ContextPolicy's `local(through+1..)`), Prompt and configuration publication, TimelineTree's `branch` validation on a
 parent, the App Server's history pages and summaries, collaboration and export.
 
@@ -336,7 +343,7 @@ At the first idle the heap is 0.30 to 0.33 MB above the level before the restore
 - **Long-session residency.** An idle branch holds no copy, so its live bytes do not grow with steps
   ([timeline-storage §7](../../architecture/rust-agent/timeline-storage.md#7-验收)).
 - **Child branches.** A child's opening holds its own events and one ancestry read, with their batch ends: the size
-  of one `context` read of the child, which Prompt and ToolBinding each materialize today.
+  of one context fold of the child, which Prompt and ToolBinding each materialize today.
 - **One copy per Session, during a restore only.** A restore opens one branch at a time. Branches created at runtime
   (concurrent `branch` calls, a prepared Session) open independently, so concurrent child builds each hold their own
   copy of their ancestry while they open, as each of their readers holds a decoded ancestry today.
@@ -524,7 +531,7 @@ runtime's Timeline and zero new public content.
 | ADR 002 D2 (no wiring modules) | No new module or plugin |
 | ADR 002 D3 (dependencies follow scope) | No new dependency |
 | ADR 002 D4 (configuration) | None |
-| ADR 002 D5 (language-neutral contracts) | No contract changes; a TypeScript part reading through `Dispatcher::local` is served the same way |
+| ADR 002 D5 (language-neutral contracts) | No contract changes; a TypeScript part reading through the Timeline query is served the same way |
 
 ## 11. Requirements raised to mechanism owners
 
@@ -615,7 +622,7 @@ With the implementation, each keeping its meaning:
 [timeline-storage](../../architecture/rust-agent/timeline-storage.md) §4 "使用方" says that while a branch opens its
 Timeline serves reads of the history it was built with from one shared copy, released when the branch leaves `Loading`
 (published, closed or rolled back), and that the copy keeps each event's batch end so §4's range-end rule holds for its
-reads. §5's "恢复" row says the capabilities' `context` or `local` reads share it; the rebuild row
+reads. §5's "恢复" row says the capabilities' point-in-time reads share it; the rebuild row
 of [single-tree](../../architecture/rust-agent/single-tree.md#能力重载协议) stays as written. §15 and §20 of
 [request delta storage](request-delta-storage.md) link here.
 

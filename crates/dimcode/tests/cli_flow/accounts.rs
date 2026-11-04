@@ -454,7 +454,7 @@ fn the_provider_panel_signs_in_through_each_described_namespace() {
         terminal.write(b"\x1b");
         terminal.until("Add custom provider");
         terminal.write(b"\x1b");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -506,7 +506,7 @@ fn a_panel_without_the_sign_in_method_shows_the_unsupported_daemon_error() {
     terminal.until("OpenAI Codex");
     terminal.write(b"\r");
     terminal.until("This daemon does not offer account.codex.login.browser.begin");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }

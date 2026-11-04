@@ -13,6 +13,7 @@ use dim_agent_capabilities::{
     prompt_state::PromptSnapshot,
     summary_strategy::ProductSummaryStrategyConfig,
 };
+use dim_agent_runtime::testing::branch_events;
 use std::{path::Path, sync::Mutex as StdMutex};
 
 type Seen = Arc<StdMutex<Vec<(Uri, HeaderMap, Value)>>>;
@@ -726,8 +727,7 @@ async fn temporary_startup_rebinds_after_restart_and_preserves_parent_cut_connec
     );
     let member = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if let Some(member) = session
-                .local("main", ..)
+            if let Some(member) = branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .into_iter()

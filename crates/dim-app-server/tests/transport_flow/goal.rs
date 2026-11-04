@@ -13,6 +13,7 @@ use dim_agent_capabilities::{
         ModelDriver, ModelHost, ModelStopReason, ModelStream, PrepareContextHost,
     },
 };
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_types::{BranchCreateData, BranchSource, MessageContent, ModelRequest};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use std::path::{Path, PathBuf};
@@ -70,8 +71,7 @@ async fn goal(client: &mut Client, method: &str, params: Value) -> Value {
 /// Goal's blocks on `branch`, in order: each input's first `<dim-goal>`
 /// marker line, and the input's sequence.
 async fn goal_writes(session: &dim_agent_runtime::Session, branch: &str) -> Vec<(u64, String)> {
-    session
-        .local(branch, ..)
+    branch_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -100,7 +100,7 @@ async fn wait_for(session: &dim_agent_runtime::Session, branch: &str, needle: &s
     assert!(
         found.is_ok(),
         "no Goal block with {needle}: {:#?}",
-        session.local(branch, ..).await
+        branch_events(session, branch, ..).await
     );
 }
 async fn idle(client: &mut Client, session: &str, branch: &str) {
@@ -126,8 +126,7 @@ fn block_value(text: &str, label: &str) -> String {
 }
 /// The full text of the last Goal block on `branch` whose marker contains `needle`.
 async fn goal_block(session: &dim_agent_runtime::Session, branch: &str, needle: &str) -> String {
-    session
-        .local(branch, ..)
+    branch_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -254,8 +253,7 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
             .all(|(sequence, line)| *sequence <= completed || !line.contains("continuation")),
         "{writes:#?}"
     );
-    let results: Vec<String> = session
-        .local("main", ..)
+    let results: Vec<String> = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -435,7 +433,7 @@ async fn wait_event(
     matches: impl Fn(&EventKind) -> bool,
 ) {
     for _ in 0..750 {
-        let Ok(events) = session.local(branch, ..).await else {
+        let Ok(events) = branch_events(session, branch, ..).await else {
             tokio::time::sleep(Duration::from_millis(20)).await;
             continue;
         };
@@ -444,7 +442,7 @@ async fn wait_event(
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let events = session.local(branch, ..).await.unwrap_or_default();
+    let events = branch_events(session, branch, ..).await.unwrap_or_default();
     panic!(
         "event did not arrive: {:#?}",
         events
@@ -455,8 +453,7 @@ async fn wait_event(
 }
 /// Sequences of the `turn/end` events on `branch`.
 async fn turn_ends(session: &dim_agent_runtime::Session, branch: &str) -> Vec<u64> {
-    session
-        .local(branch, ..)
+    branch_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -650,7 +647,7 @@ async fn node_goal_settings_resume_unload_and_fork() {
     let forked = agent.get_session(&fork_id).unwrap();
     wait_for(&forked, "main", r#"reason="new_branch""#).await;
     idle(&mut client, &fork_id, "main").await;
-    let events = forked.local("main", ..).await.unwrap();
+    let events = branch_events(&forked, "main", ..).await.unwrap();
     let opening = events
         .iter()
         .find(|event| matches!(&event.kind, EventKind::SessionForked(_)))
@@ -784,8 +781,7 @@ async fn branch_creates(
     session: &dim_agent_runtime::Session,
     branch: &str,
 ) -> Vec<(u64, BranchCreateData)> {
-    session
-        .local(branch, ..)
+    branch_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -800,7 +796,7 @@ async fn branch_creates(
 /// built has no published events yet.
 async fn first_user_text(session: &dim_agent_runtime::Session, branch: &str) -> String {
     for _ in 0..750 {
-        let Ok(events) = session.local(branch, ..).await else {
+        let Ok(events) = branch_events(session, branch, ..).await else {
             tokio::time::sleep(Duration::from_millis(20)).await;
             continue;
         };
@@ -859,8 +855,7 @@ async fn node_goal_on_a_line_behaves_as_on_main() {
         .unwrap()
         .to_owned();
     idle(&mut client, &id, &child).await;
-    let opening = session
-        .local(&child, ..)
+    let opening = branch_events(&session, &child, ..)
         .await
         .unwrap()
         .iter()
@@ -1029,8 +1024,7 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
     // The conclusion it decides on is one input of one block, and that
     // block's marker is the report of this evaluation and evaluator
     // (Pursuit §5).
-    let (blocks, marker) = session
-        .local("main", ..)
+    let (blocks, marker) = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -1069,7 +1063,12 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
     idle(&mut client, &id, "main").await;
     let head = session.sequence(child).unwrap();
     assert_eq!(session.ended_head(child), Some(head));
-    let line_events = session.local_page(child, 0, 256, head).await.unwrap();
+    let line_events = session
+        .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()
+        .unwrap()
+        .page(child.to_owned(), 0, 256)
+        .await
+        .unwrap();
     assert_eq!(
         line_events
             .iter()
@@ -1078,8 +1077,7 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
         1,
         "one evaluator turn"
     );
-    let endings: Vec<Value> = session
-        .local("main", ..)
+    let endings: Vec<Value> = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -1235,7 +1233,7 @@ async fn node_goal_registers_the_entry_for_the_marker_it_writes() {
     // The request that carries the `<dim-goal` input carries the entry too
     // (A.5.1): the Session part registers it for the Session, so every
     // branch's System holds it while the row is loaded.
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let request = events
         .iter()
         .rev()

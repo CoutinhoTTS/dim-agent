@@ -1,14 +1,16 @@
 use crate::{
-    context_policy::{ContextPolicy, PolicyContext, configured_request},
-    history::{HistoryRenderer, context_configuration},
+    context_policy::{
+        ContextPolicy, EstimateEvent, PolicyContext, configured_request, estimate_events,
+    },
+    history::{HistoryRenderer, chain_by_id, context_configuration},
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::{PromptSnapshot, scope_is_visible},
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
-    PolicyFacts, Timeline, TimelineIdentity,
+    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Dispatcher, Names, Timeline,
+    TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -544,20 +546,18 @@ impl ContextPreparation {
         let policy = self.policy.as_ref().ok_or_else(|| {
             ContextOpError::Model(HostError::failed("Context compaction is not available"))
         })?;
-        let through = self.timeline.committed();
-        let facts = self
-            .timeline
-            .policy_facts(through, "")
+        let through = self.timeline.sequence();
+        let events = estimate_events(&self.timeline)
             .await
             .map_err(ContextOpError::Read)?;
-        if let Some(request) = canary_request(&facts) {
+        if let Some(request) = canary_request(&events) {
             let model = policy
                 .resolver
                 .resolve(request.clone(), cancel.clone())
                 .await
                 .map_err(ContextOpError::Model)?;
             if let Some(input) = self
-                .incremental_usage(&facts, through, &request, model.as_ref())
+                .incremental_usage(&events, through, &request, model.as_ref())
                 .await?
             {
                 return Ok(ContextUsage {
@@ -598,15 +598,15 @@ impl ContextPreparation {
     /// the request's system and tools are unchanged since that call.
     async fn incremental_usage(
         &self,
-        facts: &PolicyFacts,
+        events: &[EstimateEvent],
         through: u64,
         request: &Arc<ModelRequest>,
         model: &dyn crate::host::ContextModel,
     ) -> std::result::Result<Option<f64>, ContextOpError> {
-        let Some(usage) = last_usage(facts) else {
+        let Some(usage) = last_usage(events) else {
             return Ok(None);
         };
-        let Some(call) = last_call(facts, &usage.request_id) else {
+        let Some(call) = last_call(events, &usage.request_id) else {
             return Ok(None);
         };
         let segments = self
@@ -614,16 +614,15 @@ impl ContextPreparation {
             .segments(through)
             .map_err(ContextOpError::Read)?;
         let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
-        let Some(call_rank) = rank(&call.position.branch_id) else {
+        let Some(call_rank) = rank(&call.0.branch_id) else {
             return Ok(None);
         };
-        let at = (Some(call_rank), call.position.sequence);
-        if facts.events.iter().any(|fact| {
-            (rank(&fact.position.branch_id), fact.position.sequence) > at
+        let at = (Some(call_rank), call.0.sequence);
+        if events.iter().any(|(position, event)| {
+            (rank(&position.branch_id), position.sequence) > at
                 && matches!(
-                    &fact.event.kind,
+                    &event.kind,
                     dim_agent_types::EventKind::ContextConfigured(_)
-                        | dim_agent_types::EventKind::PromptChanged(_)
                         | dim_agent_types::EventKind::ContextCompaction(
                             dim_agent_types::ContextCompactionData {
                                 outcome: dim_agent_types::ContextCompactionResult::Completed { .. },
@@ -634,29 +633,25 @@ impl ContextPreparation {
         }) {
             return Ok(None);
         }
-        let mut tail = Vec::new();
-        for (index, (branch, cut)) in segments.iter().enumerate().skip(call_rank) {
-            let mut cursor = if index == call_rank {
-                call.position.sequence + 1
-            } else {
-                1
+        let mut tail: Vec<(String, Vec<Arc<dim_agent_types::AgentEvent>>)> = Vec::new();
+        let mut read =
+            crate::history::FoldRead::timeline(&self.timeline, Some(call.1.id.clone()), through);
+        loop {
+            let Some(page) = read.next(256).await.map_err(ContextOpError::Read)? else {
+                break;
             };
-            let mut events = Vec::new();
-            while cursor <= *cut {
-                let page = self
-                    .timeline
-                    .stored_context_page_in(branch, cursor - 1, 256, *cut)
-                    .await
-                    .map_err(ContextOpError::Read)?;
-                if page.is_empty() {
-                    break;
+            let read = page.events.len() as u64;
+            for (event, position) in page.events.into_iter().zip(page.positions) {
+                let same = tail
+                    .last()
+                    .is_some_and(|(branch, _)| *branch == position.branch_id);
+                match tail.last_mut() {
+                    Some((_, events)) if same => events.push(event),
+                    _ => tail.push((position.branch_id, vec![event])),
                 }
-                let end = page.last().map_or(cursor, |event| event.sequence);
-                events.extend(page);
-                cursor = end + 1;
             }
-            if !events.is_empty() {
-                tail.push((branch.clone(), events));
+            if read < 256 {
+                break;
             }
         }
         let mut history = Vec::new();
@@ -671,18 +666,14 @@ impl ContextPreparation {
                     })
                     && !supplied.iter().any(|seen| seen.id == data.input_id)
                 {
-                    let input = if let Some(fact) = facts
+                    let input = self
+                        .timeline
+                        .query(chain_by_id(&data.input_id))
+                        .await
+                        .map_err(ContextOpError::Read)?
                         .events
-                        .iter()
-                        .find(|fact| fact.event.id == data.input_id)
-                    {
-                        Some(fact.event.clone())
-                    } else {
-                        self.timeline
-                            .event_by_id(&data.input_id)
-                            .await
-                            .map_err(ContextOpError::Read)?
-                    };
+                        .into_iter()
+                        .next();
                     if let Some(input) = input {
                         supplied.push(input);
                     }
@@ -777,14 +768,15 @@ impl ContextPreparation {
         };
         match &self.policy {
             Some(policy) => {
-                let facts = self
-                    .timeline
-                    .policy_facts(source.through, &source.turn_id)
+                let events = estimate_events(&self.timeline)
                     .await
-                    .map_err(|error| HostError::failed(error.to_string()))?;
+                    .map_err(|error| HostError::failed(error.to_string()))?
+                    .into_iter()
+                    .map(|(_, event)| event)
+                    .collect();
                 policy
                     .prepare(
-                        request, &source, context, history, facts, cancel, &cancelled,
+                        request, &source, context, history, events, cancel, &cancelled,
                     )
                     .await
             }
@@ -911,11 +903,13 @@ impl DynPlugin for ContextPreparationPlugin {
             let owner = service.clone();
             let failures = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
+            let read = owner.clone();
+            let read_timeline = owner.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "ContextPreparation",
-                    &[
+                    "ContextPreparation".into(),
+                    [
                         "context/prepare",
                         "context/compaction-start",
                         "context/compaction",
@@ -924,19 +918,38 @@ impl DynPlugin for ContextPreparationPlugin {
                         "input/applied",
                         "turn/start",
                         "turn/end",
-                    ],
-                    move |delivery| {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "context/prepare",
+                                    "model/call",
+                                    "step/model-output-end",
+                                    "context/compaction-start",
+                                    "context/compaction",
+                                    "stop/interrupt",
+                                    "step/model-start",
+                                    "input/applied",
+                                    "turn/start",
+                                    "turn/end",
+                                ],
+                            )
+                            .await?;
+                            read.rebuild(&mut read.state.lock().unwrap(), &reply.events)?;
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| {
                         let owner = owner.clone();
                         let failures = failures.clone();
                         let lifecycle = lifecycle.clone();
                         Box::pin(async move {
-                            let event = match delivery {
-                                Delivery::Replay(events) => {
-                                    return owner
-                                        .rebuild(&mut owner.state.lock().unwrap(), &events);
-                                }
-                                Delivery::Live(event) => event,
-                            };
                             if matches!(event.kind, EventKind::ContextCompactionStart(_)) {
                                 owner.state.lock().unwrap().compaction = Some(event.sequence);
                                 return Ok(());
@@ -1025,7 +1038,7 @@ impl DynPlugin for ContextPreparationPlugin {
                             });
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.context.clone(), service)?;
@@ -1034,31 +1047,25 @@ impl DynPlugin for ContextPreparationPlugin {
     }
 }
 
-fn last_usage(facts: &PolicyFacts) -> Option<&dim_agent_types::ModelUsageData> {
-    facts
-        .events
-        .iter()
-        .rev()
-        .find_map(|fact| match &fact.event.kind {
-            dim_agent_types::EventKind::ModelUsage(data) => Some(data),
-            _ => None,
-        })
-}
-
-fn last_call<'a>(
-    facts: &'a PolicyFacts,
-    request_id: &str,
-) -> Option<&'a dim_agent_runtime::PolicyEvent> {
-    facts.events.iter().rev().find(|fact| {
-        matches!(&fact.event.kind, dim_agent_types::EventKind::ModelCall(data) if data.request_id == request_id)
+fn last_usage(facts: &[EstimateEvent]) -> Option<&dim_agent_types::ModelUsageData> {
+    facts.iter().rev().find_map(|(_, event)| match &event.kind {
+        dim_agent_types::EventKind::ModelUsage(data) => Some(data),
+        _ => None,
     })
 }
 
-fn canary_request(facts: &PolicyFacts) -> Option<Arc<ModelRequest>> {
+fn last_call<'a>(facts: &'a [EstimateEvent], request_id: &str) -> Option<&'a EstimateEvent> {
+    facts.iter().find(|(_, event)| {
+        matches!(&event.kind, dim_agent_types::EventKind::ModelCall(data) if data.request_id == request_id)
+    })
+}
+
+fn canary_request(facts: &[EstimateEvent]) -> Option<Arc<ModelRequest>> {
     let usage = last_usage(facts)?;
-    let call = last_call(facts, &usage.request_id)?;
-    match &call.event.kind {
-        dim_agent_types::EventKind::ModelCall(data) => Some(data.request.clone()),
+    facts.iter().rev().find_map(|(_, event)| match &event.kind {
+        dim_agent_types::EventKind::ModelCall(data) if data.request_id == usage.request_id => {
+            Some(data.request.clone())
+        }
         _ => None,
-    }
+    })
 }

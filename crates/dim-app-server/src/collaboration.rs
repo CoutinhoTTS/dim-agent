@@ -16,7 +16,7 @@ use crate::protocol::SessionOrigin;
 use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_capabilities::{
     context_block,
-    host::{HostError, HostFuture, ToolExecutionContext},
+    host::{HostError, HostFuture, SelectableModelsHost, ToolExecutionContext},
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::PromptSnapshot,
     timeline_tree::TreeCommands,
@@ -25,6 +25,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{
     AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
     SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, Timeline, TimelineIdentity,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{
@@ -39,6 +40,7 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroU64,
     sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
@@ -77,7 +79,7 @@ fn member_create_failed(detail: String) -> Failure {
 /// a whole text in place of its built-in one (Collaboration §3).
 #[derive(Debug, Clone, Default)]
 pub struct CollaborationConfig {
-    /// The leader's `agent` description in place of [`LEADER_DESCRIPTION`].
+    /// The leader's `agent` description in place of the built-in leader text.
     pub leader_description: Option<Arc<str>>,
     /// The member's `agent` description in place of [`MEMBER_DESCRIPTION`].
     pub member_description: Option<Arc<str>>,
@@ -740,8 +742,6 @@ struct BranchRecord {
     /// refused nor have a handled `result`. Updated only by handlers, in
     /// sequence order.
     open: BTreeMap<String, BTreeSet<String>>,
-    /// Positions only; full result bodies remain in the Timeline store.
-    results: BTreeMap<String, u64>,
     /// Delivery work per peer runs in operation event order.
     chains: BTreeMap<String, (u64, Shared<WorkFuture<'static, ()>>)>,
 }
@@ -778,6 +778,9 @@ pub struct CollaborationSession {
     tree: Arc<TreeCommands>,
     /// Gives each request its hold on this Session.
     lifecycle: Arc<SessionLifecycle>,
+    /// Provider's selectable models, when the deployment reads them: the
+    /// `models` action is offered exactly then.
+    selectable: Option<Arc<SelectableModelsHost>>,
     state: Mutex<State>,
     interactive: bool,
     approval_tools: bool,
@@ -894,6 +897,7 @@ impl CollaborationSession {
                 | Input::Close { .. }
                 | Input::Inspect { .. }
                 | Input::Result { .. }
+                | Input::Models { .. }
         );
         if leader_only && self.role == CollaborationRole::Member {
             return Ok(refusal(
@@ -913,6 +917,7 @@ impl CollaborationSession {
         };
         let (kind, action) = match input {
             Input::List {} => return Ok(self.list().await),
+            Input::Models {} => return self.models(&cancel).await,
             Input::Inspect { agent_id } => return Ok(self.inspect(&agent_id).await),
             Input::Result { result_id } => {
                 return Ok(self.result(&context.branch_id, &result_id).await);
@@ -1061,6 +1066,33 @@ impl CollaborationSession {
             None => refusal(Refusal::AgentNotFound, "no such agent is available to you"),
         }
     }
+    /// The models a new member can run, with their provider IDs. Provider
+    /// owns the read; a deployment without it offers no `models` action.
+    async fn models(&self, cancel: &CancellationToken) -> Result<ToolResult, HostError> {
+        let Some(selectable) = &self.selectable else {
+            return Ok(refusal(
+                Refusal::InvalidInput,
+                "this deployment does not describe selectable models",
+            ));
+        };
+        let models = match selectable.0.selectable(cancel.clone()).await {
+            Ok(models) => models,
+            Err(error @ HostError::Cancelled(_)) => return Err(error),
+            Err(error) => {
+                return Ok(ToolResult::error(format!(
+                    "Models are unavailable: {error}"
+                )));
+            }
+        };
+        Ok(success(json!({"models": models.iter().map(|model| json!({
+            "providerId": model.target.provider_id,
+            "modelId": model.target.model_id,
+            "contextWindow": model.capabilities.context_window,
+            "maxOutputTokens": model.capabilities.max_output_tokens,
+            "vision": model.capabilities.vision,
+            "reasoning": model.capabilities.reasoning,
+        })).collect::<Vec<_>>()})))
+    }
     async fn list(&self) -> ToolResult {
         let participants: Vec<Value> = self
             .collaboration
@@ -1097,23 +1129,37 @@ impl CollaborationSession {
     }
 
     async fn result(&self, branch_id: &str, result_id: &str) -> ToolResult {
-        let position = {
-            let state = self.state.lock().unwrap();
-            state.branches.get(branch_id).and_then(|branch| {
-                branch
-                    .results
-                    .get(result_id)
-                    .map(|sequence| (branch.timeline.clone(), *sequence))
-            })
-        };
-        let Some((timeline, sequence)) = position else {
+        let timeline = self
+            .state
+            .lock()
+            .unwrap()
+            .branches
+            .get(branch_id)
+            .map(|branch| branch.timeline.clone());
+        let Some(timeline) = timeline else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
-        let local = match timeline.local(sequence..=sequence).await {
-            Ok(local) => local,
+        let reply = match timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                event_id: Some(result_id.to_owned()),
+                predicate: None,
+                limit: NonZeroU64::MIN,
+                offset: 0,
+            })
+            .await
+        {
+            Ok(reply) => reply,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        let Some(event) = local.iter().find(|event| event.id == result_id) else {
+        let Some(event) = reply.events.first() else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
         match &event.kind {
@@ -1301,7 +1347,6 @@ impl CollaborationSession {
             EventKind::CollaborationDelivered(data) => self.delivered(branch_id, data),
             EventKind::CollaborationResult(data) => {
                 self.with_branch(branch_id, |branch| {
-                    branch.results.insert(event.id.clone(), event.sequence);
                     close_request(&mut branch.open, &data.request_event_id);
                 });
                 let this = self.clone();
@@ -2407,12 +2452,13 @@ enum Input {
         limit: Option<usize>,
     },
     List {},
+    Models {},
     Inspect {
         agent_id: String,
     },
 }
 
-const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
+const LEADER_DESCRIPTION_HEAD: &str = "Work with other agents as a team you lead.
 - request: give a task to a new member (agentId or profile) or to one of your members
   (agentId + sessionId). An agentId is copied exactly from list's agents[].agentId; an
   Agent's name, such as \"default\", is not an agentId. A profile creates a temporary
@@ -2424,7 +2470,13 @@ const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the
   receiver must change course now.
 - read: view a team member's recent activity. list: show your team and the agents you
-  can use. inspect: show one agent's full profile (instructions, tools, model).
+  can use. inspect: show one agent's full profile (instructions, tools, model).";
+/// The `models` bullet, between [`LEADER_DESCRIPTION_HEAD`] and
+/// [`LEADER_DESCRIPTION_TAIL`]: only a deployment with Provider's selectable
+/// read offers the action.
+const LEADER_MODELS: &str = "
+- models: query the models this Session can start an agent with.";
+const LEADER_DESCRIPTION_TAIL: &str = "
 - result: read a complete result by resultId from a report, even after closing the member.
 Address members with agentId + sessionId from earlier results.";
 
@@ -2437,7 +2489,11 @@ const MEMBER_DESCRIPTION: &str = "You are a member of a team. You cannot delegat
 Your final answer to the task is returned to the leader automatically; do not send it
 as a message.";
 
-fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> ToolDefinition {
+fn agent_definition(
+    role: CollaborationRole,
+    factory: &CollaborationConfig,
+    models: bool,
+) -> ToolDefinition {
     let mut properties = json!({
         "agentId": {"type": "string",
             "description": "An Agent's opaque id, copied exactly from list's agents[].agentId, or from participants[].agentId for a team member. A name such as \"default\" is not an id."},
@@ -2467,22 +2523,28 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
                         "properties": {"providerId": {"type": "string"}, "modelId": {"type": "string"}}},
                 },
             });
-            (
-                vec![
-                    "request", "cancel", "close", "message", "read", "list", "inspect", "result",
-                ],
-                factory
-                    .leader_description
-                    .as_deref()
-                    .unwrap_or(LEADER_DESCRIPTION),
-            )
+            let mut actions = vec![
+                "request", "cancel", "close", "message", "read", "list", "inspect", "result",
+            ];
+            if models {
+                actions.push("models");
+            }
+            let description = match factory.leader_description.as_deref() {
+                Some(text) => text.to_owned(),
+                None => format!(
+                    "{LEADER_DESCRIPTION_HEAD}{}{LEADER_DESCRIPTION_TAIL}",
+                    if models { LEADER_MODELS } else { "" }
+                ),
+            };
+            (actions, description)
         }
         CollaborationRole::Member => (
             vec!["message", "read", "list"],
             factory
                 .member_description
                 .as_deref()
-                .unwrap_or(MEMBER_DESCRIPTION),
+                .unwrap_or(MEMBER_DESCRIPTION)
+                .to_owned(),
         ),
     };
     properties["action"] = json!({"type": "string", "enum": actions});
@@ -2497,7 +2559,7 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
             "message" => vec![vec!["action", "agentId", "sessionId", "content"]],
             "inspect" => vec![vec!["action", "agentId"]],
             "result" => vec![vec!["action", "resultId"]],
-            "list" => vec![vec!["action"]],
+            "list" | "models" => vec![vec!["action"]],
             _ => unreachable!("declared agent action"),
         };
         for required in choices {
@@ -2520,7 +2582,7 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
     }
     definition(
         AGENT_TOOL,
-        description,
+        &description,
         json!({"type": "object", "required": ["action"], "additionalProperties": false,
             "properties": properties, "anyOf": variants}),
     )
@@ -2639,6 +2701,7 @@ impl DynPlugin for CollaborationSessionPlugin {
                 role: config.collaboration_role,
                 tree,
                 lifecycle,
+                selectable: ctx.get::<SelectableModelsHost>(),
                 state: Mutex::new(State::default()),
                 interactive: config.interactive,
                 approval_tools: config.tools.as_ref().is_none_or(|tools| {
@@ -2649,7 +2712,11 @@ impl DynPlugin for CollaborationSessionPlugin {
             tools.register(
                 ctx,
                 ToolContribution {
-                    definition: agent_definition(config.collaboration_role, &factory),
+                    definition: agent_definition(
+                        config.collaboration_role,
+                        &factory,
+                        service.selectable.is_some(),
+                    ),
                     handler: Arc::new(AgentTool {
                         session: service.clone(),
                         stopping: ctx.cancellation_token(),
@@ -2715,126 +2782,162 @@ impl DynPlugin for CollaborationTimelinePlugin {
                 owner.unload(&unloading).await;
                 Ok(())
             })?;
-            let rebuilt = Arc::new(tokio::sync::Mutex::new(0u64));
-            let gate = rebuilt.clone();
-            let mut rebuilding = rebuilt.lock().await;
             let consumer = service.clone();
             let consumed = branch_id.clone();
-            dispatcher.subscribe(
-                ctx,
-                "CollaborationTimeline",
-                &[
-                    "turn/start",
-                    "turn/end",
-                    "stop/interrupt",
-                    "collaboration/request",
-                    "collaboration/cancel",
-                    "collaboration/close",
-                    "collaboration/message",
-                    "collaboration/delivered",
-                    "collaboration/result",
-                    "input/message",
-                    "input/consumed",
-                    "input/deleted",
-                    "step/tool-call",
-                    "step/tool-result",
-                    "approval/request",
-                    "approval/respond",
-                    "approval/cancelled",
-                ],
-                move |event| {
-                    let gate = gate.clone();
-                    let consumer = consumer.clone();
-                    let consumed = consumed.clone();
-                    Box::pin(async move {
-                        if event.sequence > *gate.lock().await {
-                            consumer.consume(&consumed, event).await
-                        } else {
-                            Ok(())
-                        }
-                    })
-                },
-            )?;
-            let through = timeline.committed();
-            let events = timeline.local(..=through).await?;
-            *rebuilding = events.last().map_or(0, |event| event.sequence);
-            let tasks = TaskTracker::new();
-            let cleanup_tasks = tasks.clone();
-            let mut stale_inputs = BTreeSet::new();
-            for event in &events {
-                match &event.kind {
-                    EventKind::InputMessage(data)
-                        if data
-                            .submission_id
-                            .as_ref()
-                            .is_some_and(|id| id.starts_with("collaboration-approval:"))
-                            && data.user.is_none()
-                            && matches!(data.blocks.first(), Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-agent-approval>\n")) =>
-                    {
-                        stale_inputs.insert(event.id.clone());
-                    }
-                    EventKind::InputApplied(InputAppliedData { input_id, .. })
-                    | EventKind::InputDeleted(InputDeletedData { input_id }) => {
-                        stale_inputs.remove(input_id);
-                    }
-                    _ => {}
-                }
-            }
-            let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
-            service.state.lock().unwrap().branches.insert(
-                branch_id.clone(),
-                BranchRecord {
-                    ctx: ctx.clone(),
-                    dispatcher: dispatcher.clone(),
-                    approvals: BTreeMap::new(),
-                    approval_calls: BTreeMap::new(),
-                    forwarded_approvals: BTreeMap::new(),
-                    timeline,
-                    tasks,
-                    abort: CancellationToken::new(),
-                    current_turn,
-                    interrupted,
-                    closing: false,
-                    ops: BTreeMap::new(),
-                    open: BTreeMap::new(),
-                    results: events
-                        .iter()
-                        .filter(|&event| matches!(event.kind, EventKind::CollaborationResult(_)))
-                        .map(|event| (event.id.clone(), event.sequence))
-                        .collect(),
-                    chains: BTreeMap::new(),
-                },
-            );
-            drop(rebuilding);
-            if !stale_inputs.is_empty() {
-                cleanup_tasks.spawn(async move {
-                    if !phase.activated().await {
-                        return;
-                    }
-                    let result = async {
-                        let branch = service.tree.get(&branch_id)?;
-                        let queue =
-                            branch.service::<dim_agent_capabilities::input_queue::InputQueue>()?;
-                        for input_id in stale_inputs {
-                            queue
-                                .withdraw(
-                                    InputWithdrawData {
-                                        input_id,
-                                        reason: Some(RELOADING.into()),
-                                    },
-                                    None,
-                                )
-                                .await?;
-                        }
-                        Ok::<_, AgentError>(())
-                    }
-                    .await;
-                    if let Err(error) = result {
-                        dispatcher.fail(error);
-                    }
-                });
-            }
+            let rebuilds = service.clone();
+            let phases = phase.clone();
+            let rebuilt_branch = branch_id.clone();
+            let rebuilt_timeline = timeline.clone();
+            let rebuilt_dispatcher = dispatcher.clone();
+            let rebuilt_ctx = ctx.clone();
+            dispatcher
+                .consume(
+                    ctx,
+                    "CollaborationTimeline".into(),
+                    [
+                        "turn/start",
+                        "turn/end",
+                        "stop/interrupt",
+                        "collaboration/request",
+                        "collaboration/cancel",
+                        "collaboration/close",
+                        "collaboration/message",
+                        "collaboration/delivered",
+                        "collaboration/result",
+                        "input/message",
+                        "input/consumed",
+                        "input/deleted",
+                        "step/tool-call",
+                        "step/tool-result",
+                        "approval/request",
+                        "approval/respond",
+                        "approval/cancelled",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let service = rebuilds.clone();
+                        let phase = phases.clone();
+                        let branch_id = rebuilt_branch.clone();
+                        let timeline = rebuilt_timeline.clone();
+                        let dispatcher = rebuilt_dispatcher.clone();
+                        let ctx = rebuilt_ctx.clone();
+                        Box::pin(async move {
+                            restore(service, phase, branch_id, timeline, dispatcher, ctx).await
+                        })
+                    }),
+                    Arc::new(move |event| {
+                        let consumer = consumer.clone();
+                        let consumed = consumed.clone();
+                        Box::pin(async move { consumer.consume(&consumed, Arc::new(event)).await })
+                    }),
+                )
+                .await?;
             Ok(Effect::Done)
         })
     }
+}
+
+/// Rebuilds one branch's collaboration state from its own facts and returns
+/// the cutoff the read took: facts the previous generation wrote and had not
+/// published yet decide whether an operation was delivered or a request is
+/// still open, so the read adds the undispatched tail (ADR 020 D3). The
+/// refusals and failures it writes from that state are not taken back.
+async fn restore(
+    service: Arc<CollaborationSession>,
+    phase: Arc<BranchLifecycle>,
+    branch_id: String,
+    timeline: Arc<Timeline>,
+    dispatcher: Arc<Dispatcher>,
+    ctx: Ctx,
+) -> dim_agent_runtime::Result<u64> {
+    let reply = rebuild_facts(
+        &timeline,
+        &[
+            "turn/start",
+            "turn/end",
+            "stop/interrupt",
+            "collaboration/request",
+            "collaboration/cancel",
+            "collaboration/close",
+            "collaboration/message",
+            "collaboration/delivered",
+            "collaboration/result",
+            "input/message",
+            "input/applied",
+            "input/deleted",
+        ],
+    )
+    .await?;
+    let events = reply.events;
+    let tasks = TaskTracker::new();
+    let cleanup_tasks = tasks.clone();
+    let mut stale_inputs = BTreeSet::new();
+    for event in &events {
+        match &event.kind {
+            EventKind::InputMessage(data)
+                if data
+                    .submission_id
+                    .as_ref()
+                    .is_some_and(|id| id.starts_with("collaboration-approval:"))
+                    && data.user.is_none()
+                    && matches!(data.blocks.first(), Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-agent-approval>\n")) =>
+            {
+                stale_inputs.insert(event.id.clone());
+            }
+            EventKind::InputApplied(InputAppliedData { input_id, .. })
+            | EventKind::InputDeleted(InputDeletedData { input_id }) => {
+                stale_inputs.remove(input_id);
+            }
+            _ => {}
+        }
+    }
+    let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
+    service.state.lock().unwrap().branches.insert(
+        branch_id.clone(),
+        BranchRecord {
+            ctx,
+            dispatcher: dispatcher.clone(),
+            approvals: BTreeMap::new(),
+            approval_calls: BTreeMap::new(),
+            forwarded_approvals: BTreeMap::new(),
+            timeline,
+            tasks,
+            abort: CancellationToken::new(),
+            current_turn,
+            interrupted,
+            closing: false,
+            ops: BTreeMap::new(),
+            open: BTreeMap::new(),
+            chains: BTreeMap::new(),
+        },
+    );
+    if !stale_inputs.is_empty() {
+        cleanup_tasks.spawn(async move {
+            if !phase.activated().await {
+                return;
+            }
+            let result = async {
+                let branch = service.tree.get(&branch_id)?;
+                let queue = branch.service::<dim_agent_capabilities::input_queue::InputQueue>()?;
+                for input_id in stale_inputs {
+                    queue
+                        .withdraw(
+                            InputWithdrawData {
+                                input_id,
+                                reason: Some(RELOADING.into()),
+                            },
+                            None,
+                        )
+                        .await?;
+                }
+                Ok::<_, AgentError>(())
+            }
+            .await;
+            if let Err(error) = result {
+                dispatcher.fail(error);
+            }
+        });
+    }
+    Ok(reply.through)
 }

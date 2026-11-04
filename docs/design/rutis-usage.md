@@ -435,7 +435,8 @@ impl DynPlugin for WaitBranch {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let dispatcher = ctx.require_at(&self.dispatcher)?;
-            /* dispatcher.follow(ctx, "Wait", keys, handler).await?, the Rust form of `consume`
+            /* dispatcher.consume(ctx, "Wait", keys, rebuild, handler).await?: subscribe, hold,
+               read the folded kinds with their unpublished tail, release above the cutoff
                (plugin contract §5.2), then ctx.provide_at(self.wait.clone(), wait) */
             Ok(Effect::Done)
         })
@@ -593,29 +594,34 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds from history, then follows live events (plugin contract §5.2).
+// A Capability that rebuilds from the query including its publishing facts, then
+// follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
-  inject: ['dispatcher'],
+  inject: ['dispatcher', 'timeline'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const timeline = ctx.use<Services['timeline']>('timeline')
     let count = 0
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
-    await dispatcher.consume('example-counter', ['input/message'], delivery => {
-      if ('live' in delivery) fold(delivery.live)
-      else delivery.replay.forEach(fold)
-    })
+    await dispatcher.consume('example-counter', ['input/message'], async () => {
+      const page = await timeline.query({
+        scope: 'branch', include_publishing: true, direction: 'ascending', kinds: ['input/message'], limit: 1024n, offset: 0n,
+      })
+      page.events.forEach(fold)
+      return BigInt(page.through)
+    }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
 })
 ```
 
-The hand-written form stays valid: `listen` before `committed()`, then a rebuild from `local`
-through that cutoff while the handler waits, skipping the live events it covered.
+A part that reads nothing registers with `listen`, which delivers live facts only; `consume` is the
+registration for one that rebuilds.
 
-The repository's fixtures show both languages and both forms: `runtime/fixtures/branch-part.ts`
-rebuilds by hand, `runtime/fixtures/python/python_branch_part.py` and `runtime/plugins/goal/branch.ts`
-use `consume`.
+The repository's fixtures show the form in both languages: `runtime/fixtures/branch-part.ts`,
+`runtime/fixtures/python/python_branch_part.py` and `runtime/plugins/goal/branch.ts` consume the
+branch this way.

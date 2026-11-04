@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 
 /// The command rules of the product profile: written through the
 /// `permission` management methods, read by Permission on the next call of an
@@ -88,8 +89,7 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
     assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
     let exec = json!({"sessionId":sid,"branchId":"main","text":"tool:exec {\"command\":\"printf ruled\"}"});
     let last_result = async || {
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -101,8 +101,7 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
             .unwrap()
     };
     let requests = async || {
-        session
-            .local("main", ..)
+        branch_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
