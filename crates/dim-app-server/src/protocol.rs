@@ -106,6 +106,7 @@ pub enum Call {
     Submit(Submit),
     InputLookup(InputLookup),
     History(History),
+    Keys(Keys),
     Stop(Stop),
     Idle(Idle),
     Close(SessionId),
@@ -704,6 +705,17 @@ pub struct History {
     #[serde(default, deserialize_with = "optional_cursor")]
     pub before: Option<u64>,
 }
+/// `session.keys`: the live keyed blocks of one branch segment at a fixed
+/// position (keyed-blocks §2.1).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Keys {
+    pub session_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub branch_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_cursor")]
+    pub through: Option<u64>,
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Stop {
@@ -752,7 +764,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 34] = [
+const BUILTIN_METHODS: [&str; 35] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -775,6 +787,7 @@ const BUILTIN_METHODS: [&str; 34] = [
     "session.submit",
     "session.input_lookup",
     "session.history",
+    "session.keys",
     "session.stop",
     "session.idle",
     "session.close",
@@ -840,6 +853,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.submit" => Call::Submit(params(raw_params)?),
             "session.input_lookup" => Call::InputLookup(params(raw_params)?),
             "session.history" => Call::History(params(raw_params)?),
+            "session.keys" => Call::Keys(params(raw_params)?),
             "session.stop" => Call::Stop(params(raw_params)?),
             "session.idle" => Call::Idle(params(raw_params)?),
             "session.close" => Call::Close(params(raw_params)?),
@@ -1217,6 +1231,7 @@ pub enum Reply {
     Submit(SubmitResult),
     InputLookup(InputLookupResult),
     History(crate::tree_protocol::HistoryResult),
+    Keys(crate::tree_protocol::KeysResult),
     BranchCreate(crate::tree_protocol::CreateResult),
     Barrier(crate::tree_protocol::BarrierResult),
     AgentCreated(AgentCreated),

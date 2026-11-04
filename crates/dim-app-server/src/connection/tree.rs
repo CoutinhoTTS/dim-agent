@@ -6,7 +6,7 @@ use dim_agent_capabilities::input_queue::{
 };
 use dim_agent_capabilities::timeline_tree::TreeCommands;
 use dim_agent_runtime::{BranchOptions, TimelineQuery};
-use dim_agent_types::{BranchSource, EventKind, InputMode};
+use dim_agent_types::{BranchSource, EventKind, InputBlock, InputMode};
 
 impl Connection {
     /// Runs the Session's submit checks before writing operator input (Hooks
@@ -264,6 +264,48 @@ impl Connection {
         }))
     }
 
+    /// The branch's live keyed blocks at `through` (keyed-blocks §2.2): the
+    /// newest live block of each key on the branch's own segment, or the
+    /// published head when `through` is absent. A position past the head is
+    /// invalid input, not a clamp: the client's overlay was built from a
+    /// different view of the branch.
+    pub(super) async fn keys(&self, rpc: &RpcService, params: Keys) -> Result<Reply, RpcError> {
+        let session = self.session(rpc, &params.session_id)?;
+        let branch = params.branch_id.as_deref().expect("validated branchId");
+        let head = session.sequence(branch).map_err(RpcError::from)?;
+        let through = match params.through {
+            Some(through) if through > head => {
+                return Err(RpcError::invalid("Future keyed-block position"));
+            }
+            Some(through) => through,
+            None => head,
+        };
+        let entries = if session.ended_head(branch).is_some() {
+            let tree = session
+                .session_service::<TreeCommands>()
+                .map_err(history_error)?;
+            scan_keys(&WindowRead::Ended(&tree), branch, through).await?
+        } else {
+            match scan_keys(&WindowRead::Open(&session), branch, through).await {
+                // The line ended while the scan ran: the tree serves the same
+                // read at its fixed head (ADR 021 D2).
+                Err(error)
+                    if error
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data.app_error == "branch_ended") =>
+                {
+                    let tree = session
+                        .session_service::<TreeCommands>()
+                        .map_err(history_error)?;
+                    scan_keys(&WindowRead::Ended(&tree), branch, through).await?
+                }
+                other => other?,
+            }
+        };
+        Ok(Reply::Keys(wire::KeysResult { through, entries }))
+    }
+
     pub(super) async fn end_branch(
         &self,
         rpc: &RpcService,
@@ -379,12 +421,29 @@ const HISTORY_TURN_BYTES: usize = 4 * 1024 * 1024;
 const HISTORY_FRAME_BYTES: usize = crate::outbound::MAX_FRAME_BYTES - 64 * 1024;
 /// Facts one page of the window's anchor read keeps.
 const TURN_WINDOW_PAGE: u64 = 256;
+/// Facts one page of the `session.keys` scan keeps.
+const KEYS_PAGE: u64 = 256;
+/// The most live keyed blocks one `session.keys` reply carries. The key is
+/// writer-chosen and unchecked (session-access A.2), so the entry count is
+/// bounded here rather than by the producers' key sets; a reply above it
+/// fails `too_many_keys` instead of truncating live state.
+const KEYS_ENTRY_LIMIT: usize = 1024;
 
 fn history_error(error: AgentError) -> RpcError {
     match error {
         AgentError::InvalidInput(message) => RpcError::invalid(message),
         error => RpcError::from(error),
     }
+}
+
+fn too_many_keys() -> RpcError {
+    RpcError::app(
+        -32000,
+        "too_many_keys",
+        format!(
+            "The branch has more than {KEYS_ENTRY_LIMIT} live keyed blocks; the read refuses to truncate live state"
+        ),
+    )
 }
 
 /// The newest turn at `through` and the first sequence a window over it
@@ -552,6 +611,118 @@ impl WindowRead<'_> {
             Self::Ended(tree) => tree.batch_end(branch.to_owned(), sequence).await,
         }
     }
+}
+
+/// The branch segment's live keyed blocks at `through` (keyed-blocks §3): one
+/// descending scan of the four kinds that runs from `through` down to the
+/// branch's opening. `input/deleted` is collected in the same pass; InputQueue
+/// writes it only for an input it still holds unapplied, so the deletion is
+/// always above the input it removes and the descending scan meets it first.
+/// A block is live only when its input is absent from that set, and a retire
+/// written by a deleted input never ends the key. The scan stops at the first
+/// opening (`branch/start` or `session/forked`) and discards everything below
+/// it: a fork's copied facts and a branch's inherited prefix are not the
+/// branch's own segment. Pages advance by sequence, never `offset` (ADR 019
+/// D2): the storage reader fetches `offset + limit` rows before skipping.
+async fn scan_keys(
+    read: &WindowRead<'_>,
+    branch: &str,
+    through: u64,
+) -> Result<Vec<wire::KeyEntry>, RpcError> {
+    let mut found: HashMap<String, (u64, usize, wire::KeyEntry)> = HashMap::new();
+    let mut closed: HashSet<String> = HashSet::new();
+    let mut deleted: HashSet<String> = HashSet::new();
+    let mut from = through;
+    while from > 0 {
+        let page = read
+            .query(
+                branch,
+                TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    include_publishing: false,
+                    from_event: None,
+                    from_sequence: Some(from),
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Descending,
+                    kinds: vec![
+                        "input/message".into(),
+                        "input/deleted".into(),
+                        "branch/start".into(),
+                        "session/forked".into(),
+                    ],
+                    flags: Vec::new(),
+                    event_id: None,
+                    predicate: None,
+                    limit: std::num::NonZeroU64::new(KEYS_PAGE).expect("a page keeps one event"),
+                    offset: 0,
+                },
+            )
+            .await
+            .map_err(history_error)?;
+        let exhausted = (page.events.len() as u64) < KEYS_PAGE;
+        let mut done = false;
+        for event in &page.events {
+            match &event.kind {
+                EventKind::BranchStart(_) | EventKind::SessionForked(_) => {
+                    done = true;
+                    break;
+                }
+                EventKind::InputDeleted(data) => {
+                    deleted.insert(data.input_id.clone());
+                }
+                EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
+                    for (index, block) in data.blocks.iter().enumerate().rev() {
+                        let InputBlock::Raw {
+                            text,
+                            key: Some(key),
+                            retire,
+                        } = block
+                        else {
+                            continue;
+                        };
+                        if found.contains_key(key) {
+                            continue;
+                        }
+                        if *retire {
+                            closed.insert(key.clone());
+                            continue;
+                        }
+                        if closed.contains(key) {
+                            continue;
+                        }
+                        found.insert(
+                            key.clone(),
+                            (
+                                event.sequence,
+                                index,
+                                wire::KeyEntry {
+                                    key: key.clone(),
+                                    sequence: event.sequence,
+                                    input_id: event.id.clone(),
+                                    text: text.clone(),
+                                },
+                            ),
+                        );
+                        if found.len() > KEYS_ENTRY_LIMIT {
+                            return Err(too_many_keys());
+                        }
+                    }
+                }
+                EventKind::InputMessage(_) => {}
+                _ => {}
+            }
+        }
+        if done || exhausted {
+            break;
+        }
+        from = page
+            .events
+            .last()
+            .map_or(0, |event| event.sequence.saturating_sub(1));
+    }
+    let mut entries: Vec<_> = found.into_values().collect();
+    entries.sort_by_key(|(sequence, index, _)| (*sequence, *index));
+    Ok(entries.into_iter().map(|(_, _, entry)| entry).collect())
 }
 
 async fn window_at(

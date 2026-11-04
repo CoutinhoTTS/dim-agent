@@ -439,6 +439,7 @@ impl Connection {
                 call,
                 Call::InputLookup(_)
                     | Call::History(_)
+                    | Call::Keys(_)
                     | Call::Summaries(_)
                     | Call::Catalog(_)
                     | Call::CatalogCancel(_)
@@ -479,6 +480,7 @@ impl Connection {
             }
             Call::InputLookup(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::History(p) => (Some(&p.session_id), Some(&p.branch_id)),
+            Call::Keys(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Stop(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Idle(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::ApprovalRespond(p) => (Some(&p.session_id), Some(&p.branch_id)),
@@ -651,6 +653,7 @@ impl Connection {
             Call::Submit(p) => Some(&p.session_id),
             Call::InputLookup(p) => Some(&p.session_id),
             Call::History(p) => Some(&p.session_id),
+            Call::Keys(p) => Some(&p.session_id),
             Call::Stop(p) => Some(&p.session_id),
             Call::Idle(p) => Some(&p.session_id),
             Call::ApprovalRespond(p) => Some(&p.session_id),
@@ -899,6 +902,7 @@ impl Connection {
             Call::Submit(params) => self.submit(rpc, params).await,
             Call::InputLookup(params) => self.input_lookup(rpc, params).await,
             Call::History(params) => self.history(rpc, params).await,
+            Call::Keys(params) => self.keys(rpc, params).await,
             Call::Stop(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
                     let branch = params.branch_id.as_deref().unwrap_or("main");
