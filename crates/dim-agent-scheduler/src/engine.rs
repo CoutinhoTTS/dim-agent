@@ -40,8 +40,9 @@ fn is_reloading(code: &str) -> bool {
 fn is_launched(run: &Run) -> bool {
     run.session_origin == Some(SessionOrigin::Launch)
 }
-/// A window this far behind the clock is missed, not run (A.4).
-const GRACE_SECONDS: i64 = 60;
+/// A window this far behind the clock is missed, not run (A.4). The wakeup
+/// policy uses the same grace (design §10).
+pub(crate) const GRACE_SECONDS: i64 = 60;
 pub(crate) const REPORT_GUIDANCE: &str = "Inspect schedule.history for this job.";
 /// A run detail set when a first-reuse binding conflicts twice (A.5.1).
 const BINDING_CONFLICT: &str = "binding_conflict";
@@ -580,7 +581,7 @@ async fn lookup_input(
 
 /// A `sessions` call. The outer error is a transport failure, whose outcome
 /// is unknown; the inner error is the service's own code.
-async fn sessions(
+pub(crate) async fn sessions(
     service: &dyn HostDispatch,
     method: &str,
     args: Value,
@@ -603,7 +604,7 @@ async fn sessions(
     }
 }
 
-fn escaped(text: &str) -> String {
+pub(crate) fn escaped(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
