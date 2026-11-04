@@ -22,7 +22,7 @@ const HINT: &str = "type filter · enter select · esc clear/close";
 /// a name containing it, a description word starting with it, then three
 /// or more of the query's letters in order through the name (`stg` for
 /// `settings`).
-/// Registry task order breaks ties; a match inside a
+/// Registry order breaks ties; a match inside a
 /// description word is noise and is left out.
 pub fn filter_commands(query: &str, context: Context) -> Vec<&'static Command> {
     let normalized = query.trim().to_lowercase();
@@ -134,9 +134,9 @@ fn filter_skills<'a>(skills: &'a [Skill], query: &str) -> Vec<&'a Skill> {
     prefix
 }
 
-/// Palette rows for `query`: commands and skills share the list, told apart
-/// by their category; skills lead when a skill name matches and no command
-/// name does. A command reads `/name` and its description.
+/// Palette rows for `query`: commands and skills share the list; skills lead
+/// when a skill name matches and no command name does. A command reads
+/// `/name` and its description.
 pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
     let commands = filter_commands(query, context);
     let matched_skills = filter_skills(skills, query);
@@ -151,7 +151,6 @@ pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
             let detail = description.to_owned();
             Row {
                 kind: Kind::Command(command),
-                category: t(command.category).to_owned(),
                 label,
                 detail,
                 key: command.key.map(str::to_owned),
@@ -163,7 +162,6 @@ pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
         .iter()
         .map(|skill| Row {
             kind: Kind::Skill(skill.name.clone()),
-            category: t("skill").to_owned(),
             label: format!("${}", skill.name),
             detail: skill.detail(),
             key: None,
@@ -427,41 +425,41 @@ mod tests {
     }
 
     #[test]
-    fn both_modes_list_only_visible_slash_commands_in_task_order() {
+    fn both_modes_list_only_visible_slash_commands_in_curated_order() {
         let expected = [
             "new",
             "resume",
+            "models",
+            "compact",
+            "usage",
+            "effort",
+            "fast",
+            "agent",
+            "permissions",
+            "settings",
+            "branch",
+            "fork",
+            "lines",
             "timeline",
             "goal",
             "tasks",
-            "lines",
-            "branch",
-            "fork",
-            "compact",
-            "usage",
             "rename",
             "web",
-            "models",
-            "agent",
-            "effort",
-            "fast",
-            "permissions",
             "connect",
             "login",
             "skills",
+            "reload-skills",
             "mcp",
             "plugins",
+            "runtime",
             "hooks",
             "scheduled",
             "workflow",
             "workflow:save",
-            "reload-skills",
-            "runtime",
-            "theme",
-            "language",
             "tools",
             "tui",
-            "settings",
+            "theme",
+            "language",
             "keys",
             "exit",
         ];
@@ -482,12 +480,6 @@ mod tests {
             let commands = filter_commands("/", context);
             let listed = names("/", context);
             assert_eq!(listed, expected);
-            let categories: Vec<_> = commands.iter().map(|c| c.category).collect();
-            assert_eq!(&categories[..12], ["session"; 12]);
-            assert_eq!(&categories[12..19], ["model"; 7]);
-            assert_eq!(&categories[19..28], ["extensions"; 9]);
-            assert_eq!(&categories[28..32], ["view"; 4]);
-            assert_eq!(&categories[32..], ["app"; 3]);
             assert!(commands.iter().all(|command| command.slash));
             for hidden in [
                 "interrupt",
@@ -509,8 +501,8 @@ mod tests {
         assert_eq!(
             names("/se", SCROLLBACK),
             [
-                "settings", "resume", "new", "lines", "fork", "rename", "web", "models", "agent",
-                "effort", "fast", "mcp"
+                "settings", "resume", "new", "models", "effort", "fast", "agent", "fork", "lines",
+                "rename", "web", "mcp"
             ]
         );
         assert_eq!(names("/stg", SCROLLBACK), ["settings"]);
@@ -541,18 +533,14 @@ mod tests {
     }
 
     #[test]
-    fn rows_read_as_amps_category_label_and_key() {
+    fn rows_read_as_label_detail_and_key() {
         let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let rows = rows_for("/", FULLSCREEN, &[]);
         let mut state = PaletteState::default();
         state.set_query("");
         let panel = render_overlay(&state, &rows, 72, rows.len() + 5, &theme.palette).rows;
         let plain: Vec<String> = panel.iter().map(|r| strip(r)).collect();
-        assert!(
-            plain[4].starts_with("│      session  /new "),
-            "{:?}",
-            plain[4]
-        );
+        assert!(plain[4].starts_with("│   /new "), "{:?}", plain[4]);
         assert!(panel[4].contains("\x1b[30;43m"), "{:?}", panel[4]);
         assert!(plain.iter().all(|r| display_width(r) == 72), "{plain:#?}");
         state.selected = rows.len() - 1;
@@ -588,11 +576,7 @@ mod tests {
         assert_eq!(panel.len(), PAGE_SIZE + CHROME_ROWS);
         let plain: Vec<String> = panel.iter().map(|r| strip(r)).collect();
         assert!(plain[1].contains("Commands") && plain[1].contains("esc close"));
-        assert!(
-            plain[2].starts_with("│      session  /new"),
-            "{:?}",
-            plain[2]
-        );
+        assert!(plain[2].starts_with("│   /new"), "{:?}", plain[2]);
         assert!(
             plain[8].contains(&format!("1 / {}", rows.len())),
             "{:?}",
@@ -619,11 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn skills_share_the_list_under_their_own_category() {
+    fn skills_share_the_list_after_commands() {
         let skills = sample_skills();
         let rows = rows_for("timeline", SCROLLBACK, &skills);
-        let categories: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
-        assert_eq!(categories, ["session", "skill", "skill"]);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(rows[0].kind, Kind::Command(_)));
+        assert!(rows[1..].iter().all(|r| matches!(r.kind, Kind::Skill(_))));
         assert_eq!(panel_title(&rows), "Suggestions");
         let only = rows_for("claude", SCROLLBACK, &skills);
         assert!(only.iter().all(|r| matches!(r.kind, Kind::Skill(_))));
