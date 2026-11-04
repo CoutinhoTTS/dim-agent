@@ -284,6 +284,8 @@ async fn a_reuse_job_binds_its_first_session_and_later_runs_reuse_it() {
     let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
     assert_eq!(listed["jobs"][0]["session_id"], json!(bound), "{listed}");
 
+    server.restart("Agents").await.unwrap();
+
     let second: Value = client
         .typed("schedule.run_now", json!({"job_id": job_id}))
         .await
