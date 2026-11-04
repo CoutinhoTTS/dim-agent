@@ -51,7 +51,8 @@ line, which the line's BranchLine folds from its own `tool/use` and
 `an_after_below_the_cut_is_raised_to_it`,
 `a_read_without_after_continues_from_the_last_page_in_both_directions`,
 `main_re_reads_a_line_from_zero_and_the_cursor_follows_that_read`,
-`a_read_cursor_survives_a_restore`.
+`a_read_cursor_survives_a_restore`,
+`an_after_past_the_targets_head_is_refused_and_the_cursor_stays`.
 
 <!-- generated:plugin BranchTool — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
@@ -104,7 +105,10 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
   decided from the line's state rather than the parent's signal: the parent's
   turn-end, published by TimelineTree, and the line's own write queue wake the
   writer, and consuming, deleting or interrupting a held block queues the same
-  decision. An idle line is not woken, and `main` gets none
+  decision. An idle line is not woken, and `main` gets none. A child whose
+  inherited prefix holds a live parent block, meaning a nested line, gets one
+  more block in its opening input, naming its own parent at the cut;
+  TimelineTree writes it with the identity block
   (design [§7.1.1](../../../design/timeline-branches.md#711-the-parent-block-branchparent)).
 - **Idle notice.** On a tool line, one Steer to its parent at a `turn/end` that
   neither steered the parent in that turn, called `end`, nor left a driving
@@ -135,7 +139,9 @@ rechecks the fold before writing.
 `an_idle_line_is_told_its_parent_moved_without_being_woken`,
 `a_running_line_gets_the_block_with_its_next_request_once`,
 `two_parent_turns_while_the_line_is_idle_write_one_block`,
-`a_new_block_after_the_last_is_consumed_names_the_new_head`,
+`a_move_while_a_block_is_held_is_written_after_the_block_is_consumed`,
+`a_move_while_a_block_is_held_is_written_after_the_block_is_deleted`,
+`a_move_while_a_block_is_held_is_written_after_the_block_is_interrupted`,
 `a_restore_writes_a_due_parent_block_once_and_none_without_movement`,
 `an_ending_line_and_main_get_no_parent_block`,
 `the_parent_block_replays_after_a_compaction`,
@@ -143,7 +149,8 @@ rechecks the fold before writing.
 `a_host_line_cut_at_the_start_is_not_told_what_happened_before_it`,
 `a_host_line_cut_at_the_start_is_told_when_main_acts_after_it`,
 `a_host_line_cut_before_it_was_opened_is_not_told_about_the_gap`,
-`main_carries_no_parent_entry_and_a_line_does`.
+`a_nested_line_is_told_its_own_parent_at_open`,
+`a_childs_first_system_is_its_parents_at_the_cut`.
 
 <!-- generated:plugin BranchLine — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
