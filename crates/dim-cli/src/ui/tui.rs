@@ -7178,17 +7178,10 @@ mod tests {
             );
             app.fullscreen = fullscreen;
             let frame = app.frame((160, 30));
-            let bytes = if fullscreen {
-                FullScreen::new((160, 30), true).render(&frame, (160, 30), &app.palette, &app)
-            } else {
-                Screen::new((160, 30), true).render(&frame, (160, 30))
-            };
-            let mut emu = crate::ui::render::testterm::Emu::new(160, 30);
-            emu.feed(&bytes);
             let cwd = crate::ui::tilde(&std::env::current_dir().unwrap().display().to_string());
-            let row = emu
-                .rows_text()
-                .into_iter()
+            let row = frame
+                .live
+                .iter()
                 .find(|row| row.contains(&cwd))
                 .expect("the composer shows the working directory without Git");
             assert!(
