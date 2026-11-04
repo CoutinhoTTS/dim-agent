@@ -5,7 +5,7 @@
 //! dispatch of every `exec/ended` that is not `cancelled`. Each running task
 //! holds its Session (`SessionLifecycle::take_hold`) until its `exec/ended` is
 //! appended, so an idle unload never ends it (idle unload §5, R2).
-use super::exec::{ExecProcess, Output, recovered_result};
+use super::exec::{ExecProcess, OUTPUT_FILE_BYTE_LIMIT, Output, recovered_result, sanitize};
 use crate::{
     context_block,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
@@ -18,9 +18,13 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     collections::HashMap,
+    io::SeekFrom,
     sync::{Arc, Mutex},
 };
-use tokio::sync::watch;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    sync::watch,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub struct StartRequest {
@@ -51,19 +55,62 @@ pub enum TaskError {
     Closed,
 }
 
+/// Why one paged read of a task's registered output file answered nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputPageError {
+    /// No matching task on this branch.
+    Unknown,
+    /// The registered output file is gone or unreadable: it was cleaned, or
+    /// the task's Session was deleted.
+    Unavailable,
+    /// This instance was unloaded.
+    Closed,
+}
+
+/// One page of a task's registered output file, as
+/// `session.exec.output.page` answers it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputPage {
+    /// The page's text, sanitized like the tail preview.
+    pub text: String,
+    /// The raw bytes consumed from the file for this page; `text` can be
+    /// shorter because sanitization drops control characters.
+    pub bytes: u64,
+    /// The byte offset after this page; absent when the file ended at this
+    /// page. A growing file continues from the same cursor when it has more.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    /// Whether the output file reached `OUTPUT_FILE_BYTE_LIMIT`.
+    pub truncated: bool,
+}
+
+/// How far a page may exceed its budget to hold a whole character: a UTF-8
+/// character is at most four bytes, so at most three lie past the limit.
+const PAGE_CHAR_TRAILING_BYTES: usize = 3;
+
 struct Task {
     description: String,
     cancel: CancellationToken,
     output: Option<Arc<Output>>,
+    /// The task's registered output file (`exec/started.output_path`): what
+    /// the paged read answers from, in every state of the task.
+    output_path: String,
     /// The dispatched `exec/ended`, once its wake decision is done.
     ended: watch::Sender<Option<ExecEndedData>>,
 }
 impl Task {
-    fn new(description: String, cancel: CancellationToken, output: Option<Arc<Output>>) -> Self {
+    fn new(
+        description: String,
+        cancel: CancellationToken,
+        output: Option<Arc<Output>>,
+        output_path: String,
+    ) -> Self {
         Self {
             description,
             cancel,
             output,
+            output_path,
             ended: watch::Sender::new(None),
         }
     }
@@ -135,6 +182,7 @@ impl BackgroundExec {
                         description.clone(),
                         cancel.clone(),
                         Some(process.output.clone()),
+                        data.output_path.clone(),
                     ),
                 );
                 registered = Some(data.task_id.clone());
@@ -209,6 +257,109 @@ impl BackgroundExec {
                 .ok_or(TaskError::Unknown)?
         };
         Ok(output.preview().await)
+    }
+
+    /// Reads one page of the task's registered output file, by byte offset.
+    /// The file is the read's only source, so a running task, an ended task
+    /// and a task rebuilt after an unload answer alike; the live capture and
+    /// the result preview are not consulted. The file is append-only, so a
+    /// cursor the method handed out always names a byte that never changes.
+    pub async fn output_page(
+        &self,
+        task_id: &str,
+        cursor: u64,
+        limit: usize,
+    ) -> Result<OutputPage, OutputPageError> {
+        let (output_path, ended, live) = {
+            let state = self.state.lock().unwrap();
+            if state.closed {
+                return Err(OutputPageError::Closed);
+            }
+            let task = state.tasks.get(task_id).ok_or(OutputPageError::Unknown)?;
+            (
+                task.output_path.clone(),
+                task.ended.borrow().clone(),
+                task.output.clone(),
+            )
+        };
+        let mut file = tokio::fs::File::open(&output_path)
+            .await
+            .map_err(|_| OutputPageError::Unavailable)?;
+        file.seek(SeekFrom::Start(cursor))
+            .await
+            .map_err(|_| OutputPageError::Unavailable)?;
+        let mut buffer = vec![0u8; limit + PAGE_CHAR_TRAILING_BYTES];
+        let mut read = 0;
+        while read < buffer.len() {
+            match file.read(&mut buffer[read..]).await {
+                Ok(0) => break,
+                Ok(bytes) => read += bytes,
+                Err(_) => return Err(OutputPageError::Unavailable),
+            }
+        }
+        // The file holds the pipe decoder's output, so its bytes are valid
+        // UTF-8; every completed write ends on a character boundary, though a
+        // read can land inside one write and see the file end inside a
+        // character. The page ends at the last character boundary at or
+        // before `limit`, so a character the limit splits is served whole: at
+        // the start of the next page when the cut falls after other
+        // characters, and whole in this page when the budget cuts the very
+        // first character. A page therefore consumes at least one character
+        // while the file holds one, and can carry up to `limit` plus three
+        // bytes. A cursor the method handed out always names a boundary;
+        // neither a client's own cursor inside a character, which no read can
+        // complete, nor a read that lands inside one write has a whole
+        // character to serve, and both stay an empty page with no
+        // `nextCursor`, which ends a following walk.
+        let mut end = read.min(limit);
+        while end > 0 && std::str::from_utf8(&buffer[..end]).is_err() {
+            end -= 1;
+        }
+        if end == 0 && read > 0 {
+            let whole = match buffer[0] {
+                0xc2..=0xdf => 2,
+                0xe0..=0xef => 3,
+                0xf0..=0xf4 => 4,
+                _ => 0,
+            };
+            // Only a character the read completed is served whole; one the
+            // read cut short stays for the next call, which sees the write
+            // finish.
+            if whole <= read {
+                end = whole;
+            }
+        }
+        let text =
+            sanitize(std::str::from_utf8(&buffer[..end]).expect("the page ends on a boundary"));
+        // A read that filled the page's budget may have more behind it; a
+        // shorter one means the file ended at that moment, and a growing file
+        // continues when the client retries the same cursor. The read length
+        // decides it: the file's size races with the appender. An empty page
+        // (the file ended, or a client cursor inside a character) carries no
+        // `nextCursor`.
+        let next_cursor = (read >= limit && end > 0).then_some(cursor + end as u64);
+        let truncated = match ended
+            .as_ref()
+            .and_then(|data| output_truncated(&data.result))
+        {
+            Some(truncated) => truncated,
+            None => match &live {
+                Some(output) => output.truncated().await,
+                // Only the recovery terminal (`recovered_result`) carries no
+                // flag; its truncation is the file's size alone.
+                None => file
+                    .metadata()
+                    .await
+                    .map(|metadata| metadata.len() >= OUTPUT_FILE_BYTE_LIMIT)
+                    .unwrap_or(false),
+            },
+        };
+        Ok(OutputPage {
+            text,
+            bytes: end as u64,
+            next_cursor,
+            truncated,
+        })
     }
 
     /// Stops a task: cancels it while running, so it ends `cancelled` and
@@ -310,7 +461,12 @@ impl BackgroundExec {
                 EventKind::ExecStarted(data) => {
                     state.tasks.insert(
                         data.task_id.clone(),
-                        Task::new(data.description.clone(), CancellationToken::new(), None),
+                        Task::new(
+                            data.description.clone(),
+                            CancellationToken::new(),
+                            None,
+                            data.output_path.clone(),
+                        ),
                     );
                     open.push((data.task_id.clone(), data.output_path.clone()));
                 }
@@ -435,6 +591,15 @@ pub(crate) fn wake_input(event_id: &str, data: &ExecEndedData, name: String) -> 
 /// is a result the model should see.
 pub(crate) fn wakes(data: &ExecEndedData) -> bool {
     data.status != ExecStatus::Cancelled
+}
+
+/// The `outputTruncated` flag an `exec/ended` result carries.
+fn output_truncated(result: &ToolResult) -> Option<bool> {
+    result
+        .structured_content
+        .as_ref()
+        .and_then(|fields| fields.get("outputTruncated"))
+        .and_then(serde_json::Value::as_bool)
 }
 
 /// `<dim-notification>`: work the model started has finished, failed or

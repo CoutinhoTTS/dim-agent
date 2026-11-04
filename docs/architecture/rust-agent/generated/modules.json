@@ -14086,6 +14086,9 @@
         "mod background",
         "path BackgroundExecPlugin::new",
         "path background::BackgroundExec",
+        "path background::OutputPageError::Closed",
+        "path background::OutputPageError::Unavailable",
+        "path background::OutputPageError::Unknown",
         "path background::TaskError::Closed",
         "path background::TaskError::Unknown",
         "use background::BackgroundExecPlugin"
@@ -14234,11 +14237,15 @@
       "to": "dim_agent_capabilities::workspace_tools::exec",
       "references": [
         "path ExecProcess",
+        "path OUTPUT_FILE_BYTE_LIMIT",
         "path Output",
         "path recovered_result",
+        "path sanitize",
         "use super::exec::ExecProcess",
+        "use super::exec::OUTPUT_FILE_BYTE_LIMIT",
         "use super::exec::Output",
-        "use super::exec::recovered_result"
+        "use super::exec::recovered_result",
+        "use super::exec::sanitize"
       ]
     },
     {
