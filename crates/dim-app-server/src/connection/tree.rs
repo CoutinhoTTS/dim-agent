@@ -210,9 +210,22 @@ impl Connection {
             } else {
                 WindowRead::Open(&session)
             };
-            return Ok(Reply::History(
-                window_at(
-                    &read,
+            let reply = window_at(
+                &read,
+                branch,
+                before,
+                limit,
+                through,
+                turn,
+                self.protocol_version(),
+            )
+            .await;
+            // The owner is chosen before the read: a line that ends in between
+            // answers `BranchEnded`, and the tree serves the same request at its
+            // fixed head.
+            let reply = match reply {
+                Err(error) if session.ended_head(branch).is_some() => window_at(
+                    &WindowRead::Ended(&tree),
                     branch,
                     before,
                     limit,
@@ -220,8 +233,11 @@ impl Connection {
                     turn,
                     self.protocol_version(),
                 )
-                .await?,
-            ));
+                .await
+                .map_err(|_| error),
+                other => other,
+            };
+            return reply.map(Reply::History);
         }
         let events = rpc
             .index

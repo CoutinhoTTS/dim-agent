@@ -257,7 +257,6 @@ The method's error contract, including the new `history_too_large`:
 | `session_build_failed` | -32000 | acquiring the Session failed while restoring it | report it; a retry may succeed after the cause is fixed |
 | `service_reloading` | -32000 | the Agents index, or a capability the restore needs, is reloading | retry |
 | `session_invalid_input` | -32000 | the branch does not exist | correct the branch |
-| `branch_ended` | -32000 | the line ended while the read was running, after the read chose its owner | retry; the retry finds the line ended and reads it through the tree at its fixed head |
 | `history_too_large` | -32000 | the newest batch of a window page alone encodes to more than the transport frame minus 64 KiB, so the reply cannot be framed | read that turn with forward paging (§1.1); no retry of the same window helps |
 | none | -32603 | a storage failure or a reply encoding failure; opaque, with a server message | retry, and report if it repeats |
 
@@ -339,10 +338,9 @@ the tree's read at the fixed head it owns: `TreeCommands::query` for both
 directions and `TreeCommands::batch_end` for the page's ends
 ([ADR 021](../../adr/021-reads-follow-the-state-owner.md) D2,
 [timeline read ownership §2](../timeline-read-ownership.md#2-owners-and-their-reads)).
-A line that ends while its window is read answers `BranchEnded`; the read is
-not handed over mid-flight. A retry of the same request finds the line ended
-and reads it through the tree at the fixed head. This is a narrow race: the
-window runs for one request, and the line has to end inside it.
+A line that ends while its window is read is served by the tree: the owner is
+chosen when the read starts, and an answer of `BranchEnded` re-runs the same
+request through the tree at the fixed head.
 The App Server has no store read on this path. The window requires the native store: a host without one
 (`ServerConfig.database_path: None`) advertises no
 `session.history.latestTurn` and answers a window request

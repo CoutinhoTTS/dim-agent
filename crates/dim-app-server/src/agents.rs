@@ -749,8 +749,8 @@ impl AgentIndex {
     /// The Session must already be loaded. An ended line is served by the tree
     /// at its fixed head; otherwise the Session query serves the page. The
     /// `ended_head` check is a snapshot: a line that ends while the query reads
-    /// it answers `BranchEnded`, and the client retries, which takes the tree
-    /// path.
+    /// it answers `BranchEnded`, and the page is re-read through the tree at
+    /// the fixed head.
     pub(crate) async fn history_page(
         &self,
         id: &str,
@@ -768,7 +768,12 @@ impl AgentIndex {
         if session.ended_head(branch).is_some() {
             return ended_page(&session, branch, after, limit, through).await;
         }
-        session_history_page(&session, branch, after, limit, through).await
+        match session_history_page(&session, branch, after, limit, through).await {
+            Err(AgentError::BranchEnded(_)) => {
+                ended_page(&session, branch, after, limit, through).await
+            }
+            page => page,
+        }
     }
     /// Whether this index has the native Session store the history window
     /// reads (session-history-window §5.3).
