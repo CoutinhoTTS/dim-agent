@@ -592,6 +592,7 @@ impl Projection {
             .map(|(source, intent)| {
                 let inactive = intent.current.iter().any(|(id, configuration)| {
                     enabled(configuration)
+                        && !unresolved_url(configuration)
                         && McpServerPlugin::new(id, configuration.clone(), Key::of()).is_err()
                 }) || self.application_failed.keys().any(
                     |(_, failed_source, id)| {
@@ -781,6 +782,15 @@ fn enabled(config: &McpServerSettings) -> bool {
             enabled.unwrap_or(true)
         }
     }
+}
+/// A remote URL that still names an unset reference cannot be judged before
+/// a connection expands it: the source stays applied and only the entry's
+/// connection reports the failure (D19).
+fn unresolved_url(settings: &McpServerSettings) -> bool {
+    matches!(
+        settings,
+        McpServerSettings::Remote { url, .. } if !config::unresolved(url).is_empty()
+    )
 }
 fn connection(port: &Publication, generation: &Generation) -> Arc<McpConnection> {
     Arc::new(McpConnection {

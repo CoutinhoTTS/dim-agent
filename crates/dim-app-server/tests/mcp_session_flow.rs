@@ -3113,6 +3113,44 @@ async fn an_unset_reference_keeps_its_text_and_the_catalog_names_it() {
             .contains_key("unset")
     );
 
+    // #952 review: a reference that leaves no parseable URL must not turn the
+    // whole source into a configuration error; only the entry's connection
+    // fails, and the probe names the unset variable.
+    let user_revision = catalog.user_revision.clone();
+    let application = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let application = env.directory.application(McpSource::User);
+            if application.error.is_some()
+                || application.applied_revision.as_deref() == Some(user_revision.as_str())
+            {
+                return application;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the user source settles");
+    assert_eq!(
+        application.applied_revision.as_deref(),
+        Some(user_revision.as_str()),
+        "{application:?}"
+    );
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source": "user", "id": "unset"}),
+    )
+    .await
+    .expect("an unset reference is a probe outcome, not a refused request");
+    assert_eq!(probe["status"], "failed", "{probe}");
+    assert!(
+        probe["message"]
+            .as_str()
+            .unwrap()
+            .contains("MCP_TEST_952_UNSET_URL"),
+        "{probe}"
+    );
+
     let session = env.session(false, PermissionPreset::FullAccess).await;
     let mcp = session.session_service::<McpSession>().unwrap();
     let mut changed = mcp.subscribe();
@@ -3128,6 +3166,68 @@ async fn an_unset_reference_keeps_its_text_and_the_catalog_names_it() {
     })
     .await
     .expect("the unset reference fails its connection");
+    env.close().await;
+}
+
+/// #952 review: an unset reference in a remote URL leaves its source applied
+/// and fails only its connection, and a probe names the unset variable instead
+/// of answering a configuration error.
+#[tokio::test]
+async fn an_unset_url_reference_keeps_its_source_applied_and_the_probe_names_it() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "unresolved",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": "https://${MCP_TEST_952_UNSET_HOST}/mcp"
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let user_revision = env
+        .directory
+        .catalog(Some(1), &cancel)
+        .await
+        .unwrap()
+        .user_revision;
+    let application = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let application = env.directory.application(McpSource::User);
+            if application.error.is_some()
+                || application.applied_revision.as_deref() == Some(user_revision.as_str())
+            {
+                return application;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the user source settles");
+    assert_eq!(
+        application.applied_revision.as_deref(),
+        Some(user_revision.as_str()),
+        "{application:?}"
+    );
+
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source": "user", "id": "unresolved"}),
+    )
+    .await
+    .expect("an unset reference is a probe outcome, not a refused request");
+    assert_eq!(probe["status"], "failed", "{probe}");
+    assert!(
+        probe["message"]
+            .as_str()
+            .unwrap()
+            .contains("MCP_TEST_952_UNSET_HOST"),
+        "{probe}"
+    );
     env.close().await;
 }
 
@@ -3185,55 +3285,6 @@ async fn a_probe_runs_a_project_cwd_where_the_published_connection_runs() {
     ready(&session).await;
     env.close().await;
     std::fs::remove_dir_all(tools).unwrap();
-}
-
-/// #953: the management read shows an entry's `timeout` when it is set,
-/// `mcp.update` sets and clears it, and an invalid value is the entry's own
-/// field error.
-#[tokio::test]
-async fn management_reads_sets_and_clears_the_tool_call_timeout() {
-    let env = Env::new().await;
-    let read = || {
-        management(
-            &env.agent,
-            "mcp.configuration",
-            json!({"source":"user","id":"docs"}),
-        )
-    };
-    let before = read().await.unwrap();
-    assert!(before["configuration"].get("timeout").is_none(), "{before}");
-    management(
-        &env.agent,
-        "mcp.update",
-        json!({"source":"user","id":"docs","expectedVersion":before["revision"],"patch":{"timeout":1000}}),
-    )
-    .await
-    .unwrap();
-    let after = read().await.unwrap();
-    assert_eq!(after["configuration"]["timeout"], 1000, "{after}");
-    management(
-        &env.agent,
-        "mcp.update",
-        json!({"source":"user","id":"docs","expectedVersion":after["revision"],"patch":{"timeout":null}}),
-    )
-    .await
-    .unwrap();
-    let cleared = read().await.unwrap();
-    assert!(
-        cleared["configuration"].get("timeout").is_none(),
-        "{cleared}"
-    );
-    let refused = management(
-        &env.agent,
-        "mcp.update",
-        json!({"source":"user","id":"docs","expectedVersion":cleared["revision"],"patch":{"timeout":86400001}}),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(refused.data.unwrap().app_error, "mcp_invalid_config");
-    assert!(refused.message.contains("timeout"), "{}", refused.message);
-    assert!(!refused.message.contains("86400001"), "{}", refused.message);
-    env.close().await;
 }
 
 /// #952: a probe patch replaces the stored overlay's members exactly once.
@@ -3396,6 +3447,55 @@ async fn a_probe_patch_replaces_the_stored_overlay_once() {
 
     stop.cancel();
     patched_server.await.unwrap().unwrap();
+    env.close().await;
+}
+
+/// #953: the management read shows an entry's `timeout` when it is set,
+/// `mcp.update` sets and clears it, and an invalid value is the entry's own
+/// field error.
+#[tokio::test]
+async fn management_reads_sets_and_clears_the_tool_call_timeout() {
+    let env = Env::new().await;
+    let read = || {
+        management(
+            &env.agent,
+            "mcp.configuration",
+            json!({"source":"user","id":"docs"}),
+        )
+    };
+    let before = read().await.unwrap();
+    assert!(before["configuration"].get("timeout").is_none(), "{before}");
+    management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":before["revision"],"patch":{"timeout":1000}}),
+    )
+    .await
+    .unwrap();
+    let after = read().await.unwrap();
+    assert_eq!(after["configuration"]["timeout"], 1000, "{after}");
+    management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":after["revision"],"patch":{"timeout":null}}),
+    )
+    .await
+    .unwrap();
+    let cleared = read().await.unwrap();
+    assert!(
+        cleared["configuration"].get("timeout").is_none(),
+        "{cleared}"
+    );
+    let refused = management(
+        &env.agent,
+        "mcp.update",
+        json!({"source":"user","id":"docs","expectedVersion":cleared["revision"],"patch":{"timeout":86400001}}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.data.unwrap().app_error, "mcp_invalid_config");
+    assert!(refused.message.contains("timeout"), "{}", refused.message);
+    assert!(!refused.message.contains("86400001"), "{}", refused.message);
     env.close().await;
 }
 

@@ -369,10 +369,13 @@ environment when it builds the effective configuration a connection runs. `NAME`
 as set, and there is no escape or nesting, so a default ends at the first `}`. Header names,
 environment names, `extra` and `oauth` are not expanded. A reference the daemon environment does
 not set keeps its text: the entry decodes, loads and is listed with the name, and its connection
-fails with its usual transport error rather than a configuration error. The stored document always
-keeps the text the user wrote; only the expanded copy a connection runs is transient, so a read,
-save or move never writes a value back. The legacy import copies such an entry as written, so an
-imported reference starts working when the entry connects.
+fails with its usual transport error rather than a configuration error. A remote `url` that still
+names a reference is left to that connection: the publisher's application check does not judge it,
+so the source stays applied with its revision, and a probe of the entry contacts nothing and
+answers `failed`/`unavailable` with the unset names in the message (§4.5). The stored document
+always keeps the text the user wrote; only the expanded copy a connection runs is transient, so a
+read, save or move never writes a value back. The legacy import copies such an entry as written, so
+an imported reference starts working when the entry connects.
 
 The expansion is one pure function in the MCP configuration module. It runs in the publisher after
 the `mcp-secrets` overlay merge and before `config::effective` joins a project or plugin `cwd` to
@@ -381,7 +384,9 @@ builds a connection outside publication calls the same function first: the `mcp.
 temporary-binding sites, and `mcp.auth.start`/`mcp.auth.logout` with the catalog's credential key.
 `ConnectionConfig` carries the expanded value only, so nothing expands twice. A `cwd` is expanded
 before it is joined. A plugin entry's `cwd` is not expanded: it is confined to the plugin directory
-at registration, a reference there has no use, and the existing refusal stays.
+at registration, a reference there has no use, and the existing refusal stays. A temporary binding
+is the client's own document, so both of its sites expand with `Origin::User`, where no field is
+guarded and no credential names are read.
 
 A document shared with other users or the repository is not trusted to read the daemon's own
 credentials. A user entry expands every reference. A plugin entry is guarded in every guarded
@@ -418,6 +423,12 @@ lists against a daemon that omits them, and an older client ignores them.
 contains: without a reference it keeps its behaviour; with a reference and a `://` it keeps the
 scheme and authority as written, in the reference's own case, and drops userinfo, path, query and
 fragment; and with a reference and no `://` it keeps the text before any `?` or `#`.
+
+While a remote entry's `url` still names an unset reference, `mcp.auth.logout` cannot build that
+entry's credential key and so cannot clear its stored sign-in; the key exists again once the
+variable is set. A withheld URL keeps the literal scheme check the secret record always had: text
+before the first reference that names a scheme other than `http` or `https` is refused when the
+record is written.
 
 ### D20. A tool call waits as long as its entry allows
 
@@ -616,7 +627,8 @@ skeleton only; the overlay-held fields stay in `mcp-secrets` and are never copie
 
 A read serves a disabled entry: enablement is a field, not a condition for reading. An unset
 environment reference is not a configuration error (D19): the entry loads and its connection
-reports the transport's usual failure.
+reports the transport's usual failure. A probe of a remote entry whose URL still names one answers
+`failed` with the names (§4.5).
 
 ### 4.5 Probe (`mcp.test`)
 
@@ -624,7 +636,8 @@ reports the transport's usual failure.
 every tool page, closes it, and reports what happened. It attaches no Session, publishes no tool,
 registers no connection and writes no configuration (D9). It expands environment references
 exactly as a connection does, with a complete configuration's and a patch's members treated as
-user text (D19); its reply carries no variable lists.
+user text (D19); its reply carries no variable lists, though a failure message may name the
+variables a URL still references.
 
 The request is unchanged, and a complete `configuration` is a user-supplied draft without
 `patch`. Otherwise the probe uses that source's declared entry with an optional unsaved `patch`,
@@ -656,8 +669,10 @@ Only a request refused before anything is contacted stays an RPC error: `invalid
 empty `id`, a plugin `patch`, a complete `configuration` for a non-user source or a field of the
 other transport (§4.4); `mcp_unknown_server` for an unknown `id`; `mcp_unavailable` for a project
 or plugin entry that is not enabled; and, unchanged, the error a configuration answers when the
-MCP owner cannot construct it (D8). An interrupted probe answers `operation_interrupted`, and a
-probe while Mcp is not serving answers `service_reloading`
+MCP owner cannot construct it (D8). A remote URL that still names an unset reference is not such a
+refusal: the probe contacts nothing and answers `failed`/`unavailable` with the names in its
+message (D19). An interrupted probe answers `operation_interrupted`, and a probe while Mcp is not
+serving answers `service_reloading`
 ([management methods](management-methods.md#dispatch-and-lifecycle)).
 
 ### 4.6 Move (`mcp.move`)
@@ -942,9 +957,11 @@ name or adds a version rather than silently reusing this one.
   formats. A new user-scope `mcp-secrets` source holds the migration overlay; it has no prior
   format and a missing file reads as empty. No existing persisted data moves or changes meaning,
   so no format version changes.
-- No new plugin, part, service, port, Timeline event or notification. Assembly, routing, the
-  MCP Session part and its connections are untouched; the MCP row registers the new Settings
-  source itself.
+- No new plugin, part, Timeline event or notification. D19 adds one typed capability port,
+  `CredentialVariables` with its `CredentialVariablesHost` wrapper, registered in the capabilities
+  service catalog and provided by the assembly root in `serve`. Assembly, routing, the MCP Session
+  part and its connections are otherwise untouched; the MCP row registers the new Settings source
+  itself.
 
 ## 7. Events and state
 
@@ -962,11 +979,15 @@ business configuration, not an event.
 | `settings` ([Settings service](settings-service.md#42-service-settings-owner-path)) | Reading a source with its revision, compare-and-set writes, project authorization; the `mcp`, `mcp-projects` and `mcp-secrets` sources |
 | PluginManager ([§3.7](../plugins/PluginManager.md#37-content-registration)) | A plugin entry is registered content; Mcp reads it as declared and writes nothing |
 | `McpAuth` ([MCP OAuth](mcp-oauth.md)) | The `mcp.auth.*` methods of the same namespace; the credential record is untouched by a move |
+| `CredentialVariablesHost` (capabilities host, D19) | The names of the environment variables the daemon reads credentials from, beside `ModelSelectionHost`; `McpPublication` and `McpPlugin` declare it, and the assembly root in `serve` provides it |
 
 ## 9. Cross-module requirements
 
-None raised to the runtime, rutis, Settings or Rpc: the revision and the source snapshot already
-exist, and the change stays inside the MCP owner and its documents and reply shapes.
+One requirement is raised to the capabilities host: a `CredentialVariables` trait and its
+`CredentialVariablesHost` wrapper beside `ModelSelectionHost`, registered in the service catalog
+and provided by the assembly root in `serve` (D19). None is raised to the runtime, rutis, Settings
+or Rpc: the revision and the source snapshot already exist, and the change stays inside the MCP
+owner and its documents and reply shapes.
 
 Client-side follow-ups, which are not requirements on another owner: the Web settings page (this
 repository) adds the move control and admits exactly `mcp.move` for it, as
@@ -994,7 +1015,8 @@ walked field, the guard rules by origin, the protected list including `DIMENSION
 the reference-aware `public_url`, and the rule that a stored document keeps its text. The session
 flow covers a daemon variable at connect, the probe with a complete configuration and with a
 patch, a temporary binding, the guard of a configured credential variable, the overlay's unguarded
-members, and an unset reference the catalog names while the entry still loads. The transport flow
+members, and an unset reference the catalog names while the entry still loads, including a URL
+reference that keeps its source applied while the probe reports the name. The transport flow
 asserts the catalog and configuration fields on the wire, including their absence on invalid
 entries and probe results. `mcp_flow.rs` keeps a reference through reads, writes and moves and
 proves a write never stores an expanded value; `mcp_oauth_flow.rs` discovers from the expanded URL;
@@ -1034,12 +1056,12 @@ for the same reason: reaching it costs sixty seconds of real time for one assert
 | §4 rule 5 (batch) | Not applicable: no events are written |
 | §4 rule 6 (model context) | Not applicable: nothing enters the model context. MCP tool declarations are unchanged, and a probe's discovered tools are a reply to the client that asked, not tools published to a Session or a model |
 | §4 rule 7 (public events and services only) | The MCP row uses Settings' public service, reads the entries PluginManager registered, and reaches the credential authority through its own part; it reads no other part's internal state. The `mcp-secrets` overlay is MCP's own user-scope document |
-| §4 rule 8 (infrastructure unchanged) | No change to the Timeline, Dispatcher, event envelope, assembly, Session or branch facades; no requirement is raised |
+| §4 rule 8 (infrastructure unchanged) | No change to the Timeline, Dispatcher, event envelope, Session or branch facades. One process host value is added: the capabilities catalog registers `CredentialVariablesHost`, and the assembly root in `serve` provides it beside `ModelSelectionHost` (D19, §9) |
 | §4 rule 9 (only facts later decisions use) | Configuration stays out of the Timeline; a Session broadcast notice is not added |
 | §1 (Capability and the App Server boundary) | No new part and no new Capability. The MCP process row and its Session part keep their state; the change is in the process row's management methods |
 | ADR 002 D1 (scope follows the owner of state) | Entry configuration is shared across Sessions, so it stays in the process owner |
-| ADR 002 D2 (no wiring modules) | No new plugin, port or adapter; `mcp.move` is one method on the existing MCP row |
-| ADR 002 D3 (dependencies point to the core) | No dependency changes; Settings is already declared |
+| ADR 002 D2 (no wiring modules) | One port is added to the capabilities host (`CredentialVariables`, D19), a typed host beside `ModelSelectionHost`, not a wiring module; `mcp.move` is one method on the existing MCP row |
+| ADR 002 D3 (dependencies point to the core) | `McpPublication` and `McpPlugin` declare the capabilities host `CredentialVariablesHost`; it points to the core, and Settings is already declared |
 | ADR 002 D4 (structural versus business configuration) | Business configuration stays in its source, read on use; the `mcp-secrets` overlay is user-scope business configuration and reloads nothing |
 | ADR 002 D5 (language-neutral contracts) | The request, reply and error shapes are JSON data; the revision is an opaque string |
 | ADR 003 D3 (project entries start disabled) | A move into project clears the user's enablement record before the project entry exists and never writes `enabled` into `.mcp.json`; project content cannot enable itself. A move into user preserves only the user's existing enablement choice |
@@ -1047,7 +1069,8 @@ for the same reason: reaching it costs sixty seconds of real time for one assert
 Scope migration adds no new rule answer: it writes MCP-owned Settings documents through the
 owner's typed writes, uses the public Settings and OAuth contracts, and starts a project
 destination disabled. It is explicitly not a cross-source transaction; §4.6 is the recovery
-contract.
+contract. Environment expansion (D19) adds the two answers above: the capabilities port and the
+dependency on it.
 
 ## 12. Alternatives considered
 

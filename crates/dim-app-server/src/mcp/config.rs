@@ -944,13 +944,22 @@ impl McpSecretEntry {
         {
             return Err(SettingsError::Invalid("invalid MCP secret values"));
         }
-        if let Some(url) = &self.url
-            && !has_reference(url)
-        {
-            let parsed = url::Url::parse(url)
-                .map_err(|_| SettingsError::Invalid("invalid MCP secret URL"))?;
-            if parsed.scheme() != "http" && parsed.scheme() != "https" {
-                return Err(SettingsError::Invalid("invalid MCP secret URL"));
+        if let Some(url) = &self.url {
+            if has_reference(url) {
+                // A reference may hold the scheme itself, so only a literal
+                // scheme written before it can be checked.
+                if let Some(scheme) = literal_scheme(url)
+                    && !scheme.eq_ignore_ascii_case("http")
+                    && !scheme.eq_ignore_ascii_case("https")
+                {
+                    return Err(SettingsError::Invalid("invalid MCP secret URL"));
+                }
+            } else {
+                let parsed = url::Url::parse(url)
+                    .map_err(|_| SettingsError::Invalid("invalid MCP secret URL"))?;
+                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    return Err(SettingsError::Invalid("invalid MCP secret URL"));
+                }
             }
         }
         if let Some(oauth) = &self.oauth {
@@ -1025,15 +1034,26 @@ pub(crate) fn public_endpoint(value: &str) -> std::result::Result<String, url::P
     Ok(url::Url::parse(value)?.origin().ascii_serialization())
 }
 
-fn has_reference(value: &str) -> bool {
+/// The names a value still references after expansion. A reference the
+/// environment does not set keeps its text, so an expanded value names the
+/// variables the daemon could not fill in (D19).
+pub(crate) fn unresolved(value: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
     let mut rest = value;
     while let Some(start) = rest.find("${") {
-        if reference(&rest[start + 2..]).is_some() {
-            return true;
-        }
-        rest = &rest[start + 1..];
+        let candidate = &rest[start + 2..];
+        let Some((name, _, used)) = reference(candidate) else {
+            rest = &rest[start + 1..];
+            continue;
+        };
+        names.insert(name.to_owned());
+        rest = &candidate[used..];
     }
-    false
+    names
+}
+
+fn has_reference(value: &str) -> bool {
+    !unresolved(value).is_empty()
 }
 
 fn reference_public_url(value: &str) -> String {
@@ -1749,6 +1769,20 @@ fn reference(input: &str) -> Option<(&str, Option<&str>, usize)> {
     }
 }
 
+/// The scheme written literally before the first reference of a value. A
+/// reference may hold the `://` itself, and then there is no literal scheme
+/// to check.
+fn literal_scheme(value: &str) -> Option<&str> {
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        if reference(&rest[start + 2..]).is_some() {
+            return rest[..start].split_once("://").map(|(scheme, _)| scheme);
+        }
+        rest = &rest[start + 1..];
+    }
+    None
+}
+
 /// The canonical workspace of an authorized project source, as the
 /// enablement key.
 pub(crate) fn workspace(settings: &SettingsService, scope: SettingsScope) -> Result<String> {
@@ -1900,6 +1934,26 @@ mod tests {
             ..Default::default()
         };
         assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn a_withheld_url_keeps_the_literal_scheme_check() {
+        let accepted = |url: &str| {
+            McpSecretEntry {
+                url: Some(url.to_owned()),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        };
+        assert!(accepted("https://${MCP_952_HOST}/mcp"));
+        assert!(accepted("HTTPS://${MCP_952_HOST}/mcp"));
+        assert!(accepted("${MCP_952_SCHEME}://${MCP_952_HOST}/mcp"));
+        assert!(accepted("http://localhost:${MCP_952_PORT}/mcp"));
+        assert!(accepted("https://host/${MCP_952_PATH}"));
+        assert!(!accepted("ftp://${MCP_952_HOST}/mcp"));
+        assert!(!accepted("ftp://host/mcp"));
+        assert!(!accepted("not a url"));
     }
 
     #[test]
