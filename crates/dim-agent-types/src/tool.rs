@@ -580,11 +580,13 @@ impl Default for ToolResult {
 const SHORTENED_COMMAND_CHARS: usize = 200;
 
 impl ToolEffect {
-    /// The effect as a reader sees it (session boundary A.6): a command keeps
-    /// its first [`SHORTENED_COMMAND_CHARS`] characters, counted before
-    /// escaping, and a longer one is cut there and marked with a trailing
-    /// `…`; a path stays verbatim, an exact identifier. The compaction
-    /// digest and both read pages call this, so the three cannot drift.
+    /// The effect as a reader sees it: a command keeps its first
+    /// [`SHORTENED_COMMAND_CHARS`] characters, counted before escaping, and a
+    /// longer one is cut there and marked with a trailing `…`; a path stays
+    /// verbatim, an exact identifier. The cut is ContextCompaction §5.10's
+    /// rule for the digest and the timeline branches design's rule for a read
+    /// page. The compaction digest and both read pages call this, so the three
+    /// cannot drift.
     pub fn shortened(&self) -> ToolEffect {
         match self {
             ToolEffect::CommandRun {
