@@ -2881,15 +2881,21 @@ impl BranchTool {
             Some(after) => after.max(cut),
             None => line.cursor(&target.id).unwrap_or(cut),
         };
+        let head = self
+            .tree
+            .head(&target.id)
+            .ok_or_else(|| HostError::failed(format!("unknown line {}", target.id)))?;
+        if after > head {
+            return Err(HostError::failed(format!(
+                "after {after} is past line {}'s head {head}; a read starts at or below {head}",
+                target.id
+            )));
+        }
         let events = self
             .tree
             .page(target.id.clone(), after, limit)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        let head = self
-            .tree
-            .head(&target.id)
-            .ok_or_else(|| HostError::failed(format!("unknown line {}", target.id)))?;
         let (items, next) = read_items(&events, after);
         let done = next >= head;
         let page = serde_json::json!({"items": items, "nextCursor": next, "done": done});

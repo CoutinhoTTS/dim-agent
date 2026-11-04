@@ -368,6 +368,7 @@ WorkspaceTools 不变。
 | 对 host 线 `message` 或 `read` | `Line C was not opened with this tool; it follows its own protocol.` | `branch_not_tool_line` |
 | 向已结束的线发消息，或与结束发生竞争 | `Line C has ended. Read it to see what it did.` | `branch_ended` |
 | 在 `main` 或 host 线上 `end` | `Only a line opened with create can end itself.` | `branch_cannot_end` |
+| `read` 的 `after` 超过目标的头部 | `after A is past line T's head H; a read starts at or below H` | 无：带错误结果，不带代码 |
 
 这些拒绝是工具自己的规则。`TreeCommands.end` 本身只检查目标（§10）。如果线已经提交了自己的 `branch/end`，再来的 `end` 取 `branch_ended` 一行，不会再写一条最终消息：第一次调用的消息就是这条线最后的话。
 
@@ -437,7 +438,7 @@ WorkspaceTools 不变。
 - **父线块的事实句。** "Line P has new activity: it was at H when this was written, and you have read it to A."、"Read what is new with the branch tool (action read, branch \"P\")" 中的动作与字段名，以及规则 "with no after, the read continues from A."。
 - **通知的事实句。** "Line C's turn ended (<status>) without a message to you, and C is waiting." 与 "Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages"。
 - **branch 工具的动作与模式。** 动作 `create`、`message`、`read`、`end` 及各自做什么；`mode` 为 `append` 或 `steer` 及它对接收方的作用；每个动作接收的字段，`action` 必填且不接受别的字段；`read` 的目标规则及其游标规则（"With no after, a read continues after your last read of that line"）；以及陈述保证的句子："Returns the line's id"、"Pass after to read from another point"、"It is your last action"、"A line reads the line it was cut from; main reads the lines it opened. Messages pass only between main and the lines it opened."。
-- **结果与拒绝。** `Line created: C`、`Sent to C.`、页 `{items, nextCursor, done}`、`Line C is ending; your final message was sent to P.` 与 `Line C ends with this message.`；拒绝码 `branch_not_main`、`branch_not_kin`、`branch_not_tool_line`、`branch_ended`、`branch_cannot_end` 及各自的文本；以及 `Invalid branch arguments: …`。
+- **结果与拒绝。** `Line created: C`、`Sent to C.`、页 `{items, nextCursor, done}`、`Line C is ending; your final message was sent to P.` 与 `Line C ends with this message.`；拒绝码 `branch_not_main`、`branch_not_kin`、`branch_not_tool_line`、`branch_ended`、`branch_cannot_end` 及各自的文本；`after A is past line T's head H; a read starts at or below H`，即读取在 `after` 超过目标头部时返回的错误结果，不带代码；以及 `Invalid branch arguments: …`。
 - **指南条目。** 每个条目标明它的标记是什么、承载谁的话或哪些事实，以及它是状态或信息、绝不是请求。`<dim-branch-line>` 的条目说明后出现的同名块会取代它，它归 TimelineTree——每段身份块都由它写——所以在任何执行配置下都在位。`<dim-branch-lines>`、`<dim-branch-idle>` 和 `<dim-branch-ended>` 的条目归 BranchLine，名册和两条通知都由它写；`<dim-branch-message>` 的条目与它们一起注册，因为 BranchLine 恰好在写消息的 BranchTool 所在之处加载。`<dim-branch-parent>` 的条目只在有父线的线上在位，因为只有这样的线收得到这个块：`main` 从不收到它，而组合一个永远不会出现的条目只会白白撑大 `main` 的指南。名册条目和消息条目在每条线上都在。
 
 **策略。**
@@ -608,7 +609,7 @@ BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是
 8. Pursuit 的评审者得到 host 线的身份块，能读到执行者在它的切点之后的工作，现有的 Pursuit 流程照常通过。
 9. 两条线编辑同一个文件：后编辑的那条得到 `file_modified_since_read`（已有行为）。
 10. v1、v2 客户端看不到新事件。v3 历史包含它们，`hello.features` 列出 `session.branch_end`。
-11. 读取父线：一条线第一次读它被切出来的那条线时，从切点之后开始；低于切点的显式 `after` 会抬到切点；不带 `after` 的读取从调用方上一次的 `nextCursor` 继续，两个方向都一样，并且重载后仍然保留；`main` 的 `after: 0` 从一条线的开头重读。
+11. 读取父线：一条线第一次读它被切出来的那条线时，从切点之后开始；低于切点的显式 `after` 会抬到切点；高于目标头部的显式 `after` 由工具结果拒绝并报出该头部，不存任何东西；不带 `after` 的读取从调用方上一次的 `nextCursor` 继续，两个方向都一样，并且重载后仍然保留；`main` 的 `after: 0` 从一条线的开头重读。
 12. 父线块：空闲的线被告知父线动了而不会被开启一轮，块在它下一轮的第一个请求里、先于开启那一轮的输入；运行中的线在下一次模型请求时拿到它，且只拿一次；被持有的块不会被覆盖；被消费的块之后，新的头部带来新的块；已经读到头部的线不会被通知；只为开启这条线的那一轮不算活动，而之后的工具调用或操作者输入算；没有移动的重载不写任何东西，有到期块的重载写一个；结束中的线和 `main` 都拿不到；对这条线的一次压缩之后块会重放。
 13. 父线块在评审者线上不改变任何 Goal 决定：它是一条 Append 输入，第一个块不是 goal 标记，key 也不是 goal key，所以折叠的 `driving`、`lastOperator`、计数和结论都不变（`goal.test.mjs`）。
 

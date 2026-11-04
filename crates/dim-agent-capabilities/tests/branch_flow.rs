@@ -3985,6 +3985,52 @@ async fn an_after_below_the_cut_is_raised_to_it() {
     soon(agent.close()).await.unwrap();
 }
 
+/// An `after` past the target's head is a mistake, so the read refuses it and
+/// stores nothing, keeping the stored cursor valid by construction
+/// ([§20.11](../../docs/design/timeline-branches.md#20-acceptance)).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_after_past_the_targets_head_is_refused_and_the_cursor_stays() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    // A host line writes no idle notice, so main has no turn in flight and
+    // its head stays where the test reads it.
+    let line = open_host_line(&session, "check the parser").await;
+    let first = page_of(&tool_call(&session, &line, r#"{"action":"read","branch":"main"}"#).await);
+    let cursor = first["nextCursor"].as_u64().unwrap();
+    let head = session.sequence("main").unwrap();
+    let refused = tool_call(
+        &session,
+        &line,
+        &format!(
+            r#"{{"action":"read","branch":"main","after":{}}}"#,
+            head + 1
+        ),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true), "{:?}", refused.content);
+    assert!(
+        matches!(&refused.content, ToolContent::Text(text) if text.contains(&head.to_string())),
+        "the refusal names the head {head}: {:?}",
+        refused.content
+    );
+    move_main(&session).await;
+    let (_, text, _) = settle_line(&session, &line).await;
+    let (block_head, after) = parent_block(&text);
+    assert_eq!(after, cursor, "the refused read stored no cursor");
+    assert!(block_head > cursor);
+    let second = page_of(&tool_call(&session, &line, r#"{"action":"read","branch":"main"}"#).await);
+    let sequences = page_sequences(&second);
+    assert!(!sequences.is_empty(), "{second}");
+    assert!(
+        sequences.iter().all(|sequence| *sequence > cursor),
+        "the read continues after the cursor {cursor}: {second}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_read_without_after_continues_from_the_last_page_in_both_directions() {
     let probe = Arc::new(Probe::default());
