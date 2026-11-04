@@ -1,50 +1,75 @@
 ---
 name: dim-release
-description: Prepare and deliver Dim releases in this repository. Use for product version changes, release branches or PRs, version tags, self-hosted release builds, draft GitHub Releases, manual npm publication from a published Release, or recovery of an incomplete release. npm publication is disabled until explicitly activated.
+description: Prepare Dim release versions and release PRs, or build and publish alpha releases through GitHub CI. Use for version bumps, next-alpha selection, release tags, GitHub Releases, npm OIDC publication and release recovery.
 ---
 
 # Dim release
 
-Alpha releases (`X.Y.Z-alpha.N`, the Rust CLI on the `alpha` dist-tag) follow [dim-alpha-release](../../../skills/dim-alpha-release/SKILL.md), which builds on the rules here.
+Use this skill for committed release metadata and the GitHub CI route. CI currently accepts only `X.Y.Z-alpha.N`; it does not publish the Rust CLI to the stable or beta channels. Use [dim-alpha-release](../../../skills/dim-alpha-release/SKILL.md) only when selecting the local Mac alternative.
 
-Read [release packaging](../../../docs/release/README.md) for runner prerequisites, platform artifacts and plugin configuration. The workflow is `.github/workflows/release.yml`; CI is `.github/workflows/ci.yml`.
+Read [version preparation](../../../docs/release/README.md#version-preparation) before editing metadata and [alpha npm publication](../../../docs/release/README.md#alpha-npm-publication) before operating CI. Read runner prerequisites only when a build is requested.
 
-## Prepare
+## Requested stage
 
-- Inspect the working tree, current branch, `origin/main`, tags and existing GitHub Releases before changing release metadata. Fetch `origin/main` and tags. Preserve unrelated local work.
-- Select the version requested by the user; if none was supplied, ask for it. Use `vX.Y.Z`, `vX.Y.Z-beta.N` or `vX.Y.Z-alpha.N`; npm publication rejects other prerelease identifiers. `0.1.0` is a development baseline, not evidence of an unused npm version.
-- Prepare on `codex/release-vVERSION` from `origin/main`, or continue the corresponding existing branch. Use a normal PR into `main`; this repository has no separate release integration branch or special merge command.
-- Set the same version in `Cargo.toml` under `[workspace.package]`, `npm/package.json` and every exact optional dependency, `runtime/package.json`, and both root version fields in `runtime/package-lock.json` (`version` and `packages[""].version`). Refresh the workspace package versions in `Cargo.lock` with `cargo metadata --format-version 1 > /dev/null`; review the lockfile for unrelated dependency changes.
-- Summarize user-visible changes from commits since the previous tag for the PR and draft release notes. Do not add unrelated features or release infrastructure.
+- A version bump or release-PR request ends with a reviewable PR. It does not authorize merging, tags, builds, GitHub Release publication or npm writes.
+- A build request covers the self-hosted build and draft inspection. npm publication is a separate stage.
+- An explicit end-to-end publication request may authorize all stages. Honor authorization already given; do not ask again at each stage.
+- A skill review or configuration check never runs a release. `publish-alpha.mjs --dry-run` builds the targets; it is not a read-only version check.
 
-## Verify and merge
+## Select the version
 
-- Run the applicable checks from `AGENTS.md`, reusing unchanged evidence. Metadata-only changes need version consistency and locked Cargo metadata checks. Run `node --test scripts/*.test.mjs` when changing packaging scripts. The PR check must succeed before tagging.
-- Commit in English following repository conventions. When no stronger convention exists, use `chore: prepare vVERSION`.
-- Push the branch and create or update its PR when the user has requested that delivery. Merge only within the user's authorization. Never force-push `main`.
+1. Inspect the working tree, current branch, `origin/main`, remote tags, open release PRs and existing GitHub Releases. Fetch `origin/main` and tags without changing unrelated work. Continue an existing PR for the same preparation task rather than opening a duplicate. Resume the matching release branch or immutable Release when the request is a retry.
+2. Read registry versions for `dimcode-alpha`, `dimcode-web`, every `dimcode-<platform>` in `npm/package.json`, and legacy `dimcode`. Use `npm view PACKAGE versions --json --registry=https://registry.npmjs.org`; only an explicit E404 means an absent package. Authentication or network failures do not mean a version is free.
+3. Use an explicit requested version. For “next alpha” without a number, choose the highest alpha across those registry versions, reserved GitHub tags/Releases and other open release PRs, then increment its numeric `N`. If no alpha exists, use the Cargo workspace's `X.Y.Z-alpha.0`. Compare SemVer numerically: `alpha.10` follows `alpha.9`. Do not choose from a dist-tag or the committed Cargo version alone; a partial publication reserves its version too.
+4. A new version must be absent from every package and remote tag/Release. An existing matching release is a retry, not a new version. An alpha must stay below the newest legacy `dimcode` beta; retain the packaging scripts' check. Do not change the release core the user explicitly selected.
 
-## Build the draft
+## Prepare the version PR
 
-- Create an annotated `vVERSION` tag on the verified release commit already reachable from `origin/main`. The tag, Cargo version, wrapper, optional dependencies and runtime metadata must agree.
-- Pushing the tag triggers release CI. Treat a tag push as a release action and perform it only within the user's request. For an existing tag, use `gh workflow run release.yml --ref main -f tag=vVERSION`; do not dispatch while the tag-triggered run is active.
-- Watch the run with `gh run watch RUN_ID --exit-status`. All jobs use self-hosted runners. Cross-built macOS x64, Linux ARM64 and Windows ARM64 artifacts receive architecture checks; these checks do not demonstrate target-system runtime acceptance.
-- CI collects six native archives and seven npm tarballs, validates their version/source/toolchain/plugin provenance and SHA-256, and attaches all thirteen original archives, `release-manifest.json` and `SHA256SUMS` to a draft GitHub Release. Prerelease tags create prerelease drafts. npm registry writes remain disabled.
-- Inspect the draft with `gh release view vVERSION --json url,isDraft,tagName,assets`. Confirm all fifteen attachment names and sizes, check native archive digests against `SHA256SUMS` and npm tarball digests against the manifest, and review generated notes. Publish the GitHub draft only when requested; npm publication requires it to be non-draft first.
-- Actions artifacts expire after one day. All original archives persist as GitHub Release attachments, so later npm publication does not depend on Actions retention.
+- Work from `origin/main` on `dimagent/release-vVERSION`, or continue its corresponding branch. Use a normal PR into `main`; no separate release integration branch is needed.
+- Synchronize the fields in the version-preparation table. Refresh `Cargo.lock` with `cargo metadata --format-version 1 --no-deps > /dev/null`; review its diff for unrelated dependency changes. Do not replace lockfile versions by text substitution or bump explicitly versioned crates such as `dim-agent-types`.
+- Keep the npm template named `dimcode`, with its `dim`/`dimcode` bins. `collect-release.mjs` selects `dimcode-alpha` and `dima` when packaging an alpha. This is a product-version change, not a Node/Rutis/dependency upgrade.
+- Export `DIM_RELEASE_VERSION` as the selected version without the leading `v`, then verify:
 
-## Publish npm packages
+```sh
+node --input-type=module <<'NODE'
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+const version = process.env.DIM_RELEASE_VERSION;
+assert.match(version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha\.(0|[1-9]\d*)$/);
+const json = file => JSON.parse(readFileSync(file, 'utf8'));
+assert.equal(readFileSync('Cargo.toml', 'utf8').match(/\[workspace\.package\]\s+version = "([^"]+)"/)[1], version);
+const wrapper = json('npm/package.json');
+assert.equal(wrapper.version, version);
+assert(Object.values(wrapper.optionalDependencies).every(value => value === version));
+assert.equal(json('runtime/package.json').version, version);
+const lock = json('runtime/package-lock.json');
+assert.equal(lock.version, version);
+assert.equal(lock.packages[''].version, version);
+NODE
+cargo metadata --format-version 1 --no-deps --locked --offline > /dev/null
+git diff --check
+```
 
-- `.github/workflows/npm-publish.yml.disabled` stays disabled until package ownership and trusted publishers for all seven packages are configured and the user explicitly requests activation.
-- After activation, dispatch only when the user requests npm publication: `gh workflow run npm-publish.yml --ref main -f release_tag=vVERSION`. Use the tag of an already published, non-draft GitHub Release. There is no automatic publish trigger and no build-run input.
-- The public Ubuntu runner downloads the original npm tarballs and manifest from that Release. It rechecks published status and tag identity, then validates exact packages, version, source SHA and digests before writing to npm. Never rebuild, repack or substitute packages during publication.
-- Platform packages publish before `dimcode`; versions are `X.Y.Z`, `X.Y.Z-beta.N` or `X.Y.Z-alpha.N` and publish to `latest`, `beta` or `alpha` respectively, so each channel upgrades only within itself. An alpha must stay below the newest `dimcode` beta on the registry, because installed TypeScript betas upgrade to the highest prerelease of any identifier; publication checks this before any write. An existing version is skipped only when its registry integrity exactly matches the original archive. Different bytes, registry authentication errors and network failures stop publication.
-- The publication receipt records the Release ID, tag and package digests as a one-day Actions artifact. It does not modify the published GitHub Release.
+- Metadata-only changes need these checks and the existing PR checks; they do not need six-platform builds or a repeated full local test suite. Reuse valid evidence under `AGENTS.md`.
+- Summarize user-visible changes since the previous release for the PR and release notes. Commit as `chore: prepare vVERSION`. Push and create/update the PR when requested. Report the chosen version, source commit, changed metadata and verification; for preparation-only work, end here.
+
+## Build and inspect the draft
+
+- After the required CI passes and the release commit is on `origin/main`, create an annotated `vVERSION` tag on that exact commit. Merge and push the tag only within the requested stage; never force-push `main` or move a release tag.
+- A tag push triggers `release.yml`. For an existing unchanged tag, use `gh workflow run release.yml --ref main -f tag=vVERSION` only when no run for it is active. Watch the existing run instead of dispatching duplicates.
+- Every build and draft-assembly job uses self-hosted runners. Check the draft's seventeen attachments: seven native archives including Web, eight npm tarballs, `release-manifest.json` and `SHA256SUMS`. Verify names, sizes, native digests and npm manifest digests, and review release notes. Cross-target architecture checks do not establish target-system runtime acceptance.
+- Publish the GitHub prerelease only within the authorized stage. npm publication requires a non-draft published Release. Original attachments persist independently of one-day Actions artifacts.
+
+## Publish the original npm packages
+
+- Confirm the eight packages' trusted publishers and the `npm-release` environment using the linked npm setup instructions. No npm write credentials go to self-hosted jobs.
+- `gh workflow run npm-publish.yml --ref main -f release_tag=vVERSION` performs verification on the self-hosted Linux runner. It schedules no GitHub-hosted job. Do not dispatch it just to review skill/configuration changes.
+- Actual publication requires an explicit npm-publication request, `NPM_ALPHA_PUBLISH_ENABLED=true`, and the same command with `-f publish=true`. Keep the switch unset or `false` during setup and ordinary verification; do not silently enable it for a preparation request.
+- The hosted job independently downloads the original tarballs and manifest from the GitHub Release and validates their bytes and registry state again. It publishes without building or repacking: six platform packages and `dimcode-web`, then `dimcode-alpha`, all on `alpha`. It does not publish `dimcode` or change `latest`/`beta`. Check registry versions/dist-tags and retain the workflow's publication receipt.
 
 ## Recovery
 
-- Fix build failures on the release preparation branch and use a new version tag if the source changes. Never move an existing release tag or overwrite published assets without an explicit request.
-- A failed build creates no draft. Rerun failed jobs while successful artifacts are still available; after one day rerun all jobs or dispatch a complete build for the unchanged tag.
-- An upload failure may leave an incomplete draft. The workflow rejects an existing release instead of replacing attachments. Inspect it, then delete only that incomplete draft when authorized before retrying. Keep its tag.
-- Missing runner labels or cross toolchains must be fixed on the self-hosted fleet; never fall back to GitHub-hosted release runners. Plugin provenance mismatches require the same immutable archive URL and SHA-256 across all platforms before rebuilding.
-- If an older published Release lacks its original npm tarballs or manifest, stop npm publication. Do not rebuild packages to fill the gap; prepare a new release containing the complete original artifacts.
-- Do not rename or enable `.github/workflows/npm-publish.yml.disabled` during ordinary release work. Enabling npm requires package ownership and trusted publishers for all seven packages, and a separate user request.
+- For an unchanged source/tag, resume its existing run, Release and original archives. A matching registry integrity may be skipped; different bytes or registry/authentication errors stop publication. Do not allocate a new version just because the publication job needs retrying.
+- Source changes need a new version and new tag. Never rebuild or substitute missing archives in an already published Release; prepare a complete new release.
+- After one-day build artifacts expire, rebuild all targets for the unchanged tag if no complete Release exists. An incomplete draft must be inspected and removed only when authorized before retrying; keep the tag.
+- Fix missing self-hosted labels/toolchains on that fleet. Do not move builds to GitHub-hosted runners or run a local publish as an unrequested fallback.

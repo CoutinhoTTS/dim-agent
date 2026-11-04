@@ -377,6 +377,9 @@ async fn turn_window(
             window_start: 1,
         });
     }
+    let tree = session
+        .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()
+        .map_err(history_error)?;
     let page = |kinds: Vec<String>,
                 direction: TimelineQueryDirection,
                 from: Option<u64>,
@@ -394,9 +397,9 @@ async fn turn_window(
         limit: std::num::NonZeroU64::new(TURN_WINDOW_PAGE).expect("a page keeps one event"),
         offset: 0,
     };
-    let turned = session
+    let turned = tree
         .query(
-            branch,
+            branch.to_owned(),
             page(
                 vec!["turn/start".into()],
                 TimelineQueryDirection::Descending,
@@ -412,9 +415,9 @@ async fn turn_window(
             window_start: 1,
         });
     };
-    let first_step = session
+    let first_step = tree
         .query(
-            branch,
+            branch.to_owned(),
             page(
                 vec!["step/model-start".into()],
                 TimelineQueryDirection::Ascending,
@@ -433,9 +436,9 @@ async fn turn_window(
     if let Some(first_step) = first_step {
         let mut from = turn_start.saturating_add(1);
         loop {
-            let reply = session
+            let reply = tree
                 .query(
-                    branch,
+                    branch.to_owned(),
                     page(
                         vec!["input/consumed".into()],
                         TimelineQueryDirection::Ascending,
@@ -455,9 +458,9 @@ async fn turn_window(
                 let EventKind::InputConsumed(data) = &event.kind else {
                     unreachable!("the read selects consumed inputs")
                 };
-                let input = session
+                let input = tree
                     .query(
-                        branch,
+                        branch.to_owned(),
                         page(
                             Vec::new(),
                             TimelineQueryDirection::Ascending,
@@ -479,9 +482,9 @@ async fn turn_window(
         }
     }
     if !consumed {
-        let newest = session
+        let newest = tree
             .query(
-                branch,
+                branch.to_owned(),
                 page(
                     vec!["input/message".into()],
                     TimelineQueryDirection::Descending,

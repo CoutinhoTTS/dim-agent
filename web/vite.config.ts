@@ -1,6 +1,7 @@
 import { defineConfig } from "vite"
 import vue from "@vitejs/plugin-vue"
 import tailwindcss from "@tailwindcss/vite"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 
 /** The `dimcode web` entry the dev server forwards /api and /ws to. */
 const target = process.env.DIM_WEB_TARGET ?? "http://127.0.0.1:43201"
@@ -16,7 +17,27 @@ export default defineConfig({
       { find: /^@terrastruct\/d2$/, replacement: unused },
     ],
   },
-  plugins: [tailwindcss(), vue()],
+  plugins: [tailwindcss(), vue(), {
+    name: "third-party-notices",
+    apply: "build",
+    generateBundle() {
+      const lock = JSON.parse(readFileSync(new URL("./package-lock.json", import.meta.url), "utf8"))
+      const notices = [readFileSync(new URL("../NOTICE", import.meta.url), "utf8")]
+      for (const directory of Object.keys(lock.packages).sort()) {
+        const pkg = lock.packages[directory]
+        if (!directory || pkg.dev) continue
+        const root = new URL(`./${directory}/`, import.meta.url)
+        if (pkg.optional && !existsSync(root)) continue
+        const name = directory.slice(directory.lastIndexOf("node_modules/") + "node_modules/".length)
+        const files = readdirSync(root, { withFileTypes: true })
+          .filter(file => file.isFile() && /^(licen[cs]e|copying|notice|ofl)(?:[.-]|$)/i.test(file.name))
+          .map(file => new URL(file.name, root))
+        if (files.length === 0) files.push(new URL(`./licenses/${name}/${pkg.version}/LICENSE`, import.meta.url))
+        notices.push(`${name}@${pkg.version}`, ...files.map(file => readFileSync(file, "utf8")))
+      }
+      this.emitFile({ type: "asset", fileName: "THIRD-PARTY-NOTICES.txt", source: notices.join("\n\n") })
+    },
+  }],
   server: {
     proxy: {
       "/api": { target, changeOrigin: true, headers: { origin: target } },

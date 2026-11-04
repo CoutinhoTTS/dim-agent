@@ -34,9 +34,12 @@ ending line. `TreeCommands::end`
 checks only the target: it exists, it is open, and it is not `main`; a line
 that ended writes nothing and answers `branch_ended`. `info` answers for an
 ended line too, and `page` reads an open or ended line from the store at its
-head. A child's opening input is the identity block, and when the prefix it
-inherits holds a live parent block, one more parent block after it naming the
-line that opened it at the cut; the keyed state is read over the chain the child
+head. `query` selects one line's own facts: it forwards to the Timeline while
+open and uses the ended head after closing, with the event query's anchors,
+selection, ordering and paging. It rejects chain scope. A child's opening input
+is the identity block, and when the prefix it inherits holds a live parent
+block, one more parent block after it naming the line that opened it at the
+cut; the keyed state is read over the chain the child
 inherits, never from the rendered history, while the child opens, as a resumed
 line's facts are, and a failed read fails the create like any other opening
 failure (branch/create-failed). Each line's node publishes the

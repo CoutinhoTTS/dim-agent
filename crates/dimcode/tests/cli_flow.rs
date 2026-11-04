@@ -9878,10 +9878,20 @@ fn tui_models_picker_cycles_reasoning_effort() {
     terminal.until("‹ none ›");
     terminal.write(b"\r");
     terminal.until("Ask anything...");
+    let mut calls = Vec::new();
+    loop {
+        let call = observed
+            .recv_timeout(HANG_GUARD)
+            .expect("the model was adopted");
+        let adopted = call["method"] == "session.model.update";
+        calls.push(call);
+        if adopted {
+            break;
+        }
+    }
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
-    let calls: Vec<Value> = observed.try_iter().collect();
     let update = calls
         .iter()
         .find(|call| call["method"] == "provider.preferences.update")

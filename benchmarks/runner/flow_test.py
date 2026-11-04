@@ -308,6 +308,21 @@ class BaselineFlowTest(unittest.TestCase):
                 self.frozen(trials, model=partial)
             self.assertIn(absent, str(caught.exception))
 
+    def test_a_baseline_where_every_trial_scored_zero_is_refused(self) -> None:
+        """Scoring that ran and passed nothing has happened once on this corpus,
+        and it was the measurement that was broken: the verifiers could not
+        install themselves (runner/assemble_tasks.py, the Terminal-Bench config).
+        A reference like that reads every later run as an improvement, so
+        freezing one is refused — with an explicit way out for the day zero is
+        the real answer."""
+        trials = [trial_record("a__1", "tb/a", 0.0), trial_record("a__2", "tb/a", 0.0)]
+        with self.assertRaises(baseline.BaselineError) as caught:
+            self.frozen(trials)
+        self.assertIn("scored 0", str(caught.exception))
+
+        frozen = self.frozen(trials, allow_zero_pass=True)
+        self.assertEqual(frozen["tasks"]["tb/a"]["passes"], 0)
+
     def test_a_baseline_with_no_identity_is_refused_on_the_way_in_too(self) -> None:
         """One frozen before the check existed, or hand-edited since, must not be
         compared against either — and must say why rather than raising a

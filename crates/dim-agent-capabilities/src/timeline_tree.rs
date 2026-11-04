@@ -7,7 +7,8 @@ use dim_agent_runtime::{
     AgentError, Branch, BranchLifecycle, BranchOptions, Dispatcher, Names, Result, SessionIdentity,
     StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
     TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPredicate, TimelineQueryScope, TimelineStore, TimelineTreeControl, rebuild_facts,
+    TimelineQueryPredicate, TimelineQueryReply, TimelineQueryScope, TimelineStore,
+    TimelineTreeControl, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -193,6 +194,20 @@ impl TreeCommands {
             .upgrade()
             .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
             .page(&id, after, limit)
+            .await
+    }
+    /// Queries one line's own facts, forwarding to its Timeline while open
+    /// and reading at the tree's fixed head after it ends. Chain scope is
+    /// invalid; an ended line has no publishing tail.
+    pub async fn query(
+        &self,
+        id: String,
+        query: TimelineQuery,
+    ) -> std::result::Result<TimelineQueryReply, AgentError> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .query(&id, query)
             .await
     }
     /// The head a read of `id` ends at: fixed once ended, published while
@@ -797,6 +812,57 @@ impl TimelineTree {
             .into_iter()
             .map(|record| record.event)
             .collect())
+    }
+    async fn query(&self, id: &str, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        query.validate()?;
+        if query.scope != TimelineQueryScope::Branch {
+            return Err(AgentError::InvalidInput(
+                "a tree query reads one line's own facts".into(),
+            ));
+        }
+        if let Some(context) = self.owned_context(id) {
+            return context.timeline().query(query).await;
+        }
+        let through = self
+            .ended_head(id)
+            .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: id.into(),
+        };
+        let anchor = if let Some(event_id) = &query.from_event {
+            let point = TimelineQuery {
+                from_event: None,
+                event_id: Some(event_id.clone()),
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                predicate: None,
+                offset: 0,
+                limit: NonZeroU64::MIN,
+                ..query.clone()
+            };
+            let page = self.store.query(&key, &point, 1, through).await?;
+            let Some(event) = page.events.first() else {
+                return Ok(TimelineQueryReply {
+                    events: Vec::new(),
+                    positions: Vec::new(),
+                    through,
+                });
+            };
+            Some(event.sequence)
+        } else {
+            query.from_sequence
+        };
+        let (from, bound) = match query.direction {
+            TimelineQueryDirection::Ascending => (anchor.unwrap_or(1), through),
+            TimelineQueryDirection::Descending => (1, anchor.unwrap_or(through).min(through)),
+        };
+        let page = self.store.query(&key, &query, from, bound).await?;
+        Ok(TimelineQueryReply {
+            events: page.events,
+            positions: page.positions,
+            through,
+        })
     }
     /// Whether `id` did anything after `from` up to `through` that a line it
     /// opened must see ([timeline branches §7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)):

@@ -48,7 +48,7 @@ Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §3, §4
 | §4 rule 4 No business meaning in core | The texts are Collaboration's, and they travel on the declaration, the tool result and the markers; Timeline, Dispatcher and Loop gain no Collaboration branch |
 | §4 rule 5 Read the whole batch before deciding | Not applicable to this page: the texts are written by the Session part's tool handling and by the branch part's decisions, which follow dispatch order; this page adds no read and changes no decision |
 | §4 rule 6 Context from handed-over events | A marker reaches the model only as a consumed input, and a tool result only as `step/tool-result`; the page adds no context path |
-| §4 rule 7 Public events and services only | The Session part uses the Session's `collaboration`, `sessionIdentity`, `sessionConfig`, `treeCommands`, `sessionLifecycle`, `toolRegistry` and `guideEntries`, and reads Provider's public `selectableModels` port when the deployment provides it (§7); the branch part injects the Session's `CollaborationSession`, `timeline`, `dispatcher`, `timelineIdentity` and `branchLifecycle`. Nothing reads another plugin's internal state |
+| §4 rule 7 Public events and services only | The Session part uses the Session's `collaboration`, `sessionIdentity`, `sessionConfig`, `treeCommands`, `sessionLifecycle`, `toolRegistry` and `guideEntries`, and reads the deployment's public `selectableModels` port when it provides one (§7); the branch part injects the Session's `CollaborationSession`, `timeline`, `dispatcher`, `timelineIdentity` and `branchLifecycle`. Nothing reads another plugin's internal state |
 | §4 rule 8 Requirements to mechanism owners | None to the runtime, rutis, the loader, the lifecycle or the tool contracts: the entry route is Prompt's existing contract, the declaration is ToolRegistry's, and the inputs are the branch's existing operation. The delegation's requirements go to Agents, SessionStore and the deletion design (§6.5) |
 | §4 rule 9 Only facts later decisions use | No Timeline fact is added. The two markers are the model-visible results the delegation exists for, and the guide entries are registrations inside Prompt's scope. A delegation's ownership and leader are business records without a Timeline: they go through Agents' and SessionStore's typed writes (§6), not events |
 | §1 Plugin, part and Capability boundaries | Collaboration stays the App Server capability it is. The Session part registers a declaration, a tool and the entries; the branch part consumes the delegation's facts. No Capability is added and no core module gains business code |
@@ -144,15 +144,16 @@ no availability rule of its own and caches nothing, so a model the user disables
 disappears from the next call.
 
 **Availability.** The Session part reads the port when it mounts, and the deployment either has it
-or does not: a profile without Provider lists no models, and there the leader's declaration offers
-no `models` action, because naming one would promise a read that cannot answer, and the built-in
-leader text carries the bullet only when the action is offered. The member declaration never
+or does not: the product profile provides it through Provider, the configured model profile from
+its model file, and any other profile lists no models, where the leader's declaration offers no
+`models` action, because naming one would promise a read that cannot answer; the built-in leader
+text carries the bullet only when the action is offered. The member declaration never
 carries the action: a member cannot delegate. A factory that replaces the leader description is one
 whole text and states the action itself, as it does for every other action (§3).
 
-The read stays optional rather than a dependency that gates the part: a deployment without
-Provider is a supported profile, and Collaboration must load there too, so the part reads the port
-once when it mounts instead of waiting for it. That read is a snapshot: a Provider reload does not
+The read stays optional rather than a dependency that gates the part: a deployment that provides
+no such read is a supported profile, and Collaboration must load there too, so the part reads the
+port once when it mounts instead of waiting for it. That read is a snapshot: a Provider reload does not
 reload this part, and a later call answers with the owner's own error until the Session or its part
 reloads.
 
