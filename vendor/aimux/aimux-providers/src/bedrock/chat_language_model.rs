@@ -331,6 +331,15 @@ impl AmazonBedrockChatStream {
     }
 
     fn content_block_delta(&mut self, payload: &serde_json::Value, controller: &mut Controller) {
+        // A delta the decoder cannot read must fail the stream: silently
+        // ignoring it completes the block from whatever it accumulated, and
+        // the tool call then runs with input the model never sent.
+        if !readable_delta(payload) {
+            controller.error(AiMuxError::invalid_response_data(
+                "unsupported or unreadable Bedrock content delta",
+            ));
+            return;
+        }
         let idx = payload
             .get("contentBlockIndex")
             .and_then(serde_json::Value::as_u64)
@@ -639,6 +648,26 @@ impl Transformer for AmazonBedrockChatStream {
             provider_metadata,
         });
     }
+}
+
+/// One known member, readable: `text` as a string, `toolUse.input` as a
+/// string, or `reasoningContent` as an object.
+fn readable_delta(payload: &serde_json::Value) -> bool {
+    let Some(delta) = payload
+        .get("delta")
+        .and_then(serde_json::Value::as_object)
+        .filter(|fields| fields.len() == 1)
+    else {
+        return false;
+    };
+    delta.get("text").is_some_and(serde_json::Value::is_string)
+        || delta
+            .get("toolUse")
+            .and_then(|tool_use| tool_use.get("input"))
+            .is_some_and(serde_json::Value::is_string)
+        || delta
+            .get("reasoningContent")
+            .is_some_and(serde_json::Value::is_object)
 }
 
 /// Attach accumulated encrypted reasoning once at the end of the block.

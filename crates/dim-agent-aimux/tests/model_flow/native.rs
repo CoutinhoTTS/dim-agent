@@ -367,6 +367,79 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
 }
 
 #[tokio::test]
+async fn bedrock_unreadable_tool_delta_fails_the_turn_without_a_call() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = [
+        bedrock_frame("messageStart", json!({"role":"assistant"})),
+        bedrock_frame(
+            "contentBlockStart",
+            json!({"contentBlockIndex":0,"start":{"toolUse":{"toolUseId":"call-array","name":"echo"}}}),
+        ),
+        bedrock_frame(
+            "contentBlockDelta",
+            json!({"contentBlockIndex":0,"delta":{"toolUse":{"input":["unreadable"]}}}),
+        ),
+        bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+        bedrock_frame("messageStop", json!({"stopReason":"tool_use"})),
+        bedrock_frame(
+            "metadata",
+            json!({"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}),
+        ),
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/vnd.amazon.eventstream")
+                .set_body_bytes(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut request = ModelRequest::new(
+        "bedrock",
+        "anthropic.model",
+        vec![Message::text(Role::User, "run")],
+    );
+    request.tools = Some(MockTools.definitions().into());
+    let connection = ModelConnection::Bedrock(BedrockModelConnection {
+        base_url: server.uri(),
+        network: Default::default(),
+        headers: Default::default(),
+        auth: BedrockAuth::Bearer("bearer".into()),
+    });
+    let mut output = host
+        .0
+        .invoke(Arc::new(request), connection, CancellationToken::new())
+        .await
+        .unwrap();
+    let mut tool_use = false;
+    let mut failure = None;
+    while let Some(chunk) = output.next().await {
+        match chunk {
+            Ok(ModelChunk::Content(parts)) => {
+                tool_use |= parts
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::ToolUse { .. }));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    let failure = failure.expect("the unreadable delta must fail the turn");
+    assert!(matches!(failure, HostError::Failed { .. }), "{failure:?}");
+    assert!(!tool_use, "no tool call may come from an unreadable delta");
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
