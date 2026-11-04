@@ -113,6 +113,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::ModelHost>(catalog, None);
     register::<host::ProviderConnectionResolver>(catalog, None);
     register::<host::ModelSelectionHost>(catalog, None);
+    register::<host::CredentialVariablesHost>(catalog, None);
     register::<host::SessionFilesHost>(catalog, None);
     register::<skill_settings::SkillSettingsHost>(catalog, None);
     register::<environment_clients::SessionClientsHost>(catalog, None);

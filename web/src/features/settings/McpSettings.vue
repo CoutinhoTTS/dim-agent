@@ -176,6 +176,15 @@ function validDraft(form: Draft): boolean {
     error.value = s('Secret field names must be nonempty and unique.', '机密字段名称不能为空且必须唯一。')
     return false
   }
+  // A reference is expanded by the daemon, which validates the expanded
+  // endpoint; only a literal endpoint is checked here.
+  const url = form.url.trim()
+  if (form.type !== "stdio" && !form.secretsInUserScope && url && !url.includes("${")) {
+    try { new URL(url) } catch {
+      error.value = s('The endpoint must be an absolute URL, or contain a variable reference the daemon expands.', '端点必须是绝对 URL，或包含由守护进程展开的变量引用。')
+      return false
+    }
+  }
   return editorForm.value?.reportValidity() ?? false
 }
 async function save(): Promise<void> {
@@ -334,8 +343,8 @@ onBeforeUnmount(() => {
     <section v-if="detail" class="settings-card settings-form" aria-live="polite">
       <h3>{{ s('Server details', '服务器详情') }}: {{ detail.server.id }}</h3>
       <p>{{ detail.server.source }} · {{ detail.server.transport }} · {{ detail.inspection.enabled ? s('Enabled', '已启用') : s('Disabled', '已禁用') }}</p>
-      <template v-if="detail.inspection.configuration.type === 'stdio'"><p>{{ s('Executable', '可执行程序') }}: <code>{{ detail.inspection.configuration.command }}</code></p><p>{{ s('Stored arguments (hidden)', '已存参数（隐藏）') }}: {{ detail.inspection.configuration.argsCount }}</p><p>{{ s('Working directory', '工作目录') }}: {{ detail.inspection.configuration.cwd || s('Daemon directory', '守护进程目录') }}</p><p>{{ s('Environment names', '环境变量名') }}: {{ detail.inspection.configuration.envNames.join(', ') || '—' }}</p></template>
-      <template v-else><p>{{ s('Endpoint (origin only)', '端点（仅来源）') }}: <code>{{ detail.inspection.configuration.endpoint }}</code></p><p>{{ s('Header names', '请求头名称') }}: {{ detail.inspection.configuration.headerNames.join(', ') || '—' }}</p><p>{{ s('Stored bearer token', '已存储的 Bearer 令牌') }}: {{ detail.inspection.configuration.authConfigured ? s('Configured', '已配置') : s('None', '无') }}</p><p v-if="detail.inspection.configuration.oauth?.clientId">OAuth client ID: {{ detail.inspection.configuration.oauth.clientId }}</p></template>
+      <template v-if="detail.inspection.configuration.type === 'stdio'"><p>{{ s('Executable', '可执行程序') }}: <code>{{ detail.inspection.configuration.command }}</code></p><p>{{ s('Stored arguments (hidden)', '已存参数（隐藏）') }}: {{ detail.inspection.configuration.argsCount }}</p><p>{{ s('Working directory', '工作目录') }}: {{ detail.inspection.configuration.cwd || s('Daemon directory', '守护进程目录') }}</p><p>{{ s('Environment names', '环境变量名') }}: {{ detail.inspection.configuration.envNames.join(', ') || '—' }}</p><p>{{ s('Variables', '变量') }}: {{ detail.inspection.configuration.referencedVariables.join(', ') || '—' }}</p><p>{{ s('Unset variables', '未设置变量') }}: {{ detail.inspection.configuration.unsetVariables.join(', ') || '—' }}</p></template>
+      <template v-else><p>{{ s('Endpoint (origin only)', '端点（仅来源）') }}: <code>{{ detail.inspection.configuration.endpoint }}</code></p><p>{{ s('Header names', '请求头名称') }}: {{ detail.inspection.configuration.headerNames.join(', ') || '—' }}</p><p>{{ s('Stored bearer token', '已存储的 Bearer 令牌') }}: {{ detail.inspection.configuration.authConfigured ? s('Configured', '已配置') : s('None', '无') }}</p><p v-if="detail.inspection.configuration.oauth?.clientId">OAuth client ID: {{ detail.inspection.configuration.oauth.clientId }}</p><p>{{ s('Variables', '变量') }}: {{ detail.inspection.configuration.referencedVariables.join(', ') || '—' }}</p><p>{{ s('Unset variables', '未设置变量') }}: {{ detail.inspection.configuration.unsetVariables.join(', ') || '—' }}</p></template>
       <p>{{ s('Connection snapshots do not open a connection. Tool lists are the last successful discovery for each live connection generation.', '查看快照不会打开连接。工具列表来自每个活动连接代次最近一次成功的发现。') }}</p>
       <p v-if="!detail.inspection.connections.length" role="status">{{ s('No live session connections. Use Test connection to discover tools without creating a session.', '没有活动会话连接。可通过“测试连接”发现工具，无需创建会话。') }}</p>
       <section v-for="(runtime, index) in detail.inspection.connections" :key="index" class="runtime-detail"><h4>{{ s('Connection', '连接') }} {{ index + 1 }} · {{ runtime.state }}<template v-if="runtime.expired"> · {{ s('Credential expired', '凭据已过期') }}</template></h4><ul v-if="runtime.tools"><li v-for="tool in runtime.tools" :key="tool.name"><strong>{{ tool.name }}</strong><p v-if="tool.description">{{ tool.description }}</p></li></ul><p v-if="runtime.tools === undefined">{{ s('Tools have not been discovered.', '尚未发现工具。') }}</p><p v-else-if="!runtime.tools.length">{{ s('The server exposes no tools.', '服务器没有提供工具。') }}</p></section>
@@ -351,7 +360,7 @@ onBeforeUnmount(() => {
       </template>
       <template v-else>
         <p v-if="editing">{{ s('Current endpoint', '当前端点') }}: {{ draft.endpoint }} — {{ s('Path and credentials are hidden.', '路径和凭据已隐藏。') }}</p>
-        <label v-if="!draft.secretsInUserScope"><span>{{ editing ? s('Replace URL (blank preserves the stored URL)', '替换 URL（留空保留已存储的 URL）') : 'URL' }}</span><input v-model="draft.url" class="ui-field" data-size="md" type="url" :required="!editing" autocomplete="off" /></label>
+        <label v-if="!draft.secretsInUserScope"><span>{{ editing ? s('Replace URL (blank preserves the stored URL)', '替换 URL（留空保留已存储的 URL）') : 'URL' }}</span><input v-model="draft.url" class="ui-field" data-size="md" type="text" inputmode="url" :required="!editing" autocomplete="off" /></label>
         <template v-if="!editing"><label class="checkbox-label"><input v-model="draft.oauth" type="checkbox" :disabled="!!draft.token" />{{ s('Configure OAuth', '配置 OAuth') }}</label><label v-if="!draft.oauth"><span>{{ s('Bearer token (optional, write-only)', 'Bearer 令牌（可选，只写）') }}</span><input v-model="draft.token" class="ui-field" data-size="md" type="password" autocomplete="new-password" /></label></template>
         <label v-if="editing && !staticCredentialWithheld"><span>{{ s('OAuth configuration', 'OAuth 配置') }}</span><select v-model="draft.oauthAction" class="ui-field" data-size="md"><option value="keep">{{ s('Preserve existing configuration', '保留现有配置') }}</option><option value="set">{{ s('Configure / edit OAuth', '配置 / 编辑 OAuth') }}</option><option value="remove">{{ s('Remove explicit configuration (automatic discovery remains)', '移除显式配置（仍可自动发现）') }}</option></select></label>
         <section v-if="(!editing && draft.oauth) || (editing && draft.oauthAction === 'set' && !staticCredentialWithheld)" class="settings-form">

@@ -200,6 +200,16 @@
       ]
     },
     {
+      "id": "dim_agent_aimux::models::tests",
+      "crate": "dim_agent_aimux",
+      "parent": "dim_agent_aimux::models",
+      "file": "crates/dim-agent-aimux/src/models.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "json"
+      ]
+    },
+    {
       "id": "dim_agent_aimux::plugin",
       "crate": "dim_agent_aimux",
       "parent": "dim_agent_aimux",
@@ -457,6 +467,7 @@
       "unexpandedMacros": [
         "format",
         "tokio::select",
+        "tracing::warn",
         "vec"
       ]
     },
@@ -2202,7 +2213,8 @@
         "assert_eq",
         "format",
         "json",
-        "panic"
+        "panic",
+        "vec"
       ]
     },
     {
@@ -2214,6 +2226,15 @@
         "matches",
         "serde_json::json",
         "unreachable"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::management::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::management",
+      "file": "crates/dim-app-server/src/mcp/management.rs",
+      "unexpandedMacros": [
+        "assert_eq"
       ]
     },
     {
@@ -3395,6 +3416,16 @@
         "matches",
         "vec",
         "write"
+      ]
+    },
+    {
+      "id": "dim_cli::management::mcp::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::management::mcp",
+      "file": "crates/dim-cli/src/management/mcp.rs",
+      "unexpandedMacros": [
+        "assert",
+        "json"
       ]
     },
     {
@@ -6495,6 +6526,13 @@
     },
     {
       "from": "dim_agent_aimux::models",
+      "to": "dim_agent_aimux::models::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models",
       "to": "dim_agent_aimux::request",
       "references": [
         "path crate::request::convert"
@@ -6547,6 +6585,20 @@
       "references": [
         "path ModelId",
         "use dim_agent_runtime::ModelId"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models::tests",
+      "to": "dim_agent_aimux::config",
+      "references": [
+        "path ModelConfigFile"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models::tests",
+      "to": "dim_agent_aimux::models",
+      "references": [
+        "path AimuxModels::from_config"
       ]
     },
     {
@@ -7273,6 +7325,7 @@
         "mod host",
         "path host::CompactionStrategyHost",
         "path host::ContextModelHost",
+        "path host::CredentialVariablesHost",
         "path host::ModelHost",
         "path host::ModelSelectionHost",
         "path host::PrepareContextHost",
@@ -8944,8 +8997,10 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
+        "path BranchPhase::Closing",
         "path SessionIdentity",
         "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::BranchPhase",
         "use dim_agent_runtime::SessionIdentity"
       ]
     },
@@ -17326,6 +17381,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path dim_agent_capabilities::host::CredentialVariables",
+        "path dim_agent_capabilities::host::CredentialVariablesHost"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path dim_agent_capabilities::host_platform::HostPlatformConfig",
@@ -21225,6 +21288,16 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost",
+        "use dim_agent_capabilities::host::CredentialVariables",
+        "use dim_agent_capabilities::host::CredentialVariablesHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
@@ -21272,6 +21345,8 @@
         "path McpAuth::new",
         "path McpAuthError",
         "path auth",
+        "path auth::CredentialKey",
+        "path auth::credential_key",
         "use auth::McpAuth",
         "use auth::McpAuthError"
       ]
@@ -21302,9 +21377,17 @@
         "path McpSettings",
         "path McpSettings::default",
         "path McpSettings::from_value",
+        "path config::Connection",
+        "path config::Expanded",
+        "path config::Origin::Plugin",
+        "path config::Origin::User",
+        "path config::Origin::Workspace",
+        "path config::connected",
         "path config::effective",
         "path config::merge_secret",
         "path config::split_entry",
+        "path config::unresolved",
+        "path config::viewed",
         "path config::workspace",
         "use config::McpEntryError",
         "use config::McpPluginDocument",
@@ -21600,12 +21683,23 @@
       "from": "dim_app_server::mcp::config::tests",
       "to": "dim_app_server::mcp::config",
       "references": [
+        "path BearerAuth::Bearer",
+        "path Expanded",
+        "path McpOAuthSettings",
         "path McpSecretEntry",
+        "path McpServerSettings",
         "path McpServerSettings::Remote",
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::from_file",
-        "path decode_entry"
+        "path Origin::Plugin",
+        "path Origin::User",
+        "path Origin::Workspace",
+        "path PROTECTED_NAMES",
+        "path RemoteTransport::Http",
+        "path Stdio::Stdio",
+        "path decode_entry",
+        "path expand"
       ]
     },
     {
@@ -21632,6 +21726,7 @@
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
+        "path SettingsScope::User",
         "use crate::settings::SettingsScope"
       ]
     },
@@ -21661,7 +21756,6 @@
         "path McpSource::Plugins",
         "path McpSource::Project",
         "path McpSource::User",
-        "path super::McpServerEntry",
         "use super::McpChange",
         "use super::McpError",
         "use super::McpService",
@@ -21700,6 +21794,7 @@
         "path RemoteTransport::Http",
         "path RemoteTransport::Sse",
         "path config::decode_entry",
+        "path config::public_endpoint",
         "path config::strip_secret",
         "use super::config",
         "use super::config::BearerAuth",
@@ -21707,6 +21802,13 @@
         "use super::config::McpServerSettings",
         "use super::config::McpSettings",
         "use super::config::RemoteTransport"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp::management::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -21749,6 +21851,32 @@
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management::tests",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path RemoteTransport::Http"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management::tests",
+      "to": "dim_app_server::mcp::management",
+      "references": [
+        "path configuration_view"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost",
+        "use dim_agent_capabilities::host::CredentialVariables",
+        "use dim_agent_capabilities::host::CredentialVariablesHost"
       ]
     },
     {
@@ -21827,11 +21955,13 @@
         "path McpSource::Project",
         "path McpSource::User",
         "path Result",
+        "path daemon_environment",
         "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
         "use super::Result",
+        "use super::daemon_environment",
         "use super::sources_in_precedence"
       ]
     },
@@ -21857,8 +21987,11 @@
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path config",
-        "path config::effective",
-        "path config::merge_secret",
+        "path config::Connection",
+        "path config::Origin::Plugin",
+        "path config::Origin::User",
+        "path config::Origin::Workspace",
+        "path config::connected",
         "path config::settings_changes",
         "path config::workspace",
         "use super::config",
@@ -21906,6 +22039,14 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CredentialVariables",
+        "path CredentialVariablesHost"
       ]
     },
     {
@@ -22386,7 +22527,9 @@
       "to": "dim_app_server::mcp",
       "references": [
         "path McpConnection::temporary",
-        "use super::McpConnection"
+        "path daemon_environment",
+        "use super::McpConnection",
+        "use super::daemon_environment"
       ]
     },
     {
@@ -22395,6 +22538,10 @@
       "references": [
         "path McpServerSettings",
         "path McpServerSettings::Stdio",
+        "path config",
+        "path config::Origin::User",
+        "path config::expand",
+        "use super::config",
         "use super::config::McpServerSettings"
       ]
     },
@@ -28385,6 +28532,13 @@
     },
     {
       "from": "dim_cli::management::mcp",
+      "to": "dim_cli::management::mcp::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp",
       "to": "dim_cli::mcp",
       "references": [
         "path Auth",
@@ -28463,6 +28617,14 @@
         "path crate::client::RpcError",
         "path crate::client::app_error",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::mcp::tests",
+      "to": "dim_cli::management::mcp",
+      "references": [
+        "path Configuration::decode",
+        "path test"
       ]
     },
     {

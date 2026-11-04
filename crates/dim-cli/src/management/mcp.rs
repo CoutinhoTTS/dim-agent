@@ -53,6 +53,10 @@ pub enum Configuration {
         cwd: Option<String>,
         #[serde(rename = "envNames")]
         env_names: Vec<String>,
+        #[serde(rename = "referencedVariables", default)]
+        referenced_variables: Vec<String>,
+        #[serde(rename = "unsetVariables", default)]
+        unset_variables: Vec<String>,
     },
     Http(Remote),
     Sse(Remote),
@@ -67,6 +71,10 @@ pub struct Remote {
     oauth_configured: bool,
     #[serde(default)]
     oauth: Option<OAuthView>,
+    #[serde(default)]
+    referenced_variables: Vec<String>,
+    #[serde(default)]
+    unset_variables: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,12 +107,13 @@ impl Configuration {
     /// The configuration lines below the list, as the projection reports
     /// them: no stored value a secret hides, and no value inferred.
     fn lines(&self) -> Vec<String> {
-        match self {
+        let mut lines = match self {
             Self::Stdio {
                 command,
                 args_count,
                 cwd,
                 env_names,
+                ..
             } => vec![
                 tf("Executable: {command}", &[("command", &safe_line(command))]),
                 tf(
@@ -164,7 +173,20 @@ impl Configuration {
                     ),
                 ]
             }
-        }
+        };
+        let (referenced, unset) = match self {
+            Self::Stdio {
+                referenced_variables,
+                unset_variables,
+                ..
+            } => (referenced_variables, unset_variables),
+            Self::Http(remote) | Self::Sse(remote) => {
+                (&remote.referenced_variables, &remote.unset_variables)
+            }
+        };
+        lines.push(tf("Variables: {names}", &[("names", &names(referenced))]));
+        lines.push(tf("Unset variables: {names}", &[("names", &names(unset))]));
+        lines
     }
 }
 
@@ -1329,5 +1351,42 @@ fn names(values: &[String]) -> String {
             .map(|value| safe_line(value))
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn variables_are_names_only_in_the_detail_lines() {
+        let configuration = Configuration::decode(&json!({
+            "type": "http",
+            "endpoint": "https://example.test",
+            "headerNames": ["X-Key"],
+            "authConfigured": false,
+            "oauthConfigured": false,
+            "oauth": null,
+            "referencedVariables": ["MCP_HOST", "MCP_TOKEN"],
+            "unsetVariables": ["MCP_TOKEN"]
+        }))
+        .unwrap();
+        let lines = configuration.lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Variables") && line.contains("MCP_HOST, MCP_TOKEN"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Unset variables") && line.contains("MCP_TOKEN"))
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("made-up-token-value"))
+        );
     }
 }
