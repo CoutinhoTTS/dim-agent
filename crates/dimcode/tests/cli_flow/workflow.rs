@@ -1565,6 +1565,7 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
 #[test]
 fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
     let home = Home::new();
+    let launch_cwd = fs::canonicalize(&home.0).unwrap();
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         opened_with(
@@ -1580,6 +1581,7 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
         );
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("workflow.list");
+        assert_eq!(request["params"]["cwd"], json!(launch_cwd));
         wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
@@ -1591,7 +1593,7 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
             json!({
                 "name": "release-notes",
                 "source": "plugin",
-                "cwd": "/workspace",
+                "cwd": launch_cwd,
                 "params": {},
             })
         );
@@ -1602,7 +1604,9 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
         wire.reply(&request, settings());
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut command = home.command();
+    command.args(["--cwd", home.0.to_str().unwrap()]);
+    let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/new\r");

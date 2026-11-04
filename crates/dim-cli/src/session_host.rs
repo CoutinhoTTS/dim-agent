@@ -1266,7 +1266,6 @@ impl Worker {
                         session_id: String::new(),
                         kind: SwitchKind::New,
                     });
-                    self.send(Update::Skills(Vec::new()));
                 }
             }
             Command::Resume(session_id) => {

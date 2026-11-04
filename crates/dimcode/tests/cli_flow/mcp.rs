@@ -6,6 +6,7 @@ use std::sync::mpsc;
 fn resumed_mcp_line_commands_use_the_session_workspace_in_both_clients() {
     for tui in [false, true] {
         let home = Home::new();
+        let launch_cwd = fs::canonicalize(&home.0).unwrap();
         let daemon = home.daemon(move |wire| {
             hello(wire);
             let attach = wire.read("session.attach");
@@ -32,6 +33,13 @@ fn resumed_mcp_line_commands_use_the_session_workspace_in_both_clients() {
             let disable = wire.read("mcp.set_enabled");
             assert_eq!(disable["params"], json!({"cwd":"/workspace","id":"metrics","source":"project","expectedVersion":"project:1","enabled":false}));
             wire.reply(&disable, json!({}));
+            if tui {
+                let list = wire.read("mcp.catalog");
+                assert_eq!(list["params"]["cwd"], json!(launch_cwd));
+                let mut catalog = catalog(true, None);
+                catalog["servers"][0]["id"] = json!("launch-only");
+                wire.reply(&list, catalog);
+            }
             wire.hold();
         });
         let mut launch = home.command();
@@ -53,6 +61,12 @@ fn resumed_mcp_line_commands_use_the_session_workspace_in_both_clients() {
         }
         terminal.write(b"/mcp disable metrics --source project\r");
         terminal.until("Disabled");
+        if tui {
+            terminal.write(b"/new\r");
+            terminal.until("new session");
+            terminal.write(b"/mcp list\r");
+            terminal.until("launch-only");
+        }
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();

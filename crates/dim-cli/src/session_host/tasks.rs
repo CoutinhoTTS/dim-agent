@@ -46,6 +46,8 @@ impl Worker {
             attached_session = std::mem::take(&mut self.parked);
         }
         self.projection = Projection::default();
+        self.session_cwd = None;
+        self.send(Update::Skills(Vec::new()));
         self.session_title = None;
         self.title_revision = 0;
         self.last_usage = None;
