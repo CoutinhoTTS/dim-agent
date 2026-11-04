@@ -371,19 +371,8 @@ fn decode_value(
         }
         Some(_) => return Err(entry_error(id, Some("type"), "a string")),
     };
-    for key in entry.keys() {
-        if key == "$generation" {
-            return Err(entry_error(id, Some(key), "not a reserved field"));
-        }
-        if key == "transport" {
-            return Err(entry_error(id, Some(key), "not a field; set type instead"));
-        }
-    }
-    if let Some(metadata) = entry.get("metadata")
-        && !metadata.is_null()
-        && !metadata.is_object()
-    {
-        return Err(entry_error(id, Some("metadata"), "an object"));
+    if entry.contains_key("$generation") {
+        return Err(entry_error(id, Some("$generation"), "not a reserved field"));
     }
     match transport {
         Transport::Stdio => decode_stdio(id, entry),

@@ -329,6 +329,13 @@ because no management call can name it; the error says an entry id is empty and 
 Every broken entry is its own row in its own source; two sources that hold a broken entry for one
 id list two rows and no server.
 
+`$generation` is a reserved entry member. It names the secret overlay record's generation (D13),
+and an entry that carried it would collide with that record when the entry is split, so an entry
+that has it does not decode. This includes a stored entry written before the member was reserved:
+on upgrade it reads as broken, only that entry, and its error names the field. A member dim does
+not read, such as `transport`, is unknown instead: the entry loads, a read and an edit of another
+member keep it as written, and nothing interprets it; `type` alone names the transport.
+
 The write rule follows from the same value: each entry is held as read beside the entry decoded
 from it, and a write serialises from typed values only the entry it changed. Every other entry,
 decoded or broken, goes back as the file wrote it, including member order and unknown fields.

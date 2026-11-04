@@ -887,8 +887,12 @@ Opening the group still shows each tool's full path and diff.
 ✓ Edited src/main.rs (+12 -3) ▸
 ✓ Edited 2 files (+18 -5) · src/main.rs, src/config.rs ▸
 ✓ Edited 5 files (+42 -16) · src/main.rs, … 4 more ▸
-✓ Ran 1 command, edited src/main.rs (+12 -3) ▸
+✓ Ran 1 command, edited src/main.rs (+12 -3) · python ▸
+✓ Ran 2 commands, ran 1 search · python ×2, rg ▸
 ```
+
+Collapsed headers also show shell program names, as defined by the
+[transcript detail settings contract](../../docs/design/cli-commands.md#transcript-detail-settings).
 
 Summary keeps the group header and adds one row per call in its original order,
 with the tool name and command, path or primary input. Each call takes at most

@@ -45,7 +45,7 @@ with its existing owner; management never writes another owner's state.
 | --- | --- |
 | `managementMethods`, process, namespace `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing namespace |
 | Provider module boundary `stored_selection` (Rust) | Native data-boundary consumers such as Migration; §3.7 adds one pure function over an admitted record, not an RPC, host port or management method |
-| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by Provider | In-process owners that route by model capability (Modality) and the `agent` tool's `models` action; §3.6 adds one read, not a management method or RPC method |
+| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by the profile's model owner (Provider, or the configured model file) | In-process owners that route by model capability (Modality) and the `agent` tool's `models` action; §3.6 adds one read, not a management method or RPC method |
 | Existing `account`, `account.codex`, `account.grok` namespaces | Existing account operations; no new account method, event or managed host capability |
 | `ProviderConnectionResolver`, `ModelSelectionHost` | Provider implements catalog/route decisions through existing types; no new core port |
 | `auxiliaryModel.complete` | Existing caller-selected S4 contract, unchanged |
@@ -494,11 +494,14 @@ stored entry does not mark it, and only a limit no source declares is deleted.
 ### 3.6 Selectable models for process owners
 
 A process owner that routes work by model capability cannot keep its own copy of
-Provider's availability rules. Provider owns one side-effect-free read of the
-models it would serve, with the identifiers and declared capabilities a routing
-decision needs. This read is a process host port, not a management method: it is
-not on the `provider` namespace, is not served over RPC, and does not change
-`provider.catalog`.
+the availability rules of the models it routes to. The port below has one provider
+per profile — Provider in the product profile, the configured model profile
+(`dim-agent-aimux`) from its model file — and each provider owns one
+side-effect-free read of the models it would serve, with the identifiers and
+declared capabilities a routing decision needs. This section defines the port and
+Provider's rules; the configured profile's rule is that page's. The read is a
+process host port, not a management method: it is not on the `provider` namespace,
+is not served over RPC, and does not change `provider.catalog`.
 
 **Why a port rather than a method on `ProviderService`.** A consumer plugin lives
 in its own crate, and `xtask check` rejects a dependency on `dim-app-server`, the
@@ -506,11 +509,12 @@ composition layer, so the consumer cannot name `ProviderService`. The port and i
 data type live in `dim-agent-capabilities`, which Provider and the consumer both
 depend on; registering it as a process name lets a consumer name the port and
 the catalog resolve it, and the dependency points from the extension to the core,
-as [ADR 002 D3](../../adr/002-plugin-scope.md) requires. Provider keeps the
-implementation, the catalog and the rules.
+as [ADR 002 D3](../../adr/002-plugin-scope.md) requires. Each provider keeps its
+implementation, its catalog and its rules.
 
 **Contract (language-neutral).** A process host port, no instance key, provided
-by Provider: operation `selectableModels`, asynchronous, request `{}`, reply
+by Provider in the product profile and by the configured model profile from its
+model file: operation `selectableModels`, asynchronous, request `{}`, reply
 `{models: ModelCapabilitySnapshot[]}`. The element is the existing
 `ModelCapabilitySnapshot` — `{target: {providerId, modelId}, capabilities:
 ModelCapabilities, reasoning?, serviceTier?}` — not a new model type: it already
@@ -520,7 +524,7 @@ limits (§3.5), so the existing `capability_snapshot` conversion always succeeds
 The caller passes its cancellation token; cancelling it cancels the read and
 returns `Cancelled`.
 
-**Rules it applies.** The candidates are the providers default resolution
+**Rules Provider applies.** The candidates are the providers default resolution
 considers: every account provider the managed package advertises and every static
 provider `provider.list` returns. Each model comes from the same per-provider
 catalog read as `provider.catalog` (`catalog_for`), so bundled substitution,
@@ -536,6 +540,14 @@ A model appears only if `select`, `configuration`, `apply_preferences`, the
 per-request check and `auxiliaryModel` accept it at the same read. Execution
 remains authoritative: a later write can make a model unselectable, and the
 consumer passes the ID back to Provider, which re-checks.
+
+**Rules the configured profile applies.** Its candidates are every provider and
+model entry of the model file, ordered by provider and then model id. The file
+requires both limits, so each entry is returned with them; it declares no other
+capability, so entries carry the text defaults. That profile has no account,
+route, disable or preference input, and the read adds no such test: the file's
+validation and its rule are its own page's
+([aimux](../../../crates/dim-agent-aimux/README.md)).
 
 This read is not [#560](https://github.com/arcships/dim/issues/560)'s validation
 contract. That contract (§3.7) takes an admitted persisted static record and an explicit
@@ -581,7 +593,9 @@ non-chat rules. The read adds no state, cache, notification, crate or module.
 
 **Rust binding.** The port is defined in `crates/dim-agent-capabilities/src/host.rs`
 beside `ModelSelectionHost`. Provider provides it in `ProviderPlugin::apply`, and
-the App Server catalog registers it as the Rust-only name `selectableModelsHost`
+the configured model profile (`dim-agent-aimux`) provides it from the entries of
+its model file, so both deployments answer the same read. The App Server catalog
+registers it as the Rust-only name `selectableModelsHost`
 (no cross-language binding before
 [#4](https://github.com/arcships/dim/issues/4)):
 

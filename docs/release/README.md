@@ -1,8 +1,62 @@
 # Release packaging
 
-Dim uses self-hosted runners for PR checks and the complete GitHub release workflow. npm publication stays disabled in `.github/workflows/npm-publish.yml.disabled`. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) walks through publishing a `-alpha.N` version end to end (Chinese).
+Dim uses self-hosted runners for PR checks, alpha builds and npm package verification. Only an explicitly enabled npm publication job uses a GitHub-hosted runner. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) covers the alpha channels and local publication alternative (Chinese).
 
 The source, including the Dim account plugin, uses MIT. An account-enabled distribution differs from the API-key one only by the OAuth client IDs compiled in from repository secrets.
+
+## Release skills
+
+Both skills live in this repository and travel with its release workflow. Use the requested stage explicitly:
+
+| Request | Skill | Result |
+| --- | --- | --- |
+| Choose the next alpha and prepare its version PR | [dim-release](../../.agents/skills/dim-release/SKILL.md) | Committed, consistent metadata and a PR into `main`; no tag/build/publication |
+| Build a GitHub draft or publish its npm packages | [dim-release](../../.agents/skills/dim-release/SKILL.md) | The authorized CI stage, using the immutable release version and original archives |
+| Choose the alpha route, or explicitly build/publish on a local Mac | [dim-alpha-release](../../skills/dim-alpha-release/SKILL.md) | CI by default; the local command only when that route is requested |
+
+Example agent requests:
+
+```text
+Use $dim-release to prepare the next alpha version PR. Select an unused version,
+synchronize the metadata and run its consistency checks. Do not merge, tag,
+dispatch a build or publish.
+
+Use $dim-release to build a GitHub prerelease draft from the verified release
+commit on main. Inspect the artifacts and stop before publishing it or npm.
+
+Use $dim-release to publish the existing GitHub prerelease vX.Y.Z-alpha.N to npm.
+Use its original packages and the configured OIDC workflow; do not rebuild them.
+
+Use $dim-alpha-release for a local Mac dry run only. Build and validate the alpha;
+do not publish to npm or create GitHub tags/Releases.
+```
+
+If an agent does not list a skill, ask it to read the linked repository `SKILL.md` by path. An explicit end-to-end publication request can authorize the complete workflow; a preparation or review request does not. Existing authorization does not need to be requested again at each stage.
+
+## Version preparation
+
+The CI route uses an explicit committed `X.Y.Z-alpha.N`. It does not select, bump or write back versions. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
+
+For the next alpha, inspect registry versions across `dimcode-alpha`, `dimcode-web`, the six platform packages and legacy `dimcode`, plus reserved remote tags/GitHub Releases and open release PRs. Continue an existing PR for the same preparation task; otherwise increment the highest reserved alpha numerically. A partial publication reserves its version too. Do not infer availability from the checkout's version or a dist-tag alone. Reuse the matching release version and original archives for a CI retry instead of allocating another number. Keep the existing legacy-beta compatibility guard.
+
+Prepare a normal version PR from `origin/main`, synchronizing:
+
+| File | Fields |
+| --- | --- |
+| `Cargo.toml` | `[workspace.package].version` |
+| `Cargo.lock` | Generated versions of packages inheriting the workspace version; refresh with Cargo metadata |
+| `npm/package.json` | `version` and every exact `optionalDependencies` version |
+| `runtime/package.json` | `version` |
+| `runtime/package-lock.json` | Root `version` and `packages[""].version` |
+
+Explicitly versioned crates such as `dim-agent-types` keep their own version. The npm source template keeps the name `dimcode` and the `dim`/`dimcode` bins: collection selects `dimcode-alpha`/`dima` for an alpha. Do not change Node/Rutis versions or unrelated dependencies as part of the product bump. The skill provides executable consistency checks; metadata-only preparation needs no release build.
+
+```text
+version PR -> required CI -> merge into main -> annotated vX.Y.Z-alpha.N tag
+           -> self-hosted build -> inspect GitHub draft -> authorized publication
+```
+
+The local Mac route differs: `publish-alpha.mjs` selects a version and temporarily updates these product fields, then restores them without committing. Do not use it to prepare a CI version PR. Source changes after tagging need a new version and tag; existing tags and published package bytes are immutable.
 
 ## Upgrade compatibility
 
@@ -50,8 +104,10 @@ Workflows use GitHub's [default self-hosted OS and architecture labels](https://
 
 All runners need a current GitHub Actions runner, Git, rustup, a C/C++ toolchain, tar and Bash. Actions installs Node from `.node-version`; Rust is pinned by `rust-toolchain.toml`, and release jobs install their Rust target. PR runners must be isolated from release credentials and private networks. Apply GitHub's approval policy before running untrusted PRs on self-hosted machines.
 
+Native release runners also need `cargo-about` 0.9.3 (`cargo install cargo-about --version 0.9.3 --locked`). It generates Rust distribution notices; PR script checks do not need it. [cargo-about generation](https://embarkstudios.github.io/cargo-about/cli/generate/index.html).
+
 - macOS: install Xcode Command Line Tools and accept the Xcode license. Apple Clang and its SDK build both architectures.
-- Linux: provision a GNU/Linux baseline suitable for the intended users. On Debian/Ubuntu install `build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu`. The ARM64 job selects that cross compiler, archiver and linker; it does not require emulation. Install `gh` for release assembly.
+- Linux: provision a GNU/Linux baseline suitable for the intended users. On Debian/Ubuntu install `build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu`. The ARM64 job selects that cross compiler, archiver and linker; it does not require emulation. Install `gh` and `jq` for release assembly and npm verification.
 - Windows: install Git for Windows (Bash and tar), PowerShell 7, Visual Studio Build Tools with the x64 and ARM64 MSVC tools and Windows SDK, LLVM/clang-cl, and NASM for x64 assembly. Put `clang-cl` and `nasm` on the runner's PATH. The workflow configures `amd64` or `amd64_arm64` and selects the target MSVC linker by full path to avoid Git Bash's unrelated `link.exe`. [Windows native dependency requirements](https://aws.github.io/aws-lc-rs/requirements/windows.html).
 
 Cross-built executables are inspected for their ELF, Mach-O or PE target architecture. Staging runs `dimcode --version` on native builds. Cross-target version execution and target-system runtime acceptance require the corresponding system; a successful cross build alone is not that acceptance. Record and verify OS/libc baselines before declaring installation support.
@@ -62,12 +118,12 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 ### Action pins and updates
 
-External Actions in `ci.yml`, `release.yml` and the disabled npm publication workflow use full commit SHAs. PR checks use the same policy because their Actions execute on persistent self-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
+External Actions in `ci.yml`, `release.yml` and `npm-publish.yml` use full commit SHAs. PR checks use the same policy because their Actions execute on persistent self-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
 
 Update an Action in a normal pull request:
 
 1. Select a release in the Action's original upstream repository. Review its release notes and the changes since the pinned commit, including runner requirements and input changes.
-2. Resolve the release tag to its commit. For example, `git ls-remote https://github.com/actions/checkout.git 'refs/tags/v6.1.0' 'refs/tags/v6.1.0^{}'` shows the commit; for an annotated tag use the peeled `^{}` entry, not the tag object's SHA. Verify the commit in the upstream repository, then update every use of that Action and its version comment together. Keep npm publication disabled.
+2. Resolve the release tag to its commit. For example, `git ls-remote https://github.com/actions/checkout.git 'refs/tags/v6.1.0' 'refs/tags/v6.1.0^{}'` shows the commit; for an annotated tag use the peeled `^{}` entry, not the tag object's SHA. Verify the commit in the upstream repository, then update every use of that Action and its version comment together. Keep `NPM_ALPHA_PUBLISH_ENABLED` unset or `false` while validating publication changes.
 3. Run `node --test scripts/*.test.mjs`, review the workflow diff and require PR CI to pass before merging. A change to release-only behavior also needs the affected platform's release-build validation before shipping.
 
 The release script suite rejects external Action references that are not full commit SHAs, including those in disabled workflows. Upstream tag movement never updates a pin automatically.
@@ -143,7 +199,7 @@ Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's
 
 Accepting contributions from forks or outside collaborators requires moving their checks to ephemeral runners first.
 
-`release.yml` runs when a `v*.*.*` tag is pushed, or when manually dispatched with an existing tag:
+`release.yml` builds only `vX.Y.Z-alpha.N` tags, on tag push or manual dispatch with an existing alpha tag. Beta and stable tags are rejected. Every build and draft assembly job uses a self-hosted runner:
 
 ```sh
 gh workflow run release.yml --ref main -f tag=vVERSION
@@ -153,7 +209,7 @@ Preflight checks the exact tag commit is reachable from `origin/main`, and verif
 
 The draft receives seven native archives (six platforms and the Web workspace), eight original npm tarballs (six platform packages, `dimcode-web` and the wrapper), `release-manifest.json` and `SHA256SUMS`: seventeen attachments in total. `SHA256SUMS` covers the native archives; the manifest records digests for both native and npm archives. npm tarballs are not published to a registry by this workflow. Existing releases, including drafts, are rejected to avoid replacing attachments. If an upload leaves an incomplete draft, inspect it and remove that draft only when authorized before retrying; keep its tag.
 
-All Actions artifacts, including the disabled npm publication receipt, use `retention-days: 1`. GitHub Release attachments persist independently of Actions retention. A retry after artifacts expire must rebuild all targets.
+All Actions artifacts, including the npm publication receipt, use `retention-days: 1`. GitHub Release attachments persist independently of Actions retention. A retry after build artifacts expire must rebuild all targets; npm publication can download the original Release attachments again.
 
 ## Local packaging
 
@@ -162,7 +218,8 @@ One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock
 ```sh
 DIM_RELEASE_BUILD=1 cargo build --release --locked -p dimcode
 node scripts/stage-plugins.mjs staging/local-plugins
-node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --plugins staging/local-plugins
+node scripts/rust-notices.mjs staging/rust-notices.txt
+node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --plugins staging/local-plugins --rust-notices staging/rust-notices.txt
 node scripts/pack-release.mjs staging/local release/local
 node scripts/stage-web.mjs release/web 0.1.0 FULL_SOURCE_COMMIT
 ```
@@ -176,7 +233,8 @@ These commands stage an API-key-only distribution. An account build is the same 
 ```sh
 DIM_RELEASE_BUILD=1 DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release --locked -p dimcode
 node scripts/stage-plugins.mjs staging/local-plugins
-node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account --plugins staging/local-plugins
+node scripts/rust-notices.mjs staging/rust-notices.txt
+node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account --plugins staging/local-plugins --rust-notices staging/rust-notices.txt
 ```
 
 In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` repository secrets. Every target is then an account build; without both secrets CI builds API-key-only payloads, and a partial configuration fails. The IDs are compiled into the executable and never enter manifests. The account build adds no runtime, package or Node. Each platform package and native archive holds the executable, the default configuration file and the default plugins (`scripts/stage-plugins.mjs`, then `stage-release.mjs --plugins DIR`); the Node and Python runtimes are not bundled: RuntimeManager downloads them, verified against pins compiled into Dim, into the home ([RuntimeManager](../design/plugins/RuntimeManager.md)):
@@ -187,12 +245,13 @@ default-plugins.json          # the default configuration file, passed as `--def
 plugins/<name>/               # the default plugins with their production node_modules
 LICENSE
 NOTICE
+licenses/                     # Rust dependency texts and vendored notices
 release-manifest.json         # `account` records whether this is the account build
 ```
 
 The alpha publisher stages the plugin tree once on the build host and gives every platform the same copy, as `publish-alpha.mjs` does, so it runs `stage-plugins.mjs --portable`. That refuses, before installing anything, a listed plugin whose `package-lock.json` names a package with `os`, `cpu` or `libc`: one shared tree cannot carry another platform's package. `release.yml` stages on each platform's own runner and does not pass the flag.
 
-`pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets and `release-web` from `stage-web.mjs`, checks identical source/version/toolchain/account provenance and artifact digests, creates the thin npm wrapper, then validates all seven npm archives without publishing.
+`pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets and `release-web` from `stage-web.mjs`, checks identical source/version/toolchain/account provenance and artifact digests, creates the thin npm wrapper, then validates all eight npm archives without publishing.
 
 ```sh
 node scripts/collect-release.mjs staging/platforms staging/complete
@@ -202,26 +261,61 @@ node scripts/check-native.mjs staging/complete/native VERSION FULL_SOURCE_COMMIT
 
 The wrapper resolves the installed platform optional dependency and forwards arguments, terminal streams and exit status. Installation runs no lifecycle scripts or executable downloads. Package checks include a real offline npm install of local tarballs.
 
-## Disabled npm publication
+## Alpha npm publication
 
-`.github/workflows/npm-publish.yml.disabled` is not registered and cannot run. Do not activate it until package ownership and npm trusted publishing are configured and activation is explicitly requested. It is the only workflow intended to use a GitHub-hosted `ubuntu-latest` runner. No npm token is injected into self-hosted build jobs.
+The registered `.github/workflows/npm-publish.yml` accepts only published alpha GitHub Releases and runs only from `main`. Its default is verification on `[self-hosted, linux, x64]`. The GitHub-hosted `ubuntu-latest` publication job is scheduled only when both the `publish` input and repository variable `NPM_ALPHA_PUBLISH_ENABLED` are `true`. Leave the variable unset or `false` during setup. No npm token or OIDC permission is given to a self-hosted job.
 
-Future activation needs one trusted publisher for `dimcode`, `dimcode-web` and each of the six platform packages, bound to `arcships/dim`, `npm-publish.yml` and `npm-release`. [npm trusted publishing documentation](https://docs.npmjs.com/trusted-publishers/).
+```text
+alpha tag -> self-hosted builds -> draft GitHub Release -> maintainer publishes prerelease
+          -> self-hosted package verification
+          -> publish=true + NPM_ALPHA_PUBLISH_ENABLED=true
+          -> GitHub-hosted npm OIDC publication (no build or tests)
+```
+
+Configure each of these eight existing npm packages: `dimcode-alpha`, `dimcode-web`, `dimcode-darwin-arm64`, `dimcode-darwin-x64`, `dimcode-linux-arm64`, `dimcode-linux-x64`, `dimcode-windows-arm64` and `dimcode-windows-x64`. The `dimcode` package is not part of this workflow.
+
+In each package's npm Settings → Trusted publishing, add GitHub Actions with:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `arcships` |
+| Repository | `dim` |
+| Workflow filename | `npm-publish.yml` |
+| Environment name | `npm-release` |
+| Allowed action | Allow direct `npm publish` |
+
+Use only the filename, without `.github/workflows/`. npm requires Node >=22.14.0 and npm >=11.5.1; the workflow uses `.node-version` and checks npm's minimum version. A new trusted publisher must complete its first publication within two days, so configure it close to the intended release. No `NPM_TOKEN` or `NODE_AUTH_TOKEN` secret is required. The repository must be public for npm's automatic provenance generation. [npm trusted publishing documentation](https://docs.npmjs.com/trusted-publishers/).
+
+Create the GitHub `npm-release` environment and restrict it to the `main` branch. This configuration has no required environment reviewer: repository write access and an explicit workflow dispatch with `publish=true` authorize publication. After all eight publishers are configured and a release is ready, set the repository Actions variable `NPM_ALPHA_PUBLISH_ENABLED=true`. Setting it alone does not schedule a runner or publish a package.
 
 Release construction and npm publication are separate operations. Review and publish the GitHub draft first. The npm workflow has only `workflow_dispatch`; it takes the tag of an existing **non-draft** GitHub Release and can run from `main` regardless of that release's age:
 
 ```sh
-gh workflow run npm-publish.yml --ref main -f release_tag=vVERSION
+gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N
 ```
 
-This command becomes available only after explicit workflow activation. Publication downloads the original eight `.tgz` attachments and manifest from the specified Release, resolves the tag's commit, and verifies published status, exact package names, versions, source commit and digests before any registry write. It rechecks Release status and tag identity immediately before publishing. It does not rebuild packages or consume expiring Actions artifacts. [Release attachment download](https://cli.github.com/manual/gh_release_download).
+The command above performs verification only and never schedules a GitHub-hosted runner. It downloads the original eight `.tgz` attachments and manifest, then checks published status, exact package names, versions, source commit and digests with `publish-npm.mjs --check-release`. It also reads npm registry metadata to reject conflicting published bytes and an alpha that would overtake the existing `dimcode` beta. It neither rebuilds nor publishes. [Release attachment download](https://cli.github.com/manual/gh_release_download).
 
-Publication validates every package before the first registry write. A retry compares an already published version's SHA-512 integrity with the original local archive and skips an exact match. A different archive, authentication error or network error fails; only an explicit registry E404 permits publication. All platform packages precede `dimcode`; versions are `X.Y.Z`, `X.Y.Z-beta.N` or `X.Y.Z-alpha.N` and publish to `latest`, `beta` or `alpha` respectively, so each channel upgrades only within itself. An alpha must stay below the newest `dimcode` beta on the registry, because installed TypeScript betas upgrade to the highest prerelease of any identifier; publication checks this before any write.
+For an explicitly authorized publication, with the repository variable enabled:
 
-`npm-packages` contains eight tgz files and a release manifest; `native-packages` contains seven native archives, the matching manifest and `SHA256SUMS`. The GitHub Release retains all fifteen original archives and the shared metadata independently of Actions retention. Future npm publication uploads an Actions receipt containing the Release ID, tag and package digests; that receipt also expires after one day.
+```sh
+gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N -f publish=true
+```
+
+The self-hosted job verifies the originals first. The GitHub-hosted job independently downloads the original archives and manifest directly from the GitHub Release, rechecks the alpha tag and Release identity, validates the packages and registry state again, and publishes with npm OIDC. It consumes no package bytes from the self-hosted runner and runs no build, install or test suite. Retrying the workflow downloads the originals from the Release again, independently of any previous run's artifact retention.
+
+Publication validates every package before the first registry write. A retry compares an already published version's SHA-512 integrity with the original local archive and skips an exact match. A different archive, authentication error or network error fails; only an explicit registry E404 permits publication. The six platform packages and `dimcode-web` precede `dimcode-alpha`; all eight use the `alpha` dist-tag. `dimcode`, `latest` and `beta` are untouched. An alpha must stay below the newest `dimcode` beta on the registry, because installed TypeScript betas upgrade to the highest prerelease of any identifier; publication checks this before any write.
+
+`npm-packages` contains eight tgz files and a release manifest; `native-packages` contains seven native archives, the matching manifest and `SHA256SUMS`. The GitHub Release retains all fifteen original archives and the shared metadata independently of Actions retention. npm publication uploads an Actions receipt containing the Release ID, tag and package digests; that receipt also expires after one day.
 
 ## Public source export
 
 `scripts/export-public-source.sh OUTPUT.tar.gz` exports a whitelist of tracked public source, project skills and documentation from HEAD, without `.git`, repository history, private plugins, caches or staging directories. This creates a local archive only and does not push to any remote.
 
-Native archives and platform npm packages include the vendored terminal libraries’ Apache-2.0 license and notices under `licenses/grok-build/`, referenced by the root `NOTICE`. The extra Swift syntax asset is excluded pending license verification.
+## Distribution notices
+
+The wrapper, native packages and Web package include the root `NOTICE`. Native archives and platform npm packages retain Rust dependency notices under `licenses/RUST-THIRD-PARTY-NOTICES.txt`, Aimux's MIT license under `licenses/aimux/` and the vendored terminal libraries' Apache-2.0 license and notices under `licenses/grok-build/`. The extra Swift syntax asset is excluded pending license verification. Default TypeScript plugins keep the license files supplied by their npm packages.
+
+Run `node scripts/rust-notices.mjs staging/rust-notices.txt` before staging native payloads and pass `--rust-notices staging/rust-notices.txt` to `stage-release.mjs`. CI and the local alpha publisher do this automatically. The generator uses pinned `cargo-about`, the locked workspace's full feature and target graph, and `scripts/release-licenses.toml`; it excludes dev-only dependencies. It preserves the generated license texts and supplements them with the crates' original license, copyright and notice files, including nested native dependencies. Generation errors stop packaging; staging refuses missing or empty Rust notices. This is distribution output, while `deny.toml` remains the license-policy gate.
+
+Every Web production build emits `THIRD-PARTY-NOTICES.txt` from the installed production package licenses. The conservative inventory includes every non-dev lock entry, including type packages, and skips optional packages absent on the build host. It includes Geist and Geist Mono's SIL Open Font License and any upstream notices. Packages that omit license files use the exact-version source notices recorded under `web/licenses/`; a missing notice fails the build. The file is shipped in both Web archives, in the npm package and in embedded Web builds. Staging refuses a frontend build without it, and the release manifest covers its digest.

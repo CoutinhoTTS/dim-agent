@@ -27,7 +27,12 @@ Settings · Interface
   Thinking details   collapsed
 ```
 
-Collapsed tool groups retain their existing header and member cards. Summary
+Collapsed tool groups retain their existing header and member cards. The header
+appends the first program name of each shell call, without arguments, executable
+paths, script bodies or output. Names stay in first-call order, with repetitions
+counted (`python ×2, rg`), including shell calls classified as reads or searches.
+The header remains one terminal row and keeps its disclosure when truncated.
+Other tools retain their existing header summaries. Summary
 adds one row per call, in call order, naming its tool and input target or command,
 without output, diffs or script bodies. Each row truncates to one terminal row;
 a multiline command shows its first nonblank line followed by `…`. Expanded

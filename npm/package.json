@@ -6,7 +6,7 @@
   "repository": { "type": "git", "url": "git+https://github.com/arcships/dim.git" },
   "type": "module",
   "bin": { "dim": "bin/dimcode.mjs", "dimcode": "bin/dimcode.mjs" },
-  "files": ["bin", "README.md", "LICENSE", "plugin.d.ts", "branch-services.d.ts"],
+  "files": ["bin", "README.md", "LICENSE", "NOTICE", "plugin.d.ts", "branch-services.d.ts"],
   "typesVersions": { "*": { "plugin": ["plugin.d.ts"] } },
   "engines": { "node": "^22.19.0 || >=23.11.0" },
   "peerDependencies": { "@arcships/rutis": "~0.19.0" },

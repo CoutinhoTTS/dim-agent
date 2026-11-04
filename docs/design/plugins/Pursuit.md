@@ -15,7 +15,7 @@ Requirement ([feature list](../../feature-list.md), Agent behavior): keep workin
 | P3 | Evaluate when the worker's completion report stops Goal | That is the only point where the worker decides the goal is done. A worker's `blocked` stands (it needs the user); a limit, or the user's own interrupt or pause, is not a completion and starts nothing |
 | P4 | Under the evaluator judge the worker's `completed` is a request; the status stays `active` | Only the evaluator completes the goal. This is the one exception to Goal's fold rule, recorded in [Goal A16](Goal.md#appendix-e-assumptions) with this design (maintainer decision, 2026-10-22) |
 | P5 | The evaluator is a child branch cut at that `turn/end` | It sees what was done and why, runs under the same policy, and is an ordinary branch created with `treeCommands.create` |
-| P6 | The evaluator writes its conclusion to the working branch as input; Goal there decides | A branch reads only its own events; cross-branch communication is input by id ([branch TypeScript binding](../branch-typescript.md#subscription-rebuild-and-recovery), item 6). Callers write, owners decide |
+| P6 | The evaluator writes its conclusion to the working branch as input; Goal there decides | A branch folds only its own events; cross-branch communication is input by id ([branch TypeScript binding](../branch-typescript.md#subscription-rebuild-and-recovery), item 6), and a line reads the line it was cut from through a tool result ([Timeline branches](../timeline-branches.md) §6). Callers write, owners decide |
 
 ## 2. User flow
 
@@ -102,7 +102,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 No business meaning in core | No change to Timeline, Dispatcher, TimelineTree, InputQueue or Loop |
 | §4.5 Batch | Decisions follow consumed events in sequence order; each outcome is one input |
 | §4.6 Context only from handed-off events | The worker sees the conclusion only through adopted inputs; the evaluator's reply stays on its branch |
-| §4.7 Public events and services only | Goal reads only its own branch's public events and calls exported services; no branch reads another |
+| §4.7 Public events and services only | Goal reads only its own branch's public events and calls exported services; no part folds another branch's facts. The evaluator's reading of the worker's work is a tool result on its own branch, not a fold ([Timeline branches](../timeline-branches.md) §6) |
 | §4.8 Requirements to mechanism owners | None |
 | §4.9 Only facts later decisions use enter the Timeline | No new event type; `branch/create` records the evaluation, the conclusion input is what the owner decides on, the follow-up is what makes the evaluator conclude |
 | §1 Capability and App Server boundary | No new Capability; nothing in App Server |
