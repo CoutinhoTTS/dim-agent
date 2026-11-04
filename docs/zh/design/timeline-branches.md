@@ -208,6 +208,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - **什么算新活动。** 只有两类事件算：操作者输入，即带 `user` 内容的 `input/message`；以及工具调用。创建调用的 `step/tool-use` 写在 `opened` 之前，所以从不会被算进去。其他都不单独算：父线的文本、它的轮次结束、只有块的输入（名册、来自各线的消息）、以及创建调用的结果。规则是：父线行动时、或操作者告诉父线事情时，线被告知；只为开启它的那一轮（它的创建调用结果、文本和轮次结束）则从不告知，否则每条线都会白白读一次父线，并学会忽略这个块。
 - **检查方式。** 父线的事实通过唯一的事件查询读取（[ADR 019](../adr/019-event-query.md)）：该分支的 `input/message` 和 `step/tool-use` 事件，从新到旧分页，直到有一个符合条件，或读取到达 `from`。不折叠任何其他线的事件。
 - **写入。** 一条带 key 的 Append，key 为 `branch:parent`，经 `TreeCommands.input` 写在这条线自己身上，属性是父线的 id、`head` 和 `after`。同一 key 的后一个块会在带 key 的基线里取代前一个。写完之后折叠记下新头部和新输入，所以队列里的第二次决定不会再写。
+- **开启时。** 子分支继承的前缀里持有活的 `branch:parent` 块时，子分支的开启输入在身份块之后再带一个原始块：key 为 `branch:parent`，活的、不 retire，名字是开出它的那条线 P，`head` 和 `after` 都等于切点 H。它像身份块取代继承的名册那样取代继承的块（§7.1），所以这条线最新的 `branch:parent` 总是名字它自己的父线，它的 `told` 从 H 开始，而 H 等于 `opened`；压缩重放的是这个块，从不重放上面那个，P 移动时照常的新块取代它。只有嵌套的线才会拿到它：从 `main` 切出来的线不继承任何 `branch:parent` 块，它的开启输入逐字节不变。TimelineTree 在写身份块的地方组合它，从子分支继承的前缀的带 key 状态判断这个 key 是否活着，绝不看渲染后的历史。它在开启子分支时读那份状态，如同读一条恢复的分支的 facts；读取失败时这次创建和任何其他开启失败一样失败（branch/create-failed）。
 - **随后发生什么。** 运行中的线在下一次模型请求时拿到这个块。空闲的线不会被唤醒：这个块在它下一轮的第一个请求里、先于开启那一轮的输入被消费，这是有文档记录的 Append 规则（[session access](contracts/session-access.md)、[Loop](../../architecture/rust-agent/plugins/Loop.md)）。重载不写任何东西；重启最多写当时已经该写的那个块。`main` 拿不到块：它上面没有东西。
 - **记录。** 这条线发送的是它自己配置里持有的 System。指南在每条线上都一样（§7.3），所以 System 没有相对继承来的那份发生移动的线，引用的是记录它的那份配置，无论记录在哪条线的链上；线的 System 移动时，它像任何分支一样写出自己的 `context/configured`。
 - **被否决的替代方案。**
@@ -386,6 +387,7 @@ WorkspaceTools 不变。
 | 名册 | `P`，`branch:line` | Append | `<dim-branch-lines branch="main">` / `Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it can read your work after that point, and you can read its.` / `- C1: <目的的第一行，最多 120 个字符>` / … / ``They message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you.`` / `</dim-branch-lines>` |
 | 名册，没有未结束的线 | `P`，`branch:line` 退役 | Append | `<dim-branch-lines branch="main">` / `All lines you opened have ended.` / `</dim-branch-lines>` |
 | 父线块 | `C`，`branch:parent` | Append | `<dim-branch-parent branch="P" head="H" after="A">` / `Line P has new activity: it was at H when this was written, and you have read it to A. Read what is new with the branch tool (action read, branch "P"); with no after, the read continues from A. Read it when what P did changes what you do, and before your final message; do not page through all of P's work.` / `</dim-branch-parent>` |
+| 父线块，嵌套线开启时 | `C`，开启输入，身份块之后，`branch:parent` | Queue | `<dim-branch-parent branch="P" head="H" after="H">` / `Line P has no new activity since you were cut from it at H. Parent blocks above this point were written for P and are not yours.` / `</dim-branch-parent>` |
 | 消息 | 接收方，无 key | `append` 或 `steer` | `<dim-branch-message from="C" to="P">` / `<content>` / `</dim-branch-message>` |
 | 最终消息 | `P`，无 key | Steer | `<dim-branch-message from="C" to="P" final="true">` / `<content>` / 空行 / `Line C ends with this message.` / `</dim-branch-message>` |
 | 空闲通知 | `P`，无 key | Steer | `<dim-branch-idle branch="C" status="completed\|failed\|cancelled">` / `Line C's turn ended (<status>) without a message to you, and C is waiting. Read it if you need its state; message it with mode "steer" to give it more work, or leave it.` / `</dim-branch-idle>` |
@@ -611,7 +613,7 @@ BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是
 9. 两条线编辑同一个文件：后编辑的那条得到 `file_modified_since_read`（已有行为）。
 10. v1、v2 客户端看不到新事件。v3 历史包含它们，`hello.features` 列出 `session.branch_end`。
 11. 读取父线：一条线第一次读它被切出来的那条线时，从切点之后开始；低于切点的显式 `after` 会抬到切点；高于目标头部的显式 `after` 由工具结果拒绝并报出该头部，不存任何东西；不带 `after` 的读取从调用方上一次的 `nextCursor` 继续，两个方向都一样，并且重载后仍然保留；`main` 的 `after: 0` 从一条线的开头重读。
-12. 父线块：空闲的线被告知父线动了而不会被开启一轮，块在它下一轮的第一个请求里、先于开启那一轮的输入；运行中的线在下一次模型请求时拿到它，且只拿一次；被持有的块不会被覆盖；被消费的块之后，新的头部带来新的块；已经读到头部的线不会被通知；只为开启这条线的那一轮不算活动，而之后的工具调用或操作者输入算；没有移动的重载不写任何东西，有到期块的重载写一个；结束中的线和 `main` 都拿不到；对这条线的一次压缩之后块会重放。
+12. 父线块：空闲的线被告知父线动了而不会被开启一轮，块在它下一轮的第一个请求里、先于开启那一轮的输入；运行中的线在下一次模型请求时拿到它，且只拿一次；被持有的块不会被覆盖；被消费的块之后，新的头部带来新的块；已经读到头部的线不会被通知；只为开启这条线的那一轮不算活动，而之后的工具调用或操作者输入算；没有移动的重载不写任何东西，有到期块的重载写一个；结束中的线和 `main` 都拿不到；对这条线的一次压缩之后块会重放；嵌套线的开启输入带着名字它自己父线、切点为头部的那个块，而从 `main` 切出来的线拿不到。
 13. 父线块在评审者线上不改变任何 Goal 决定：它是一条 Append 输入，第一个块不是 goal 标记，key 也不是 goal key，所以折叠的 `driving`、`lastOperator`、计数和结论都不变（`goal.test.mjs`）。
 
 Goal 流程，放在 `goal.test.mjs` 和 `transport_flow/goal.rs` 中（§7.4）：

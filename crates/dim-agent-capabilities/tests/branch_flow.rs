@@ -2974,6 +2974,12 @@ fn parent_block(text: &str) -> (u64, u64) {
     };
     (attr("head"), attr("after"))
 }
+/// The line a `<dim-branch-parent>` block names.
+fn parent_block_line(text: &str) -> String {
+    let start = text.find("branch=\"").expect("the block names its branch") + "branch=\"".len();
+    let rest = &text[start..];
+    rest[..rest.find('"').expect("the attribute ends")].to_string()
+}
 /// The parent block inputs on a line, by event sequence.
 fn parent_block_events(events: &[Arc<AgentEvent>]) -> Vec<(u64, String)> {
     events
@@ -4007,7 +4013,7 @@ async fn an_after_past_the_targets_head_is_refused_and_the_cursor_stays() {
         .unwrap();
     // A host line writes no idle notice, so main has no turn in flight and
     // its head stays where the test reads it.
-    let line = open_host_line(&session, "check the parser").await;
+    let line = open_host_line(&session, "main", "check the parser").await;
     let first = page_of(&tool_call(&session, &line, r#"{"action":"read","branch":"main"}"#).await);
     let cursor = first["nextCursor"].as_u64().unwrap();
     let head = session.sequence("main").unwrap();
@@ -4450,10 +4456,10 @@ async fn two_parent_turns_while_the_line_is_idle_write_one_block() {
     patient(agent.close()).await.unwrap();
 }
 
-/// A host line under `main`, opened at its current head and settled.
-async fn open_host_line(session: &Session, purpose: &str) -> String {
-    let at = session.sequence("main").unwrap();
-    let line = soon(session.branch("main".into(), at, options(purpose)))
+/// A host line under `parent`, opened at its current head and settled.
+async fn open_host_line(session: &Session, parent: &str, purpose: &str) -> String {
+    let at = session.sequence(parent).unwrap();
+    let line = soon(session.branch(parent.into(), at, options(purpose)))
         .await
         .unwrap();
     quiet(session, &line).await;
@@ -4495,7 +4501,7 @@ async fn a_move_while_a_block_is_held_is_written_after_the_block_is_consumed() {
         .unwrap();
     // A host line writes no idle notice, so main's turn stays where the test
     // holds it and cannot be the signal that writes the next block.
-    let line = open_host_line(&session, "watch the tests").await;
+    let line = open_host_line(&session, "main", "watch the tests").await;
     move_main(&session).await;
     let (first, _, first_head) = settle_line(&session, &line).await;
     move_main(&session).await;
@@ -4538,7 +4544,7 @@ async fn a_move_while_a_block_is_held_is_written_after_the_block_is_deleted() {
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
-    let line = open_host_line(&session, "watch the tests").await;
+    let line = open_host_line(&session, "main", "watch the tests").await;
     move_main(&session).await;
     let (first, _, first_head) = settle_line(&session, &line).await;
     move_main(&session).await;
@@ -4584,7 +4590,7 @@ async fn a_move_while_a_block_is_held_is_written_after_the_block_is_interrupted(
     let session = patient(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
-    let line = open_host_line(&session, "watch the tests").await;
+    let line = open_host_line(&session, "main", "watch the tests").await;
     move_main(&session).await;
     let (first, _, first_head) = settle_line(&session, &line).await;
     move_main(&session).await;
@@ -4620,6 +4626,409 @@ async fn a_move_while_a_block_is_held_is_written_after_the_block_is_interrupted(
         "the block names the head the parent reached while the first was held: {blocks:?}"
     );
     patient(agent.close()).await.unwrap();
+}
+
+/// The blocks of a line's opening input: the message that carries its
+/// identity, each as its key, its text and whether it retires the key.
+fn opening_blocks(events: &[Arc<AgentEvent>]) -> Vec<(Option<String>, String, bool)> {
+    events
+        .iter()
+        .find_map(|event| {
+            match &event.kind {
+            EventKind::InputMessage(data)
+                if data.blocks.iter().any(|block| {
+                    matches!(block, InputBlock::Raw { key: Some(key), .. } if key == "branch:line")
+                }) =>
+            {
+                Some(
+                    data.blocks
+                        .iter()
+                        .map(|block| {
+                            let InputBlock::Raw { text, key, retire } = block;
+                            (key.clone(), text.clone(), *retire)
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        }
+        })
+        .expect("the line's opening input")
+}
+
+/// A memory store that refuses the read a line's opening makes of the line it
+/// was cut from while armed, so that read can fail: `query` on the armed
+/// line's key with the opening read's kinds
+/// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+/// Every other read, like the boundary checks a creation makes of the same
+/// line, keeps working, so the refusal lands on that read alone.
+#[derive(Default)]
+struct RefuseQueries {
+    memory: MemoryTimelineStore,
+    armed: Mutex<Option<String>>,
+}
+impl RefuseQueries {
+    fn arm(&self, branch: &str) {
+        *self.armed.lock().unwrap() = Some(branch.into());
+    }
+    fn disarm(&self) {
+        *self.armed.lock().unwrap() = None;
+    }
+}
+impl TimelineStore for RefuseQueries {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> dim_agent_runtime::BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn read_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        self.memory.read_page(key, after, limit, through)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        self.memory.read_segments(session_id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        snapshot: RecoverySnapshot,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
+        self.memory.latest_snapshot(key, through, interpreter)
+    }
+    fn read_page_without_request_bodies<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        self.memory
+            .read_page_without_request_bodies(key, after, limit, through)
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<TimelineQueryPage>> {
+        Box::pin(async move {
+            if self.armed.lock().unwrap().as_deref() == Some(key.branch_id.as_str())
+                && query.kinds.as_slice() == ["input/message"]
+            {
+                return Err(AgentError::Storage("injected opening read failure".into()));
+            }
+            self.memory.query(key, query, from, through).await
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_nested_line_is_told_its_own_parent_at_open() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(Arc::new(MemoryTimelineStore::default()))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(Compact)))))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::install(&mut builder);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let outer = open_host_line(&session, "main", "outer line").await;
+    move_main(&session).await;
+    let (_, text, _) = settle_line(&session, &outer).await;
+    assert_eq!(
+        parent_block_line(&text),
+        "main",
+        "the outer line hears main"
+    );
+    let inner = open_host_line(&session, &outer, "inner line").await;
+    let cut = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id == inner)
+        .and_then(|info| info.branch_point)
+        .expect("the inner line's cut");
+
+    // 1. The opening input: the identity, then the block naming the outer line.
+    let events = local_events(&session, &inner).await;
+    let opening = opening_blocks(&events);
+    assert_eq!(
+        opening.len(),
+        2,
+        "the opening input carries the identity and one parent block: {opening:?}"
+    );
+    assert!(
+        opening[0].1.starts_with("<dim-branch-line"),
+        "the identity comes first: {opening:?}"
+    );
+    assert_eq!(
+        opening[1].0.as_deref(),
+        Some("branch:parent"),
+        "the block stays in effect: {opening:?}"
+    );
+    assert!(!opening[1].2, "the block is live, not retired: {opening:?}");
+    let (head, after) = parent_block(&opening[1].1);
+    assert_eq!(
+        (head, after),
+        (cut, cut),
+        "the block reports the cut: {opening:?}"
+    );
+    assert_eq!(
+        parent_block_line(&opening[1].1),
+        outer,
+        "the block names the line that opened it: {opening:?}"
+    );
+    let opening_sequence = events
+        .iter()
+        .find(|event| {
+            matches!(&event.kind, EventKind::InputMessage(data) if data.blocks.iter().any(|block| {
+                matches!(block, InputBlock::Raw { key: Some(key), .. } if key == "branch:line")
+            }))
+        })
+        .expect("the opening input event")
+        .sequence;
+
+    // 2. The line's latest live parent block names its own parent.
+    let latest = parent_block_events(&events)
+        .last()
+        .cloned()
+        .expect("the opening block is on the line");
+    assert_eq!(parent_block_line(&latest.1), outer, "{latest:?}");
+
+    // 3. A compaction replays that block, and never one naming main.
+    for text in ["x".repeat(1500), "y".repeat(1500)] {
+        session
+            .submit(text, InputMode::Queue, &inner)
+            .await
+            .unwrap();
+        soon(session.idle(&inner)).await.unwrap();
+    }
+    let message = baseline_message(&local_events(&session, &inner).await, "branch:parent")
+        .expect("the line compacted and its parent block replayed");
+    let MessageContent::Text(text) = &message.content else {
+        panic!("the parent block is text: {message:?}");
+    };
+    assert!(
+        text.starts_with(&format!(
+            "<dim-branch-parent branch=\"{outer}\" head=\"{cut}\" after=\"{cut}\">"
+        )),
+        "{text}"
+    );
+    assert!(
+        !text.contains("branch=\"main\""),
+        "the replayed block never names main: {text}"
+    );
+
+    // 4. When the outer line moves, the usual block follows, after the cut.
+    patient(session.submit("OUTER-MOVES".into(), InputMode::Queue, &outer))
+        .await
+        .unwrap();
+    patient(session.idle(&outer)).await.unwrap();
+    let blocks = second_parent_block(&session, &inner, opening_sequence).await;
+    let moved = blocks.last().expect("a block after the opening one");
+    assert_eq!(
+        parent_block_line(&moved.1),
+        outer,
+        "the block names the line that opened it: {blocks:?}"
+    );
+    assert_eq!(
+        parent_block(&moved.1).1,
+        cut,
+        "the read cursor is still the cut: {blocks:?}"
+    );
+
+    // 5. A line cut from main gets no such block.
+    let plain = open_host_line(&session, "main", "plain line").await;
+    let plain_events = local_events(&session, &plain).await;
+    let plain_opening = opening_blocks(&plain_events);
+    assert_eq!(
+        plain_opening.len(),
+        1,
+        "a line cut from main carries its identity alone: {plain_opening:?}"
+    );
+    assert!(
+        plain_opening[0].1.starts_with("<dim-branch-line")
+            && plain_opening[0].1.contains("source=\"host\""),
+        "{plain_opening:?}"
+    );
+    assert!(
+        blocks_with(&plain_events, "<dim-branch-parent").is_empty(),
+        "no parent block is written or carried"
+    );
+
+    // 6. The reads still follow the chain.
+    let (code, _) = call(&session, &inner, r#"{"action":"read","branch":"main"}"#).await;
+    assert_eq!(code, "branch_not_kin", "the inner line cannot read main");
+    let page = page_of(
+        &tool_call(
+            &session,
+            &inner,
+            &format!(r#"{{"action":"read","branch":"{outer}"}}"#),
+        )
+        .await,
+    );
+    assert!(
+        !page_sequences(&page).is_empty(),
+        "the inner line reads the line that opened it: {page}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// A read that fails while a nested line opens fails that create: the caller
+/// gets the error, the line the child was cut from records
+/// `branch/create-failed` for it, and that line keeps dispatching, so a later
+/// create under it opens
+/// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_nested_line_whose_opening_read_fails_is_a_failed_create() {
+    let store = Arc::new(RefuseQueries::default());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(store.clone())
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(Compact)))))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::install(&mut builder);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let outer = open_host_line(&session, "main", "outer line").await;
+    // The outer line hears main's move and writes the live parent block the
+    // inner line's opening read looks for; the refusal then fails that read.
+    move_main(&session).await;
+    let (_, text, _) = settle_line(&session, &outer).await;
+    assert_eq!(
+        parent_block_line(&text),
+        "main",
+        "the outer line hears main"
+    );
+    store.arm(&outer);
+    let at = session.sequence(&outer).unwrap();
+    let created = tokio::time::timeout(
+        Duration::from_secs(30),
+        session.branch(outer.clone(), at, options("inner line")),
+    )
+    .await
+    .expect("a hang guard: the failed read must not leave the create waiting");
+    assert!(
+        created.is_err(),
+        "the create reports the failed read: {created:?}"
+    );
+    let events = until_events(&session, &outer, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchCreateFailed(_)))
+    })
+    .await;
+    let failed: Vec<&BranchCreateFailedData> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchCreateFailed(data) => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed.len(), 1, "one failed create is recorded: {failed:?}");
+    let BranchCreateFailedData::Failed { branch, .. } = failed[0] else {
+        panic!("the read failure fails the create: {failed:?}");
+    };
+    assert!(!branch.is_empty(), "{failed:?}");
+
+    store.disarm();
+    let inner = open_host_line(&session, &outer, "inner line").await;
+    let opening = opening_blocks(&local_events(&session, &inner).await);
+    assert_eq!(
+        opening.len(),
+        2,
+        "the later create under the same line opens with its parent block: {opening:?}"
+    );
+    assert_eq!(
+        parent_block_line(&opening[1].1),
+        outer,
+        "the block names the line that opened it: {opening:?}"
+    );
+    soon(agent.close()).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

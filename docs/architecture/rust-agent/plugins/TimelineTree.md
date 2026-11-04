@@ -6,9 +6,10 @@ The TimelineTree plugin registers TimelineTree in every Session and TreeTimeline
 
 Owner: [timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs).
 Owns Session branches, reservations and asynchronous creation/restore/close,
-and a line's end: the identity block in every child's opening input, the
-`info.source` a line was opened with, `branch/end` to `branch/ended` on the
-parent, and the restore rule that leaves an ended line closed
+and a line's end: the identity block in every child's opening input, the parent
+block a nested line is told at open, the `info.source` a line was opened with,
+`branch/end` to `branch/ended` on the parent, and the restore rule that leaves
+an ended line closed
 ([timeline branches §5–§10](../../../design/timeline-branches.md#10-ending-a-line)).
 Provides the TreeCommands/TimelineTreeControl ports. The `branch` tool is
 [BranchTool](BranchTool.md)'s. Its model-facing texts — every child's identity
@@ -33,8 +34,14 @@ ending line. `TreeCommands::end`
 checks only the target: it exists, it is open, and it is not `main`; a line
 that ended writes nothing and answers `branch_ended`. `info` answers for an
 ended line too, and `page` reads an open or ended line from the store at its
-head. Each line's node publishes the sequence of its latest `turn/end`, which
-the line's BranchLine waits on for the parent block (design
+head. A child's opening input is the identity block, and when the prefix it
+inherits holds a live parent block, one more parent block after it naming the
+line that opened it at the cut; the keyed state is read over the chain the child
+inherits, never from the rendered history, while the child opens, as a resumed
+line's facts are, and a failed read fails the create like any other opening
+failure (branch/create-failed). Each line's node publishes the
+sequence of its latest `turn/end`, which the line's BranchLine waits on for the
+parent block (design
 [§7.1.1](../../../design/timeline-branches.md#711-the-parent-block-branchparent)). `TreeCommands` also
 answers whether a line's parent has new activity past a sequence, through the
 one event query ([ADR 019](../../../adr/019-event-query.md)). Candidate branches remain private until opening

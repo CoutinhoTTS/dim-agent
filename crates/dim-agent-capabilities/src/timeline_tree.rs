@@ -609,9 +609,9 @@ impl TimelineTree {
                         }
                     }
                 }
-                if let Some((timeline, through)) = validate {
+                if let Some((timeline, through)) = &validate {
                     let boundary = tokio::select! {
-                        result = tokio::time::timeout(owner.factory.startup_timeout(), crate::history::validate_context_boundary_at(&timeline, through)) =>
+                        result = tokio::time::timeout(owner.factory.startup_timeout(), crate::history::validate_context_boundary_at(timeline, *through)) =>
                             result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                         _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                     };
@@ -637,7 +637,7 @@ impl TimelineTree {
                     .get_mut(&id)
                     .expect("building branch")
                     .context = Some(context.clone());
-                let (opening, first) = match opening {
+                let (opening, mut first) = match opening {
                     Opening::Start { start, first } => (EventKind::BranchStart(start), first),
                     Opening::Resume { head, lines } => {
                         let mut facts = LineFacts::default();
@@ -693,6 +693,26 @@ impl TimelineTree {
                         (EventKind::BranchResume(BranchResumeData {}), None)
                     }
                 };
+                if let (Some(parent), Some((timeline, cut)), Some(input)) =
+                    (&info.parent, &validate, &mut first)
+                {
+                    // A nested line inherits its parent's parent block, which
+                    // names a line it cannot read; its own opening input
+                    // supersedes that state with one naming the line that
+                    // opened it (§7.1.1). The read runs here, as a resumed
+                    // line's facts do, so a failed read fails this create
+                    // through the existing path and the parent keeps
+                    // dispatching.
+                    let key = parent_key();
+                    let carried = tokio::select! {
+                        result = tokio::time::timeout(owner.factory.startup_timeout(), owner.keyed_live(parent, timeline, *cut, &key)) =>
+                            result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
+                        _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                    };
+                    if carried {
+                        input.blocks.push(parent_open_block(parent, *cut));
+                    }
+                }
                 let opened = context.timeline().append(opening.into())?;
                 tokio::select! {
                     result = context.finish_opening(opened.sequence, owner.factory.startup_timeout()) => result?,
@@ -826,6 +846,75 @@ impl TimelineTree {
             }
             offset += PAGE;
         }
+    }
+    /// Whether the latest block under `key` in the context `parent` has built
+    /// at `cut` is live: the keyed state, resolved over the chain the child
+    /// inherits, the state a block written under the same key supersedes. The
+    /// blocks are read as blocks, never as the rendered history.
+    async fn keyed_live(
+        &self,
+        parent: &str,
+        timeline: &Timeline,
+        cut: u64,
+        key: &str,
+    ) -> Result<bool> {
+        const PAGE: u64 = 8;
+        let mut chain = timeline.ancestors();
+        chain.push((parent.to_owned(), cut));
+        for (line, through) in chain.into_iter().rev() {
+            // The root line has no parent, so it never carries a parent block.
+            if self.info(&line).is_none_or(|info| info.parent.is_none()) {
+                continue;
+            }
+            let target = TimelineKey {
+                session_id: self.session_id.clone(),
+                branch_id: line,
+            };
+            let mut offset = 0;
+            loop {
+                let query = TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from_event: None,
+                    from_sequence: None,
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Descending,
+                    include_publishing: false,
+                    kinds: vec!["input/message".into()],
+                    flags: Vec::new(),
+                    event_id: None,
+                    predicate: None,
+                    limit: std::num::NonZeroU64::new(PAGE).expect("a page is nonzero"),
+                    offset,
+                };
+                let page = self.store.query(&target, &query, 1, through).await?;
+                if page.events.is_empty() {
+                    break;
+                }
+                for event in &page.events {
+                    let EventKind::InputMessage(data) = &event.kind else {
+                        continue;
+                    };
+                    for block in data.blocks.iter().rev() {
+                        let InputBlock::Raw {
+                            key: Some(found),
+                            retire,
+                            ..
+                        } = block
+                        else {
+                            continue;
+                        };
+                        if found == key {
+                            return Ok(!*retire);
+                        }
+                    }
+                }
+                if (page.events.len() as u64) < PAGE {
+                    break;
+                }
+                offset += PAGE;
+            }
+        }
+        Ok(false)
     }
     fn head(&self, id: &str) -> Option<u64> {
         if let Some(ended) = self.state.lock().unwrap().ended.get(id) {
@@ -3116,6 +3205,26 @@ fn first_input(parent: &str, data: &BranchCreateData) -> InputMessageData {
         mode: Some(InputMode::Queue),
         ..InputMessageData::default()
     }
+}
+
+/// The block a nested line gets at open: it keeps the parent key live and
+/// names the line that opened it at the cut, so the block it inherited, which
+/// names a line it cannot read, is no longer its latest (§7.1.1).
+fn parent_open_block(parent: &str, cut: u64) -> InputBlock {
+    crate::context_block::raw(
+        crate::context_block::element(
+            "dim-branch-parent",
+            &[
+                ("branch", parent),
+                ("head", &cut.to_string()),
+                ("after", &cut.to_string()),
+            ],
+            &format!(
+                "Line {parent} has no new activity since you were cut from it at {cut}. Parent blocks above this point were written for {parent} and are not yours."
+            ),
+        ),
+        Some(parent_key()),
+    )
 }
 
 fn tool_line_identity(line: &str, parent: &str, prompt: &str) -> InputBlock {
