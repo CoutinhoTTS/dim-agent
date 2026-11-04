@@ -18235,9 +18235,11 @@
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
+        "path SelectableModelsHost",
         "path ToolExecutionContext",
         "use dim_agent_capabilities::host::HostError",
         "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::SelectableModelsHost",
         "use dim_agent_capabilities::host::ToolExecutionContext"
       ]
     },
