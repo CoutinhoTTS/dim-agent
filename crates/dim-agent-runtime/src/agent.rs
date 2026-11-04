@@ -523,10 +523,15 @@ impl Session {
         self.published(branch)?.batch_end(sequence).await
     }
     pub fn sequence(&self, branch: &str) -> Result<u64> {
-        if let Some(head) = self.0.tree.ended_head(branch) {
-            return Ok(head);
+        match self.published(branch) {
+            Ok(line) => Ok(line.sequence()),
+            Err(AgentError::BranchEnded(_)) => self
+                .0
+                .tree
+                .ended_head(branch)
+                .ok_or_else(|| AgentError::BranchEnded(branch.into())),
+            Err(error) => Err(error),
         }
-        Ok(self.published(branch)?.sequence())
     }
     /// The fixed head of an ended line, `None` for an open or unknown one.
     pub fn ended_head(&self, branch: &str) -> Option<u64> {

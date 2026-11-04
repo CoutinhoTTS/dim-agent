@@ -224,17 +224,23 @@ impl Connection {
             // answers `BranchEnded`, and the tree serves the same request at its
             // fixed head.
             let reply = match reply {
-                Err(error) if session.ended_head(branch).is_some() => window_at(
-                    &WindowRead::Ended(&tree),
-                    branch,
-                    before,
-                    limit,
-                    through,
-                    turn,
-                    self.protocol_version(),
-                )
-                .await
-                .map_err(|_| error),
+                Err(error)
+                    if error
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data.app_error == "branch_ended") =>
+                {
+                    window_at(
+                        &WindowRead::Ended(&tree),
+                        branch,
+                        before,
+                        limit,
+                        through,
+                        turn,
+                        self.protocol_version(),
+                    )
+                    .await
+                }
                 other => other,
             };
             return reply.map(Reply::History);
