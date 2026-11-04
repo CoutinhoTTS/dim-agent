@@ -143,10 +143,12 @@ flowchart LR
   p16 -->|"dim_app_server::settings::SettingsService"| p23
   p16 -->|"dim_app_server::settings::SettingsService"| p22
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p21
+  p1 -->|"dim_agent_capabilities::host::CredentialVariablesHost"| p21
   p40 -->|"dim_agent_runtime::parts::PartRegistry"| p21
   p20 -->|"dim_app_server::mcp::publication::Publication"| p21
   p8 -->|"dim_app_server::methods::ManagementMethods"| p21
   p16 -->|"dim_app_server::settings::SettingsService"| p21
+  p1 -->|"dim_agent_capabilities::host::CredentialVariablesHost"| p20
   p16 -->|"dim_app_server::settings::SettingsService"| p20
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p19
   p16 -->|"dim_app_server::settings::SettingsService"| p19

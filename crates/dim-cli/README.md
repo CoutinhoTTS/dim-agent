@@ -157,9 +157,10 @@ acceptance evidence; cross-compilation alone does not establish platform behavio
 Use `dimcode session export SESSION_ID --format markdown|json [--output PATH]`
 for a fixed prefix of main-branch history. Without `--output`, it writes to stdout.
 Exports include main only; Markdown labels child branch requests and failures
-without fetching child histories. Files are created new, never overwritten, and
-use mode 0600 on Unix or the inherited ACL on Windows. A write error can leave a
-partial new file. Relative paths use the CLI process cwd; `~` is literal.
+without fetching child histories. The output file is opened before the read and removed when the read or a write
+fails, so a failed export leaves no file; a killed run can leave a partial one.
+Files are created new, never overwritten, and use mode 0600 on Unix or the
+inherited ACL on Windows. Relative paths use the CLI process cwd; `~` is literal.
 
 `dimcode session rename SESSION TITLE` sets the Session's manual title with
 `session.rename` and prints the title the server returns;
@@ -393,8 +394,11 @@ Provider entry. See [Model startup](../../docs/design/model-startup.md).
 
 `mcp list` prints tab-separated rows: quoted and escaped ID, source, transport, enablement and
 authorization (`sign-in required`, `signed in`, `sign-in expired`, or `—` when absent).
-Missing scopes appear below the entry. With no entry in the catalog it says so in one line
-instead of printing the column legend, which describes rows.
+Missing scopes appear below the entry. `Variables:` and `Unset variables:` appear below a row when
+the entry references environment variables or has unset ones; both are sorted name lists only. A
+reference is kept as written in the stored entry and expanded when the daemon connects, so the
+lists explain a connection failure without showing a value. With no entry in the catalog it says
+so in one line instead of printing the column legend, which describes rows.
 An entry that does not decode is listed with `invalid` in place of its transport and its error
 instead of the authorization column. It stays in its file as written and never runs; `mcp remove
 ID` deletes it, an add with the same id and source replaces it, and `mcp enable`, `mcp test` and
@@ -415,10 +419,11 @@ omitted `url` or header key keeps the stored one. `dimcode mcp remove ID` delete
 source revision. `dimcode mcp test ID`
 runs the stored entry once and prints the tools the temporary connection found, and `dimcode mcp
 inspect ID` prints the effective configuration and the Session's connections without contacting
-the server. A broken entry has no configuration to read, so `mcp edit` and `mcp set` refuse it
-with its error. `dimcode mcp disconnect ID` closes the entry's live connections without changing its
-enablement or stored configuration; the entry reconnects on next use. The `/mcp` panel does the
-same on a list: `Enter`, `Ctrl+E`, `Ctrl+N`, `Ctrl+X`, `Ctrl+T` and `Tab`.
+the server, including the same referenced and unset variable names. A broken entry has no
+configuration to read, so `mcp edit` and `mcp set` refuse it with its error. `dimcode mcp
+disconnect ID` closes the entry's live connections without changing its enablement or stored
+configuration; the entry reconnects on next use. The `/mcp` panel does the same on a list:
+`Enter`, `Ctrl+E`, `Ctrl+N`, `Ctrl+X`, `Ctrl+T` and `Tab`.
 
 Every command above that names one stored entry by ID also takes `--source SOURCE`, whose values
 are the sources `mcp list` prints: `user`, `project` and `plugin`. An ID one source lists is that

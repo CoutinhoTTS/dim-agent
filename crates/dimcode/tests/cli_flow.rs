@@ -2259,6 +2259,10 @@ fn session_export_preserves_the_fixed_main_prefix_and_does_not_replace_files() {
         let daemon = home.daemon(move |wire| {
             let hello = wire.read("hello");
             wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+            if mode == "existing" {
+                assert!(wire.trailing_request().is_none(),"an existing output path is refused before the history read");
+                return;
+            }
             let first = wire.read("session.history");
             assert_eq!(first["params"],json!({"sessionId":"session","branchId":"main","after":0,"limit":256}));
             wire.reply(&first,json!({"events":&returned[..10],"through":20,"nextAfter":12,"done":false}));
@@ -2296,11 +2300,11 @@ fn session_export_preserves_the_fixed_main_prefix_and_does_not_replace_files() {
                     "{}",
                     String::from_utf8_lossy(&output.stderr)
                 );
-                let exported: Value = serde_json::from_slice(&output.stdout).unwrap();
-                assert_eq!(
-                    exported,
-                    json!({"sessionId":"session","branchId":"main","through":20,"events":events})
-                );
+                let document = serde_json::to_string_pretty(
+                    &json!({"sessionId":"session","branchId":"main","through":20,"events":events}),
+                )
+                .unwrap();
+                assert_eq!(String::from_utf8(output.stdout).unwrap(), document + "\n");
             }
             "markdown" => {
                 assert!(
@@ -2310,21 +2314,53 @@ fn session_export_preserves_the_fixed_main_prefix_and_does_not_replace_files() {
                 );
                 assert!(output.stdout.is_empty());
                 let markdown = fs::read_to_string(&path).unwrap();
-                for text in [
-                    "Keep ```code``` intact",
-                    "[Image attachment: image/png]",
-                    "### Reasoning",
-                    "Hello world",
-                    "### Tool call: read (call)",
-                    "### Tool result: call",
-                    "```````json",
-                    "Child branch child (contents not exported).",
-                    "Child branch child was not created.",
-                    "Child branch cancelled-child was not created.",
-                ] {
-                    assert!(markdown.contains(text), "{text}: {markdown}");
-                }
-                assert_eq!(markdown.matches("# must remain inside fence").count(), 1);
+                let expected = r#"# Session session
+
+Branch: main
+
+
+### User
+
+Keep ```code``` intact
+[Image attachment: image/png]
+
+
+### Reasoning
+
+A reason
+
+### Assistant
+
+Hello world
+
+### Tool call: read (call)
+
+```json
+{
+  "path": "file"
+}
+```
+
+
+### Tool result: call
+
+```````json
+{
+  "content": "```\n# must remain inside fence\n``````"
+}
+```````
+
+
+Child branch child (contents not exported).
+
+
+Child branch child was not created.
+
+
+Child branch cancelled-child was not created.
+
+"#;
+                assert_eq!(markdown, expected);
                 assert_eq!(
                     fs::metadata(&path).unwrap().permissions().mode() & 0o777,
                     0o600
@@ -2358,14 +2394,10 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     let (release, wait_release) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.start(false);
-        for index in 0..2 {
-            let history = wire.read("session.history");
-            if index == 0 {
-                entered.send(()).unwrap();
-                wait_release.recv_timeout(PATIENCE).unwrap();
-            }
-            wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        }
+        let history = wire.read("session.history");
+        entered.send(()).unwrap();
+        wait_release.recv_timeout(PATIENCE).unwrap();
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let history = wire.read("session.history");
         wire.send(json!({"jsonrpc":"2.0","id":history["id"],"error":{"code":-32000,"message":"fixture history failure"}}));
         wire.detach();
@@ -2404,8 +2436,20 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     assert!(terminal.wait().success());
     daemon.join().unwrap();
     let path = cli_dir.join("~/Session notes.json");
-    let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    let data: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(data["events"], json!([]));
+    assert_eq!(
+        text,
+        serde_json::to_string_pretty(&json!({
+            "sessionId": data["sessionId"],
+            "branchId": "main",
+            "through": data["through"],
+            "events": [],
+        }))
+        .unwrap()
+            + "\n"
+    );
     assert_eq!(
         fs::metadata(path).unwrap().permissions().mode() & 0o777,
         0o600

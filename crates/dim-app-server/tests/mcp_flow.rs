@@ -95,6 +95,7 @@ impl Fixture {
     }
     async fn open(home: PathBuf, reversed: bool) -> Self {
         let root = Ctx::root().unwrap();
+        mcp_host::provide_credentials(&root);
         let catalog = dim_app_server::catalog();
         let build = Build::default();
         let names = Names::copy(&catalog, &build);
@@ -2109,6 +2110,374 @@ async fn a_broken_project_entry_does_not_hide_the_user_entry_with_the_same_id() 
         .unwrap();
     drop(connection);
 
+    fixture.close().await;
+}
+
+/// #952: a reference keeps its spelling in the project file when an entry
+/// moves into a workspace; the full text and the credentials stay in the
+/// user's overlay.
+#[tokio::test]
+async fn a_moved_entry_keeps_a_reference_name_in_the_project_file() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "reference".into(),
+            McpChange::Put(
+                serde_json::from_value(json!({
+                    "type": "http",
+                    "url": "https://${MCP_HOST}/mcp",
+                    "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+                }))
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "reference".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let project: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("project/.mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        project["mcpServers"]["reference"]["url"],
+        "https://${MCP_HOST}"
+    );
+    assert!(project["mcpServers"]["reference"].get("headers").is_none());
+
+    let secrets = fixture
+        .settings
+        .read::<McpSecrets>(SettingsScope::User, &cancel)
+        .await
+        .unwrap()
+        .document;
+    let workspace = fs::canonicalize(fixture.home.join("project"))
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let secret = &secrets.entries[&workspace]["reference"];
+    assert_eq!(
+        secret.url.as_deref(),
+        Some("https://${MCP_HOST}/mcp"),
+        "the full text is withheld"
+    );
+    assert!(
+        secret
+            .headers
+            .as_ref()
+            .is_some_and(|headers| headers.contains_key("Authorization"))
+    );
+
+    fixture.close().await;
+}
+
+/// #952: a stored reference survives reads, an enablement write and a move in
+/// each direction.
+#[tokio::test]
+async fn a_stored_reference_survives_reads_writes_and_moves() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "kept".into(),
+            McpChange::Put(
+                serde_json::from_value(json!({
+                    "type": "http",
+                    "url": "https://${MCP_HOST}/mcp",
+                    "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+                }))
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let user = |fixture: &Fixture| -> Value {
+        serde_json::from_slice(&fs::read(fixture.home.join("mcp.json")).unwrap()).unwrap()
+    };
+    assert_eq!(
+        user(&fixture)["mcpServers"]["kept"]["url"],
+        "https://${MCP_HOST}/mcp"
+    );
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "kept".into(),
+            McpChange::SetEnabled(true),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        user(&fixture)["mcpServers"]["kept"]["url"],
+        "https://${MCP_HOST}/mcp",
+        "an enablement write keeps the text"
+    );
+    assert_eq!(
+        user(&fixture)["mcpServers"]["kept"]["headers"]["Authorization"],
+        "Bearer ${MCP_TOKEN}"
+    );
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "kept".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let project: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("project/.mcp.json")).unwrap()).unwrap();
+    assert_eq!(project["mcpServers"]["kept"]["url"], "https://${MCP_HOST}");
+
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::Project(1),
+            McpSource::User,
+            "kept".into(),
+            catalog.project_revision.unwrap(),
+            catalog.user_revision,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        user(&fixture)["mcpServers"]["kept"]["url"],
+        "https://${MCP_HOST}/mcp",
+        "the move back restores the withheld text"
+    );
+
+    fixture.close().await;
+}
+
+/// #952: a write stores the reference, never an expanded value, even when the
+/// daemon's environment has the name set.
+#[tokio::test]
+async fn a_write_never_stores_an_expanded_value() {
+    unsafe {
+        std::env::set_var("MCP_TEST_952_WRITE_URL", "https://expanded.test/mcp");
+    }
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "kept".into(),
+            McpChange::Put(
+                serde_json::from_value(json!({
+                    "type": "http",
+                    "url": "${MCP_TEST_952_WRITE_URL}"
+                }))
+                .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let stored: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["mcpServers"]["kept"]["url"],
+        "${MCP_TEST_952_WRITE_URL}"
+    );
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    let kept = catalog.servers.get("kept").unwrap();
+    assert_eq!(
+        kept.referenced_variables,
+        std::collections::BTreeSet::from(["MCP_TEST_952_WRITE_URL".to_owned()])
+    );
+    assert!(kept.unset_variables.is_empty());
+    fixture.close().await;
+}
+
+/// #952: a move into a project writes the reference URL's public skeleton and
+/// its full text to the overlay, for every shape a reference can take, and a
+/// read back returns the stored text.
+#[tokio::test]
+async fn a_moved_reference_url_is_split_between_the_skeleton_and_the_overlay() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let workspace = fs::canonicalize(fixture.home.join("project")).unwrap();
+    let workspace = workspace.to_str().unwrap();
+    for (index, (url, skeleton)) in [
+        (
+            "http://localhost:${MCP_PORT}/mcp",
+            "http://localhost:${MCP_PORT}",
+        ),
+        ("${MCP_BASE}/mcp?token=x", "${MCP_BASE}/mcp"),
+        ("${SCHEME}://host/mcp", "${SCHEME}://host"),
+        (
+            "https://${HOST:-localhost:8080}/sse",
+            "https://${HOST:-localhost:8080}",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("reference-{index}");
+        let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+        fixture
+            .mcp
+            .update(
+                SettingsScope::User,
+                catalog.user_revision,
+                id.clone(),
+                McpChange::Put(
+                    serde_json::from_value(json!({"type": "http", "url": url})).unwrap(),
+                ),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+        fixture
+            .mcp
+            .move_entry(
+                McpSource::User,
+                McpSource::Project(1),
+                id.clone(),
+                catalog.user_revision,
+                catalog.project_revision.unwrap(),
+                &cancel,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("the move of {url} failed: {error}"));
+
+        let project: Value =
+            serde_json::from_slice(&fs::read(fixture.home.join("project/.mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(project["mcpServers"][&id]["url"], skeleton, "{url}");
+        let secrets: Value =
+            serde_json::from_slice(&fs::read(fixture.home.join("mcp-secrets.json")).unwrap())
+                .unwrap();
+        assert_eq!(secrets["entries"][workspace][&id]["url"], url);
+
+        let entry = fixture
+            .mcp
+            .entry(McpSource::Project(1), id.clone(), &cancel)
+            .await
+            .unwrap();
+        let McpServerSettings::Remote { url: read_back, .. } = &entry.configuration else {
+            panic!("the moved entry is remote");
+        };
+        assert_eq!(read_back, url, "a read back returns the stored text");
+    }
+    fixture.close().await;
+}
+
+async fn management(fixture: &Fixture, method: &str, params: Value) -> Value {
+    fixture
+        .root
+        .get::<dim_app_server::methods::ManagementMethods>()
+        .expect("management methods are installed")
+        .provider(method)
+        .expect("the method is registered")
+        .accept(method.into(), params, CancellationToken::new(), |_| {})
+        .expect("the method is accepted")
+        .reply
+        .await
+        .expect("the method replies")
+        .expect("the method succeeds")
+}
+
+/// #952: a `://` inside a query value is withheld text, so a move never puts
+/// the preceding query into the project file or the configuration view, and
+/// the overlay keeps the full URL.
+#[tokio::test]
+async fn a_moved_reference_url_keeps_its_query_in_the_overlay() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let url = "${BASE}/mcp?token=demo-key&next=https://callback.example/done";
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .update(
+            SettingsScope::User,
+            catalog.user_revision,
+            "query".into(),
+            McpChange::Put(serde_json::from_value(json!({"type": "http", "url": url})).unwrap()),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    fixture
+        .mcp
+        .move_entry(
+            McpSource::User,
+            McpSource::Project(1),
+            "query".into(),
+            catalog.user_revision,
+            catalog.project_revision.unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let project = fs::read_to_string(fixture.home.join("project/.mcp.json")).unwrap();
+    assert!(
+        !project.contains("demo-key"),
+        "the project file keeps the query private: {project}"
+    );
+    assert!(
+        !project.contains("callback.example"),
+        "the project file keeps the query private: {project}"
+    );
+
+    let configuration = management(
+        &fixture,
+        "mcp.configuration",
+        json!({"source": "project", "id": "query", "cwd": fixture.home.join("project")}),
+    )
+    .await;
+    assert_eq!(configuration["configuration"]["endpoint"], "${BASE}/mcp");
+    assert!(
+        !configuration.to_string().contains("demo-key"),
+        "the configuration view keeps the query private: {configuration}"
+    );
+
+    let secrets: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("mcp-secrets.json")).unwrap()).unwrap();
+    let workspace = fs::canonicalize(fixture.home.join("project")).unwrap();
+    assert_eq!(
+        secrets["entries"][workspace.to_str().unwrap()]["query"]["url"],
+        url,
+        "the overlay keeps the full URL"
+    );
     fixture.close().await;
 }
 

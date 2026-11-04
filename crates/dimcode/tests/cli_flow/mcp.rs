@@ -2474,3 +2474,95 @@ fn mcp_remove_reaches_a_broken_row_beside_a_valid_plugin_entry() {
     );
     assert_eq!(output.stdout, b"Removed docs.\n");
 }
+
+/// `mcp list` prints the referenced and unset names the daemon reports.
+#[test]
+fn mcp_list_names_referenced_and_unset_variables() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["mcp.catalog"]);
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "user:1",
+                "projectRevision": null,
+                "userApplication": {"error": null, "cleanupError": null},
+                "pluginApplication": null,
+                "projectApplication": null,
+                "servers": [{
+                    "id": "docs", "source": "user", "enabled": true,
+                    "transport": "http",
+                    "referencedVariables": ["MCP_HOST", "MCP_TOKEN"],
+                    "unsetVariables": ["MCP_TOKEN"],
+                }],
+            }),
+        );
+    });
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Variables: MCP_HOST, MCP_TOKEN"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Unset variables: MCP_TOKEN"), "{stdout}");
+    assert!(!stdout.contains("made-up-value"), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Variables and unset variables are names only, never values."),
+        "{stderr}"
+    );
+}
+
+/// `mcp inspect` keeps an endpoint reference as written and prints the names.
+#[test]
+fn mcp_configuration_keeps_a_reference() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.inspect");
+        wire.reply(
+            &request,
+            json!({
+                "enabled": true,
+                "configuration": {
+                    "type": "http",
+                    "endpoint": "https://${MCP_HOST}",
+                    "headerNames": ["Authorization"],
+                    "authConfigured": true,
+                    "oauthConfigured": false,
+                    "referencedVariables": ["MCP_HOST", "MCP_TOKEN"],
+                    "unsetVariables": ["MCP_TOKEN"],
+                },
+                "connections": [],
+            }),
+        );
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["mcp", "inspect", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Endpoint: https://${MCP_HOST}"), "{stdout}");
+    assert!(
+        stdout.contains("Variables: MCP_HOST, MCP_TOKEN"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Unset variables: MCP_TOKEN"), "{stdout}");
+}

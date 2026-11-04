@@ -1773,6 +1773,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::host::CredentialVariablesHost",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::parts::PartRegistry",
             "scope": null,
             "status": "Ready"
@@ -1799,6 +1804,12 @@
             "scope": null,
             "provider": 4,
             "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::host::CredentialVariablesHost",
+            "scope": null,
+            "provider": 1,
+            "generation": 0
           },
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
@@ -1831,6 +1842,12 @@
             "provider": 4,
             "declared": true,
             "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::host::CredentialVariablesHost",
+            "provider": 1,
+            "declared": true,
+            "external": false
           },
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
@@ -1866,12 +1883,23 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_capabilities::host::CredentialVariablesHost",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_app_server::settings::SettingsService",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
+          {
+            "service": "dim_agent_capabilities::host::CredentialVariablesHost",
+            "scope": null,
+            "provider": 1,
+            "generation": 0
+          },
           {
             "service": "dim_app_server::settings::SettingsService",
             "scope": null,
@@ -1880,6 +1908,12 @@
           }
         ],
         "reads": [
+          {
+            "service": "dim_agent_capabilities::host::CredentialVariablesHost",
+            "provider": 1,
+            "declared": true,
+            "external": false
+          },
           {
             "service": "dim_app_server::settings::SettingsService",
             "provider": 16,
@@ -2574,6 +2608,12 @@
         "service": "dim_agent_capabilities::host::AuxiliaryModelHost",
         "provider": 14,
         "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::host::CredentialVariablesHost",
+        "provider": 1,
+        "generation": 0,
         "removing": false
       },
       {

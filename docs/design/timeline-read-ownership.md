@@ -57,6 +57,14 @@ A branch's `Timeline` exists from the moment its Session is loaded until the lin
 
 `session.history` and the in-process `sessions.history` acquire the Session, so a client read and the scheduler's run tracking both work on a loaded Session. `session.attach` is not a prerequisite and does not change which read serves the page.
 
+A Collaboration peer read authorizes the peer, acquires its Session and holds
+that lease through the page and supplemental call lookups. Outcome collection
+uses the member Session already held by its request. Both use bounded queries
+for the event kinds they consume; unused stored model-request bodies need not
+be rebuilt. Page cursors still count every fact and end on complete batches,
+including pages whose selected event set is empty. Text remains separated
+across omitted non-text facts.
+
 A line that ended keeps its identity in `TimelineTree`: the ended head, the end record and the creation source. That state outlives the line's `Timeline`, which is why the tree, not the App Server, serves its page.
 
 No read holds a whole branch. A reader takes a page, consumes it and drops it before the next; the page size belongs to the caller. This holds for the client history read, the ended line's page and a part's fold. A copy shared by readers exists only while the readers and the branch's opening are alive together (ADR 021 D6).

@@ -10,9 +10,9 @@
 //! request ids / timestamps / nonces are stripped before fingerprinting so
 //! they cannot break prefix continuation across calls (RFC-0015 §3).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ts_rs::TS;
 
 use super::hash;
 
@@ -125,8 +125,8 @@ fn denoise_at(value: &Value, depth: usize) -> Value {
 
 /// Serialized-wire fingerprint stored in a `TraceRecord` (hex strings —
 /// `u128` is not JSON-serializable).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Fingerprint {
     /// 128-bit hash of the whole denoised body (hex).
     pub body_hash: String,
@@ -240,6 +240,6 @@ mod tests {
         assert_eq!(f.body_hash.len(), 32); // 128-bit hex
         assert!(f.block_hashes.iter().all(|h| h.len() == 32));
         let json = serde_json::to_string(&f).unwrap();
-        assert!(json.contains("\"body_hash\":\""));
+        assert!(json.contains("\"bodyHash\":\""));
     }
 }
