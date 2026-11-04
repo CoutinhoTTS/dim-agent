@@ -22,6 +22,7 @@ use dim_agent_capabilities::{
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -844,7 +845,7 @@ async fn turn(session: &Session, text: &str) {
 }
 
 async fn events(session: &Session) -> Vec<Arc<AgentEvent>> {
-    session.local("main", ..).await.unwrap()
+    branch_events(session, "main", ..).await.unwrap()
 }
 
 /// The raw blocks of every input, in order.
@@ -920,8 +921,7 @@ fn marker_command(path: &Path, text: &str) -> String {
 /// Waits for an event matching `find` on `main`.
 async fn wait_event<T>(session: &Session, find: impl Fn(&EventKind) -> Option<T>) -> T {
     for _ in 0..500 {
-        if let Some(found) = session
-            .local("main", ..)
+        if let Some(found) = branch_events(session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -1199,8 +1199,7 @@ async fn a_prompt_context_cannot_close_its_runtime_block() {
     .unwrap();
     assert_eq!(reply["status"], "notHeld", "{reply}");
     let steer = reply["steer"]["inputId"].as_str().unwrap();
-    let event = session
-        .local("main", ..)
+    let event = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -1748,8 +1747,7 @@ async fn a_user_answer_cancels_the_hook_and_does_not_delay_the_next_point() {
         !late.exists(),
         "the user's answer did not terminate the running hook"
     );
-    let approved = session
-        .local("main", ..)
+    let approved = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -2192,8 +2190,7 @@ async fn a_second_session_start_does_not_run_the_hooks_again() {
 }
 
 async fn last_result(session: &Session) -> ToolResult {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -2229,8 +2226,7 @@ async fn the_session_start_block_is_still_in_context_after_compaction() {
         .unwrap();
     let _ = session.idle("main").await;
     assert!(
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -2565,7 +2561,7 @@ async fn a_blocked_steer_writes_nothing_and_the_old_input_still_applies() {
     .expect_err("a blocked steer fails");
     assert_eq!(app_error(&refused), "input_blocked");
     assert_eq!(refused.message, "Hook user: not happening");
-    let local = session.local("main", ..).await.unwrap();
+    let local = branch_events(&session, "main", ..).await.unwrap();
     assert!(
         !local.iter().any(|event| matches!(
             &event.kind,
@@ -2591,8 +2587,7 @@ async fn a_blocked_steer_writes_nothing_and_the_old_input_still_applies() {
     let _ = release.send(());
     let mut applied = false;
     for _ in 0..500 {
-        applied = session
-            .local("main", ..)
+        applied = branch_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -2641,8 +2636,7 @@ async fn the_prompt_context_follows_the_operator_text_and_keeps_it_operator_inpu
     .unwrap();
     assert_eq!(reply["status"], "notHeld", "{reply}");
     let steer = reply["steer"]["inputId"].as_str().unwrap();
-    let event = session
-        .local("main", ..)
+    let event = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -2787,8 +2781,7 @@ async fn two_proceeding_handlers_keep_their_contexts_in_catalog_order() {
     .await
     .unwrap();
     let steer = reply["steer"]["inputId"].as_str().unwrap();
-    let event = session
-        .local("main", ..)
+    let event = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()
@@ -2868,8 +2861,7 @@ async fn a_failure_finishing_after_a_later_result_blocks_by_its_own_handler() {
     assert_eq!(app_error(&refused), "input_blocked");
     assert_eq!(refused.message, "Hook plugin:second did not finish");
     assert!(
-        session
-            .local("main", ..)
+        branch_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -2983,7 +2975,7 @@ async fn an_unload_settles_a_pending_prompt_check_by_on_failure() {
         .expect_err("an unloaded check with onFailure block refuses the steer");
     assert_eq!(app_error(&refused), "input_blocked");
     assert_eq!(refused.message, "Hook user did not finish");
-    let local = session.local("main", ..).await.unwrap();
+    let local = branch_events(&session, "main", ..).await.unwrap();
     assert!(
         !local.iter().any(|event| matches!(
             &event.kind,
@@ -3030,7 +3022,7 @@ async fn an_unload_with_the_default_on_failure_writes_the_input() {
         .expect("an unloaded check with the default onFailure proceeds");
     assert_eq!(reply["status"], "deleted", "{reply}");
     assert!(reply["steer"]["inputId"].is_string(), "{reply}");
-    let local = session.local("main", ..).await.unwrap();
+    let local = branch_events(&session, "main", ..).await.unwrap();
     assert!(
         local.iter().any(|event| matches!(
             &event.kind,
@@ -3786,8 +3778,7 @@ async fn a_prompt_submit_hook_precedes_a_referenced_skill() {
     .unwrap();
     assert_eq!(reply["status"], "notHeld", "{reply}");
     let steer = reply["steer"]["inputId"].as_str().unwrap();
-    let event = session
-        .local("main", ..)
+    let event = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .into_iter()

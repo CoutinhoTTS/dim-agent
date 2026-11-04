@@ -228,3 +228,136 @@ impl DynPlugin for AgentAnchor {
         })
     }
 }
+
+/// How many facts one read of a log asks for.
+const EVENTS_PAGE: u64 = 4096;
+
+/// The facts a flow reads from one log: its own branch through the branch
+/// query, or the Timeline service itself.
+#[derive(Clone, Copy)]
+enum Log<'a> {
+    Session(&'a Session, &'a str),
+    Timeline(&'a Timeline),
+}
+impl Log<'_> {
+    async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        match self {
+            Self::Session(session, branch) => session.query(branch, query).await,
+            Self::Timeline(timeline) => timeline.query(query).await,
+        }
+    }
+    fn branch(&self) -> String {
+        match self {
+            Self::Session(_, branch) => (*branch).to_owned(),
+            Self::Timeline(timeline) => timeline.branch_id(),
+        }
+    }
+}
+
+/// The facts `session` published on `branch` alone within `range`, oldest
+/// first: the whole selection, read a page at a time through the branch's
+/// query. A flow reads a branch's log with this instead of paging by hand.
+pub async fn branch_events<R: std::ops::RangeBounds<u64> + Send>(
+    session: &Session,
+    branch: &str,
+    range: R,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    read(
+        Log::Session(session, branch),
+        TimelineQueryScope::Branch,
+        range,
+    )
+    .await
+}
+
+/// [`branch_events`] over the branch's chain: each ancestor to its cut and then
+/// the branch, root first.
+pub async fn chain_events<R: std::ops::RangeBounds<u64> + Send>(
+    session: &Session,
+    branch: &str,
+    range: R,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    read(
+        Log::Session(session, branch),
+        TimelineQueryScope::Chain,
+        range,
+    )
+    .await
+}
+
+/// [`branch_events`] through the Timeline service: every fact of the queried
+/// branch or of its chain within `range`, including the branch's own facts
+/// written but not yet published.
+pub async fn timeline_events<R: std::ops::RangeBounds<u64> + Send>(
+    timeline: &Timeline,
+    scope: TimelineQueryScope,
+    range: R,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    read(Log::Timeline(timeline), scope, range).await
+}
+
+async fn read<R: std::ops::RangeBounds<u64> + Send>(
+    log: Log<'_>,
+    scope: TimelineQueryScope,
+    range: R,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    use std::ops::Bound;
+    let start = match range.start_bound() {
+        Bound::Included(start) => *start,
+        Bound::Excluded(start) => start.saturating_add(1),
+        Bound::Unbounded => 1,
+    }
+    .max(1);
+    let end = match range.end_bound() {
+        Bound::Included(end) => Some(*end),
+        Bound::Excluded(end) => Some(end.saturating_sub(1)),
+        Bound::Unbounded => None,
+    };
+    let mut query = TimelineQuery {
+        scope,
+        from_event: None,
+        from_sequence: (start > 1).then_some(start),
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        include_publishing: matches!(log, Log::Timeline(_)),
+        kinds: Vec::new(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: std::num::NonZeroU64::new(EVENTS_PAGE).expect("a page keeps at least one fact"),
+        offset: 0,
+    };
+    let own = log.branch();
+    let mut events: Vec<(
+        dim_agent_types::TimelinePosition,
+        Arc<dim_agent_types::AgentEvent>,
+    )> = Vec::new();
+    loop {
+        let reply = log.query(query.clone()).await?;
+        let short = (reply.events.len() as u64) < EVENTS_PAGE;
+        let last = reply.positions.last().map(|position| position.sequence);
+        events.extend(reply.positions.into_iter().zip(reply.events));
+        if let (false, Some(last)) = (short, last) {
+            query.from_sequence = Some(last + 1);
+        } else {
+            break;
+        }
+        if end.is_some_and(|end| {
+            events
+                .last()
+                .is_some_and(|(_, event)| event.sequence >= end)
+        }) {
+            break;
+        }
+    }
+    Ok(events
+        .into_iter()
+        .filter(|(position, event)| match end {
+            // The end bounds the branch the range names; an ancestor is read
+            // to its cut.
+            Some(end) => position.branch_id != own || event.sequence <= end,
+            None => true,
+        })
+        .map(|(_, event)| event)
+        .collect())
+}

@@ -8,7 +8,8 @@ use crate::{
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, Session, SessionConfig, TimelineKey,
+    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
@@ -22,6 +23,7 @@ use rutis_loader::edit::InstanceResult;
 use rutis_loader::resolve::Build;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    num::NonZeroU64,
     path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
@@ -342,6 +344,93 @@ pub struct AgentIndex {
     #[cfg(feature = "testing")]
     idle_admitted: Arc<tokio::sync::Notify>,
 }
+/// One page of `branch`'s own facts after `after` through its Session's query:
+/// at most `limit`, never past `through`, ending on an atomic batch.
+async fn session_history_page(
+    session: &Session,
+    branch: &str,
+    after: u64,
+    limit: usize,
+    through: u64,
+) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    if after > 0 {
+        session.batch_end(branch, after).await?;
+    }
+    session.batch_end(branch, through).await?;
+    let mut events = session
+        .query(branch, history_page_query(after, limit))
+        .await?
+        .events;
+    events.retain(|event| event.sequence <= through);
+    while let Some(sequence) = events.last().map(|event| event.sequence) {
+        if sequence >= through {
+            break;
+        }
+        match session.batch_end(branch, sequence).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let next = session
+            .query(branch, history_page_query(sequence, 1))
+            .await?
+            .events;
+        let Some(event) = next.into_iter().find(|event| event.sequence <= through) else {
+            break;
+        };
+        events.push(event);
+    }
+    Ok(events)
+}
+
+/// The facts after `after` a page asks for, up to `limit`.
+fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQuery {
+    dim_agent_runtime::TimelineQuery {
+        scope: dim_agent_runtime::TimelineQueryScope::Branch,
+        include_publishing: false,
+        from_event: None,
+        from_sequence: Some(after.saturating_add(1)),
+        order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
+        direction: dim_agent_runtime::TimelineQueryDirection::Ascending,
+        kinds: Vec::new(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: NonZeroU64::new(u64::try_from(limit).unwrap_or(u64::MAX).max(1))
+            .expect("a page keeps one fact"),
+        offset: 0,
+    }
+}
+
+/// How many facts one page of a prefix read holds.
+const PREFIX_PAGE: u64 = 4096;
+
+/// The facts of the session's `main` chain through `at`, in chain order: the
+/// fork's rest-point check folds them as one history.
+async fn chain_through(
+    session: &Session,
+    at: u64,
+) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    let mut query = history_page_query(0, PREFIX_PAGE as usize);
+    query.scope = dim_agent_runtime::TimelineQueryScope::Chain;
+    let mut events: Vec<Arc<dim_agent_types::AgentEvent>> = Vec::new();
+    loop {
+        let reply = session.query("main", query.clone()).await?;
+        let short = (reply.events.len() as u64) < PREFIX_PAGE;
+        let last = reply.positions.last().map(|position| position.sequence);
+        events.extend(reply.events);
+        if events.last().is_some_and(|event| event.sequence >= at) {
+            break;
+        }
+        match (short, last) {
+            (false, Some(last)) => query.from_sequence = Some(last + 1),
+            _ => break,
+        }
+    }
+    events.retain(|event| event.sequence <= at);
+    Ok(events)
+}
+
 impl AgentIndex {
     /// Whether this profile resolves Session models through a host.
     pub(crate) fn selects_models(&self) -> bool {
@@ -356,8 +445,11 @@ impl AgentIndex {
             .then(|| self.ctx.get()?.get::<ModelSelectionHost>())
             .flatten()
     }
-    const SUMMARY_SCAN_LIMIT: usize = 256;
+    /// How many `input/message` facts a session summary's preview scan keeps.
+    const SUMMARY_SCAN_LIMIT: u64 = 256;
     const SUMMARY_PREVIEW_CHARS: usize = 120;
+    /// How many `step/tool-use-start` facts one read of a call's start holds.
+    const TOOL_USE_START_PAGE: u64 = 1024;
     /// Process Session defaults that Agent profiles apply on top of.
     pub fn session_defaults(&self) -> &SessionConfig {
         &self.session_defaults
@@ -665,7 +757,7 @@ impl AgentIndex {
             return Ok((
                 through,
                 store
-                    .read_page_without_request_bodies(id, after, limit, through)
+                    .read_page_without_request_bodies(id, "main", after, limit, through)
                     .await?,
             ));
         }
@@ -675,8 +767,49 @@ impl AgentIndex {
         let through = through.unwrap_or(session.sequence("main")?);
         Ok((
             through,
-            session.local_page("main", after, limit, through).await?,
+            session_history_page(&session, "main", after, limit, through).await?,
         ))
+    }
+    /// One page of `branch`'s own facts after `after`, at most `limit`, never
+    /// past `through`, ending on an atomic batch.
+    ///
+    /// A loaded line pages through its Session's query, which asks the store
+    /// whether the page's last fact ends a batch ([ADR 020 D4]); a line whose
+    /// Session this process does not hold, or an ended one when the host keeps
+    /// no store of its own, reads through a page read instead: the tree owns
+    /// the ended lines and serves them at their fixed head ([ADR 020 D6]).
+    pub(crate) async fn history_page(
+        &self,
+        id: &str,
+        branch: &str,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+        if let Some((_, session)) = self.session(id)
+            && !session.is_unloading()
+        {
+            if session.ended_head(branch).is_none() {
+                match session_history_page(&session, branch, after, limit, through).await {
+                    Err(AgentError::BranchEnded(_)) => {}
+                    result => return result,
+                }
+            } else if self.session_store.is_none() {
+                let page = session
+                    .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
+                    .page(branch.to_owned(), after, limit)
+                    .await?;
+                return Ok(page
+                    .into_iter()
+                    .filter(|event| event.sequence <= through)
+                    .collect());
+            }
+        }
+        self.session_store
+            .as_ref()
+            .ok_or_else(|| AgentError::Closed(id.into()))?
+            .read_page_without_request_bodies(id, branch, after, limit, through)
+            .await
     }
     /// The stored events of `event_ids` in one read; ids the store does not
     /// hold are absent.
@@ -691,13 +824,32 @@ impl AgentIndex {
         let (_, session) = self
             .session(id)
             .ok_or_else(|| AgentError::Closed(id.into()))?;
-        Ok(session
-            .history("main", None)
-            .await?
-            .into_iter()
-            .filter(|event| event_ids.contains(&event.id))
-            .map(|event| (event.id.clone(), event))
-            .collect())
+        let mut found = HashMap::with_capacity(event_ids.len());
+        for event_id in event_ids {
+            let reply = session
+                .query(
+                    "main",
+                    TimelineQuery {
+                        scope: TimelineQueryScope::Branch,
+                        include_publishing: false,
+                        from_event: None,
+                        from_sequence: None,
+                        order_by: TimelineQueryOrderBy::Sequence,
+                        direction: TimelineQueryDirection::Ascending,
+                        kinds: Vec::new(),
+                        flags: Vec::new(),
+                        event_id: Some(event_id.clone()),
+                        predicate: None,
+                        limit: NonZeroU64::MIN,
+                        offset: 0,
+                    },
+                )
+                .await?;
+            if let Some(event) = reply.events.into_iter().next() {
+                found.insert(event.id.clone(), event);
+            }
+        }
+        Ok(found)
     }
     /// The main-branch `step/tool-use-start` of each `(request_id, call_id)`
     /// in one read; calls the store does not hold are absent.
@@ -714,13 +866,40 @@ impl AgentIndex {
             .session(id)
             .ok_or_else(|| AgentError::Closed(id.into()))?;
         let mut starts = HashMap::with_capacity(keys.len());
-        for event in session.history("main", None).await? {
-            let key = match &event.kind {
-                EventKind::ToolUseStart(start) => (start.request_id.clone(), start.call_id.clone()),
-                _ => continue,
-            };
-            if keys.contains(&key) {
-                starts.insert(key, event);
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            include_publishing: false,
+            from_event: None,
+            from_sequence: Some(1),
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: vec!["step/tool-use-start".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::new(Self::TOOL_USE_START_PAGE)
+                .expect("a page keeps at least one tool use"),
+            offset: 0,
+        };
+        loop {
+            let reply = session.query("main", query.clone()).await?;
+            let short = (reply.events.len() as u64) < Self::TOOL_USE_START_PAGE;
+            let last = reply.positions.last().map(|position| position.sequence);
+            for event in reply.events {
+                let EventKind::ToolUseStart(start) = &event.kind else {
+                    continue;
+                };
+                let key = (start.request_id.clone(), start.call_id.clone());
+                if keys.contains(&key) {
+                    starts.insert(key, event);
+                }
+            }
+            if short || starts.len() == keys.len() {
+                break;
+            }
+            match last {
+                Some(last) => query.from_sequence = Some(last + 1),
+                None => break,
             }
         }
         Ok(starts)
@@ -733,19 +912,6 @@ impl AgentIndex {
     /// reads (session-history-window §5.3).
     pub(crate) fn has_session_store(&self) -> bool {
         self.session_store.is_some()
-    }
-    /// The newest turn at `through` and the window's first sequence.
-    pub(crate) async fn turn_window(
-        &self,
-        id: &str,
-        branch: &str,
-        through: u64,
-    ) -> dim_agent_runtime::Result<crate::storage::TurnWindow> {
-        self.session_store
-            .as_ref()
-            .ok_or_else(Self::no_history_store)?
-            .turn_window(id, branch, through)
-            .await
     }
     /// The newest events below `before` in `window_start..=through`, whole
     /// batches at both ends.
@@ -1002,12 +1168,50 @@ impl AgentIndex {
         through: u64,
         created_at: u64,
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
+        let inputs = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            include_publishing: false,
+            from_event: None,
+            from_sequence: None,
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: vec!["input/message".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT)
+                .expect("a summary scan keeps at least one input"),
+            offset: 0,
+        };
         let loaded = match self.session(id) {
             Some((_, session)) => match async {
-                let events = session
-                    .local_page("main", 0, Self::SUMMARY_SCAN_LIMIT, through)
-                    .await?;
-                let last = session.local("main", through..=through).await?.pop();
+                let events = session.query("main", inputs.clone()).await?.events;
+                let last = if through == 0 {
+                    None
+                } else {
+                    session
+                        .query(
+                            "main",
+                            TimelineQuery {
+                                scope: TimelineQueryScope::Branch,
+                                include_publishing: false,
+                                from_event: None,
+                                from_sequence: Some(through),
+                                order_by: TimelineQueryOrderBy::Sequence,
+                                direction: TimelineQueryDirection::Ascending,
+                                kinds: Vec::new(),
+                                flags: Vec::new(),
+                                event_id: None,
+                                predicate: None,
+                                limit: NonZeroU64::MIN,
+                                offset: 0,
+                            },
+                        )
+                        .await?
+                        .events
+                        .into_iter()
+                        .next()
+                };
                 Ok::<_, AgentError>((events, last))
             }
             .await
@@ -1027,18 +1231,18 @@ impl AgentIndex {
                 .session_store
                 .as_ref()
                 .ok_or_else(|| AgentError::Closed(id.into()))?;
+            let key = TimelineKey {
+                session_id: id.into(),
+                branch_id: "main".into(),
+            };
             let events = store
-                .read_page_without_request_bodies(id, 0, Self::SUMMARY_SCAN_LIMIT, through)
-                .await?;
+                .timeline_store()
+                .query(&key, &inputs, 1, through)
+                .await?
+                .events;
             let last = store
                 .timeline_store()
-                .read(
-                    &TimelineKey {
-                        session_id: id.into(),
-                        branch_id: "main".into(),
-                    },
-                    through..=through,
-                )
+                .read(&key, through..=through)
                 .await?
                 .pop()
                 .map(|record| record.event);
@@ -1444,7 +1648,7 @@ impl AgentIndex {
             let boundary =
                 dim_agent_capabilities::history::validate_context_boundary_in(session, "main", at)
                     .await?;
-            let prefix = session.context("main", at).await?;
+            let prefix = chain_through(session, at).await?;
             Ok::<_, AgentError>((boundary, prefix))
         }
         .await;
@@ -1453,7 +1657,7 @@ impl AgentIndex {
         }
         let (boundary, prefix) = checked?;
         boundary
-            .and_then(|()| rest_point(&prefix.events))
+            .and_then(|()| rest_point(&prefix))
             .map_err(AgentError::InvalidInput)?;
         let version = self
             .version_of(source)

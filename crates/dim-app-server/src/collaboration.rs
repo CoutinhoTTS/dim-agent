@@ -25,6 +25,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{
     AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
     SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, Timeline, TimelineIdentity,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{
@@ -39,6 +40,7 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroU64,
     sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
@@ -740,8 +742,6 @@ struct BranchRecord {
     /// refused nor have a handled `result`. Updated only by handlers, in
     /// sequence order.
     open: BTreeMap<String, BTreeSet<String>>,
-    /// Positions only; full result bodies remain in the Timeline store.
-    results: BTreeMap<String, u64>,
     /// Delivery work per peer runs in operation event order.
     chains: BTreeMap<String, (u64, Shared<WorkFuture<'static, ()>>)>,
 }
@@ -1097,23 +1097,37 @@ impl CollaborationSession {
     }
 
     async fn result(&self, branch_id: &str, result_id: &str) -> ToolResult {
-        let position = {
-            let state = self.state.lock().unwrap();
-            state.branches.get(branch_id).and_then(|branch| {
-                branch
-                    .results
-                    .get(result_id)
-                    .map(|sequence| (branch.timeline.clone(), *sequence))
-            })
-        };
-        let Some((timeline, sequence)) = position else {
+        let timeline = self
+            .state
+            .lock()
+            .unwrap()
+            .branches
+            .get(branch_id)
+            .map(|branch| branch.timeline.clone());
+        let Some(timeline) = timeline else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
-        let local = match timeline.local(sequence..=sequence).await {
-            Ok(local) => local,
+        let reply = match timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                event_id: Some(result_id.to_owned()),
+                predicate: None,
+                limit: NonZeroU64::MIN,
+                offset: 0,
+            })
+            .await
+        {
+            Ok(reply) => reply,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        let Some(event) = local.iter().find(|event| event.id == result_id) else {
+        let Some(event) = reply.events.first() else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
         match &event.kind {
@@ -1301,7 +1315,6 @@ impl CollaborationSession {
             EventKind::CollaborationDelivered(data) => self.delivered(branch_id, data),
             EventKind::CollaborationResult(data) => {
                 self.with_branch(branch_id, |branch| {
-                    branch.results.insert(event.id.clone(), event.sequence);
                     close_request(&mut branch.open, &data.request_event_id);
                 });
                 let this = self.clone();
@@ -2715,126 +2728,162 @@ impl DynPlugin for CollaborationTimelinePlugin {
                 owner.unload(&unloading).await;
                 Ok(())
             })?;
-            let rebuilt = Arc::new(tokio::sync::Mutex::new(0u64));
-            let gate = rebuilt.clone();
-            let mut rebuilding = rebuilt.lock().await;
             let consumer = service.clone();
             let consumed = branch_id.clone();
-            dispatcher.subscribe(
-                ctx,
-                "CollaborationTimeline",
-                &[
-                    "turn/start",
-                    "turn/end",
-                    "stop/interrupt",
-                    "collaboration/request",
-                    "collaboration/cancel",
-                    "collaboration/close",
-                    "collaboration/message",
-                    "collaboration/delivered",
-                    "collaboration/result",
-                    "input/message",
-                    "input/consumed",
-                    "input/deleted",
-                    "step/tool-call",
-                    "step/tool-result",
-                    "approval/request",
-                    "approval/respond",
-                    "approval/cancelled",
-                ],
-                move |event| {
-                    let gate = gate.clone();
-                    let consumer = consumer.clone();
-                    let consumed = consumed.clone();
-                    Box::pin(async move {
-                        if event.sequence > *gate.lock().await {
-                            consumer.consume(&consumed, event).await
-                        } else {
-                            Ok(())
-                        }
-                    })
-                },
-            )?;
-            let through = timeline.committed();
-            let events = timeline.local(..=through).await?;
-            *rebuilding = events.last().map_or(0, |event| event.sequence);
-            let tasks = TaskTracker::new();
-            let cleanup_tasks = tasks.clone();
-            let mut stale_inputs = BTreeSet::new();
-            for event in &events {
-                match &event.kind {
-                    EventKind::InputMessage(data)
-                        if data
-                            .submission_id
-                            .as_ref()
-                            .is_some_and(|id| id.starts_with("collaboration-approval:"))
-                            && data.user.is_none()
-                            && matches!(data.blocks.first(), Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-agent-approval>\n")) =>
-                    {
-                        stale_inputs.insert(event.id.clone());
-                    }
-                    EventKind::InputApplied(InputAppliedData { input_id, .. })
-                    | EventKind::InputDeleted(InputDeletedData { input_id }) => {
-                        stale_inputs.remove(input_id);
-                    }
-                    _ => {}
-                }
-            }
-            let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
-            service.state.lock().unwrap().branches.insert(
-                branch_id.clone(),
-                BranchRecord {
-                    ctx: ctx.clone(),
-                    dispatcher: dispatcher.clone(),
-                    approvals: BTreeMap::new(),
-                    approval_calls: BTreeMap::new(),
-                    forwarded_approvals: BTreeMap::new(),
-                    timeline,
-                    tasks,
-                    abort: CancellationToken::new(),
-                    current_turn,
-                    interrupted,
-                    closing: false,
-                    ops: BTreeMap::new(),
-                    open: BTreeMap::new(),
-                    results: events
-                        .iter()
-                        .filter(|&event| matches!(event.kind, EventKind::CollaborationResult(_)))
-                        .map(|event| (event.id.clone(), event.sequence))
-                        .collect(),
-                    chains: BTreeMap::new(),
-                },
-            );
-            drop(rebuilding);
-            if !stale_inputs.is_empty() {
-                cleanup_tasks.spawn(async move {
-                    if !phase.activated().await {
-                        return;
-                    }
-                    let result = async {
-                        let branch = service.tree.get(&branch_id)?;
-                        let queue =
-                            branch.service::<dim_agent_capabilities::input_queue::InputQueue>()?;
-                        for input_id in stale_inputs {
-                            queue
-                                .withdraw(
-                                    InputWithdrawData {
-                                        input_id,
-                                        reason: Some(RELOADING.into()),
-                                    },
-                                    None,
-                                )
-                                .await?;
-                        }
-                        Ok::<_, AgentError>(())
-                    }
-                    .await;
-                    if let Err(error) = result {
-                        dispatcher.fail(error);
-                    }
-                });
-            }
+            let rebuilds = service.clone();
+            let phases = phase.clone();
+            let rebuilt_branch = branch_id.clone();
+            let rebuilt_timeline = timeline.clone();
+            let rebuilt_dispatcher = dispatcher.clone();
+            let rebuilt_ctx = ctx.clone();
+            dispatcher
+                .consume(
+                    ctx,
+                    "CollaborationTimeline".into(),
+                    [
+                        "turn/start",
+                        "turn/end",
+                        "stop/interrupt",
+                        "collaboration/request",
+                        "collaboration/cancel",
+                        "collaboration/close",
+                        "collaboration/message",
+                        "collaboration/delivered",
+                        "collaboration/result",
+                        "input/message",
+                        "input/consumed",
+                        "input/deleted",
+                        "step/tool-call",
+                        "step/tool-result",
+                        "approval/request",
+                        "approval/respond",
+                        "approval/cancelled",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let service = rebuilds.clone();
+                        let phase = phases.clone();
+                        let branch_id = rebuilt_branch.clone();
+                        let timeline = rebuilt_timeline.clone();
+                        let dispatcher = rebuilt_dispatcher.clone();
+                        let ctx = rebuilt_ctx.clone();
+                        Box::pin(async move {
+                            restore(service, phase, branch_id, timeline, dispatcher, ctx).await
+                        })
+                    }),
+                    Arc::new(move |event| {
+                        let consumer = consumer.clone();
+                        let consumed = consumed.clone();
+                        Box::pin(async move { consumer.consume(&consumed, Arc::new(event)).await })
+                    }),
+                )
+                .await?;
             Ok(Effect::Done)
         })
     }
+}
+
+/// Rebuilds one branch's collaboration state from its own facts and returns
+/// the cutoff the read took: facts the previous generation wrote and had not
+/// published yet decide whether an operation was delivered or a request is
+/// still open, so the read adds the undispatched tail (ADR 020 D3). The
+/// refusals and failures it writes from that state are not taken back.
+async fn restore(
+    service: Arc<CollaborationSession>,
+    phase: Arc<BranchLifecycle>,
+    branch_id: String,
+    timeline: Arc<Timeline>,
+    dispatcher: Arc<Dispatcher>,
+    ctx: Ctx,
+) -> dim_agent_runtime::Result<u64> {
+    let reply = rebuild_facts(
+        &timeline,
+        &[
+            "turn/start",
+            "turn/end",
+            "stop/interrupt",
+            "collaboration/request",
+            "collaboration/cancel",
+            "collaboration/close",
+            "collaboration/message",
+            "collaboration/delivered",
+            "collaboration/result",
+            "input/message",
+            "input/applied",
+            "input/deleted",
+        ],
+    )
+    .await?;
+    let events = reply.events;
+    let tasks = TaskTracker::new();
+    let cleanup_tasks = tasks.clone();
+    let mut stale_inputs = BTreeSet::new();
+    for event in &events {
+        match &event.kind {
+            EventKind::InputMessage(data)
+                if data
+                    .submission_id
+                    .as_ref()
+                    .is_some_and(|id| id.starts_with("collaboration-approval:"))
+                    && data.user.is_none()
+                    && matches!(data.blocks.first(), Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-agent-approval>\n")) =>
+            {
+                stale_inputs.insert(event.id.clone());
+            }
+            EventKind::InputApplied(InputAppliedData { input_id, .. })
+            | EventKind::InputDeleted(InputDeletedData { input_id }) => {
+                stale_inputs.remove(input_id);
+            }
+            _ => {}
+        }
+    }
+    let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
+    service.state.lock().unwrap().branches.insert(
+        branch_id.clone(),
+        BranchRecord {
+            ctx,
+            dispatcher: dispatcher.clone(),
+            approvals: BTreeMap::new(),
+            approval_calls: BTreeMap::new(),
+            forwarded_approvals: BTreeMap::new(),
+            timeline,
+            tasks,
+            abort: CancellationToken::new(),
+            current_turn,
+            interrupted,
+            closing: false,
+            ops: BTreeMap::new(),
+            open: BTreeMap::new(),
+            chains: BTreeMap::new(),
+        },
+    );
+    if !stale_inputs.is_empty() {
+        cleanup_tasks.spawn(async move {
+            if !phase.activated().await {
+                return;
+            }
+            let result = async {
+                let branch = service.tree.get(&branch_id)?;
+                let queue = branch.service::<dim_agent_capabilities::input_queue::InputQueue>()?;
+                for input_id in stale_inputs {
+                    queue
+                        .withdraw(
+                            InputWithdrawData {
+                                input_id,
+                                reason: Some(RELOADING.into()),
+                            },
+                            None,
+                        )
+                        .await?;
+                }
+                Ok::<_, AgentError>(())
+            }
+            .await;
+            if let Err(error) = result {
+                dispatcher.fail(error);
+            }
+        });
+    }
+    Ok(reply.through)
 }

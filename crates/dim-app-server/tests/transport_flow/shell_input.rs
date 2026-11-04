@@ -5,6 +5,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands, workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::BranchLifecycle;
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 use std::{
     os::unix::fs::DirBuilderExt,
@@ -258,7 +259,7 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
     // branch part writing the marker registered on this branch.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let history = session.history("main", None).await.unwrap();
+            let history = chain_events(&session, "main", ..).await.unwrap();
             if history.iter().any(|event| {
                 matches!(&event.kind, EventKind::ModelCall(data)
                     if data.request.messages.iter().any(|message| matches!(

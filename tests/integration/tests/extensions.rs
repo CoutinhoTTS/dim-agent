@@ -3,6 +3,7 @@ use dim_agent_capabilities::tool_registry::{
     ToolContribution, ToolHandler, ToolProvider, ToolRegistry, ToolSourceSet, definition,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::*;
 use dim_agent_types::BranchSource;
 use dim_agent_types::EventKind;
@@ -176,8 +177,7 @@ async fn before_runs_only_on_its_own_branch() {
     }
     for (session, branch_id) in [(&one, "main"), (&one, branch.as_str()), (&two, "main")] {
         let own = format!("{}/{branch_id}", session.id());
-        let inputs: Vec<_> = session
-            .local(branch_id, ..)
+        let inputs: Vec<_> = branch_events(session, branch_id, ..)
             .await
             .unwrap()
             .into_iter()
@@ -370,8 +370,7 @@ impl Plugin for SlowOwner {
 
 /// The tools of the last model call on `branch`, in the order it offered them.
 async fn last_request_tools(session: &Session, branch: &str) -> Vec<String> {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .into_iter()
@@ -1727,8 +1726,7 @@ async fn nested_instances_preserve_optional_rows_and_cleanup_across_create_resto
             .unwrap();
         session.idle("main").await.unwrap();
         assert!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()

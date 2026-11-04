@@ -209,6 +209,10 @@
   },
   {
     "from": "dim-migration",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-migration",
     "to": "dim-agent-scheduler"
   },
   {
@@ -266,6 +270,10 @@
   {
     "from": "dim-session-title",
     "to": "dim-agent-aimux"
+  },
+  {
+    "from": "dim-session-title",
+    "to": "dim-agent-runtime"
   },
   {
     "from": "dim-session-title",

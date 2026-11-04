@@ -1,6 +1,7 @@
 #![cfg(unix)]
 mod support;
 use dim_agent_capabilities::{adapters::MockTools, defaults};
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::{EventKind, ToolContent};
 use dim_app_server::{ServerConfig, serve};
@@ -86,7 +87,7 @@ async fn scheduler_reports_do_not_replace_the_first_operator_input_for_titles() 
         .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
         .await
         .unwrap();
-    let history = session.local("main", ..).await.unwrap();
+    let history = branch_events(&session, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()
@@ -142,7 +143,7 @@ async fn scheduler_reports_do_not_replace_the_first_operator_input_for_titles() 
     let report_id = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let history = session.local("main", ..).await.unwrap();
+            let history = branch_events(&session, "main", ..).await.unwrap();
             if let Some(report) = history.iter().find(|event| {
                 matches!(&event.kind, EventKind::InputMessage(data)
                     if data.submission_id.as_deref() == Some(&report_id))

@@ -22,6 +22,7 @@ regex = "1"
 [dev-dependencies]
 dim-agent-scheduler = { path = "../dim-agent-scheduler" }
 dim-agent-aimux.workspace = true
+dim-agent-runtime = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 dim-app-server = { workspace = true, features = ["testing"] }
 dim-client.workspace = true

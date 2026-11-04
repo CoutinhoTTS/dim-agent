@@ -19,8 +19,9 @@ use crate::{
     workspace_tools::files::{canonical_prefix, resolve_path},
 };
 use dim_agent_runtime::{
-    AgentError, Delivery, Dispatcher, Names, Registration, Registrations, SessionConfig,
-    SessionIdentity, StateCell, Timeline,
+    AgentError, Dispatcher, Names, Registration, Registrations, SessionConfig, SessionIdentity,
+    StateCell, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
+    TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,
@@ -31,6 +32,7 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::{
     collections::HashMap,
+    num::NonZeroU64,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -526,29 +528,38 @@ impl Permission {
         }
         dispatched.await.map_err(|_| PermissionUpdateError::Closed)
     }
-    /// Folds the ancestor prefix, then this branch's own events.
-    async fn rebuild(&self, local: &[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> {
-        let inherited = self
+    /// Folds the chain's last `permission/changed`: its policy, and this
+    /// branch's version when the change is the branch's own.
+    async fn rebuild(&self) -> dim_agent_runtime::Result<u64> {
+        let reply = self
             .timeline
-            .ancestor_events_of_kind("permission/changed")
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Chain,
+                include_publishing: true,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: vec!["permission/changed".into()],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: NonZeroU64::MIN,
+                offset: 0,
+            })
             .await?;
         let mut state = self.state.get();
-        for event in &inherited {
-            if let EventKind::PermissionChanged(data) = &event.kind {
-                state.policy = data.policy.clone();
-            }
-        }
-        for event in local {
-            if let EventKind::PermissionChanged(data) = &event.kind {
-                state = PermissionState {
-                    version: event.sequence,
-                    policy: data.policy.clone(),
-                };
+        if let Some((event, position)) = reply.events.first().zip(reply.positions.first())
+            && let EventKind::PermissionChanged(data) = &event.kind
+        {
+            state.policy = data.policy.clone();
+            if position.branch_id == self.timeline.branch_id() {
+                state.version = position.sequence;
             }
         }
         self.inner.lock().unwrap().written = state.version;
         self.state.set(state);
-        Ok(())
+        Ok(reply.through)
     }
     fn consume(&self, event: &AgentEvent) {
         let EventKind::PermissionChanged(data) = &event.kind else {
@@ -731,22 +742,24 @@ impl DynPlugin for PermissionPlugin {
                 inner.waiters.clear();
                 Ok(())
             })?;
-            let owner = service.clone();
+            let rebuild = service.clone();
+            let live = service.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "Permission",
-                    &["permission/changed"],
-                    move |delivery| {
-                        let owner = owner.clone();
+                    "Permission".into(),
+                    ["permission/changed"].map(String::from).to_vec(),
+                    Arc::new(move || {
+                        let rebuild = rebuild.clone();
+                        Box::pin(async move { rebuild.rebuild().await })
+                    }),
+                    Arc::new(move |event| {
+                        let live = live.clone();
                         Box::pin(async move {
-                            match delivery {
-                                Delivery::Replay(local) => owner.rebuild(&local).await?,
-                                Delivery::Live(event) => owner.consume(&event),
-                            }
+                            live.consume(&event);
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.state.clone(), service.state.clone())?;

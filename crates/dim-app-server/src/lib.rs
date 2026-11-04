@@ -516,13 +516,12 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             );
         }
     }
-    // The plugin files root and PluginManager's home follow one rule
-    // (PluginManager §2.1, process TypeScript §5.2): an embedding host names
-    // the root with `plugin_files`; otherwise it is the product home, else
-    // the execution home the host was started with (`--home`). A host started
-    // with only a database file has neither, so it registers no `pluginFiles`
-    // provider and runs no PluginManager; the root never comes from
-    // `--database` or the working directory.
+    // The plugin files root is `plugin_files` when an embedding host names it,
+    // else the product home, else the execution home the host was started with
+    // (`--home`); it never comes from `--database` or the working directory.
+    // PluginManager's home is the product home, else `--home`, so a host
+    // started with only a database file has no plugin files root and runs no
+    // PluginManager (PluginManager §2.1, process TypeScript §5.2).
     let plugin_home = config
         .product_home
         .clone()

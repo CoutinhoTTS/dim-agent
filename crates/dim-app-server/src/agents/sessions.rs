@@ -537,9 +537,14 @@ impl AgentIndex {
             if after > through {
                 return Err(SessionsError::rejected("after exceeds through"));
             }
-            let events = lease
-                .session
-                .local_page(&request.branch_id, after, limit, through)
+            let events = self
+                .history_page(
+                    &request.session_id,
+                    &request.branch_id,
+                    after,
+                    limit,
+                    through,
+                )
                 .await?;
             Ok(HistoryPage { through, events })
         })

@@ -4,6 +4,7 @@
 //! `treeCommands`.
 use super::*;
 use dim_agent_runtime::Timeline;
+use dim_agent_runtime::testing::branch_events;
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 use tokio::sync::Notify;
@@ -42,7 +43,7 @@ pub(super) async fn marked(
     let session = agent.get_session(session).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            for event in session.local(branch, ..).await.unwrap() {
+            for event in branch_events(&session, branch, ..).await.unwrap() {
                 if let EventKind::InputMessage(data) = &event.kind {
                     for block in &data.blocks {
                         let dim_agent_types::InputBlock::Raw { text, .. } = block;
@@ -65,10 +66,7 @@ pub(super) async fn count(
     branch: &str,
     prefix: &str,
 ) -> usize {
-    agent
-        .get_session(session)
-        .unwrap()
-        .local(branch, ..)
+    branch_events(&agent.get_session(session).unwrap(), branch, ..)
         .await
         .unwrap()
         .iter()
@@ -360,7 +358,7 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
     session.idle("main").await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.local("main", ..).await.unwrap();
+            let events = branch_events(&session, "main", ..).await.unwrap();
             let anchors = events
                 .iter()
                 .filter(|event| matches!(&event.kind, EventKind::BranchCreate(_)))
@@ -441,7 +439,7 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
             .await,
     );
     let session = agent.get_session(&id).unwrap();
-    let local = session.local("main", ..).await.unwrap();
+    let local = branch_events(&session, "main", ..).await.unwrap();
     let written = extensions(&local);
     assert_eq!(written.len(), 1, "{written:?}");
     assert_eq!(
@@ -507,10 +505,7 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
             .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
             .await,
     );
-    let local = agent
-        .get_session(&id)
-        .unwrap()
-        .local("main", ..)
+    let local = branch_events(&agent.get_session(&id).unwrap(), "main", ..)
         .await
         .unwrap();
     assert_eq!(extensions(&local), written);

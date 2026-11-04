@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use rusqlite::Connection;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -289,7 +290,9 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
             let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
             assert_ok(&client.rpc("session.submit", json!({"sessionId":id,"branchId":"main","text":"text"})).await);
             assert_ok(&client.rpc("session.idle", json!({"sessionId":id,"branchId":"main"})).await);
-            let history = agent.get_session(&id).unwrap().history("main", None).await.unwrap();
+            let history = chain_events(&agent.get_session(&id).unwrap(), "main", ..)
+                .await
+                .unwrap();
             assert!(history.iter().any(|event| matches!(&event.kind, dim_agent_types::EventKind::Text(text) if text.delta == "process response")));
             sessions.push(id);
         }
@@ -382,13 +385,10 @@ async fn summaries_read_atomic_configuration_tails_and_survive_restart() {
         .unwrap();
     let through = session.sequence("main").unwrap();
     assert!(
-        session
-            .local_page("main", through - 1, 1, through)
-            .await
-            .is_err(),
+        session.batch_end("main", through - 1).await.is_err(),
         "regression fixture must end with a multi-event atomic batch"
     );
-    let history = session.local("main", ..=through).await.unwrap();
+    let history = branch_events(&session, "main", ..=through).await.unwrap();
     let reply = client.rpc("session.summaries", json!({})).await;
     assert_ok(&reply);
     assert_eq!(reply["result"][0]["sequence"], through);
@@ -460,10 +460,7 @@ async fn database_session_creation_adopts_initial_prompt_once_across_restart() {
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    let before = agent
-        .get_session(&id)
-        .unwrap()
-        .history("main", None)
+    let before = chain_events(&agent.get_session(&id).unwrap(), "main", ..)
         .await
         .unwrap();
     assert_eq!(
@@ -493,10 +490,7 @@ async fn database_session_creation_adopts_initial_prompt_once_across_restart() {
     );
     let mut client = Client::new_version(&server, true, 3).await;
     assert_ok(&client.rpc("session.attach", json!({"sessionId": id})).await);
-    let after = agent
-        .get_session(&id)
-        .unwrap()
-        .history("main", None)
+    let after = chain_events(&agent.get_session(&id).unwrap(), "main", ..)
         .await
         .unwrap();
     assert_eq!(&after[..before.len()], before.as_slice());
@@ -840,7 +834,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
             .await,
     );
     let original = original_agent.get_session(&session_id).unwrap();
-    let before = original.history("main", None).await.unwrap();
+    let before = chain_events(&original, "main", ..).await.unwrap();
     let created = client.rpc("session.branch_create", json!({"sessionId": session_id,
         "parentBranchId": "main", "at": original.sequence("main").unwrap(), "prompt": "child input"})).await;
     assert_ok(&created);
@@ -892,7 +886,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
             .await,
     );
     let recovered = recovered_agent.get_session(&session_id).unwrap();
-    let after = recovered.history("main", None).await.unwrap();
+    let after = chain_events(&recovered, "main", ..).await.unwrap();
     assert_eq!(&after[..before.len()], &before);
     assert!(
         recovered
@@ -900,7 +894,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
             .iter()
             .any(|branch| branch.id == child_id)
     );
-    let child_history = recovered.history(&child_id, Some(0)).await.unwrap();
+    let child_history = chain_events(&recovered, &child_id, ..=0).await.unwrap();
     assert_eq!(&child_history[..before.len()], &before);
     assert_ok(
         &client
@@ -923,7 +917,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
             )
             .await,
     );
-    assert!(recovered.local(&child_id, ..).await.unwrap().iter().any(|event|
+    assert!(branch_events(&recovered, &child_id, ..).await.unwrap().iter().any(|event|
         matches!(&event.kind, dim_agent_types::EventKind::Text(data) if data.delta.contains("after restart"))));
     drop(client);
     server.shutdown();
