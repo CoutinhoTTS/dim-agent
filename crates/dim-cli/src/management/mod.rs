@@ -267,24 +267,39 @@ fn kind_sentence(kind: ActionKind) -> &'static str {
     }
 }
 
-/// The id of the entry `action` names, when it names one.
-pub fn named_id(action: &ManagementAction) -> Option<&str> {
+/// The id of the entry `action` names and, when it carries one, the source
+/// of its row, whenever it names one.
+pub fn named_entry(action: &ManagementAction) -> Option<(&str, Option<&str>)> {
     match action {
-        ManagementAction::Toggle { id, .. }
-        | ManagementAction::Remove { id }
-        | ManagementAction::Run { id, .. }
-        | ManagementAction::Save { id: Some(id), .. } => Some(id),
+        ManagementAction::Toggle { id, source, .. }
+        | ManagementAction::Remove { id, source }
+        | ManagementAction::Run { id, source, .. }
+        | ManagementAction::Save {
+            id: Some(id),
+            source,
+            ..
+        } => Some((id, source.as_deref())),
         _ => None,
     }
 }
 
+/// The id of the entry `action` names, when it names one.
+pub fn named_id(action: &ManagementAction) -> Option<&str> {
+    named_entry(action).map(|(id, _)| id)
+}
+
 /// The label of the entry `action` names in `view`, when the view has it.
+///
+/// The source the action carries picks the row when two sources hold one id;
+/// an action without one is an area whose ids are unique on their own.
 pub fn entry_name<'a>(view: &'a ManagementView, action: &ManagementAction) -> Option<&'a str> {
-    let id = named_id(action)?;
+    let (id, source) = named_entry(action)?;
     view.groups
         .iter()
         .flat_map(|group| &group.entries)
-        .find(|entry| entry.id == id)
+        .find(|entry| {
+            entry.id == id && source.is_none_or(|source| entry.source.as_deref() == Some(source))
+        })
         .map(|entry| entry.label.as_str())
 }
 
@@ -294,7 +309,7 @@ pub fn entry_name<'a>(view: &'a ManagementView, action: &ManagementAction) -> Op
 /// run's answer — answers with it instead.
 pub fn applied_line(action: &ManagementAction, name: Option<&str>) -> String {
     match action {
-        ManagementAction::Toggle { id, enabled } => tf(
+        ManagementAction::Toggle { id, enabled, .. } => tf(
             if *enabled {
                 "Enabled {name}."
             } else {
@@ -306,7 +321,9 @@ pub fn applied_line(action: &ManagementAction, name: Option<&str>) -> String {
             tf("Saved {name}.", &[("name", name.unwrap_or(id))])
         }
         ManagementAction::Save { id: None, .. } => t("Saved.").to_owned(),
-        ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", name.unwrap_or(id))]),
+        ManagementAction::Remove { id, .. } => {
+            tf("Removed {name}.", &[("name", name.unwrap_or(id))])
+        }
         ManagementAction::Reload => t("Reloaded.").to_owned(),
         ManagementAction::Add { .. } => t("Added.").to_owned(),
         ManagementAction::Run { id, .. } => tf("Ran {name}.", &[("name", name.unwrap_or(id))]),

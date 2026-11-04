@@ -16,7 +16,7 @@
  Dispatcher <── 热窗口中已发布的事件
     └─> 各能力 handler、SessionBroadcast
 
- 冷读取 ──context / history / local──> Timeline ──> 热窗口或 TimelineStore
+ 冷读取 ──query / checkpoint──> Timeline ──> 热窗口或 TimelineStore
 ```
 
 | 模块 | 拥有 | 不拥有 |
@@ -103,7 +103,7 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 
 协作 `read_page` 的 `after` 和固定水位必须为批次边界；页长是目标值，末批超出时完整返回。内部读段可切开批次，但不把内部段尾作为业务游标。反向 `session.history` 仍为独立协议草案。
 
-已装载实例采用发布水位，未装载记录采用已提交 head。公开 `local` 可读取完整范围，业务分页调用方必须传有界区间。当前范围读取每段 256 个逻辑序号，恢复校验每段 64 条物理行；查询索引及跨行规则见[存储格式](../../design/appserver/native-storage-format.md#分页查询)。
+已装载实例采用发布水位，未装载记录采用已提交 head。公开的 `query` 以请求的界为上限，业务分页调用方必须传有界区间。当前范围读取每段 256 个逻辑序号，恢复校验每段 64 条物理行；查询索引及跨行规则见[存储格式](../../design/appserver/native-storage-format.md#分页查询)。
 
 序列化、引用解析、hash 校验与类型转换集中在存储边界，能力只消费已验证类型。外部协议仍展开为原事件。序列化优化须测量正文复制、编码次数及耗时；不为优化增加业务状态。
 

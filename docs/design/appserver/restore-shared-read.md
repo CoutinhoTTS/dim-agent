@@ -108,9 +108,9 @@ rows):
 
 The rows that name `read_context` are met by event-query pages since #942, not by the copy: `Timeline::query`, at the
 published or the branch's publishing facts, reads the store's pages directly, and the context projection folds through them
-(`history::read_context`, from a checkpoint's `resume` or from the chain's start). The copy serves the range reads that remain — `local`,
-`history`, the checkpoint's anchor read (`Timeline::checkpoint`) and their wrappers on `Dispatcher`, `Branch` and
-`Session`.
+(`history::read_context`, from a checkpoint's `resume` or from the chain's start). The copy serves the one read that
+remains on the Timeline — the checkpoint's anchor (`Timeline::checkpoint`) — and nothing on `Branch` or `Session`,
+which expose only the forwarding `query`, `batch_end` and `lookup`.
 
 One traced restore of a plain Session at 10,002 events (`restore_cost` with `RESTORE_COST_SPANS`, every store call
 with its range; readers inferred from their dependencies):
@@ -168,7 +168,7 @@ Each row names a contract, where it is written, and the mechanism that keeps it.
 | --- | --- | --- |
 | The Timeline is each branch's time bus; capabilities consume it through the Dispatcher and rebuild by reading it | [time bus](../../architecture/rust-agent/time-bus.md), [timeline-storage §1](../../architecture/rust-agent/timeline-storage.md#1-结构与所有权) | The copy lives behind the Timeline's read functions. The Dispatcher, its hot window and subscriptions are untouched |
 | Rebuild: fix `S = Timeline::committed()` in the rebuild gate, read `local(..=S)` (own events, no ancestor prefix); the read covers terminals the old generation wrote and has not published, without waiting for persistence or the Dispatcher | [single-tree, capability reload protocol](../../architecture/rust-agent/single-tree.md#能力重载协议) row "重建" | Capabilities call the same function with the same `S` and receive the same events. The copy covers only `1..=h`, which was stored before the Timeline existed; everything after `h`, including unpublished terminals, is read from the hot window and the store as today |
-| `local`, `history`, `committed` and the checkpoint selection: signatures and semantics | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#4-读取) | Unchanged, errors included. `through` runs as today. A slice is selected by sequence, so it holds exactly the events a store read of that range returns, and it is served only after the store's end check (next row) |
+| `query`, `batch_end` and the checkpoint selection: signatures and semantics | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#4-读取) | Unchanged, errors included. `through` runs as today. A slice is selected by sequence, so it holds exactly the events a store read of that range returns, and it is served only after the store's end check (next row) |
 | A range may start inside an atomic batch; its end must be a batch boundary, or the read fails with `InvalidInput` | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) "分段读取" row; `TimelineStore::read` ([timeline_store.rs](../../../crates/dim-agent-runtime/src/timeline_store.rs)) | Today the stores check the end with `StoredEvent.batch_end`, and the restored hot window holds nothing for `1..=h`. The copy keeps each event's batch end from the fill and runs the same check on the end of every slice, own or ancestor, before serving it (§4.3) |
 | Events are facts once sequenced; order is the sequence only | [time bus §1, §2](../../architecture/rust-agent/time-bus.md#2-事件是总线上带序号的事实) | The copy depends on it: events `1..=h` and their batch ends never change, so a slice taken later, with its end check, equals a read taken later |
 | Only immutable facts are shared; no push replay; no capability snapshot; no shared capability state | [time bus §2](../../architecture/rust-agent/time-bus.md#2-事件是总线上带序号的事实) (each state has one owner, decided from the events it consumed); [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) (no business state for an optimization) | The copy holds the `Arc<AgentEvent>` values live dispatch hands every subscriber (`Committed(Arc<AgentEvent>)`), each with the batch end the store returned with it, and no capability state. Each reader calls the read itself and folds into its own state |

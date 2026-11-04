@@ -16,7 +16,7 @@ fn the_product_profile_installs_native_titles_without_a_foreign_runtime() {
     );
     let stream = UnixStream::connect(home.0.join("rust/daemon.sock")).unwrap();
     stream.set_read_timeout(Some(PATIENCE)).unwrap();
-    let mut wire = Wire(BufReader::new(stream));
+    let mut wire = Wire::new(stream);
     let mut id = 0;
     let mut call = |method: &str, params: Value| {
         id += 1;

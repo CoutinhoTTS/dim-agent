@@ -835,18 +835,24 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 &options,
                 &mut input,
                 id,
+                options.mcp_source.as_deref(),
                 options.no_browser,
                 options.client_secret,
             )
             .await
         }
-        Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
-        Action::McpDisconnect(id) => mcp_command::disconnect(&mut client, &options, id).await,
+        Action::McpLogout(id) => {
+            mcp_command::sign_out(&mut client, &options, id, options.mcp_source.as_deref()).await
+        }
+        Action::McpDisconnect(id) => {
+            mcp_command::disconnect(&mut client, &options, id, options.mcp_source.as_deref()).await
+        }
         Action::McpEnable { id, enabled } => {
             let state = management::mcp::set_enabled(
                 &mut client,
                 options.workspace().as_str(),
                 id,
+                options.mcp_source.as_deref(),
                 *enabled,
             )
             .await?;

@@ -1017,16 +1017,6 @@
       ]
     },
     {
-      "id": "dim_agent_capabilities::skills::session::tests",
-      "crate": "dim_agent_capabilities",
-      "parent": "dim_agent_capabilities::skills::session",
-      "file": "crates/dim-agent-capabilities/src/skills/session.rs",
-      "unexpandedMacros": [
-        "assert_eq",
-        "vec"
-      ]
-    },
-    {
       "id": "dim_agent_capabilities::steer",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -2090,7 +2080,8 @@
       "file": "crates/dim-app-server/src/mcp/config.rs",
       "unexpandedMacros": [
         "format",
-        "matches"
+        "matches",
+        "write"
       ]
     },
     {
@@ -2101,7 +2092,9 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "json"
+        "format",
+        "json",
+        "panic"
       ]
     },
     {
@@ -2931,6 +2924,18 @@
         "format",
         "matches",
         "serde_json::json"
+      ]
+    },
+    {
+      "id": "dim_cli::args::source_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::args",
+      "file": "crates/dim-cli/src/args.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic",
+        "vec"
       ]
     },
     {
@@ -5494,6 +5499,16 @@
         "matches",
         "params",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_migration::native::tests",
+      "crate": "dim_migration",
+      "parent": "dim_migration::native",
+      "file": "crates/dim-migration/src/native.rs",
+      "unexpandedMacros": [
+        "assert",
+        "json"
       ]
     },
     {
@@ -12462,13 +12477,6 @@
     },
     {
       "from": "dim_agent_capabilities::skills::session",
-      "to": "dim_agent_capabilities::skills::session::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
         "path ToolContribution",
@@ -18255,9 +18263,11 @@
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
+        "path SelectableModelsHost",
         "path ToolExecutionContext",
         "use dim_agent_capabilities::host::HostError",
         "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::SelectableModelsHost",
         "use dim_agent_capabilities::host::ToolExecutionContext"
       ]
     },
@@ -20367,6 +20377,7 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "mod config",
+        "path McpEntryError",
         "path McpPluginDocument",
         "path McpPluginServers",
         "path McpProjectEnablement",
@@ -20379,10 +20390,12 @@
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path McpSettings::default",
+        "path McpSettings::from_value",
         "path config::effective",
         "path config::merge_secret",
         "path config::split_entry",
         "path config::workspace",
+        "use config::McpEntryError",
         "use config::McpPluginDocument",
         "use config::McpPluginServers",
         "use config::McpProjectEnablement",
@@ -20477,6 +20490,7 @@
       "references": [
         "path SettingsError",
         "path SettingsError::Conflict",
+        "path SettingsError::Document",
         "path SettingsError::Invalid",
         "path SettingsService",
         "use crate::settings::BusinessDocument",
@@ -20660,6 +20674,7 @@
         "path BusinessDocument",
         "path Result",
         "path SettingsError",
+        "path SettingsError::Document",
         "path SettingsError::Invalid",
         "path SettingsService",
         "path crate::settings::ProjectAuthorized",
@@ -20675,7 +20690,11 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "path McpSecretEntry",
-        "path McpSettings"
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
+        "path McpSettings",
+        "path McpSettings::from_file",
+        "path decode_entry"
       ]
     },
     {
@@ -20718,6 +20737,7 @@
         "path McpError::Closed",
         "path McpError::CredentialsAreUserScoped",
         "path McpError::Disabled",
+        "path McpError::InvalidEntry",
         "path McpError::InvalidId",
         "path McpError::MoveConflict",
         "path McpError::MovePartial",
@@ -20768,6 +20788,7 @@
         "path McpSettings::default",
         "path RemoteTransport::Http",
         "path RemoteTransport::Sse",
+        "path config::decode_entry",
         "path config::strip_secret",
         "use super::config",
         "use super::config::BearerAuth",
@@ -20810,6 +20831,7 @@
         "path SettingsError::Cancelled",
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
+        "path SettingsError::Document",
         "path SettingsError::Invalid",
         "path SettingsError::Worker",
         "path SettingsService",
@@ -20894,10 +20916,12 @@
         "path McpSource::Project",
         "path McpSource::User",
         "path Result",
+        "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
-        "use super::Result"
+        "use super::Result",
+        "use super::sources_in_precedence"
       ]
     },
     {
@@ -26274,6 +26298,13 @@
     },
     {
       "from": "dim_cli::args",
+      "to": "dim_cli::args::source_tests",
+      "references": [
+        "mod source_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
       "to": "dim_cli::args::workspace_tests",
       "references": [
         "mod workspace_tests"
@@ -26300,6 +26331,13 @@
       "to": "dim_cli::management::hooks",
       "references": [
         "path crate::management::hooks::PROJECT"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
+      "to": "dim_cli::mcp",
+      "references": [
+        "path crate::mcp::source"
       ]
     },
     {
@@ -26338,6 +26376,14 @@
       "to": "dim_cli::update",
       "references": [
         "path crate::update::channel"
+      ]
+    },
+    {
+      "from": "dim_cli::args::source_tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path Action::Migration",
+        "path Options::parse"
       ]
     },
     {
@@ -27411,10 +27457,16 @@
       "references": [
         "path Auth",
         "path Catalog",
+        "path Resolved",
+        "path Resolved::Broken",
+        "path Resolved::Server",
         "path Server",
+        "path resolve",
         "use crate::mcp::Auth",
         "use crate::mcp::Catalog",
-        "use crate::mcp::Server"
+        "use crate::mcp::Resolved",
+        "use crate::mcp::Server",
+        "use crate::mcp::resolve"
       ]
     },
     {
@@ -27919,7 +27971,7 @@
         "path mcp::Answer::Detail",
         "path mcp::Answer::Tools",
         "path mcp::Failure::ReadFailed",
-        "path mcp::apply",
+        "path mcp::apply_named",
         "path mcp::editable",
         "path mcp::seed",
         "path mcp::target",
@@ -28147,7 +28199,9 @@
       "from": "dim_cli::mcp_command",
       "to": "dim_cli::management::mcp",
       "references": [
-        "path crate::management::mcp::set_enabled"
+        "path crate::management::mcp::set_enabled",
+        "path mcp::target_params",
+        "use crate::management::mcp"
       ]
     },
     {
@@ -28156,15 +28210,14 @@
       "references": [
         "path Started",
         "path catalog_report",
+        "path crate::mcp::take_source",
         "path error",
         "path self::error",
         "path session_report",
-        "path target",
         "use crate::mcp::Started",
         "use crate::mcp::catalog_report",
         "use crate::mcp::error",
-        "use crate::mcp::session_report",
-        "use crate::mcp::target"
+        "use crate::mcp::session_report"
       ]
     },
     {
@@ -29623,7 +29676,8 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::management::mcp",
       "references": [
-        "path crate::management::mcp::set_enabled"
+        "path crate::management::mcp::set_enabled",
+        "path crate::management::mcp::target_params"
       ]
     },
     {
@@ -29637,12 +29691,12 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::mcp",
       "references": [
+        "path crate::mcp::take_source",
         "path mcp::Started",
         "path mcp::State",
         "path mcp::catalog_report",
         "path mcp::error",
         "path mcp::session_report",
-        "path mcp::target",
         "use crate::mcp"
       ]
     },
@@ -32367,9 +32421,9 @@
         "path ManagementResult::Refused",
         "path ManagementResult::View",
         "path ManagementView",
+        "path RemoveVerb",
         "path RemoveVerb::Remove",
         "path RemoveVerb::Reset",
-        "path RemoveVerb::default",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::EntryState",
@@ -38491,11 +38545,25 @@
     },
     {
       "from": "dim_migration::native",
+      "to": "dim_migration::native::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_migration::native",
       "to": "dim_migration::source",
       "references": [
         "path SessionData",
         "use crate::source::SessionData",
         "use crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::native::tests",
+      "to": "dim_migration::native",
+      "references": [
+        "path validate_settings"
       ]
     },
     {
@@ -38648,6 +38716,13 @@
       "references": [
         "path FileStorageError::Io",
         "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path dim_app_server::mcp::config::decode_entry"
       ]
     },
     {
@@ -39505,6 +39580,30 @@
       "path": "char::is_control"
     },
     {
+      "module": "dim_app_server::mcp::config",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "D::Error::custom"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "Raw::deserialize"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "S::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "S::Error::custom"
+    },
+    {
+      "module": "dim_app_server::mcp::config",
+      "path": "S::Ok"
+    },
+    {
       "module": "dim_app_server::mcp::management",
       "path": "D::Error"
     },
@@ -39655,6 +39754,10 @@
     {
       "module": "dim_app_server::settings",
       "path": "D::USER_FILE"
+    },
+    {
+      "module": "dim_app_server::settings",
+      "path": "D::decode"
     },
     {
       "module": "dim_app_server::settings",
@@ -40015,10 +40118,6 @@
     {
       "module": "dim_cli::session_host",
       "path": "State::Pending"
-    },
-    {
-      "module": "dim_cli::session_host",
-      "path": "char::is_whitespace"
     },
     {
       "module": "dim_cli::session_host::tests",

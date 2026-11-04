@@ -58,6 +58,10 @@ Commands:\n\
   mcp test ID                      Probe a stored entry and list its tools\n\
   mcp inspect ID                   Show an entry's effective configuration\n\
   mcp disconnect ID                Close an entry's live connections\n\
+  mcp ... ID [--source SOURCE]     Every mcp command that names one stored\n\
+                                   entry takes it: user, project or plugin, as\n\
+                                   mcp list prints it; an ID more than one\n\
+                                   source lists needs it\n\
   skills list                      List Skills, their sources and states\n\
   skills enable|disable ID         Turn one Skill on or off\n\
   skills reload                    Rescan this workspace's Skills\n\
@@ -422,6 +426,10 @@ pub struct Options {
     pub redirect_uri: String,
     pub no_browser: bool,
     pub client_secret: bool,
+    /// The source an `mcp` command that names one stored entry settles:
+    /// `user`, `project` or `plugin`, as `mcp list` prints it. Without it the
+    /// id is that entry only when one source lists it.
+    pub mcp_source: Option<String>,
 }
 
 impl Options {
@@ -458,10 +466,12 @@ impl Options {
             redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
             client_secret: false,
+            mcp_source: None,
         };
         let mut args = args.peekable();
         let mut export_format = false;
         let mut autocompact = None;
+        let mut source = None;
         while let Some(arg) = args.next() {
             let value = |args: &mut dyn Iterator<Item = String>| -> Result<String> {
                 args.next()
@@ -488,14 +498,11 @@ impl Options {
                 }
                 "--json" => options.json = true,
                 "--source" => {
-                    let Action::Migration(command) = &mut options.action else {
-                        return Err("--source requires migration".into());
-                    };
-                    if command
-                        .source
-                        .replace(PathBuf::from(value(&mut args)?))
-                        .is_some()
-                    {
+                    // What the value names is decided once the command is
+                    // known: a migration's old home, or the source an `mcp`
+                    // command's entry is in. The flag may stand on either
+                    // side of the command's own words.
+                    if source.replace(value(&mut args)?).is_some() {
                         return Err("Supply --source only once".into());
                     }
                 }
@@ -818,12 +825,14 @@ impl Options {
                             area: Area::Mcp,
                             action: ManagementAction::Remove {
                                 id: value(&mut args)?,
+                                source: None,
                             },
                         }),
                         "test" => Action::Management(ManagementRequest {
                             area: Area::Mcp,
                             action: ManagementAction::Run {
                                 id: value(&mut args)?,
+                                source: None,
                                 document: None,
                                 seed: None,
                             },
@@ -832,6 +841,7 @@ impl Options {
                             area: Area::Mcp,
                             action: ManagementAction::Inspect {
                                 id: value(&mut args)?,
+                                source: None,
                             },
                         }),
                         _ => {
@@ -847,6 +857,7 @@ impl Options {
                         "reload" => ManagementAction::Reload,
                         command @ ("enable" | "disable") => ManagementAction::Toggle {
                             id: value(&mut args)?,
+                            source: None,
                             enabled: command == "enable",
                         },
                         _ => {
@@ -873,6 +884,7 @@ impl Options {
                             area: Area::Hooks,
                             action: ManagementAction::Toggle {
                                 id: crate::management::hooks::PROJECT.to_owned(),
+                                source: None,
                                 enabled: command == "enable",
                             },
                         }),
@@ -905,6 +917,7 @@ impl Options {
                             area: Area::Scheduled,
                             action: ManagementAction::Toggle {
                                 id: value(&mut args)?,
+                                source: None,
                                 enabled: command == "enable",
                             },
                         }),
@@ -924,13 +937,14 @@ impl Options {
                         command @ ("remove" | "run" | "history") => {
                             let id = value(&mut args)?;
                             let action = match command {
-                                "remove" => ManagementAction::Remove { id },
+                                "remove" => ManagementAction::Remove { id, source: None },
                                 "run" => ManagementAction::Run {
                                     id,
+                                    source: None,
                                     document: None,
                                     seed: None,
                                 },
-                                _ => ManagementAction::Inspect { id },
+                                _ => ManagementAction::Inspect { id, source: None },
                             };
                             Action::Management(ManagementRequest {
                                 area: Area::Scheduled,
@@ -954,6 +968,7 @@ impl Options {
                             area: Area::Workflow,
                             action: ManagementAction::Toggle {
                                 id: value(&mut args)?,
+                                source: None,
                                 enabled: command == "enable",
                             },
                         }),
@@ -979,6 +994,7 @@ impl Options {
                             area: Area::Workflow,
                             action: ManagementAction::Inspect {
                                 id: value(&mut args)?,
+                                source: None,
                             },
                         }),
                         _ => {
@@ -1005,6 +1021,7 @@ impl Options {
                             area: Area::Permissions,
                             action: ManagementAction::Remove {
                                 id: value(&mut args)?,
+                                source: None,
                             },
                         }),
                         _ => {
@@ -1109,6 +1126,7 @@ impl Options {
                                         },
                                         action: ManagementAction::Toggle {
                                             id: value(&mut args)?,
+                                            source: None,
                                             enabled,
                                         },
                                     });
@@ -1145,9 +1163,9 @@ impl Options {
                                     args.next();
                                     let id = value(&mut args)?;
                                     let action = if verb == "remove" {
-                                        ManagementAction::Remove { id }
+                                        ManagementAction::Remove { id, source: None }
                                     } else {
-                                        ManagementAction::Inspect { id }
+                                        ManagementAction::Inspect { id, source: None }
                                     };
                                     options.action = Action::Management(ManagementRequest {
                                         area: Area::Models {
@@ -1168,6 +1186,23 @@ impl Options {
                     );
                 }
                 _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
+            }
+        }
+        // `--source` names a migration's old home, or the source an `mcp`
+        // command's entry is in; the flag may stand on either side of the
+        // command's own words, so it is settled now that both are known.
+        if let Some(source) = source {
+            if let Action::Migration(command) = &mut options.action {
+                command.source = Some(PathBuf::from(source));
+            } else if names_one_mcp_entry(&options.action) {
+                if crate::mcp::source(&source).is_none() {
+                    return Err(format!("--source is user, project or plugin, not {source}").into());
+                }
+                options.mcp_source = Some(source);
+            } else {
+                return Err(
+                    "--source requires migration or an mcp command that names one entry".into(),
+                );
             }
         }
         if options
@@ -1596,6 +1631,32 @@ impl Options {
     }
 }
 
+/// Whether `action` is an `mcp` command that names one stored entry, which is
+/// what `--source` settles: remove, edit, set, test, inspect, disconnect,
+/// login, logout, enable and disable.
+fn names_one_mcp_entry(action: &Action) -> bool {
+    use crate::model::session::{Area, ManagementAction};
+    match action {
+        Action::McpLogin(_)
+        | Action::McpLogout(_)
+        | Action::McpDisconnect(_)
+        | Action::McpEnable { .. } => true,
+        Action::ManagementEdit { area, .. } | Action::ManagementSet { area, .. } => {
+            area == &Area::Mcp
+        }
+        Action::Management(request) => {
+            request.area == Area::Mcp
+                && matches!(
+                    request.action,
+                    ManagementAction::Remove { .. }
+                        | ManagementAction::Run { .. }
+                        | ManagementAction::Inspect { .. }
+                )
+        }
+        _ => false,
+    }
+}
+
 /// A model limit as `--set-limits` and `--set-missing-limits` take it: a
 /// positive integer a listed model's capacity can hold as a JSON number.
 fn parse_limit(flag: &str, value: &str) -> Result<u64> {
@@ -1750,5 +1811,69 @@ mod workspace_tests {
             error.to_string().ends_with("must be valid UTF-8"),
             "{error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    /// Every `mcp` command that names one stored entry takes `--source`; a
+    /// command that names none refuses it, and so does a value `mcp list`
+    /// never prints. A migration's `--source` still names its old home.
+    #[test]
+    fn every_mcp_command_that_names_one_entry_takes_a_source() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let patch = home.path().join("patch.json");
+        std::fs::write(&patch, "{}").unwrap();
+        let patch = patch.to_str().unwrap();
+        let parse = |arguments: &[&str]| {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            Options::parse(args)
+        };
+        for arguments in [
+            vec!["mcp", "remove", "docs", "--source", "project"],
+            vec!["mcp", "edit", "docs", "--source", "project"],
+            vec!["mcp", "set", "docs", patch, "--source", "project"],
+            vec!["mcp", "test", "docs", "--source", "project"],
+            vec!["mcp", "inspect", "docs", "--source", "project"],
+            vec!["mcp", "disconnect", "docs", "--source", "project"],
+            vec!["mcp", "login", "docs", "--source", "project"],
+            vec!["mcp", "logout", "docs", "--source", "project"],
+            vec!["mcp", "enable", "docs", "--source", "project"],
+            vec!["mcp", "disable", "docs", "--source", "project"],
+            // The flag may stand before the command's own words.
+            vec!["--source", "user", "mcp", "remove", "docs"],
+        ] {
+            let options =
+                parse(&arguments).unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+            assert!(
+                matches!(options.mcp_source.as_deref(), Some("project" | "user")),
+                "{arguments:?}"
+            );
+        }
+        // The flag names one stored entry: a command that names none has
+        // nothing for it to settle.
+        for arguments in [
+            vec!["mcp", "list", "--source", "user"],
+            vec!["mcp", "add", patch, "--source", "user"],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
+        }
+        // Its values are the sources `mcp list` prints.
+        assert!(parse(&["mcp", "remove", "docs", "--source", "workspace"]).is_err());
+        // A migration's `--source` still names the old home.
+        let options = parse(&["migration", "run", "--source", directory]).unwrap();
+        match options.action {
+            Action::Migration(command) => {
+                assert_eq!(command.source, Some(PathBuf::from(directory)));
+            }
+            other => panic!("expected a migration, not {other:?}"),
+        }
     }
 }

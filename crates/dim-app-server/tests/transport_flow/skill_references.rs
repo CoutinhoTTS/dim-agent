@@ -225,7 +225,7 @@ async fn session(
 
 /// The operator inputs of `main`, oldest first.
 async fn operator_inputs(session: &dim_agent_runtime::Session) -> Vec<InputMessageData> {
-    branch_events(&session, "main", ..)
+    branch_events(session, "main", ..)
         .await
         .unwrap()
         .iter()

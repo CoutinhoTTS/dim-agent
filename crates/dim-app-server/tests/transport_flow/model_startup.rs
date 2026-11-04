@@ -1,4 +1,3 @@
-use dim_agent_runtime::testing::branch_events;
 use super::*;
 use axum::{
     Json, Router,
@@ -14,6 +13,7 @@ use dim_agent_capabilities::{
     prompt_state::PromptSnapshot,
     summary_strategy::ProductSummaryStrategyConfig,
 };
+use dim_agent_runtime::testing::branch_events;
 use std::{path::Path, sync::Mutex as StdMutex};
 
 type Seen = Arc<StdMutex<Vec<(Uri, HeaderMap, Value)>>>;

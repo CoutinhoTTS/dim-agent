@@ -285,6 +285,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "MCP's documents belong to one entry; this save names none." => {
             "MCP 문서는 항목별입니다. 이 저장은 항목을 지정하지 않았습니다."
         }
+        "{id} is in more than one MCP source: {sources}. Name one with --source." => {
+            "{id}이(가) 여러 MCP 소스에 있습니다: {sources}. --source로 하나를 지정하세요."
+        }
+        "The action names no MCP source; a row carries the source its owner reported." => {
+            "이 작업은 MCP 소스를 지정하지 않았습니다. 각 행은 소유자가 보고한 소스를 가집니다."
+        }
+        "No MCP server {id} is in source {source}." => {
+            "{source} 소스에 MCP 서버 {id}이(가) 없습니다."
+        }
         "No MCP server has that id." => "해당 id의 MCP 서버가 없습니다.",
         "This workspace has no project MCP source." => {
             "이 작업 공간에는 프로젝트 MCP 소스가 없습니다."

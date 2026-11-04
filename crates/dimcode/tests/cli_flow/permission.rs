@@ -137,7 +137,7 @@ fn tui_permission_flag_overrides_saved_controls_and_invalid_defaults_are_ignored
             }
             let mut terminal = Terminal::launch_tui(command);
             terminal.until("test / model");
-            terminal.signal(libc::SIGKILL);
+            home.kill(&terminal);
             terminal.wait();
             daemon.join().unwrap();
         }
@@ -249,7 +249,7 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
             assert!(!terminal.transcript[mark..].contains("New members from main"));
             terminal.write(b"first message\r");
             terminal.until("accepted first message");
-            terminal.signal(libc::SIGKILL);
+            home.kill(&terminal);
             terminal.wait();
             daemon.join().unwrap();
         }

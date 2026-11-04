@@ -431,7 +431,7 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
     terminal.until("diagram-model");
     let ready = start.elapsed();
     let stream = UnixStream::connect(home.0.join("rust/daemon.sock")).unwrap();
-    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
     let mut wire = BufReader::new(stream);
     let hello = rpc(
         &mut wire,
