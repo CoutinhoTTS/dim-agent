@@ -6,6 +6,12 @@ const mode = process.argv[2] || 'normal';
 const stateFile = process.env.MCP_STATE_FILE || '';
 if (stateFile) fs.appendFileSync(stateFile, 'start\n');
 if (process.env.MCP_PID_FILE) fs.appendFileSync(process.env.MCP_PID_FILE, process.pid + '\n');
+if (process.env.MCP_ARGS_FILE) {
+  fs.writeFileSync(process.env.MCP_ARGS_FILE, JSON.stringify({
+    argv: process.argv.slice(2),
+    value: process.env.MCP_TEST_VALUE ?? null,
+  }));
+}
 
 function send(message) {
   process.stdout.write(JSON.stringify(message) + '\n');

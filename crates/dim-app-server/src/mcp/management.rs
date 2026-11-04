@@ -12,7 +12,7 @@ use crate::{
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -183,7 +183,11 @@ fn patch_sets_secret(patch: &ConfigurationPatch, secret: &McpSecretEntry) -> boo
         )
 }
 
-fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Value, RpcError> {
+fn configuration_view(
+    configuration: McpServerSettings,
+    referenced: &BTreeSet<String>,
+    unset: &BTreeSet<String>,
+) -> Result<serde_json::Value, RpcError> {
     Ok(match configuration {
         McpServerSettings::Stdio {
             command,
@@ -193,7 +197,8 @@ fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Va
             ..
         } => serde_json::json!({
             "type": "stdio", "command": command, "argsCount": args.len(), "cwd": cwd,
-            "envNames": env.keys().collect::<Vec<_>>()
+            "envNames": env.keys().collect::<Vec<_>>(),
+            "referencedVariables": referenced, "unsetVariables": unset
         }),
         McpServerSettings::Remote {
             kind,
@@ -202,18 +207,21 @@ fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Va
             auth,
             oauth,
             ..
-        } => serde_json::json!({
-            "type": kind, "endpoint": url::Url::parse(&url)
-                .map_err(|_| RpcError::invalid("Invalid MCP endpoint"))?
-                .origin().ascii_serialization(),
-            "headerNames": headers.keys().collect::<Vec<_>>(),
-            "authConfigured": auth.is_some(), "oauthConfigured": oauth.is_some(),
-            "oauth": oauth.map(|oauth| serde_json::json!({
-                "clientId": oauth.client_id, "callbackPort": oauth.callback_port,
-                "scopes": oauth.scopes,
-                "metadataConfigured": oauth.auth_server_metadata_url.is_some()
-            }))
-        }),
+        } => {
+            let endpoint = config::public_endpoint(&url)
+                .map_err(|_| RpcError::invalid("Invalid MCP endpoint"))?;
+            serde_json::json!({
+                "type": kind, "endpoint": endpoint,
+                "headerNames": headers.keys().collect::<Vec<_>>(),
+                "authConfigured": auth.is_some(), "oauthConfigured": oauth.is_some(),
+                "referencedVariables": referenced, "unsetVariables": unset,
+                "oauth": oauth.map(|oauth| serde_json::json!({
+                    "clientId": oauth.client_id, "callbackPort": oauth.callback_port,
+                    "scopes": oauth.scopes,
+                    "metadataConfigured": oauth.auth_server_metadata_url.is_some()
+                }))
+            })
+        }
     })
 }
 
@@ -415,6 +423,10 @@ pub struct McpCatalogEntry {
     /// neither a credential nor a challenge for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<McpAuthStatus>,
+    /// Names only, sorted and deduplicated.
+    pub referenced_variables: BTreeSet<String>,
+    /// Names only, sorted and deduplicated.
+    pub unset_variables: BTreeSet<String>,
 }
 
 pub(crate) fn error(error: McpError) -> RpcError {
@@ -500,19 +512,6 @@ fn writable(source: McpSource) -> Result<SettingsScope, RpcError> {
         .ok_or_else(|| RpcError::invalid("plugin MCP entries change through their plugin"))
 }
 
-/// One source's entry, for the `mcp.auth.*` targets.
-async fn target(
-    directory: &Arc<McpService>,
-    source: McpSource,
-    id: String,
-    cancel: &CancellationToken,
-) -> Result<super::McpServerEntry, RpcError> {
-    if id.trim().is_empty() {
-        return Err(RpcError::invalid("id must not be empty"));
-    }
-    directory.entry(source, id, cancel).await.map_err(error)
-}
-
 pub(super) fn provide(
     ctx: &Ctx,
     methods: &ManagementMethods,
@@ -554,11 +553,16 @@ pub(super) fn provide(
                     "mcp.inspect" => {
                         let p: McpTarget = params(value)?;
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
-                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
+                        let resolved = directory.resolved(source, p.id.clone(), &stopping).await.map_err(error)?;
+                        let entry = resolved.entry;
                         let connections = directory.publication.inspect(source, p.id, &stopping).await.map_err(error)?;
                         return Ok(serde_json::json!({
                             "enabled": entry.enabled(),
-                            "configuration": configuration_view(entry.configuration)?,
+                            "configuration": configuration_view(
+                                entry.configuration,
+                                &entry.referenced_variables,
+                                &entry.unset_variables,
+                            )?,
                             "connections": connections
                         }));
                     }
@@ -572,25 +576,69 @@ pub(super) fn provide(
                             if !matches!(source, McpSource::User) || p.patch.is_some() {
                                 return Err(RpcError::invalid("A new test configuration must be user-supplied and cannot include a patch"));
                             }
-                            config::decode_entry(&p.id, &configuration).map_err(|entry| error(McpError::InvalidEntry(entry)))?
+                            let configuration = config::decode_entry(&p.id, &configuration)
+                                .map_err(|entry| error(McpError::InvalidEntry(entry)))?;
+                            directory
+                                .connected(
+                                    SettingsScope::User,
+                                    p.id.clone(),
+                                    configuration,
+                                    None,
+                                    &stopping,
+                                )
+                                .await
+                                .map_err(error)?
+                                .configuration
                         } else if let Some(patch) = p.patch {
                             let scope = writable(source)?;
                             let mut entry = directory.editable(source, p.id.clone(), &stopping).await.map_err(error)?;
                             if !matches!(source, McpSource::User) && !entry.enabled {
                                 return Err(error(McpError::Disabled));
                             }
+                            // The members this patch sets are the user's own
+                            // text; the rest of a workspace entry is guarded.
+                            let mut overlay = entry.secret.clone().unwrap_or_default();
+                            if patch.url.is_some() {
+                                overlay.url = Some(String::new());
+                            }
+                            if let Some(headers) = &patch.headers {
+                                let user = overlay.headers.get_or_insert_with(Default::default);
+                                for (name, value) in headers {
+                                    if value.is_some() {
+                                        user.insert(name.clone(), String::new());
+                                    }
+                                }
+                            }
+                            if matches!(&patch.bearer, Some(BearerPatch::Set { .. })) {
+                                overlay.auth = Some(BearerAuth::Bearer {
+                                    token: String::new(),
+                                });
+                            }
                             patch_configuration(&mut entry.configuration, patch)?;
                             let configuration = entry
                                 .configuration
                                 .canonical(&p.id)
                                 .map_err(|entry| error(McpError::InvalidEntry(entry)))?;
-                            directory.effective(scope, p.id.clone(), configuration, &stopping).await.map_err(error)?
+                            let expansion = directory
+                                .connected(
+                                    scope,
+                                    p.id.clone(),
+                                    configuration,
+                                    Some(overlay),
+                                    &stopping,
+                                )
+                                .await
+                                .map_err(error)?;
+                            expansion.configuration
                         } else {
-                            let entry = target(&directory, source, p.id.clone(), &stopping).await?;
-                            if !matches!(source, McpSource::User) && !entry.enabled() {
+                            let resolved = directory
+                                .resolved(source, p.id.clone(), &stopping)
+                                .await
+                                .map_err(error)?;
+                            if !matches!(source, McpSource::User) && !resolved.entry.enabled() {
                                 return Err(error(McpError::Disabled));
                             }
-                            entry.configuration
+                            resolved.expanded
                         };
                         let mut document = McpSettings::default();
                         document.insert(p.id.clone(), configuration);
@@ -607,7 +655,11 @@ pub(super) fn provide(
                             revision: entry.revision,
                             enabled: entry.enabled,
                             secrets_in_user_scope: entry.secrets_in_user_scope,
-                            configuration: configuration_view(entry.configuration)?,
+                            configuration: configuration_view(
+                                entry.configuration,
+                                &entry.referenced_variables,
+                                &entry.unset_variables,
+                            )?,
                         });
                     }
                     "mcp.update" => {
@@ -643,8 +695,10 @@ pub(super) fn provide(
                                 .servers
                                 .into_iter()
                                 .map(|(id, entry)| McpCatalogEntry {
-                                    auth: credential_key(&id, &entry.configuration)
-                                        .and_then(|(key, _)| states.get(&key))
+                                    auth: entry
+                                        .credential
+                                        .as_ref()
+                                        .and_then(|key| states.get(key))
                                         .map(|state| match state {
                                             AuthState::Required => McpAuthStatus {
                                                 status: "required",
@@ -676,6 +730,8 @@ pub(super) fn provide(
                                             ..
                                         } => "sse",
                                     },
+                                    referenced_variables: entry.referenced_variables,
+                                    unset_variables: entry.unset_variables,
                                 })
                                 .collect(),
                             invalid: catalog
@@ -859,16 +915,22 @@ pub(super) fn provide(
                     }
                     "mcp.auth.start" => {
                         let p: StartMcpAuth = params(value)?;
+                        if p.id.trim().is_empty() {
+                            return Err(RpcError::invalid("id must not be empty"));
+                        }
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
-                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
-                        let (key, server) = credential_key(&p.id, &entry.configuration)
+                        let resolved = directory
+                            .resolved(source, p.id.clone(), &stopping)
+                            .await
+                            .map_err(error)?;
+                        let (key, server) = credential_key(&p.id, &resolved.expanded)
                             .ok_or_else(|| error(McpAuthError::Unsupported.into()))?;
                         // Sign-in contacts the server: only for an entry the
                         // user enabled (ADR 003 D3).
-                        if !entry.enabled() {
+                        if !resolved.entry.enabled() {
                             return Err(error(McpError::Disabled));
                         }
-                        let McpServerSettings::Remote { oauth, .. } = &entry.configuration else {
+                        let McpServerSettings::Remote { oauth, .. } = &resolved.expanded else {
                             unreachable!("OAuth entries are remote");
                         };
                         if let Some(secret) = &p.client_secret
@@ -903,9 +965,15 @@ pub(super) fn provide(
                     }
                     "mcp.auth.logout" => {
                         let p: McpTarget = params(value)?;
+                        if p.id.trim().is_empty() {
+                            return Err(RpcError::invalid("id must not be empty"));
+                        }
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
-                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
-                        let key = stored_key(&p.id, &entry.configuration)
+                        let resolved = directory
+                            .resolved(source, p.id.clone(), &stopping)
+                            .await
+                            .map_err(error)?;
+                        let key = stored_key(&p.id, &resolved.expanded)
                             .ok_or_else(|| error(McpAuthError::Unsupported.into()))?;
                         let revoked = auth
                             .logout(&key, &stopping)
@@ -920,4 +988,45 @@ pub(super) fn provide(
         }),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remote(url: &str) -> McpServerSettings {
+        McpServerSettings::Remote {
+            kind: RemoteTransport::Http,
+            url: url.into(),
+            headers: Default::default(),
+            auth: None,
+            oauth: None,
+            enabled: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// #952: a malformed endpoint without a reference keeps the view's error
+    /// and never reaches the client whole; a reference stays as written and a
+    /// parseable URL is reduced to its origin.
+    #[test]
+    fn a_configuration_view_errs_on_a_malformed_endpoint() {
+        let (referenced, unset) = (BTreeSet::new(), BTreeSet::new());
+        let error =
+            configuration_view(remote("host/mcp?token=made-up-secret"), &referenced, &unset)
+                .unwrap_err();
+        assert_eq!(error.message, "Invalid MCP endpoint");
+
+        let view = configuration_view(
+            remote("https://user:made-up-credential@host/mcp"),
+            &referenced,
+            &unset,
+        )
+        .unwrap();
+        assert_eq!(view["endpoint"], "https://host");
+
+        let view =
+            configuration_view(remote("https://${MCP_HOST}/mcp"), &referenced, &unset).unwrap();
+        assert_eq!(view["endpoint"], "https://${MCP_HOST}");
+    }
 }
