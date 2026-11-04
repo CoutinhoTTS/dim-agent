@@ -87,7 +87,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `toolHost` | session | WorkspaceTools | Rust-only | — |
 | `toolRegistry` | session | ToolRegistry | yes | `register` async |
 | `toolSourcesView` | session | ToolRegistry | Rust-only | — |
-| `treeCommands` | session | TimelineTree | yes | `batchEnd` async, `create` async, `end` async, `info` async, `input` async, `list` async, `page` async |
+| `treeCommands` | session | TimelineTree | yes | `batchEnd` async, `create` async, `end` async, `info` async, `input` async, `list` async, `page` async, `query` async |
 | `agentLoop` | branch | Loop | Rust-only | — |
 | `approval` | branch | Approval | Rust-only | — |
 | `backgroundExec` | branch | BackgroundExec | Rust-only | — |

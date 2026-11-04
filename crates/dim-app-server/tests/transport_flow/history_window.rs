@@ -286,6 +286,87 @@ async fn the_latest_turn_window_carries_the_prompt_and_folds_like_forward_paging
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ended_lines_latest_turn_keeps_its_prompt_and_fixed_head() {
+    let directory = new_directory("ended");
+    let model = Arc::new(StreamingModel::default());
+    let (server, _) = serve_streaming(&directory, model.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc("session.create", create(json!(["branch"])))
+        .await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    turn(&mut client, &model, &id, "parent prompt", Plan::Chunks(1)).await;
+    let parent = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":"main","after":0,"limit":1}),
+        )
+        .await;
+    assert_ok(&parent);
+    let at = parent["result"]["through"].as_u64().unwrap();
+    let created = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":id,
+        "parentBranchId":"main","at":at,"prompt":"child prompt"}),
+        )
+        .await;
+    assert_ok(&created);
+    let branch = created["result"]["branch"]["branchId"].as_str().unwrap();
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":branch}))
+            .await,
+    );
+    let params = json!({"sessionId":id,"branchId":branch,"latestTurn":true});
+    let open = client.rpc("session.history", params.clone()).await;
+    assert_ok(&open);
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":id,"branchId":branch}),
+            )
+            .await,
+    );
+    let ended = client.rpc("session.history", params.clone()).await;
+    assert_ok(&ended);
+    assert_eq!(ended["result"]["turnStart"], open["result"]["turnStart"]);
+    assert!(
+        ended["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| text_of(event) == Some("child prompt")),
+        "{ended}"
+    );
+    assert!(
+        ended["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "branch" && event["name"] == "end"),
+        "{ended}"
+    );
+    let mut pinned = params;
+    pinned["through"] = open["result"]["through"].clone();
+    let pinned = client.rpc("session.history", pinned).await;
+    assert_ok(&pinned);
+    assert_eq!(pinned["result"], open["result"]);
+    let late = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId":id,"branchId":branch,"text":"late"}),
+        )
+        .await;
+    assert_eq!(error_name(&late), "branch_ended");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_latest_turn_window_bounds_a_large_turn_and_continues_with_before() {
     let directory = new_directory("large");
     let model = Arc::new(StreamingModel::default());
