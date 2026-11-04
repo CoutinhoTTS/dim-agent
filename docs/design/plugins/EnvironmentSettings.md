@@ -72,10 +72,10 @@ The source is written by the capability, but its values belong to `ExecutionSett
 
 ## 4. Adoption
 
-The source has one trigger: a periodic check while no turn is open.
+The source has one trigger: a committed Settings write.
 
-- The branch part follows `turn/start` and `turn/end` only to know whether a turn is open. While idle it reads `ExecutionSettingsHost` every 500 ms; when the values differ from the last adopted snapshot it asks Prompt to adopt the source.
-- The initial configuration adopts the source at branch open, so the first request of a branch carries the current value. A change during a turn waits for the turn to end, so the block is written while idle before the next input and the operator's message stays the last message.
+- The branch part listens to `settings.changed` on `settings_changes("execution")` (`settings/execution`). The event carries `{source, scope, revision}`, never the document; the source load reads the host.
+- The initial configuration adopts the source at branch open, so the first request of a branch carries the current value.
 - Prompt's serial adoption queue coalesces; several writes before the adoption collapse into one read. Prompt refuses an adoption after the branch closes.
 
 ## 5. Error and absence
@@ -113,7 +113,7 @@ Version 1 therefore does not publish the permission preset. It also does not pub
 | --- | --- |
 | `P:ExecutionSettingsHost` | Read the effective sandbox and network |
 | `S:PromptRegistry` | Register `dim/settings/execution` |
-| `B:Dispatcher` | Track whether a turn is open |
+| process bus (`settings.changed`) | Wake on a committed write |
 | `B:dyn ConfigureControl` | Adopt the source |
 
 The feature is installed only where `ExecutionSettingsHost` is provided. A fixed host (evaluation, a native profile) may install it with fixed values; the product App Server provides the real source.
@@ -147,7 +147,7 @@ The feature is installed only where `ExecutionSettingsHost` is provided. A fixed
 | Sandbox back off | A new block with the off value; no stale "on" |
 | A non-model field of the same document changes | No block |
 | The same value is written twice | No second block (body equality) |
-| Session idle when the setting changes | No turn; the next idle check writes the block before the next input |
+| Session idle when the setting changes | No turn; the next request sees the new value |
 | Restore | The current value, not the stored block as "now" |
 | Host read fails | The old block stays; no `unknown`/`cleared` |
 | No host | No block, no error |
@@ -158,6 +158,6 @@ The feature is installed only where `ExecutionSettingsHost` is provided. A fixed
 ## 11. Open decisions
 
 1. The branch-scoped source route for permission preset and other per-branch settings.
-2. Whether the source also adopts at each model request (the #986 boundary) instead of only on the idle check.
+2. Whether the source also adopts at each model request (the #986 boundary) instead of only on a committed write.
 3. Whether `dim/language` joins this capability or stays in PromptSources once its value carrier exists.
 4. The exact set of later model-facing settings after the first `execution` source is measured.

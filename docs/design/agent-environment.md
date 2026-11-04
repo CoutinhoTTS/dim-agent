@@ -43,7 +43,7 @@ Each fact is delivered the way Skills already delivers its list ([Skills §Sessi
 
 1. The **owner** registers one prompt source with the Session's `PromptRegistry` from a Session part's `apply`; the registration ends with that part.
 2. Prompt turns a `State` source into one `<dim-state source="…">` Append input. The body is final text produced by the owner, escaped by the owner. The source declares its `order`.
-3. A **branch part** checks the owner periodically while no turn is open and asks Prompt to adopt the source through `ConfigureControl::configure(targets([SOURCE]))`. A change during a turn waits for the turn to end.
+3. A **branch part** follows the owner's change signal (a process-bus `ClientsChanged` fact or a `settings.changed` event) and asks Prompt to adopt the source through `ConfigureControl::configure(targets([SOURCE]))`.
 4. The branch's Prompt loads the source, compares it with the adopted entry, and writes a state input only when the body changed.
 
 Consequences:
@@ -67,15 +67,15 @@ Current prompt sources are Session-wide in practice. `targets()` fixes `PromptSc
 
 | Fact | Trigger | Boundary |
 | --- | --- | --- |
-| Clients | a check while no turn is open; branch open | One snapshot per change, before the next input; not per attach/detach |
-| Settings | a check while no turn is open; branch open | One snapshot per change, before the next input; coalesce |
+| Clients | the owner's `ClientsChanged` fact; branch open | One snapshot per change; not per attach/detach |
+| Settings | the owner's `settings.changed` event; branch open | One snapshot per change; coalesce |
 | Client view | operator input; branch open | Only if promoted to the model; a boolean, not per-switch |
 | Existing environment, date, instructions | PromptSources' check, including [#986](https://github.com/arcships/dim/issues/986)'s request-boundary direction | Unchanged |
 
 - **No wake.** A changed fact does not start a turn. The block is consumed with the next request; an idle branch stays idle.
 - **The check task owns the work.** A per-branch task reads the owner while no turn is open and calls `configure`; no event handler waits for the adoption (rule 3).
-- **One-request lag is possible.** Adoption is asynchronous and runs only while no turn is open. A change during a turn waits for the turn to end; a client that changes the fact and immediately sends can miss the first request. The design accepts that lag; a request-boundary check remains the direction of #986. For safety-relevant facts such as the sandbox, the state is advisory: the process boundary and the tools enforce the real rule.
-- **Coalescing.** The task remembers the last adopted snapshot, so several changes before the next check collapse into one read of the latest snapshot.
+- **One-request lag is possible.** Adoption is asynchronous. A client that changes the fact and immediately sends can miss the first request. The design accepts that lag; a request-boundary check remains the direction of #986. For safety-relevant facts such as the sandbox, the state is advisory: the process boundary and the tools enforce the real rule.
+- **Coalescing.** Prompt's serial adoption queue compares the latest value, so several changes before the next adoption collapse into one read of the latest snapshot.
 
 ## 6. Noise budget
 
@@ -196,9 +196,9 @@ The format follows [design rules §4 rule 8](../architecture/rust-agent/principl
 
 | Scenario | Expected |
 | --- | --- |
-| Two TUIs attach the same Session | The model sees one presence block at the next idle check with 2 tui; not two attach blocks |
-| A TUI leaves while idle | No block; the next idle check shows 1 tui |
-| The last client leaves | The next idle check says no client is attached |
+| Two TUIs attach the same Session | The model sees presence blocks for the two changes; the latest is in force |
+| A TUI leaves | A new block shows 1 tui |
+| The last client leaves | A new block says no client is attached |
 | Web, ACP or a remote device attaches | The channel count names it; no device id/name/token |
 | No provider | No source, no block, no error |
 | Settings change from another client | The next request after the change carries the new execution state; no reload |

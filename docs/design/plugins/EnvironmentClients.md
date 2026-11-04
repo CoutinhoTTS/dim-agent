@@ -81,8 +81,8 @@ The body is final text. It is generated from the counts only; no external conten
 ### 2.4 Adoption
 
 - The Session part registers the source; the initial configuration adopts it at branch open.
-- The branch part follows `turn/start` and `turn/end` only to know whether a turn is open. While idle it reads the host every 500 ms; when the counts differ from the last adopted snapshot it asks Prompt to adopt the source through `ConfigureControl::configure(targets([SOURCE]))`.
-- The branch part does not listen to attach/detach directly; idle churn produces no block. A change during a turn waits for the turn to end, so the block is written while idle before the next input and the operator's message stays the last message.
+- The branch part listens to the process-bus `ClientsChanged` fact for its Session. Each fact asks Prompt to adopt the source through `ConfigureControl::configure(targets([SOURCE]))`; the handler spawns a tracked task and returns.
+- App Server emits `ClientsChanged` when a client attaches, detaches, or a UI leaf changes. The branch part does not read the connection registry itself.
 - Prompt refuses an adoption after the branch closes, so no write follows close. The design accepts a one-request lag when a client changes and immediately sends.
 
 ## 3. Events and state
@@ -98,7 +98,7 @@ A restored branch loads the source at `branch/resume`; the body is the current c
 | `P:SessionClientsHost` | The App Server read-only counts |
 | `S:SessionIdentity` | The Session id the source reads |
 | `S:PromptRegistry` | Register the source |
-| `B:Dispatcher` | Track whether a turn is open |
+| process bus (`ClientsChanged`) | Wake on a client change |
 | `B:dyn ConfigureControl` | Adopt the source |
 
 The feature is installed only by an assembly that provides `SessionClientsHost` (the App Server daemon profile). A native/direct profile installs neither the host nor the parts; the model sees no presence block.
@@ -165,14 +165,14 @@ No client change is required for the count. Line view is [ClientView](ClientView
 
 | Scenario | Expected |
 | --- | --- |
-| Two TUI leaves attach the same Session | At the next idle check: `2 clients attached: 2 tui.`; no attach blocks |
+| Two TUI leaves attach the same Session | A block after each change; the latest says `2 clients attached: 2 tui.` |
 | A TUI leaf's underlying connection also attaches | It is one `tui`, not `tui` + `cli` |
 | A line client attaches | `cli` |
 | Web attaches | `web` |
 | ACP attaches | `acp` |
 | A paired remote device attaches | `remote`; no device id/name |
 | A leaf is `starting` | Not counted until it attaches |
-| One of two clients leaves while idle | No block; the next idle check says one |
+| One of two clients leaves | A new block says one |
 | Last client leaves | `No client is attached.` |
 | No provider | No block, no error |
 | Restore | Current count, not an old count |
