@@ -30276,6 +30276,8 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::goal",
       "references": [
+        "path crate::goal::Call",
+        "path crate::goal::Goal",
         "path crate::goal::NOT_AVAILABLE",
         "path crate::goal::Request",
         "path crate::goal::available",
@@ -30736,7 +30738,6 @@
         "path EventContent::PermissionChanged",
         "path EventContent::TurnEnd",
         "path Progress",
-        "path crate::wire::History",
         "use crate::wire::Configuration",
         "use crate::wire::Event",
         "use crate::wire::EventContent",
