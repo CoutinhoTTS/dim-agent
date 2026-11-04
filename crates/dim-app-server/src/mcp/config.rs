@@ -441,16 +441,13 @@ fn field_enabled(
 const MIN_TIMEOUT_MILLIS: u64 = 1_000;
 const MAX_TIMEOUT_MILLIS: u64 = 86_400_000;
 
-/// The members the decoder knows for a transport. An overlay may not add one
-/// of these: an unknown name there is the user's extension field, but a known
-/// name would be written back as the entry's own member (`merge_secret`).
-const STDIO_MEMBERS: &[&str] = &[
+/// The members the decoder knows, for either transport. An overlay may not add
+/// one of these: an unknown name there is the user's extension field, but a
+/// known name would be written back as the entry's own member
+/// (`merge_secret`).
+const ENTRY_MEMBERS: &[&str] = &[
     "type", "command", "args", "env", "cwd", "enabled", "timeout", "url", "headers", "auth",
     "oauth",
-];
-const REMOTE_MEMBERS: &[&str] = &[
-    "type", "url", "headers", "auth", "oauth", "enabled", "timeout", "command", "args", "env",
-    "cwd",
 ];
 
 fn field_timeout(
@@ -513,7 +510,7 @@ fn decode_stdio(
     }
     let extra = entry
         .iter()
-        .filter(|(key, _)| !STDIO_MEMBERS.contains(&key.as_str()))
+        .filter(|(key, _)| !ENTRY_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(McpServerSettings::Stdio {
@@ -572,7 +569,7 @@ fn decode_remote(
     }
     let extra = entry
         .iter()
-        .filter(|(key, _)| !REMOTE_MEMBERS.contains(&key.as_str()))
+        .filter(|(key, _)| !ENTRY_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(McpServerSettings::Remote {
@@ -1166,7 +1163,7 @@ pub(crate) fn merge_secret(config: &mut McpServerSettings, secret: &McpSecretEnt
                 secret
                     .extra
                     .iter()
-                    .filter(|(name, _)| !STDIO_MEMBERS.contains(&name.as_str()))
+                    .filter(|(name, _)| !ENTRY_MEMBERS.contains(&name.as_str()))
                     .map(|(name, value)| (name.clone(), value.clone())),
             );
         }
@@ -1205,7 +1202,7 @@ pub(crate) fn merge_secret(config: &mut McpServerSettings, secret: &McpSecretEnt
                 secret
                     .extra
                     .iter()
-                    .filter(|(name, _)| !REMOTE_MEMBERS.contains(&name.as_str()))
+                    .filter(|(name, _)| !ENTRY_MEMBERS.contains(&name.as_str()))
                     .map(|(name, value)| (name.clone(), value.clone())),
             );
         }
