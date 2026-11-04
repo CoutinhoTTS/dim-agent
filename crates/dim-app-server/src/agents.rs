@@ -731,53 +731,24 @@ impl AgentIndex {
         limit: usize,
         through: Option<u64>,
     ) -> dim_agent_runtime::Result<(u64, Vec<Arc<dim_agent_types::AgentEvent>>)> {
-        if let Some(store) = &self.session_store {
-            let head = match self
-                .session(id)
-                .map(|(_, session)| (session.sequence("main"), session))
-            {
-                Some((Ok(head), _)) => head,
-                Some((Err(error), session)) if !session.is_unloading() => return Err(error),
-                // Not loaded, or released under the read: the store holds
-                // every event it published (idle unload D8).
-                _ => {
-                    store
-                        .timeline_store()
-                        .head(&dim_agent_runtime::TimelineKey {
-                            session_id: id.into(),
-                            branch_id: "main".into(),
-                        })
-                        .await?
-                }
-            };
-            let through = through.unwrap_or(head);
-            if through > head {
-                return Err(AgentError::InvalidInput("future Timeline sequence".into()));
-            }
-            return Ok((
-                through,
-                store
-                    .read_page_without_request_bodies(id, "main", after, limit, through)
-                    .await?,
-            ));
+        // A history read acquires the Session before querying it. It must never
+        // fall back to storage: the loaded Session is the source of its query.
+        let usage = self.acquire(id).await?;
+        let head = usage.session.sequence("main")?;
+        let through = through.unwrap_or(head);
+        if through > head {
+            return Err(AgentError::InvalidInput("future Timeline sequence".into()));
         }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        let through = through.unwrap_or(session.sequence("main")?);
         Ok((
             through,
-            session_history_page(&session, "main", after, limit, through).await?,
+            session_history_page(&usage.session, "main", after, limit, through).await?,
         ))
     }
     /// One page of `branch`'s own facts after `after`, at most `limit`, never
     /// past `through`, ending on an atomic batch.
     ///
-    /// A loaded line pages through its Session's query, which asks the store
-    /// whether the page's last fact ends a batch ([ADR 020 D4]); a line whose
-    /// Session this process does not hold, or an ended one when the host keeps
-    /// no store of its own, reads through a page read instead: the tree owns
-    /// the ended lines and serves them at their fixed head ([ADR 020 D6]).
+    /// The Session must already be loaded. An ended line is served by the tree
+    /// at its fixed head; otherwise the Session query serves the page.
     pub(crate) async fn history_page(
         &self,
         id: &str,
@@ -805,7 +776,8 @@ impl AgentIndex {
         session_history_page(&session, branch, after, limit, through).await
     }
     /// The stored events of `event_ids` in one read; ids the store does not
-    /// hold are absent.
+    /// hold are absent. Collaboration supplies ids from its `main`-branch
+    /// page, so the loaded query intentionally reads `main`.
     pub(crate) async fn read_events(
         &self,
         id: &str,
@@ -848,7 +820,8 @@ impl AgentIndex {
             .await
     }
     /// The main-branch `step/tool-use-start` of each `(request_id, call_id)`
-    /// in one read; calls the store does not hold are absent.
+    /// in one read; calls the store does not hold are absent. Collaboration
+    /// supplies keys from its `main`-branch page.
     pub(crate) async fn read_tool_use_starts(
         &self,
         id: &str,

@@ -524,14 +524,31 @@ impl TimelineTree {
             session_id: self.session_id.clone(),
             branch_id: branch.into(),
         };
-        let (mut after, mut started) = (0, false);
-        while after < head {
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            include_publishing: false,
+            from_event: None,
+            from_sequence: Some(1),
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: vec!["branch/start".into(), "input/message".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::new(CREATION_PAGE as u64).expect("a page keeps one fact"),
+            offset: 0,
+        };
+        let mut started = false;
+        while let Some(from) = query.from_sequence {
+            if from > head {
+                break;
+            }
             let page = self
                 .store
-                .read_page(&key, after, CREATION_PAGE, head)
+                .query(&key, &query, from, head)
                 .await?;
-            for record in &page {
-                match &record.event.kind {
+            for event in &page.events {
+                match &event.kind {
                     EventKind::BranchStart(_) => started = true,
                     EventKind::InputMessage(data)
                         if started && data.effective_mode() == InputMode::Queue =>
@@ -541,7 +558,13 @@ impl TimelineTree {
                     _ => {}
                 }
             }
-            after = page.last().map_or(head, |record| record.event.sequence);
+            let Some(last) = page.events.last().map(|event| event.sequence) else {
+                break;
+            };
+            if page.events.len() < CREATION_PAGE || last >= head {
+                break;
+            }
+            query.from_sequence = Some(last + 1);
         }
         Ok(false)
     }
