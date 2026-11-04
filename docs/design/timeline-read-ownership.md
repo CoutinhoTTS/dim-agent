@@ -114,7 +114,7 @@ Timeline::query(TimelineQuery) -> Result<TimelineQueryReply>
 Session::query(...) / Branch::query(...)   // forward, published bound
 
 // ended line
-TreeCommands::page(id: String, after: u64, limit: u64) -> Result<Vec<Arc<AgentEvent>>>
+TreeCommands::page(id: String, after: u64, limit: usize) -> Result<Vec<Arc<AgentEvent>>>
 TreeCommands::batch_end(id: String, sequence: u64) -> Result<()>
 TreeCommands::query(id: String, query: TimelineQuery) -> Result<TimelineQueryReply>
 

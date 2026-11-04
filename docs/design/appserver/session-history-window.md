@@ -19,11 +19,11 @@ and is served by `Connection::history`
    value beyond the branch's dispatched position fails `invalid`; the call then
    waits until the branch dispatches up to `through`.
 2. It reads the page through `AgentIndex::history_page`
-   ([agents.rs](../../../crates/dim-app-server/src/agents.rs)): a loaded line
-   pages through the branch's query and the store's `batch_end`, a line that
-   has ended through `TreeCommands.page`, and a line the process does not hold
-   through the App Server's page read
-   ([storage/timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)).
+   ([agents.rs](../../../crates/dim-app-server/src/agents.rs)), holding a Session
+   lease for the call; acquisition restores an unloaded Session. A live line
+   pages through its query and batch check; an ended line pages through
+   `TreeCommands.page` and `batch_end` at its fixed head. This entry has no
+   store-read fallback for a Session the process does not hold.
    `after` and `through` must end a batch. `limit` is required and must be positive; the v3
    method sets no upper bound today, and clients send 256 or 512. A page takes
    `limit` events and then runs to the end of that batch, so it can exceed
