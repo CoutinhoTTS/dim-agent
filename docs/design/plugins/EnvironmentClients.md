@@ -93,7 +93,7 @@ An ACP gateway is one connection. Several logical clients behind the gateway are
 
 ### Branch open
 
-The branch part appends the current snapshot once after publication.
+The branch part appends the current snapshot once after publication. The first request may race that append; a later request in the batch carries the value.
 
 ### Connection change
 
