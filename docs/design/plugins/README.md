@@ -46,5 +46,5 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | Scope | Parts |
 | --- | --- |
 | Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source) in the daemon; AcpGateway in its client host process; EnvironmentClients (the App Server counts) and ClientView (the connection's viewed line) |
-| Session parts | Questions, ShellInput, Attachments, SessionTitle, PromptSuggestion, Goal, Web, Recall, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), EnvironmentClients, EnvironmentSettings, AgentSettings |
-| Branch parts | Goal (with Pursuit), Hooks, Prompt, EnvironmentClients, EnvironmentSettings |
+| Session parts | Questions, ShellInput, Attachments, SessionTitle, PromptSuggestion, Goal, Web, Recall, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), EnvironmentClients (registered by Connection), ExecutionSettingsPrompt (registered by ExecutionSettings), AgentSettings |
+| Branch parts | Goal (with Pursuit), Hooks, Prompt, EnvironmentClientsBranch (registered by Connection), ExecutionSettingsPromptBranch (registered by ExecutionSettings) |

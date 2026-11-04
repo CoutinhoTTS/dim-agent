@@ -142,6 +142,7 @@ The format follows [design rules §4 rule 8](../architecture/rust-agent/principl
 - Provide a process read-only service that returns, for one Session, the number of attached clients by channel. It is computed from the existing connection registry and UI registry; no second registry, no attach/detach bookkeeping.
 - Keep the protocol `hello.clientKind` and `hello.clientName` on the connection; map the channel; a UI leaf's connection is `tui`, not `cli`.
 - Keep the device identity out of the projection.
+- `ConnectionPlugin` registers the presence Session and branch plugins; a separate process plugin is not added.
 - The exact contract is in [EnvironmentClients](plugins/EnvironmentClients.md).
 
 ### 12.2 RemoteGateway: the remote channel is visible

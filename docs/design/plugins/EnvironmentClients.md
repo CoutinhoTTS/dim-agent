@@ -2,7 +2,7 @@
 
 Status: Draft. Parent: [agent environment awareness](../agent-environment.md). Issue: [#1019](https://github.com/arcships/dim/issues/1019). Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §4 and §5, [ADR 002](../../adr/002-plugin-scope.md), [model-facing prompts](../model-prompts.md). Language: Rust.
 
-EnvironmentClients tells the model who is attached to its Session: how many clients, by channel, and (only if later promoted) whether anyone is viewing the current line. It is a read projection of the App Server's connection and UI registries; it owns no connection state.
+EnvironmentClients tells the model who is attached to its Session: how many clients, by channel, and (only if later promoted) whether anyone is viewing the current line. It is a read projection of the App Server's connection and UI registries; it owns no connection state. The Session and branch plugins are registered by the existing `ConnectionPlugin`; there is no separate process plugin for this projection.
 
 ## 1. Scope and non-goals
 
@@ -56,7 +56,7 @@ A client is one attached connection, except that a UI leaf and the connection it
 | Name | `dim/environment/clients` |
 | Delivery | `State` (`<dim-state>`) |
 | Order | `230`, after the date (`210`) and before Skills (`300`) |
-| Author | EnvironmentClients |
+| Author | Connection owner; projection by EnvironmentClients |
 | Class | Fact |
 | Lifecycle | Registered by the Session part from `apply`, withdrawn with it |
 

@@ -2,7 +2,7 @@
 
 Status: Draft. Parent: [agent environment awareness](../agent-environment.md). Issue: [#1020](https://github.com/arcships/dim/issues/1020). Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §4 and §5, [ADR 002](../../adr/002-plugin-scope.md), [model-facing prompts](../model-prompts.md). Language: Rust.
 
-EnvironmentSettings states the model-facing settings that change the model's behaviour, so an active Session does not keep working from a value another client or process has already changed. It owns the projection, not the settings: each value stays in its owner's source and is read through the owner's public port.
+EnvironmentSettings states the model-facing settings that change the model's behaviour, so an active Session does not keep working from a value another client or process has already changed. It owns the projection, not the settings: each value stays in its owner's source and is read through the owner's public port. The Session and branch plugins are registered by the existing `ExecutionSettingsPlugin`; there is no separate process plugin for this projection.
 
 ## 1. Scope and non-goals
 
@@ -45,7 +45,7 @@ A general "something changed" digest is not a fact the model can act on; this de
 | Name | `dim/settings/execution` |
 | Delivery | `State` (`<dim-state>`) |
 | Order | `240`, after presence (`230`) and before Skills (`300`) |
-| Author | EnvironmentSettings, reading the `ExecutionSettingsHost` port |
+| Author | ExecutionSettings owner; projection reading the `ExecutionSettingsHost` port |
 | Class | Fact |
 | Lifecycle | Registered by the Session part, withdrawn with it |
 
