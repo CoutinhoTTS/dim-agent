@@ -102,8 +102,8 @@
   </div>
   <p>只有想去掉上面那条「alpha 必须低于 beta」的限制时，才需要在 TS 仓库改 <code>packages/cli/src/core/upgrade/update-version.ts</code>，让预发布轨道只选同一标识的版本，然后发一版 beta。这个改动只对升级到新 beta 的用户生效，没升级的老版本仍按旧逻辑选。</p>
 
-  <h2>GitHub CI：自有 runner 构建，官方 runner 发布</h2>
-  <p>手动从 <code>main</code> 准备下一个 GitHub alpha。若该提交已有 alpha tag，或等于 npm 上一个 alpha 的源提交，工作流就跳过。否则它自动取号，由自有 runner 构建六个平台和 Web，把原始压缩包、清单和校验和上传到 prerelease 草稿。</p>
+  <h2>GitHub 托管 runner 构建和发布</h2>
+  <p>手动从 <code>main</code> 准备下一个 GitHub alpha。若该提交已有 alpha tag，或等于 npm 上一个 alpha 的源提交，工作流就跳过。否则它自动取号，由 GitHub 托管 runner 按目标系统和架构构建六个平台，并在 Ubuntu 构建 Web，把原始压缩包、清单和校验和上传到 prerelease 草稿。</p>
   <pre><code>gh workflow run release.yml --ref main</code></pre>
   <p>检查附件并在 GitHub 发布 prerelease，然后用它的真实 tag 运行 npm 工作流。GitHub 托管 runner 通过 OIDC 发布 Release 附件。验收任务安装 <code>dima</code>、核对旧包标签，并确认八个包在阿里 npm 镜像上可用。见<a href="README.md#alpha-npm-publication">发布配置与重试说明</a>。</p>
   <pre><code>gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N -f publish=true</code></pre>

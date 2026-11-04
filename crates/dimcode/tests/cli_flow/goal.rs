@@ -574,6 +574,16 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
             ),
         );
 
+        let transcript = wire.read("session.history");
+        assert_eq!(transcript["params"]["after"], 0);
+        wire.reply(
+            &transcript,
+            page(
+                11,
+                vec![json!({"id":"start-line-1","sequence":11,"create_at":1,
+            "type":"branch","name":"start","data":{"parent":"main"}})],
+            ),
+        );
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
         let read = wire.read("session.methods");
@@ -733,6 +743,8 @@ fn tui_goal_reports_a_failed_read_and_sends_nothing() {
         let discovery = until_request(wire, "session.history");
         failed(wire, &discovery);
 
+        let transcript = until_request(wire, "session.history");
+        failed(wire, &transcript);
         let read = until_request(wire, "session.methods");
         wire.reply(&read, methods(true));
 

@@ -32,8 +32,13 @@ use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
 };
 use crate::projection::Projection;
-use crate::wire::{Configuration, Event, EventContent, Progress};
-use crate::{configure, mcp, permission, update};
+use crate::wire::{
+    Attached, CatalogModel, Configuration, Created, Event, EventContent, Progress,
+    ProviderCatalogSnapshot,
+};
+use crate::{
+    configure, mcp, permission, session_create_from_options, session_create_params, update,
+};
 
 mod member;
 mod tasks;
@@ -509,37 +514,6 @@ async fn run(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Created {
-    session_id: String,
-    model: ModelId,
-}
-
-/// The record `session.attach` replies for the Session it opened. A server
-/// from before the record existed replies `{}`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Attached {
-    #[serde(default)]
-    model: Option<ModelId>,
-    #[serde(default)]
-    capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
-    /// The adopted configuration's preferences; absent when it carries none.
-    #[serde(default)]
-    model_preferences: Option<dim_agent_types::ModelPreferences>,
-    /// The Session's workspace; absent from servers older than the record.
-    #[serde(default)]
-    cwd: Option<String>,
-    /// The Session's stored title; absent from servers older than the title
-    /// fields, and `None` when it has none.
-    #[serde(default)]
-    title: Option<String>,
-    /// The title's revision; 0 on a server that reports none.
-    #[serde(default)]
-    title_revision: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct WebToggled {
     enabled: bool,
     open: bool,
@@ -704,16 +678,6 @@ struct CancelNotice {
     branch_id: String,
 }
 
-/// `session.create` parameters: the workspace and, when one is chosen, the
-/// permission preset, which the Session's branches and members inherit.
-fn creation_params(options: &Options) -> serde_json::Value {
-    let mut params = json!({"cwd": options.workspace().as_str()});
-    if let Some(policy) = permission::creation_policy(options) {
-        params["permissionPolicy"] = policy;
-    }
-    params
-}
-
 impl Worker {
     async fn cancel_catalog(&mut self) -> crate::Result<()> {
         if let Some((request, _, _, _)) = self.catalog_request.take()
@@ -750,27 +714,17 @@ impl Worker {
             return self.attach(id, kind).await;
         }
         let attached_session = self.invalidate_projection();
-        let mut params = creation_params(&self.options);
-        self.options.creation_startup(&mut params);
-        let mut preferences = self.options.creation_preferences(None);
-        let mut target = None;
-        if let (Some(provider), Some(model)) =
-            (self.options.provider.clone(), self.options.model.clone())
-        {
-            preferences = self.options.creation_preferences(
-                saved_model_preferences(&mut self.client, &provider, &model).await?,
-            );
-            target = Some((provider, model));
-        }
-        if let Some(preferences) = &preferences {
-            params["modelPreferences"] = preferences.clone();
-        }
+        let params = session_create_from_options(&mut self.client, &self.options).await?;
+        let preferences = params.get("modelPreferences").cloned();
         let created: Created = match self.client.typed("session.create", params).await {
             Ok(created) => created,
             Err(error) => {
                 return Err(crate::model_adoption_error(
                     &mut self.client,
-                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    self.options
+                        .provider
+                        .as_deref()
+                        .zip(self.options.model.as_deref()),
                     error,
                     preferences
                         .as_ref()
@@ -792,7 +746,7 @@ impl Worker {
     /// the status line shows.
     async fn start_session(&mut self) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        let mut params = creation_params(&self.options);
+        let mut params = session_create_params(&self.options);
         let mut preferences = None;
         let mut target = None;
         let result = async {
@@ -927,23 +881,27 @@ impl Worker {
         Ok(())
     }
 
-    /// Reads the Session's Skills for the command palette. A daemon without
-    /// `skills.catalog`, or a failed read, leaves the palette with commands
-    /// only: no error, and the next event asks again.
     async fn refresh_skills(&mut self) {
-        let Some(cwd) = self.session_cwd.clone() else {
-            self.send(Update::Skills(Vec::new()));
-            return;
-        };
         if !self.client.supports(&["skills.catalog"]) {
             self.send(Update::Skills(Vec::new()));
             return;
         }
-        let entries = crate::management::skills::catalog(&mut self.client, &cwd)
-            .await
-            .map(|catalog| catalog.entries)
-            .unwrap_or_default();
-        self.send(Update::Skills(entries));
+        let Some(cwd) = self.session_cwd.clone() else {
+            self.send(Update::Notice(
+                "Skills unavailable: the daemon did not report the Session workspace".into(),
+            ));
+            return;
+        };
+        match crate::management::skills::catalog(&mut self.client, &cwd).await {
+            Ok(catalog) => self.send(Update::Skills(catalog.entries)),
+            Err(error)
+                if error.downcast_ref::<client::RpcError>().and_then(app_error)
+                    == Some("unknown_method") =>
+            {
+                self.send(Update::Skills(Vec::new()))
+            }
+            Err(error) => self.send(Update::Notice(format!("Skills unavailable: {error}"))),
+        }
     }
 
     /// Whether the model takes image input, from its catalog entry:
@@ -975,17 +933,10 @@ impl Worker {
         if !self.client.offers("provider.catalog") {
             return None;
         }
-        #[derive(Deserialize)]
-        struct Snapshot {
-            catalog: Option<Catalog>,
-        }
-        #[derive(Deserialize)]
-        struct Catalog {
-            models: Vec<CatalogModel>,
-        }
-        let request = self
-            .client
-            .typed::<Snapshot>("provider.catalog", json!({"providerId": model.provider_id}));
+        let request = self.client.typed::<ProviderCatalogSnapshot>(
+            "provider.catalog",
+            json!({"providerId": model.provider_id}),
+        );
         let snapshot = tokio::time::timeout(Duration::from_secs(5), request)
             .await
             .ok()?
@@ -1194,6 +1145,7 @@ impl Worker {
                     .await;
                 if let Ok(opened) = &opened {
                     self.discover_branch(&opened.branch.branch_id);
+                    self.line_projection(&opened.branch.branch_id);
                     self.side = Some(opened.branch.branch_id.clone());
                     self.publish();
                 }
@@ -1333,7 +1285,6 @@ impl Worker {
                         session_id: String::new(),
                         kind: SwitchKind::New,
                     });
-                    self.send(Update::Skills(Vec::new()));
                 }
             }
             Command::Resume(session_id) => {
@@ -2607,10 +2558,15 @@ impl Worker {
     /// `--source SOURCE`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
         const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID] [--source SOURCE]";
+        let cwd = self
+            .session_cwd
+            .as_deref()
+            .unwrap_or(self.options.workspace().as_str())
+            .to_owned();
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
-                let (rows, notes) = mcp::catalog_report(&mut self.client, &self.options).await?;
+                let (rows, notes) = mcp::catalog_report(&mut self.client, &cwd).await?;
                 let mut lines = rows;
                 lines.extend(notes);
                 // Without a Session there are no connections to report; the
@@ -2648,13 +2604,9 @@ impl Worker {
                 let [id] = rest.as_slice() else {
                     return Err(USAGE.into());
                 };
-                let params = crate::management::mcp::target_params(
-                    &mut self.client,
-                    self.options.workspace().as_str(),
-                    id,
-                    source,
-                )
-                .await?;
+                let params =
+                    crate::management::mcp::target_params(&mut self.client, &cwd, id, source)
+                        .await?;
                 let result: LoggedOut = self.client.typed("mcp.auth.logout", params).await?;
                 self.report(
                     format!("Signed out of {id:?}. Revoked: {}.", result.revoked),
@@ -2668,13 +2620,9 @@ impl Worker {
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
-                let params = crate::management::mcp::target_params(
-                    &mut self.client,
-                    self.options.workspace().as_str(),
-                    &id,
-                    source,
-                )
-                .await?;
+                let params =
+                    crate::management::mcp::target_params(&mut self.client, &cwd, &id, source)
+                        .await?;
                 self.client.rpc("mcp.disconnect", params).await?;
                 self.report(
                     format!("Disconnected {}.", crate::sanitize::safe(&id)),
@@ -2690,7 +2638,7 @@ impl Worker {
                 }
                 let state = crate::management::mcp::set_enabled(
                     &mut self.client,
-                    self.options.workspace().as_str(),
+                    &cwd,
                     &id,
                     source,
                     words[0] == "enable",
@@ -2726,13 +2674,12 @@ impl Worker {
         no_browser: bool,
     ) -> crate::Result<()> {
         self.end_mcp_attempt();
-        let params = crate::management::mcp::target_params(
-            &mut self.client,
-            self.options.workspace().as_str(),
-            id,
-            source,
-        )
-        .await?;
+        let cwd = self
+            .session_cwd
+            .as_deref()
+            .unwrap_or(self.options.workspace().as_str());
+        let params =
+            crate::management::mcp::target_params(&mut self.client, cwd, id, source).await?;
         let started: mcp::Started = self.client.typed("mcp.auth.start", params).await?;
         let issuer = url::Url::parse(&started.issuer)?;
         let now = std::time::SystemTime::now()
@@ -3126,37 +3073,6 @@ impl Worker {
         struct Account {
             account: Option<serde_json::Value>,
         }
-        #[derive(Deserialize)]
-        struct Snapshot {
-            catalog: Option<Catalog>,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Catalog {
-            version: u32,
-            models: Vec<CatalogModel>,
-            disabled_model_ids: Vec<String>,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct CatalogModel {
-            id: String,
-            name: String,
-            unavailable_reason: Option<String>,
-            #[serde(default)]
-            missing_limits: Vec<String>,
-            #[serde(default)]
-            zdr: bool,
-            #[serde(default)]
-            capabilities: dim_agent_types::CatalogCapabilities,
-            #[serde(default)]
-            metadata: Option<CatalogReasoning>,
-        }
-        #[derive(Deserialize, Default)]
-        #[serde(rename_all = "camelCase")]
-        struct CatalogReasoning {
-            reasoning: Option<dim_agent_types::ModelReasoning>,
-        }
         let listed: Providers = self.client.typed("provider.list", json!({})).await?;
         let mut usable: Vec<(String, String, bool)> = Vec::new();
         // `provider.refresh` lists a static provider only; an account
@@ -3176,11 +3092,16 @@ impl Worker {
                 provider.remote_model_list,
             ));
         }
-        let managed: Vec<Managed> = self
-            .client
-            .typed("account.providers", json!({}))
-            .await
-            .unwrap_or_default();
+        let managed: Vec<Managed> = match self.client.typed("account.providers", json!({})).await {
+            Ok(providers) => providers,
+            Err(error)
+                if error.downcast_ref::<client::RpcError>().and_then(app_error)
+                    == Some("unknown_method") =>
+            {
+                Vec::new()
+            }
+            Err(error) => return Err(format!("account.providers: {error}").into()),
+        };
         for provider in managed {
             let status = self
                 .client
@@ -3200,10 +3121,13 @@ impl Worker {
         for (provider_id, provider_name, listable) in usable {
             let snapshot = self
                 .client
-                .typed::<Snapshot>("provider.catalog", json!({"providerId": provider_id}))
+                .typed::<ProviderCatalogSnapshot>(
+                    "provider.catalog",
+                    json!({"providerId": provider_id}),
+                )
                 .await;
             let catalog = match snapshot {
-                Ok(Snapshot { catalog }) => catalog,
+                Ok(ProviderCatalogSnapshot { catalog }) => catalog,
                 Err(_) => {
                     empty.push(EmptyProvider {
                         provider_id,
@@ -4290,19 +4214,6 @@ fn group(n: u64) -> String {
     out
 }
 
-/// One model of `provider.catalog`, as far as the interface reads it.
-#[derive(Deserialize)]
-struct CatalogModel {
-    id: String,
-    capabilities: dim_agent_types::CatalogCapabilities,
-    metadata: Option<CatalogPreferences>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CatalogPreferences {
-    service_tier: Option<dim_agent_types::ModelServiceTier>,
-}
-
 fn effort_choices(
     capabilities: &dim_agent_types::CatalogCapabilities,
     reasoning: Option<&dim_agent_types::ModelReasoning>,
@@ -4428,28 +4339,7 @@ pub(crate) async fn declare_model_limits(
     context_window: u64,
     max_output_tokens: u64,
 ) -> crate::Result<()> {
-    #[derive(Deserialize)]
-    struct Snapshot {
-        catalog: Option<Catalog>,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Catalog {
-        version: u32,
-        #[serde(default)]
-        disabled_model_ids: Vec<String>,
-        models: Vec<CatalogModel>,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct CatalogModel {
-        id: String,
-        #[serde(default)]
-        missing_limits: Vec<String>,
-        #[serde(default)]
-        unavailable_reason: Option<String>,
-    }
-    let snapshot: Snapshot = client
+    let snapshot: ProviderCatalogSnapshot = client
         .typed("provider.catalog", json!({"providerId": provider_id}))
         .await?;
     let catalog = snapshot
@@ -4799,7 +4689,7 @@ mod tests {
         .unwrap();
         options.resolve_workspace().unwrap();
         assert_eq!(
-            creation_params(&options)["cwd"],
+            session_create_params(&options)["cwd"],
             directory.to_str().unwrap()
         );
     }

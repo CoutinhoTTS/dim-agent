@@ -18,7 +18,7 @@ concurrency:
 jobs:
   verify:
     if: github.repository == 'arcships/dim' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       sha: ${{ steps.release.outputs.sha }}
