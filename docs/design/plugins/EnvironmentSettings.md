@@ -65,7 +65,7 @@ Rules:
 
 ### Branch open
 
-The branch part registers its listener during `apply` and appends the current snapshot once after `BranchLifecycle::activated()`. The first request of the branch then carries the current value.
+The branch part registers its listener during `apply` and appends the current snapshot once after `BranchLifecycle::activated()`. The first request may race that append; a later request carries the value.
 
 ### Settings change
 
@@ -134,7 +134,7 @@ None to the runtime or rutis.
 
 | Scenario | Expected |
 | --- | --- |
-| Branch open | One current snapshot before the first request |
+| Branch open | A current snapshot; the first request may race it |
 | Another client changes sandbox | Every open branch appends the new snapshot; an idle branch gets no turn |
 | Same value written twice | One snapshot, no duplicate |
 | Non-model field changes | No snapshot |
