@@ -23,6 +23,8 @@ in [#1091](https://github.com/arcships/dim/issues/1091).
 The plugin directory carries [dim-plugin.json](dim-plugin.json). After the checkout setup above,
 install it explicitly through PluginManager with
 `dimcode plugin install /absolute/path/to/dim/runtime/plugins/workflow --id workflow`.
+The base CLI does not acquire the Node runtime on its first start, so install it first with
+`dimcode runtime install node` (or the `/runtime` panel); until then the plugin's row stays pending.
 An embedding host may build a row from the manifest's `code` fields for
 `ServerConfig.session_typescript.rows`. A Session without a
 mount list (`SessionConfig.tools`) declares `workflow` once its Session part registers it; a Session with one
