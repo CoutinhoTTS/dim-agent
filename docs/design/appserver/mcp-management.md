@@ -884,9 +884,11 @@ name or adds a version rather than silently reusing this one.
   formats. A new user-scope `mcp-secrets` source holds the migration overlay; it has no prior
   format and a missing file reads as empty. No existing persisted data moves or changes meaning,
   so no format version changes.
-- No new plugin, part, service, port, Timeline event or notification. Assembly, routing, the
-  MCP Session part and its connections are untouched; the MCP row registers the new Settings
-  source itself.
+- No new plugin, part, Timeline event or notification. D19 adds one typed capability port,
+  `CredentialVariables` with its `CredentialVariablesHost` wrapper, registered in the capabilities
+  service catalog and provided by the assembly root in `serve`. Assembly, routing, the MCP Session
+  part and its connections are otherwise untouched; the MCP row registers the new Settings source
+  itself.
 
 ## 7. Events and state
 
@@ -904,11 +906,15 @@ business configuration, not an event.
 | `settings` ([Settings service](settings-service.md#42-service-settings-owner-path)) | Reading a source with its revision, compare-and-set writes, project authorization; the `mcp`, `mcp-projects` and `mcp-secrets` sources |
 | PluginManager ([§3.7](../plugins/PluginManager.md#37-content-registration)) | A plugin entry is registered content; Mcp reads it as declared and writes nothing |
 | `McpAuth` ([MCP OAuth](mcp-oauth.md)) | The `mcp.auth.*` methods of the same namespace; the credential record is untouched by a move |
+| `CredentialVariablesHost` (capabilities host, D19) | The names of the environment variables the daemon reads credentials from, beside `ModelSelectionHost`; `McpPublication` and `McpPlugin` declare it, and the assembly root in `serve` provides it |
 
 ## 9. Cross-module requirements
 
-None raised to the runtime, rutis, Settings or Rpc: the revision and the source snapshot already
-exist, and the change stays inside the MCP owner and its documents and reply shapes.
+One requirement is raised to the capabilities host: a `CredentialVariables` trait and its
+`CredentialVariablesHost` wrapper beside `ModelSelectionHost`, registered in the service catalog
+and provided by the assembly root in `serve` (D19). None is raised to the runtime, rutis, Settings
+or Rpc: the revision and the source snapshot already exist, and the change stays inside the MCP
+owner and its documents and reply shapes.
 
 Client-side follow-ups, which are not requirements on another owner: the Web settings page (this
 repository) adds the move control and admits exactly `mcp.move` for it, as
@@ -971,12 +977,12 @@ that a probe returns only after its cleanup ran; they reply `failed`/`unavailabl
 | §4 rule 5 (batch) | Not applicable: no events are written |
 | §4 rule 6 (model context) | Not applicable: nothing enters the model context. MCP tool declarations are unchanged, and a probe's discovered tools are a reply to the client that asked, not tools published to a Session or a model |
 | §4 rule 7 (public events and services only) | The MCP row uses Settings' public service, reads the entries PluginManager registered, and reaches the credential authority through its own part; it reads no other part's internal state. The `mcp-secrets` overlay is MCP's own user-scope document |
-| §4 rule 8 (infrastructure unchanged) | No change to the Timeline, Dispatcher, event envelope, assembly, Session or branch facades; no requirement is raised |
+| §4 rule 8 (infrastructure unchanged) | No change to the Timeline, Dispatcher, event envelope, Session or branch facades. One process host value is added: the capabilities catalog registers `CredentialVariablesHost`, and the assembly root in `serve` provides it beside `ModelSelectionHost` (D19, §9) |
 | §4 rule 9 (only facts later decisions use) | Configuration stays out of the Timeline; a Session broadcast notice is not added |
 | §1 (Capability and the App Server boundary) | No new part and no new Capability. The MCP process row and its Session part keep their state; the change is in the process row's management methods |
 | ADR 002 D1 (scope follows the owner of state) | Entry configuration is shared across Sessions, so it stays in the process owner |
-| ADR 002 D2 (no wiring modules) | No new plugin, port or adapter; `mcp.move` is one method on the existing MCP row |
-| ADR 002 D3 (dependencies point to the core) | No dependency changes; Settings is already declared |
+| ADR 002 D2 (no wiring modules) | One port is added to the capabilities host (`CredentialVariables`, D19), a typed host beside `ModelSelectionHost`, not a wiring module; `mcp.move` is one method on the existing MCP row |
+| ADR 002 D3 (dependencies point to the core) | `McpPublication` and `McpPlugin` declare the capabilities host `CredentialVariablesHost`; it points to the core, and Settings is already declared |
 | ADR 002 D4 (structural versus business configuration) | Business configuration stays in its source, read on use; the `mcp-secrets` overlay is user-scope business configuration and reloads nothing |
 | ADR 002 D5 (language-neutral contracts) | The request, reply and error shapes are JSON data; the revision is an opaque string |
 | ADR 003 D3 (project entries start disabled) | A move into project clears the user's enablement record before the project entry exists and never writes `enabled` into `.mcp.json`; project content cannot enable itself. A move into user preserves only the user's existing enablement choice |
@@ -984,7 +990,8 @@ that a probe returns only after its cleanup ran; they reply `failed`/`unavailabl
 Scope migration adds no new rule answer: it writes MCP-owned Settings documents through the
 owner's typed writes, uses the public Settings and OAuth contracts, and starts a project
 destination disabled. It is explicitly not a cross-source transaction; §4.6 is the recovery
-contract.
+contract. Environment expansion (D19) adds the two answers above: the capabilities port and the
+dependency on it.
 
 ## 12. Alternatives considered
 
