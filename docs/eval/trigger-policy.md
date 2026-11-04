@@ -624,11 +624,11 @@ k=1 给的是每任务一次伯努利抽样，**观测对期望是标准的比�
 任何东西的运行扩充判定记录的类型，不如让它的溯源留在它自己的产物里——`profiles/` 记下
 每一轮的 run id，这与 baseline 产物里已有的 `sources` 字段是同一个做法。
 
-> **相邻的一处已决。** `baseline` 运行曾把 ledger run 记录写成 `pass`——它同样没有做
-> 过任何比较，与[刚修掉的 k 不匹配记 `pass`](#l2-门禁) 是同一个形状。现在二者都归入
-> 新的 `observed`：conclusive 但门禁未武装（或根本没有比较对象）的运行一律记
-> `observed`，`pass` 只在「有 armed criterion 且未破」时可构造，`metrics` 的
-> `cleared` 也只认后者。`profile` 沿用 `observed` 的语义，但不写 ledger（见上）。
+> `baseline` 运行没有比较对象，conclusive 时记 `observed`；checkpoint 已完成比较但
+> 门禁未武装时也记 `observed`。checkpoint 缺 baseline 或 k 不匹配时则记
+> `invalid/no_reference`，保留「没有可用参照」这一事实。`pass` 只在「有 armed
+> criterion 且未破」时可构造，`metrics` 的 `cleared` 也只认后者。`profile` 沿用
+> `observed` 的语义，但不写 ledger（见上）。
 
 `profile` 产物在观测数达到阈值（每任务 ≥ 14）前标记为未完成，screen 不得使用它。达标时
 做[同质性检查](#四个阶段)，通过则封存为只读，`p_i = 通过次数 / 观测次数`。
