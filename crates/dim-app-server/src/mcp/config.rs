@@ -980,15 +980,26 @@ pub(crate) fn public_endpoint(value: &str) -> std::result::Result<String, url::P
     Ok(url::Url::parse(value)?.origin().ascii_serialization())
 }
 
-fn has_reference(value: &str) -> bool {
+/// The names a value still references after expansion. A reference the
+/// environment does not set keeps its text, so an expanded value names the
+/// variables the daemon could not fill in (D19).
+pub(crate) fn unresolved(value: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
     let mut rest = value;
     while let Some(start) = rest.find("${") {
-        if reference(&rest[start + 2..]).is_some() {
-            return true;
-        }
-        rest = &rest[start + 1..];
+        let candidate = &rest[start + 2..];
+        let Some((name, _, used)) = reference(candidate) else {
+            rest = &rest[start + 1..];
+            continue;
+        };
+        names.insert(name.to_owned());
+        rest = &candidate[used..];
     }
-    false
+    names
+}
+
+fn has_reference(value: &str) -> bool {
+    !unresolved(value).is_empty()
 }
 
 fn reference_public_url(value: &str) -> String {

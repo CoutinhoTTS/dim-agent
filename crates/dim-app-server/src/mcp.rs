@@ -236,6 +236,24 @@ impl McpProbe {
             ..Self::base(ProbeStatus::Failed, latency)
         }
     }
+    /// The URL still names references the daemon does not set, so it cannot
+    /// address a server and the probe contacts nothing: it reports the names
+    /// rather than a configuration error (D19).
+    fn unresolved(names: &BTreeSet<String>) -> Self {
+        let (noun, verb) = if names.len() == 1 {
+            ("variable", "is")
+        } else {
+            ("variables", "are")
+        };
+        let names = names.iter().cloned().collect::<Vec<_>>().join(", ");
+        Self {
+            reason: Some(ProbeReason::Unavailable),
+            message: Some(server::bounded_diagnostic(format!(
+                "environment {noun} {names} {verb} not set"
+            ))),
+            ..Self::base(ProbeStatus::Failed, std::time::Duration::ZERO)
+        }
+    }
     /// The server answered, and its answer ends the probe.
     fn ended(error: server::McpServerError, latency: std::time::Duration) -> Self {
         match error {
@@ -977,6 +995,12 @@ impl McpService {
         configuration: McpServerSettings,
         cancel: &CancellationToken,
     ) -> Result<McpProbe> {
+        if let McpServerSettings::Remote { url, .. } = &configuration {
+            let unresolved = config::unresolved(url);
+            if !unresolved.is_empty() {
+                return Ok(McpProbe::unresolved(&unresolved));
+            }
+        }
         self.run(cancel, move |_, cancel| async move {
             let key = Key::<McpServer>::dynamic(format!("mcp-test:{}", uuid::Uuid::new_v4()))
                 .instance(ctx.instance());

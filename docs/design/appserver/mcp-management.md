@@ -364,10 +364,13 @@ environment when it builds the effective configuration a connection runs. `NAME`
 as set, and there is no escape or nesting, so a default ends at the first `}`. Header names,
 environment names, `extra` and `oauth` are not expanded. A reference the daemon environment does
 not set keeps its text: the entry decodes, loads and is listed with the name, and its connection
-fails with its usual transport error rather than a configuration error. The stored document always
-keeps the text the user wrote; only the expanded copy a connection runs is transient, so a read,
-save or move never writes a value back. The legacy import copies such an entry as written, so an
-imported reference starts working when the entry connects.
+fails with its usual transport error rather than a configuration error. A remote `url` that still
+names a reference is left to that connection: the publisher's application check does not judge it,
+so the source stays applied with its revision, and a probe of the entry contacts nothing and
+answers `failed`/`unavailable` with the unset names in the message (§4.5). The stored document
+always keeps the text the user wrote; only the expanded copy a connection runs is transient, so a
+read, save or move never writes a value back. The legacy import copies such an entry as written, so
+an imported reference starts working when the entry connects.
 
 The expansion is one pure function in the MCP configuration module. It runs in the publisher after
 the `mcp-secrets` overlay merge and before `config::effective` joins a project or plugin `cwd` to
@@ -556,7 +559,8 @@ skeleton only; the overlay-held fields stay in `mcp-secrets` and are never copie
 
 A read serves a disabled entry: enablement is a field, not a condition for reading. An unset
 environment reference is not a configuration error (D19): the entry loads and its connection
-reports the transport's usual failure.
+reports the transport's usual failure. A probe of a remote entry whose URL still names one answers
+`failed` with the names (§4.5).
 
 ### 4.5 Probe (`mcp.test`)
 
@@ -564,7 +568,8 @@ reports the transport's usual failure.
 every tool page, closes it, and reports what happened. It attaches no Session, publishes no tool,
 registers no connection and writes no configuration (D9). It expands environment references
 exactly as a connection does, with a complete configuration's and a patch's members treated as
-user text (D19); its reply carries no variable lists.
+user text (D19); its reply carries no variable lists, though a failure message may name the
+variables a URL still references.
 
 The request is unchanged, and a complete `configuration` is a user-supplied draft without
 `patch`. Otherwise the probe uses that source's declared entry with an optional unsaved `patch`,
@@ -596,8 +601,10 @@ Only a request refused before anything is contacted stays an RPC error: `invalid
 empty `id`, a plugin `patch`, a complete `configuration` for a non-user source or a field of the
 other transport (§4.4); `mcp_unknown_server` for an unknown `id`; `mcp_unavailable` for a project
 or plugin entry that is not enabled; and, unchanged, the error a configuration answers when the
-MCP owner cannot construct it (D8). An interrupted probe answers `operation_interrupted`, and a
-probe while Mcp is not serving answers `service_reloading`
+MCP owner cannot construct it (D8). A remote URL that still names an unset reference is not such a
+refusal: the probe contacts nothing and answers `failed`/`unavailable` with the names in its
+message (D19). An interrupted probe answers `operation_interrupted`, and a probe while Mcp is not
+serving answers `service_reloading`
 ([management methods](management-methods.md#dispatch-and-lifecycle)).
 
 ### 4.6 Move (`mcp.move`)
@@ -924,7 +931,8 @@ walked field, the guard rules by origin, the protected list including `DIMENSION
 the reference-aware `public_url`, and the rule that a stored document keeps its text. The session
 flow covers a daemon variable at connect, the probe with a complete configuration and with a
 patch, a temporary binding, the guard of a configured credential variable, the overlay's unguarded
-members, and an unset reference the catalog names while the entry still loads. The transport flow
+members, and an unset reference the catalog names while the entry still loads, including a URL
+reference that keeps its source applied while the probe reports the name. The transport flow
 asserts the catalog and configuration fields on the wire, including their absence on invalid
 entries and probe results. `mcp_flow.rs` keeps a reference through reads, writes and moves and
 proves a write never stores an expanded value; `mcp_oauth_flow.rs` discovers from the expanded URL;

@@ -3077,6 +3077,44 @@ async fn an_unset_reference_keeps_its_text_and_the_catalog_names_it() {
             .contains_key("unset")
     );
 
+    // #952 review: a reference that leaves no parseable URL must not turn the
+    // whole source into a configuration error; only the entry's connection
+    // fails, and the probe names the unset variable.
+    let user_revision = catalog.user_revision.clone();
+    let application = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let application = env.directory.application(McpSource::User);
+            if application.error.is_some()
+                || application.applied_revision.as_deref() == Some(user_revision.as_str())
+            {
+                return application;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the user source settles");
+    assert_eq!(
+        application.applied_revision.as_deref(),
+        Some(user_revision.as_str()),
+        "{application:?}"
+    );
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source": "user", "id": "unset"}),
+    )
+    .await
+    .expect("an unset reference is a probe outcome, not a refused request");
+    assert_eq!(probe["status"], "failed", "{probe}");
+    assert!(
+        probe["message"]
+            .as_str()
+            .unwrap()
+            .contains("MCP_TEST_952_UNSET_URL"),
+        "{probe}"
+    );
+
     let session = env.session(false, PermissionPreset::FullAccess).await;
     let mcp = session.session_service::<McpSession>().unwrap();
     let mut changed = mcp.subscribe();
@@ -3092,6 +3130,68 @@ async fn an_unset_reference_keeps_its_text_and_the_catalog_names_it() {
     })
     .await
     .expect("the unset reference fails its connection");
+    env.close().await;
+}
+
+/// #952 review: an unset reference in a remote URL leaves its source applied
+/// and fails only its connection, and a probe names the unset variable instead
+/// of answering a configuration error.
+#[tokio::test]
+async fn an_unset_url_reference_keeps_its_source_applied_and_the_probe_names_it() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "unresolved",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": "https://${MCP_TEST_952_UNSET_HOST}/mcp"
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let user_revision = env
+        .directory
+        .catalog(Some(1), &cancel)
+        .await
+        .unwrap()
+        .user_revision;
+    let application = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let application = env.directory.application(McpSource::User);
+            if application.error.is_some()
+                || application.applied_revision.as_deref() == Some(user_revision.as_str())
+            {
+                return application;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the user source settles");
+    assert_eq!(
+        application.applied_revision.as_deref(),
+        Some(user_revision.as_str()),
+        "{application:?}"
+    );
+
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({"source": "user", "id": "unresolved"}),
+    )
+    .await
+    .expect("an unset reference is a probe outcome, not a refused request");
+    assert_eq!(probe["status"], "failed", "{probe}");
+    assert!(
+        probe["message"]
+            .as_str()
+            .unwrap()
+            .contains("MCP_TEST_952_UNSET_HOST"),
+        "{probe}"
+    );
     env.close().await;
 }
 
