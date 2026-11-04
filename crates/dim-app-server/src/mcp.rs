@@ -928,8 +928,9 @@ impl McpService {
     }
 
     /// The configuration a connection runs, from the declared one a client
-    /// reads and patches. `overlay` replaces the stored overlay only for the
-    /// guard question; the stored overlay is still what is merged.
+    /// reads and patches. The caller merges the stored overlay exactly once
+    /// into that configuration; `overlay` answers only which members are the
+    /// user's own text for the expansion guard.
     pub(crate) async fn connected(
         &self,
         scope: SettingsScope,
@@ -940,13 +941,11 @@ impl McpService {
     ) -> Result<config::Expanded> {
         let protected = self.protected();
         self.run(cancel, move |settings, cancel| async move {
-            let stored = secret(&settings, scope, &id, &cancel).await?;
             let enablement = enablement(&settings, scope, &cancel).await;
-            let guard = overlay.or(stored.clone());
             let origin = match scope {
                 SettingsScope::User => config::Origin::User,
                 SettingsScope::Project(_) => config::Origin::Workspace {
-                    overlay: guard.as_ref(),
+                    overlay: overlay.as_ref(),
                 },
             };
             Ok(config::connected(
@@ -955,7 +954,7 @@ impl McpService {
                 config::Connection {
                     scope: Some(scope),
                     id: &id,
-                    secret: stored.as_ref(),
+                    secret: None,
                     origin,
                     enablement: &enablement,
                     environment: &daemon_environment,

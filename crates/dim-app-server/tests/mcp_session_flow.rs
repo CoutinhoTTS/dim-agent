@@ -3150,3 +3150,166 @@ async fn a_probe_runs_a_project_cwd_where_the_published_connection_runs() {
     env.close().await;
     std::fs::remove_dir_all(tools).unwrap();
 }
+
+/// #952: a probe patch replaces the stored overlay's members exactly once.
+/// An overlay-held `args`, `env`, `headers`, `url` and bearer that the patch
+/// sets or removes reach the probed server as patched.
+#[tokio::test]
+async fn a_probe_patch_replaces_the_stored_overlay_once() {
+    let env = Env::new().await;
+    let patched = Remote::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let patched_url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let patched_server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/mcp", post(rpc))
+                .with_state(patched.clone()),
+        )
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future(),
+    );
+
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-reconnect.cjs");
+    let args_file = env.home.join("local-args.json");
+    env.update(
+        SettingsScope::User,
+        "local",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "command": "node",
+                "args": [script, "stored"],
+                "cwd": env.home,
+                "env": {
+                    "MCP_PID_FILE": env.home.join("local-pid"),
+                    "MCP_ARGS_FILE": args_file,
+                    "MCP_TEST_VALUE": "stored"
+                }
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    env.update(
+        SettingsScope::User,
+        "docs",
+        McpChange::Put(
+            serde_json::from_value(json!({
+                "type": "http",
+                "url": env.url,
+                "headers": {"X-Generation": "stored"},
+                "auth": {"type": "bearer", "token": "stored-token"}
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    for id in ["local", "docs"] {
+        let cancel = CancellationToken::new();
+        let catalog = env.directory.catalog(Some(1), &cancel).await.unwrap();
+        env.directory
+            .move_entry(
+                McpSource::User,
+                McpSource::Project(1),
+                id.into(),
+                catalog.user_revision,
+                catalog.project_revision.unwrap(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        env.update(SettingsScope::Project(1), id, McpChange::SetEnabled(true))
+            .await;
+    }
+
+    // A patch sets every overlay-held member; the probe must see these values.
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "project", "id": "local", "cwd": env.home.join("project"),
+            "patch": {"args": [script, "patched"], "env": {"MCP_TEST_VALUE": "patched"}}
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let recorded: Value = serde_json::from_slice(&std::fs::read(&args_file).unwrap()).unwrap();
+    assert_eq!(recorded["argv"], json!(["patched"]));
+    assert_eq!(recorded["value"], "patched");
+
+    let before = patched.seen().len();
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "project", "id": "docs", "cwd": env.home.join("project"),
+            "patch": {
+                "url": patched_url,
+                "headers": {"X-Generation": "patched"},
+                "bearer": {"action": "set", "token": "patched-token"}
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let seen = patched.seen();
+    let requests = &seen[before..];
+    assert!(!requests.is_empty(), "the patched URL was not contacted");
+    assert!(
+        requests
+            .iter()
+            .all(|(generation, authorization)| generation == "patched"
+                && authorization == "Bearer patched-token"),
+        "{requests:?}"
+    );
+
+    // A patch removes every overlay-held member; the stored values must not
+    // come back through a second overlay merge.
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "project", "id": "local", "cwd": env.home.join("project"),
+            "patch": {"args": [script], "env": {"MCP_TEST_VALUE": null}}
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let recorded: Value = serde_json::from_slice(&std::fs::read(&args_file).unwrap()).unwrap();
+    assert_eq!(recorded["argv"], json!([]));
+    assert!(recorded["value"].is_null(), "{recorded}");
+
+    let before = patched.seen().len();
+    let probe = management(
+        &env.agent,
+        "mcp.test",
+        json!({
+            "source": "project", "id": "docs", "cwd": env.home.join("project"),
+            "patch": {
+                "url": patched_url,
+                "headers": {"X-Generation": null},
+                "bearer": {"action": "remove"}
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe["status"], "connected", "{probe}");
+    let seen = patched.seen();
+    assert!(
+        seen[before..]
+            .iter()
+            .all(|(generation, authorization)| generation.is_empty() && authorization.is_empty()),
+        "{:?}",
+        &seen[before..]
+    );
+
+    stop.cancel();
+    patched_server.await.unwrap().unwrap();
+    env.close().await;
+}
