@@ -5,7 +5,7 @@ import { Projection, type TimelineRow } from "../projection"
 import { Lines, type LineView } from "../lines"
 import { ConnectionLost, RpcError } from "../rpc/client"
 import type { Goal, GoalCall } from "../goal"
-import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type Notification, type PendingQuestion, type PermissionPreset, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type UserInput, type WithdrawResult } from "../rpc/protocol"
+import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type UserInput, type WithdrawResult } from "../rpc/protocol"
 import { readRevision, readRules } from "../rpc/general-settings"
 import { ProtocolError, readAck, readAttachmentPath, readBranchCreate, readCompactResult, readConfigurationOutcome, readContextUsage, readFileCandidates, readForkedSessionId, readHistory, readModelUpdate, readMemberApproval, readPermissionState, readPermissionVersion, readSessionMethods, readWithdrawResult } from "../rpc/read"
 import { useConnectionStore } from "./connection"
@@ -60,6 +60,8 @@ export type SessionView = {
 
 type BranchStream = {
   projection: Projection
+  after: number
+  progress: ModelProgress | undefined
   syncing: boolean
   done: boolean
   error: string
@@ -87,7 +89,7 @@ const HISTORY_TIMEOUT_MS = 60_000
 const PUBLISH_INTERVAL_MS = 16
 
 function stream(): BranchStream {
-  return { projection: new Projection(), syncing: false, done: false, error: "", queued: [] }
+  return { projection: new Projection(), after: 0, progress: undefined, syncing: false, done: false, error: "", queued: [] }
 }
 
 function idleState(): { running: boolean; stopping: boolean } {
@@ -165,11 +167,13 @@ export const useChatStore = defineStore("chat", () => {
     channel.main.done = false
     channel.main.error = ""
     channel.main.queued = []
+    channel.main.progress = undefined
     for (const [id, branch] of channel.branches) {
       branch.syncing = true
       branch.done = false
       branch.error = ""
       branch.queued = []
+      branch.progress = undefined
       if (!channel.historyQueue.includes(id)) channel.historyQueue.push(id)
     }
     try {
@@ -202,7 +206,10 @@ export const useChatStore = defineStore("chat", () => {
       }
     } finally {
       channel.syncing = false
-      channel.main.syncing = false
+      channel.main.syncing = !channel.main.done || channel.main.error !== ""
+      if (channel.main.syncing) {
+        for (const notification of channel.queued) applyNotification(channel, notification)
+      }
       channel.queued = []
       publish(channel)
     }
@@ -229,6 +236,8 @@ export const useChatStore = defineStore("chat", () => {
         const stream = ensureBranch(channel, branchId)
         if (stream.syncing) {
           channel.lines.apply(branchId, notification.event)
+          const content = notification.event.content
+          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use") && content.requestId === stream.progress?.requestId)) stream.progress = undefined
           stream.queued.push(notification.event)
         } else {
           applyEvent(channel, branchId, notification.event)
@@ -238,7 +247,10 @@ export const useChatStore = defineStore("chat", () => {
       case "session.model.progress": {
         const branchId = notification.progress.branchId
         const stream = ensureBranch(channel, branchId)
-        if (stream.syncing) break
+        if (stream.syncing) {
+          stream.progress = notification.progress
+          break
+        }
         stream.projection.progress(notification.progress)
         changed(channel)
         break
@@ -292,6 +304,7 @@ export const useChatStore = defineStore("chat", () => {
     channel.lines.apply(branchId, event)
     const stream = ensureBranch(channel, branchId)
     if (!stream.projection.apply(event)) return
+    stream.after = Math.max(stream.after, event.sequence)
     if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
     if (branchId === MAIN_BRANCH && event.content.kind === "permission-changed") channel.view.permission = event.content.policy
     changed(channel)
@@ -318,7 +331,7 @@ export const useChatStore = defineStore("chat", () => {
     branch.syncing = true
     branch.error = ""
     branch.done = false
-    let after = branch.projection.cursor
+    let after = branch.after
     let through: number | undefined
     for (let attempt = 0; ; attempt++) {
       try {
@@ -337,14 +350,21 @@ export const useChatStore = defineStore("chat", () => {
           for (const event of page.events) {
             channel.lines.apply(branchId, event)
             branch.projection.apply(event)
+            const content = event.content
+            if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use") && content.requestId === branch.progress?.requestId)) branch.progress = undefined
             if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
           }
           after = page.nextAfter
+          branch.after = after
           if (page.done) break
         }
         const queued = branch.queued
         branch.queued = []
         for (const event of queued) applyEvent(channel, branchId, event)
+        if (branch.progress !== undefined) {
+          branch.projection.progress(branch.progress)
+          branch.progress = undefined
+        }
         branch.done = true
         branch.syncing = false
         changed(channel)
@@ -354,7 +374,6 @@ export const useChatStore = defineStore("chat", () => {
           await new Promise((resolve) => setTimeout(resolve, 100))
           continue
         }
-        branch.syncing = false
         if (error instanceof ConnectionLost) {
           branch.done = false
           branch.error = ""

@@ -357,6 +357,7 @@ optional account feature must not prevent identity or usage from loading.
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
 | Skills | List, enable/disable, source installation, update and confirmed removal |
 | Permissions | Default execution/network settings and user-scope command-rule management (exact/prefix allow/deny; project scope, patterns and per-rule ask are rejected, [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds)), with confirmation for privilege increases. The Execution card reads `host.execution.backend` and shows the owner's sandbox-backend reason when the host has none; the browser never infers the platform |
+| Scheduled tasks | List, create/edit, pause/resume, run now, recent runs and confirmed deletion through the [Scheduler management contract](plugins/Scheduler.md#a3-management-methods); no raw Settings document access |
 | Archived sessions | Search, restore/open and confirmed permanent deletion |
 | Diagnostics | Safe version, protocol, connection and metadata with refresh, the model-request recording switch, and the start-up rule for process logs instead of a log-mode control ([logging controls](#diagnostics-the-legacy-logging-controls)) |
 
@@ -569,6 +570,10 @@ WebSocket clients gain no management access. Advertised methods must use the sam
 filter as dispatch so the UI cannot mistake a blocked method for an available one.
 Only `modality.capabilities` and `modality.configure` are admitted from the
 `modality` namespace; task and realtime methods remain unavailable.
+Only `schedule.list`, `schedule.save`, `schedule.delete`, `schedule.set_enabled`,
+`schedule.run_now` and `schedule.history` are admitted from `schedule`, and only
+when its owner registers them. Additional methods require a separate admission
+review; the `schedule` Settings source is not exposed through `settings.*`.
 
 Audit every added read for secret-bearing fields before enabling it. Return only
 owner-provided safe projections; any missing safe projection is a requirement for

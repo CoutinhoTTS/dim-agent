@@ -28,6 +28,7 @@ import type {
   RawBlock,
   SessionEvent,
   SessionSummary,
+  SessionTitle,
   ToolResult,
   UserInput,
   WithdrawResult,
@@ -138,12 +139,21 @@ export function readForkedSessionId(value: unknown): string {
   return str(obj(value, "session.fork"), "sessionId", "session.fork")
 }
 
+function readSessionTitle(source: Json, at: string): SessionTitle {
+  const title = source.title === null ? null : str(source, "title", at)
+  const titleSource = source.titleSource
+  if (titleSource !== null && titleSource !== "auto" && titleSource !== "manual") fail(`${at}.titleSource`, "auto, manual or null")
+  if ((title === null) !== (titleSource === null)) fail(`${at}.titleSource`, "null exactly when title is null")
+  return { title, titleSource, titleRevision: num(source, "titleRevision", at) }
+}
+
 export function readSummaries(value: unknown): SessionSummary[] {
   return arr(value, "session.summaries").map((item, index) => {
     const at = `session.summaries[${index}]`
     const source = obj(item, at)
     const preview = optStr(source, "preview", at)
     return {
+      ...readSessionTitle(source, at),
       sessionId: str(source, "sessionId", at),
       cwd: str(source, "cwd", at),
       model: modelId(source.model, `${at}.model`),
@@ -198,7 +208,7 @@ function readPreset(value: unknown, at: string): PermissionPreset {
   return fail(at, "a permission preset")
 }
 
-function readPermissionPolicy(value: unknown, at: string): PermissionPolicy {
+export function readPermissionPolicy(value: unknown, at: string): PermissionPolicy {
   const policy = obj(value, at)
   const list = (key: string) => arr(policy[key], `${at}.${key}`).map((item, index) => {
     if (typeof item !== "string") fail(`${at}.${key}[${index}]`, "a string")
@@ -663,6 +673,9 @@ export function readNotification(method: string, value: unknown): Notification |
         requestId: str(params, "requestId", method),
       }
     case "session.notice": {
+      if (params.source === "SessionStore" && params.kind === "title") {
+        return { method: "session.title", sessionId: str(params, "sessionId", method), data: readSessionTitle(obj(params.data, `${method}.data`), `${method}.data`) }
+      }
       if (params.source !== "Collaboration" || params.kind !== "memberApprovalEnded") return undefined
       const data = obj(params.data, method)
       return { method: "memberApprovalEnded", sessionId: str(params, "sessionId", method), branchId: str(data, "branchId", method), approvalId: str(data, "approvalId", method) }

@@ -13,6 +13,12 @@ export const MAIN_BRANCH = "main"
 
 export type ModelId = { providerId: string; modelId: string }
 
+export type SessionTitle = {
+  title: string | null
+  titleSource: "auto" | "manual" | null
+  titleRevision: number
+}
+
 export type HelloResult = {
   instanceId: string
   serverVersion: string
@@ -22,7 +28,7 @@ export type HelloResult = {
 }
 
 /** `session.summaries`: SessionInfo flattened with the summary fields. */
-export type SessionSummary = {
+export type SessionSummary = SessionTitle & {
   sessionId: string
   cwd: string
   model: ModelId
@@ -228,4 +234,5 @@ export type Notification =
   | { method: "approval.request"; request: ApprovalRequest }
   | { method: "approval.cancelled" | "approval.resolved"; sessionId: string; branchId: string; requestId: string }
   | { method: "memberApprovalEnded"; sessionId: string; branchId: string; approvalId: string }
+  | { method: "session.title"; sessionId: string; data: SessionTitle }
   | { method: "session.closed"; sessionId: string; reason?: string }

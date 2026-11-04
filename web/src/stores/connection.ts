@@ -24,7 +24,8 @@ export const useConnectionStore = defineStore("connection", () => {
       if (reconnected) useChatStore().resync()
     },
     notification(notification) {
-      useChatStore().receive(notification)
+      if (notification.method === "session.title") useSessionsStore().setTitle(notification.sessionId, notification.data)
+      else useChatStore().receive(notification)
     },
     invalid(error) {
       console.error(error)
