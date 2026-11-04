@@ -1,24 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useSettingsText } from "../../i18n/settings-general"
-import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpInspection, type McpInvalidEntry, type McpOAuthInput, type McpProbe, type McpServerInput, type McpView } from "../../rpc/general-settings"
+import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpInspection, type McpInvalidEntry, type McpProbe, type McpServerInput, type McpView } from "../../rpc/general-settings"
+import { configuration, patch, type Draft } from "./mcp-form"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
 import { bindSettingsDirty, messageFrom, reloadSettingsOnReconnect } from "./context"
 
-type SecretField = { name: string; action: "keep" | "set" | "remove"; value: string; stored?: boolean }
-type Draft = {
-  id: string; source: "user" | "project"; type: "stdio" | "http" | "sse"
-  command: string; args: string[]; cwd: string; url: string; endpoint?: string
-  argsAction: "keep" | "replace"; storedArgsCount: number
-  secrets: SecretField[]; enabled: boolean; token: string; authConfigured: boolean
-  bearerAction: "keep" | "set" | "remove"; oauth: boolean; oauthAction: "keep" | "set" | "remove"
-  clientId: string; callbackPort: string; scopes: string; metadataUrl: string
-  timeout: string
-  metadataConfigured: boolean; metadataAction: "keep" | "set" | "remove"
-  secretsInUserScope: boolean
-}
 const s = useSettingsText()
 const connection = useConnectionStore()
 const catalog = ref<McpView>()
@@ -138,42 +127,6 @@ async function edit(server: McpEntry): Promise<void> {
 function closeEditor(): void {
   if (dirty.value && !window.confirm(s('Discard unsaved MCP configuration?', '放弃未保存的 MCP 配置？'))) return
   draft.value = undefined
-}
-function configuration(form: Draft): McpServerInput {
-  const values = Object.fromEntries(form.secrets.filter((secret) => secret.action === "set").map((secret) => [secret.name.trim(), secret.value]))
-  const enabled = form.source === "user" && form.enabled
-  const timeout = form.timeout.trim() ? { timeout: Number(form.timeout) } : {}
-  if (form.type === "stdio") return { type: "stdio", command: form.command, args: form.args, ...(form.cwd ? { cwd: form.cwd } : {}), env: values, enabled, ...timeout }
-  const oauth: McpOAuthInput = {
-    ...(form.clientId.trim() ? { clientId: form.clientId.trim() } : {}),
-    ...(form.callbackPort ? { callbackPort: Number(form.callbackPort) } : {}),
-    ...(form.scopes.trim() ? { scopes: form.scopes.trim() } : {}),
-    ...(form.metadataUrl.trim() ? { authServerMetadataUrl: form.metadataUrl.trim() } : {}),
-  }
-  return { type: form.type, url: form.url.trim(), headers: values, enabled, ...(form.token ? { auth: { type: "bearer", token: form.token } as const } : {}), ...(form.oauth ? { oauth } : {}), ...timeout }
-}
-function patch(form: Draft): McpConfigurationPatch {
-  // A blank field clears the entry's limit, so every save states it.
-  const limit = { timeout: form.timeout.trim() ? Number(form.timeout) : null }
-  if (form.secretsInUserScope) {
-    if (form.type === "stdio") return { command: form.command, cwd: form.cwd, ...limit }
-    const value: McpConfigurationPatch = { ...limit }
-    if (form.oauthAction === "remove") value.oauth = { action: "remove" }
-    if (form.oauthAction === "set") value.oauth = {
-      action: "set", clientId: form.clientId.trim() || null, callbackPort: form.callbackPort ? Number(form.callbackPort) : null, scopes: form.scopes.trim() || null,
-    }
-    return value
-  }
-  const secrets = Object.fromEntries(form.secrets.filter((secret) => secret.action !== "keep").map((secret) => [secret.name.trim(), secret.action === "remove" ? null : secret.value]))
-  if (form.type === "stdio") return { command: form.command, ...(form.argsAction === "replace" ? { args: form.args } : {}), cwd: form.cwd, env: secrets, ...limit }
-  const value: McpConfigurationPatch = { ...(form.url.trim() ? { url: form.url.trim() } : {}), headers: secrets, ...limit }
-  if (form.bearerAction !== "keep") value.bearer = form.bearerAction === "remove" ? { action: "remove" } : { action: "set", token: form.token }
-  if (form.oauthAction === "remove") value.oauth = { action: "remove" }
-  if (form.oauthAction === "set") value.oauth = {
-    action: "set", clientId: form.clientId.trim() || null, callbackPort: form.callbackPort ? Number(form.callbackPort) : null, scopes: form.scopes.trim() || null,
-    ...(form.metadataAction === "remove" ? { authServerMetadataUrl: null } : form.metadataAction === "set" ? { authServerMetadataUrl: form.metadataUrl.trim() } : {}),
-  }
-  return value
 }
 function validDraft(form: Draft): boolean {
   const names = form.secrets.map((secret) => secret.name.trim())
