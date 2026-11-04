@@ -92,9 +92,9 @@ No polling timer, persisted index or generic observation framework is added.
 A failed main-history read reports a connection failure and disables submission;
 the unsent draft remains in the current UI, and recovery requires exit/resume. The following local-error rules
 apply to child branches. Loading or failed branch reads are visible. Individual known targets remain
-usable, but stop-all is disabled while a discovered branch's initial history is
-unread or failed, because the list cannot yet describe its tasks. A reply releases
-the global request slot. A failed page in the current projection keeps its last
+usable, but stop-all is disabled while any discovered branch's history is
+loading or failed, including the transcript reread triggered by its first open.
+A reply releases the global request slot. A failed page in the current projection keeps its last
 validated cursor and watermark. Reopening the panel queues each failed page once,
 after any outstanding read: resume from the last valid `nextAfter` (or `after:0`
 if no page succeeded), retaining the fixed `through` if known. A first successful

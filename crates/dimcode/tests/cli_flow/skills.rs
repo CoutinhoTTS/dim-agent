@@ -64,7 +64,9 @@ fn skill_discovery_reports_failures_and_a_failed_reload_keeps_the_palette() {
     terminal.until("Other workspace Skills unavailable");
     let switched = terminal.transcript.len();
     terminal.write(b"/comm");
+    terminal.until("/comm");
     terminal.until("/permissions");
+    terminal.until("\u{1b}[?2026l");
     assert!(
         !terminal.transcript[switched..].contains("$commit"),
         "a failed read in another Session must not retain the old Session's Skills"
