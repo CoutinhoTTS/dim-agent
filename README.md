@@ -12,8 +12,6 @@
 
 An event-driven Timeline connects what an agent senses to what it does next. The runtime is built entirely from plugins. A plugin written in Rust, TypeScript or Python can give the agent a new way to act and the vocabulary to understand when to use it.
 
-Our aim is for Dim to take root on any device and grow beyond the one it starts on. Imagine a greenhouse probe reporting `18`. Its plugin explains that the reading means 18% soil moisture in bed three. The Timeline shows that the bed was watered ten minutes ago. Dim could wait for the water to reach the probe, check again, and write a plugin to alert the grower on their phone if the bed stays dry.
-
 In the Rust alpha, you can ask Dim to write a TypeScript tool for itself in a session with permission to do so. Once the plugin loads, Dim can call the tool on its next model request, edit the implementation and reload it in the same session. [Plugin authoring inside Dim](runtime/plugins/plugin-authoring/skills/plugin-authoring/SKILL.md)
 
 ## Install
