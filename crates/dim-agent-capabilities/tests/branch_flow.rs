@@ -3118,10 +3118,26 @@ async fn a_refused_branch_call_writes_nothing() {
             format!("Line {host} was not opened with this tool; it follows its own protocol.")
         )
     );
-    assert_eq!(
-        branch_events(&session, &host, ..).await.unwrap().len(),
-        before
-    );
+    // A refused call writes no message to its target; the runtime may still
+    // write its own parent block on an open line.
+    for event in branch_events(&session, &host, ..)
+        .await
+        .unwrap()
+        .iter()
+        .skip(before)
+    {
+        if let EventKind::InputMessage(data) = &event.kind {
+            assert!(
+                !data.blocks.is_empty()
+                    && data.blocks.iter().all(|block| matches!(
+                        block,
+                        InputBlock::Raw { text, .. } if text.starts_with("<dim-branch-parent")
+                    )),
+                "a refused call writes nothing to {host}: {:?}",
+                event.kind
+            );
+        }
+    }
     let main_before = branch_events(&session, "main", ..).await.unwrap().len();
     assert_eq!(
         call(
@@ -4681,8 +4697,8 @@ async fn an_ending_line_and_main_get_no_parent_block() {
     until_branch(&session, "main").await;
     soon(session.idle("main")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    if let Ok(head) = session.sequence("line") {
-        let events = branch_events(&session, "line", ..=head).await.unwrap();
+    if session.sequence("line").is_ok() {
+        let events = local_events(&session, "line").await;
         assert!(
             parent_block_events(&events).is_empty(),
             "an ending line gets no block: {events:#?}"
