@@ -132,6 +132,7 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | Permission | branch | `dispatcher`, `timeline` |
 | Prompt | branch | `dispatcher`, `timeline` |
 | SessionBroadcast | branch | `dispatcher` |
+| SettingsSnapshotBranch | branch | `timeline` |
 | ToolBinding | branch | `dispatcher`, `timeline` |
 | ToolExecutor | branch | `dispatcher`, `timeline` |
 | TreeTimeline | branch | `dispatcher`, `timeline` |

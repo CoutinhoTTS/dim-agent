@@ -496,6 +496,31 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_capabilities::execution_settings::prompt",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::execution_settings",
+      "file": "crates/dim-agent-capabilities/src/execution_settings/prompt.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::execution_settings::prompt",
+      "file": "crates/dim-agent-capabilities/src/execution_settings/prompt.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "json",
+        "panic"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::file_access",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -9033,6 +9058,165 @@
       "references": [
         "path ExecEndedData",
         "use dim_agent_types::ExecEndedData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings",
+      "to": "dim_agent_capabilities::execution_settings::prompt",
+      "references": [
+        "mod prompt"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::branch_input",
+      "references": [
+        "path append_own",
+        "use crate::branch_input::append_own"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::execution_settings",
+      "references": [
+        "path ExecutionSettings",
+        "path ExecutionSettingsHost",
+        "path SOURCE",
+        "use super::ExecutionSettings",
+        "use super::ExecutionSettingsHost",
+        "use super::SOURCE"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ToolExecutionContext",
+        "path crate::host::HostFuture",
+        "use crate::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsChanged",
+        "path settings_changes",
+        "use crate::settings::SettingsChanged",
+        "use crate::settings::settings_changes"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolContribution",
+        "path ToolHandler",
+        "path ToolRegistry",
+        "use crate::tool_registry::ToolContribution",
+        "use crate::tool_registry::ToolHandler",
+        "use crate::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path BranchLifecycle",
+        "path BranchPhase::Closing",
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::BranchPhase"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartScope::Branch",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMessageData",
+        "path InputMessageData::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path ToolSource::Extension"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_capabilities::execution_settings",
+      "references": [
+        "path ExecutionSettings",
+        "path ExecutionSettingsHost::fixed"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_capabilities::execution_settings::prompt",
+      "references": [
+        "path SettingsHandler",
+        "path TOOL"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ToolContent::Text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::execution_settings::prompt::tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall"
       ]
     },
     {
@@ -20530,6 +20714,13 @@
     },
     {
       "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_capabilities::execution_settings::prompt",
+      "references": [
+        "path dim_agent_capabilities::execution_settings::prompt::register_parts"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
@@ -20565,6 +20756,14 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "use dim_agent_runtime::PartRegistry"
       ]
     },
     {

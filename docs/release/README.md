@@ -1,6 +1,6 @@
 # Release packaging
 
-Dim uses self-hosted runners for PR checks, alpha builds and npm package verification. Only an explicitly enabled npm publication job uses a GitHub-hosted runner. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) covers the alpha channels and local publication alternative (Chinese).
+Dim uses self-hosted runners for PR checks, alpha builds and npm package verification. An explicitly enabled npm publication and its installation and mirror checks use GitHub-hosted Ubuntu. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) covers the alpha channels and local publication alternative (Chinese).
 
 The source, including the Dim account plugin, uses MIT. An account-enabled distribution differs from the API-key one only by the OAuth client IDs compiled in from repository secrets.
 
@@ -35,7 +35,7 @@ If an agent does not list a skill, ask it to read the linked repository `SKILL.m
 
 ## Version preparation
 
-The CI route uses an explicit committed `X.Y.Z-alpha.N`. It does not select, bump or write back versions. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
+The version-PR route uses an explicit committed `X.Y.Z-alpha.N`. It does not select, bump or write back versions. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
 
 For the next alpha, inspect registry versions across `dimcode-alpha`, `dimcode-web`, the six platform packages and legacy `dimcode`, plus reserved remote tags/GitHub Releases and open release PRs. Continue an existing PR for the same preparation task; otherwise increment the highest reserved alpha numerically. A partial publication reserves its version too. Do not infer availability from the checkout's version or a dist-tag alone. Reuse the matching release version and original archives for a CI retry instead of allocating another number. Keep the existing legacy-beta compatibility guard.
 
@@ -199,13 +199,15 @@ Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's
 
 Accepting contributions from forks or outside collaborators requires moving their checks to ephemeral runners first.
 
-`release.yml` builds only `vX.Y.Z-alpha.N` tags, on tag push or manual dispatch with an existing alpha tag. Beta and stable tags are rejected. Every build and draft assembly job uses a self-hosted runner:
+To prepare the next GitHub alpha prerelease from the current main commit, run:
 
 ```sh
-gh workflow run release.yml --ref main -f tag=vVERSION
+gh workflow run release.yml --ref main
 ```
 
-Preflight checks the exact tag commit is reachable from `origin/main`, and verifies the tag, Cargo workspace, npm wrapper/optional dependencies and runtime metadata have the same version. Every build checks out the resolved commit SHA. Six target jobs stage and pack their payloads. Assembly requires every target, matching toolchain/plugin provenance and valid artifact digests before creating a draft GitHub Release. Prerelease tags mark the draft as a prerelease. Release notes are generated from GitHub history and should be reviewed before publishing.
+The preflight skips a commit that already has an alpha tag or matches the Web manifest of the current npm alpha. Otherwise it increments the highest alpha across the registry packages and Git tags, including versions reserved for GitHub Releases awaiting npm publication. All six self-hosted targets and the Web assembly use that source SHA and stamp the allocated version into the build checkouts. After assembly, CI reserves an annotated `vX.Y.Z-alpha.N` tag on that commit and creates the GitHub prerelease draft.
+
+An existing tag can also start its build on push or via `gh workflow run release.yml --ref main -f tag=vVERSION`. Its commit must be reachable from main. CI-generated alpha tags repeat the build-time stamp on recovery. Manually prepared tags must match the committed Cargo, npm wrapper and runtime versions. Every build checks out the resolved commit SHA. Six target jobs stage and pack their payloads. Assembly requires every target, matching toolchain/plugin provenance and valid artifact digests before creating a draft GitHub Release. Prerelease tags mark the draft as a prerelease. Release notes are generated from GitHub history and should be reviewed before publishing.
 
 The draft receives seven native archives (six platforms and the Web workspace), eight original npm tarballs (six platform packages, `dimcode-web` and the wrapper), `release-manifest.json` and `SHA256SUMS`: seventeen attachments in total. `SHA256SUMS` covers the native archives; the manifest records digests for both native and npm archives. npm tarballs are not published to a registry by this workflow. Existing releases, including drafts, are rejected to avoid replacing attachments. If an upload leaves an incomplete draft, inspect it and remove that draft only when authorized before retrying; keep its tag.
 
@@ -237,7 +239,7 @@ node scripts/rust-notices.mjs staging/rust-notices.txt
 node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account --plugins staging/local-plugins --rust-notices staging/rust-notices.txt
 ```
 
-In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` repository secrets. Every target is then an account build; without both secrets CI builds API-key-only payloads, and a partial configuration fails. The IDs are compiled into the executable and never enter manifests. The account build adds no runtime, package or Node. Each platform package and native archive holds the executable, the default configuration file and the default plugins (`scripts/stage-plugins.mjs`, then `stage-release.mjs --plugins DIR`); the Node and Python runtimes are not bundled: RuntimeManager downloads them, verified against pins compiled into Dim, into the home ([RuntimeManager](../design/plugins/RuntimeManager.md)):
+In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` repository secrets. Every CI alpha requires both IDs and packages the account-enabled executable. A missing ID fails the build. The IDs are compiled into the executable and never enter manifests. The account build adds no runtime, package or Node. Each platform package and native archive holds the executable, the default configuration file and the default plugins (`scripts/stage-plugins.mjs`, then `stage-release.mjs --plugins DIR`); the Node and Python runtimes are not bundled: RuntimeManager downloads them, verified against pins compiled into Dim, into the home ([RuntimeManager](../design/plugins/RuntimeManager.md)):
 
 ```text
 bin/dimcode[.exe]              # the CLI; runs its daemon as `dimcode app-server`
@@ -304,9 +306,11 @@ For an explicitly authorized publication, with the repository variable enabled:
 gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N -f publish=true
 ```
 
-The self-hosted job verifies the originals first. The GitHub-hosted job independently downloads the original archives and manifest directly from the GitHub Release, rechecks the alpha tag and Release identity, validates the packages and registry state again, and publishes with npm OIDC. It consumes no package bytes from the self-hosted runner and runs no build, install or test suite. Retrying the workflow downloads the originals from the Release again, independently of any previous run's artifact retention.
+The self-hosted job verifies the originals first. The GitHub-hosted job independently downloads the original archives and manifest directly from the GitHub Release, rechecks the alpha tag and Release identity, validates the packages and registry state again, and publishes with npm OIDC. The publisher consumes only Release attachments. Retrying the workflow downloads the originals from the Release again, independently of any previous run's artifact retention.
 
 Publication validates every package before the first registry write. A retry compares an already published version's SHA-512 integrity with the original local archive and skips an exact match. A different archive, authentication error or network error fails; only an explicit registry E404 permits publication. The six platform packages and `dimcode-web` precede `dimcode-alpha`; all eight use the `alpha` dist-tag. `dimcode`, `latest` and `beta` are untouched. An alpha must stay below the newest `dimcode` beta on the registry, because installed TypeScript betas upgrade to the highest prerelease of any identifier; publication checks this before any write.
+
+After publication a separate read-only job checks all eight upstream alpha tags, the wrapper metadata and the unchanged legacy dist-tags. It installs the exact version under a temporary prefix and checks `dima --version`. It then requests sync for all eight packages on the Alibaba npm mirror and waits for the wrapper alpha tag and its seven pinned versions. Each registry has a ten-minute visibility window with 15-second polling. Retry a failed acceptance job independently of publication.
 
 `npm-packages` contains eight tgz files and a release manifest; `native-packages` contains seven native archives, the matching manifest and `SHA256SUMS`. The GitHub Release retains all fifteen original archives and the shared metadata independently of Actions retention. npm publication uploads an Actions receipt containing the Release ID, tag and package digests; that receipt also expires after one day.
 
