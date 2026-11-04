@@ -775,17 +775,18 @@ impl AgentIndex {
         }
         session_history_page(&session, branch, after, limit, through).await
     }
-    /// The stored events of `event_ids` in one read; ids the store does not
-    /// hold are absent. Collaboration supplies ids from its `main`-branch
-    /// page, so the loaded query intentionally reads `main`.
+    /// The events of `event_ids` in one read; ids the Session does not hold
+    /// are absent. Collaboration supplies ids from its `main`-branch page, so
+    /// the query reads `main`. The read loads the Session it names (ADR 021
+    /// D3).
     pub(crate) async fn read_events(
         &self,
         id: &str,
         event_ids: &[String],
     ) -> dim_agent_runtime::Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
-        if let Some((_, session)) = self.session(id)
-            && !session.is_unloading()
         {
+            let usage = self.acquire(id).await?;
+            let session = &usage.session;
             let mut found = HashMap::with_capacity(event_ids.len());
             for event_id in event_ids {
                 let reply = session
@@ -811,26 +812,22 @@ impl AgentIndex {
                     found.insert(event.id.clone(), event);
                 }
             }
-            return Ok(found);
+            Ok(found)
         }
-        self.session_store
-            .as_ref()
-            .ok_or_else(|| AgentError::Closed(id.into()))?
-            .read_events(id, event_ids)
-            .await
     }
     /// The main-branch `step/tool-use-start` of each `(request_id, call_id)`
-    /// in one read; calls the store does not hold are absent. Collaboration
-    /// supplies keys from its `main`-branch page.
+    /// in one read; calls the Session does not hold are absent. Collaboration
+    /// supplies keys from its `main`-branch page, and the read loads the
+    /// Session it names (ADR 021 D3).
     pub(crate) async fn read_tool_use_starts(
         &self,
         id: &str,
         keys: &[(String, String)],
     ) -> dim_agent_runtime::Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>>
     {
-        if let Some((_, session)) = self.session(id)
-            && !session.is_unloading()
         {
+            let usage = self.acquire(id).await?;
+            let session = &usage.session;
             let mut starts = HashMap::with_capacity(keys.len());
             let mut query = TimelineQuery {
                 scope: TimelineQueryScope::Branch,
@@ -868,13 +865,8 @@ impl AgentIndex {
                     None => break,
                 }
             }
-            return Ok(starts);
+            Ok(starts)
         }
-        self.session_store
-            .as_ref()
-            .ok_or_else(|| AgentError::Closed(id.into()))?
-            .read_tool_use_starts(id, keys)
-            .await
     }
     /// The error a history window answers without the native Session store.
     fn no_history_store() -> AgentError {

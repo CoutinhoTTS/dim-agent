@@ -12940,6 +12940,7 @@
         "path TimelineQueryPredicate",
         "path TimelineQueryReply",
         "path TimelineQueryScope::Branch",
+        "path dim_agent_runtime::TimelineQueryScope::Branch",
         "path rebuild_facts",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
@@ -17618,7 +17619,6 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
-        "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -17671,7 +17671,6 @@
       "references": [
         "path TimelineKey",
         "path dim_agent_runtime::StoredEvent",
-        "path dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineKey"
       ]
     },

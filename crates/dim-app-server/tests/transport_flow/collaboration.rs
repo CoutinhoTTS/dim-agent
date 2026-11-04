@@ -3069,7 +3069,7 @@ async fn collaboration_facts_publish_to_tree_protocols_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
+async fn stored_member_can_unload_be_read_and_work_again() {
     let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
     let (server, agent) = launch_with_agent(
         Arc::new(MockTools),
@@ -3144,8 +3144,8 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
     let read = last_ok(&events(&session).await);
     assert!(!read["events"].as_array().unwrap().is_empty());
     assert!(
-        agent.get_session(&member).is_none(),
-        "history reads do not load a member"
+        agent.get_session(&member).is_some(),
+        "a read loads the member it names"
     );
     say(
         &mut client,
@@ -3988,20 +3988,16 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
 
     let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
     let mut reads = vec![];
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let gone = agent.get_session(&member).is_none();
-            say(&mut client, &lead, read.clone(), "queue").await;
-            let lead_session = agent.get_session(&lead).unwrap();
-            idle(&mut client, &lead).await;
-            reads.push(last_ok(&events(&lead_session).await));
-            if gone {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("deadline: the member unloads");
+    for _ in 0..3 {
+        say(&mut client, &lead, read.clone(), "queue").await;
+        let lead_session = agent.get_session(&lead).unwrap();
+        idle(&mut client, &lead).await;
+        reads.push(last_ok(&events(&lead_session).await));
+    }
+    assert!(
+        agent.get_session(&member).is_some(),
+        "a read loads the member it names"
+    );
     let first = &reads[0];
     assert!(
         first.to_string().contains("Echo: again"),
