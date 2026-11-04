@@ -6,7 +6,7 @@
 
 **Dim is a paradigm for general-purpose agents that grow into the environments they inhabit.**
 
-[![npm alpha version](https://img.shields.io/npm/v/dimcode-alpha/alpha.svg?label=npm%20alpha)](https://www.npmjs.com/package/dimcode-alpha?activeTab=versions) [![Node.js versions for npm installation](https://img.shields.io/node/v/dimcode-alpha/alpha.svg?label=node%20for%20npm)](#install) [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust toolchain 1.98.1](https://img.shields.io/badge/Rust-1.98.1-93450a.svg?logo=rust)](rust-toolchain.toml) [![npm alpha version](https://img.shields.io/npm/v/dimcode-alpha/alpha.svg?label=npm%20alpha)](https://www.npmjs.com/package/dimcode-alpha?activeTab=versions) [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
 
