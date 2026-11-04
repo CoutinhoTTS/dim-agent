@@ -48,7 +48,7 @@ Session 部件在自己的 `apply` 中为每个标记各注册一个条目，按
 | §4 规则 4 核心不带业务含义 | 文本属于 Collaboration，沿声明、工具结果与标记传递；Timeline、Dispatcher 与 Loop 不增加任何 Collaboration 分支 |
 | §4 规则 5 决定前读完整批次 | 本页不适用：文本由 Session 部件的工具处理与分支部件按派发序的决定写出；本页不增加读取，也不改变决定 |
 | §4 规则 6 上下文只来自交接后的事件 | 标记只作为被消费的输入到达模型，工具结果只作为 `step/tool-result`；本页不增加上下文路径 |
-| §4 规则 7 只用公开事件与服务 | Session 部件使用 Session 的 `collaboration`、`sessionIdentity`、`sessionConfig`、`treeCommands`、`sessionLifecycle`、`toolRegistry` 与 `guideEntries`，并在部署提供时读取 Provider 的公开 `selectableModels` 端口（§7）；分支部件注入 Session 的 `CollaborationSession`、`timeline`、`dispatcher`、`timelineIdentity` 与 `branchLifecycle`。不读其他插件的内部状态 |
+| §4 规则 7 只用公开事件与服务 | Session 部件使用 Session 的 `collaboration`、`sessionIdentity`、`sessionConfig`、`treeCommands`、`sessionLifecycle`、`toolRegistry` 与 `guideEntries`，并在部署提供时读取它的公开 `selectableModels` 端口（§7）；分支部件注入 Session 的 `CollaborationSession`、`timeline`、`dispatcher`、`timelineIdentity` 与 `branchLifecycle`。不读其他插件的内部状态 |
 | §4 规则 8 向机制所有者提需求 | 对运行时、rutis、loader、生命周期与工具契约无：条目走 Prompt 既有契约，声明走 ToolRegistry，输入走分支既有操作。委派的需求提给 Agents、SessionStore 与删除设计（§6.5） |
 | §4 规则 9 只有后续决定要用的事实进 Timeline | 不增加 Timeline 事实。两个标记是委派本就需要的模型可见结果，guide 条目是 Prompt 作用域内的注册。委派的所有权与 leader 是不进 Timeline 的业务记录，经 Agents 与 SessionStore 的具名写操作写入（§6），不是事件 |
 | §1 插件、部件与 Capability 有界 | Collaboration 仍是它现有的 App Server 能力。Session 部件注册声明、工具与条目；分支部件消费委派的事实。不新增 Capability，核心模块不增加业务代码 |
@@ -141,13 +141,13 @@ leader 在 profile 的 `model` 字段里为新成员指定模型，用户的
 `ProviderCatalog::selectable` 在该次读取时接受的模型。Collaboration 不自留可用性规则、不缓存，
 因此用户停用或登出的模型在下一次调用中就消失。
 
-**可用性。** Session 部件在挂载时读取该端口，部署要么有它、要么没有：没有 Provider 的配置不
-列出模型，那里的 leader 声明也不提供 `models` 动作，因为承诺一个答不出的读取没有意义；内建
-leader 文本也只在这时带该条目。成员声明从不携带该动作：成员不能委派。替换 leader 描述的
+**可用性。** Session 部件在挂载时读取该端口，部署要么有它、要么没有：产品配置经 Provider
+提供，配置式模型配置由它的模型文件提供，其余配置不列出模型；那里的 leader 声明也不提供
+`models` 动作，因为承诺一个答不出的读取没有意义，内建 leader 文本也只在这时带该条目。成员声明从不携带该动作：成员不能委派。替换 leader 描述的
 出厂配置是一整段文本，需自行写明该动作，与其它动作一致（§3）。
 
-该读取保持可选，而不作为决定加载的门槛依赖：没有 Provider 也是受支持的配置，Collaboration
-在那里同样必须加载，因此部件在挂载时读一次端口，而不是等它就绪。这次读取是快照：Provider
+该读取保持可选，而不作为决定加载的门槛依赖：不提供该读取也是受支持的配置，Collaboration
+在那里同样必须加载，因此部件在挂载时读一次端口，而不是等它就绪。这次读取是快照：提供方
 重载不会重载该部件，之后的调用返回 owner 自己的错误，直到 Session 或其部件重载。
 
 **回复。** 与 `list`、`inspect` 一样是一个对象：

@@ -778,8 +778,8 @@ pub struct CollaborationSession {
     tree: Arc<TreeCommands>,
     /// Gives each request its hold on this Session.
     lifecycle: Arc<SessionLifecycle>,
-    /// Provider's selectable models, when the deployment reads them: the
-    /// `models` action is offered exactly then.
+    /// The deployment's selectable models, when it reads them: the `models`
+    /// action is offered exactly then.
     selectable: Option<Arc<SelectableModelsHost>>,
     state: Mutex<State>,
     interactive: bool,
@@ -1066,8 +1066,9 @@ impl CollaborationSession {
             None => refusal(Refusal::AgentNotFound, "no such agent is available to you"),
         }
     }
-    /// The models a new member can run, with their provider IDs. Provider
-    /// owns the read; a deployment without it offers no `models` action.
+    /// The models a new member can run, with their provider IDs. The
+    /// deployment's model owner answers the read; without one, no `models`
+    /// action is offered.
     async fn models(&self, cancel: &CancellationToken) -> Result<ToolResult, HostError> {
         let Some(selectable) = &self.selectable else {
             return Ok(refusal(
@@ -2472,7 +2473,7 @@ const LEADER_DESCRIPTION_HEAD: &str = "Work with other agents as a team you lead
 - read: view a team member's recent activity. list: show your team and the agents you
   can use. inspect: show one agent's full profile (instructions, tools, model).";
 /// The `models` bullet, between [`LEADER_DESCRIPTION_HEAD`] and
-/// [`LEADER_DESCRIPTION_TAIL`]: only a deployment with Provider's selectable
+/// [`LEADER_DESCRIPTION_TAIL`]: only a deployment that provides the selectable
 /// read offers the action.
 const LEADER_MODELS: &str = "
 - models: query the models this Session can start an agent with.";
