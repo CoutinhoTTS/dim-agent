@@ -55,7 +55,7 @@ The settings tool is separate from the snapshot. Its result is a tool result; th
 
 - Presence: one branch part, registered by `ConnectionPlugin`.
 - Settings snapshot: one branch part, registered by `SettingsPlugin`.
-- Settings tool: one Session part, registered by `SettingsPlugin`.
+- Settings tool: one Session part, registered by the process plugin that owns the first setting. In v1 that is `ExecutionSettingsPlugin`.
 - No new process plugin.
 - No Session prompt-source part for either fact.
 - A branch part appends only to its own branch.

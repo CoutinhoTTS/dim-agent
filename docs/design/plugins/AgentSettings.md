@@ -116,7 +116,7 @@ A refused `set` changes nothing. The result states the reason; the model does no
 
 ## 4. Registration
 
-- The existing `SettingsPlugin` registers one Session part, `SettingsTool`, and one tool contribution named `settings`.
+- The process plugin that owns the first setting registers one Session part, `SettingsTool`, and one tool contribution named `settings`. In v1 that is `ExecutionSettingsPlugin`; a later shared settings owner can register the same single tool.
 - Each setting module registers a handler with the dispatcher:
 
 ```text
