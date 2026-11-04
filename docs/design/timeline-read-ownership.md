@@ -19,7 +19,7 @@ It does not restate the query contract ([plugin contract §5.4](plugin-contract.
 | A loaded line's facts | `Timeline::query`, the checkpoint selection, the segments | its own hot window and the store, to the published head, plus the branch's not-yet-published facts when the request asks for them |
 | An ended line's page | `TimelineTree`, through the tree's service | the stored facts of a line whose `Timeline` is gone, at its fixed head |
 | Branches and their metadata | the store port's branch listing and head | branch records, not events |
-| A Session the process does not hold | the App Server's process-level read (ADR 021 D4) | committed stored facts only |
+| A Session the process does not hold | the App Server's process-level read (ADR 021 D4) | committed stored facts only, one page at a time |
 | Session files, titles, grants, fork, delete | `SessionStore` | not events |
 
 A caller does not choose a read because it is cheaper; it reads through the object that owns the state. When that object does not exist, the read is one of the last two rows and says so.
@@ -49,6 +49,8 @@ A line that ended keeps its identity in `TimelineTree`: the ended head, the end 
 
 A Session the process does not hold has no assembly and no `Timeline`. Nothing about its facts is in flight — every fact is committed and published — so a read of it is a read of stored facts and carries none of the Timeline's publication semantics.
 
+No read holds a whole branch. A reader takes a page, consumes it and drops it before the next; the page size belongs to the caller. This holds for the client history read, the process-level read and a part's fold. A copy shared by readers exists only while the readers and the branch's opening are alive together (ADR 021 D6).
+
 ## 5. Dependencies
 
 Allowed:
@@ -73,8 +75,9 @@ Not allowed:
 ## 6. Cross-module requirements
 
 - **Runtime (TimelineStore owner):** the port gains the page read the App Server's process-level read needs — a cursor, a limit, an end bound, whether the page ends on a batch boundary, and the decode policy — and the lookup of a set of event ids. Until then the App Server's process-level read stays on its own storage implementation, and the client path does not use it.
-- **App Server (session history owner):** `session.history` requires a loaded Session; the page for a Session the process does not hold moves to the process-level read. `idle-unload.md` acceptance 1 and 2 are rewritten to describe that read.
-- **TimelineTree owner:** the restore reads of `branch/ended`, `branch/end`, `branch/create` and the creation check move to the port's query, so the tree reads selections instead of ranges.
+- **Runtime (opening):** remove the shared decoded copy of a branch's opening, which kept `1..=head` in memory for replay and now has no regular reader ([#1063](https://github.com/arcships/dim/issues/1063)).
+- **App Server (session history owner):** `session.history` requires a loaded Session; the page for a Session the process does not hold moves to the process-level read, and its callers consume one page at a time ([#1065](https://github.com/arcships/dim/issues/1065)). `idle-unload.md` acceptance 1 and 2 are rewritten to describe that read.
+- **TimelineTree owner:** the restore reads of `branch/ended`, `branch/end`, `branch/create` and the creation check move to the port's query, so the tree reads selections instead of ranges and decodes only the events it selects ([#1064](https://github.com/arcships/dim/issues/1064)).
 
 ## 7. Rule check
 

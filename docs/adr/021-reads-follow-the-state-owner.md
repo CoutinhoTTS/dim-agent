@@ -40,12 +40,17 @@ A one-shot read of a Session this process does not hold — `dim export`, a sche
 
 `TimelineStore` is a runtime port. `Timeline` and `TimelineTree` may declare it; `Session`, `Branch` and other parts may not. `SessionStore` keeps Session files, titles, grants, fork and delete, and no longer serves event reads for the client protocol.
 
+### D6. No read is served by a copy that outlives its readers
+
+A shared decoded copy of a branch's history exists only for readers alive at the same time as the branch's opening. The opening copy that kept `1..=head` in memory until publication was built for replay; replay is gone and no regular reader fills it, so it goes ([#1063](https://github.com/arcships/dim/issues/1063)). A read that needs facts reads them through the object of D1, in pages it drops when it is done.
+
 ## Consequences
 
 - `agents.rs::history_page` loses the branch that reads `SessionStore` for a Session the process does not hold; a client read of an unloaded Session is answered by loading it.
 - `idle-unload.md` acceptance 1 and 2, which require `session.summaries` to list 50 unloaded Sessions and serve their history without restoring, describe the process-level API of D4 and must say so.
+- A read holds one page at a time: neither the process-level read nor a part's fold materializes a whole branch ([#1065](https://github.com/arcships/dim/issues/1065)).
 - The page rules have one owner per path: the query path for a loaded line and the process-level page read for facts with no live object. A divergence between them is a defect of the process-level read, tested against the query's page shape.
-- `TimelineTree` keeps the store port for the reads of lines it owns while they are not loaded; four of those reads select events and are better expressed as the port's query, which changes cost, not ownership.
+- `TimelineTree` keeps the store port for the reads of lines it owns while they are not loaded; four of those reads select events and become the port's query, which changes cost, not ownership ([#1064](https://github.com/arcships/dim/issues/1064)).
 - The App Server no longer calls methods of `SqliteTimelineStore` that the port does not declare. Where the port lacks a capability the App Server needs, the port gains it.
 
 ## Non-goals
