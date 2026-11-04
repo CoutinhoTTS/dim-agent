@@ -1,6 +1,46 @@
 use super::*;
+use dim_agent_capabilities::methods::{Interruption, MethodDecl};
+use dim_app_server::methods::ManagementMethods;
+use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use tokio::io::AsyncReadExt;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
+
+const SCHEDULE_METHODS: &[&str] = &[
+    "schedule.list",
+    "schedule.save",
+    "schedule.delete",
+    "schedule.set_enabled",
+    "schedule.run_now",
+    "schedule.history",
+];
+
+struct ScheduleMethods(Key<ManagementMethods>);
+impl DynPlugin for ScheduleMethods {
+    fn name(&self) -> &str {
+        "schedule-entry-fixture"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.0.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            ctx.require_at(&self.0)?.register(
+                ctx,
+                "schedule",
+                SCHEDULE_METHODS
+                    .iter()
+                    .copied()
+                    .chain(["schedule.unreviewed"])
+                    .map(|method| MethodDecl::new(method, false, Interruption::Report))
+                    .collect(),
+                Arc::new(|method, params, _, _| {
+                    Box::pin(async move { Ok(json!({"method":method,"params":params})) })
+                }),
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
 
 /// One HTTP/1.1 exchange on a fresh connection: status, head, body.
 pub(super) async fn http(address: &str, request: String) -> (u16, String, String) {
@@ -288,6 +328,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     );
     dim_app_server::permission_rules::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
+    builder.plugin(|names| Ok(Box::new(ScheduleMethods(names.key()?)) as Box<dyn DynPlugin>));
     let server = serve(
         builder,
         ServerConfig {
@@ -436,9 +477,21 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         "provider.import_legacy",
         "modality.task.submit",
         "modality.task.result",
+        "schedule.unreviewed",
     ] {
         assert!(!features.contains(&json!(method)), "{method}");
     }
+    for method in SCHEDULE_METHODS {
+        assert!(features.contains(&json!(method)), "{method}");
+    }
+    for method in SCHEDULE_METHODS {
+        let params = json!({"job_id":"web-entry-fixture"});
+        let reply = web.rpc(method, params.clone()).await;
+        assert_ok(&reply);
+        assert_eq!(reply["result"], json!({"method":method,"params":params}));
+    }
+    let unreviewed = local.rpc("schedule.unreviewed", json!({})).await;
+    assert_ok(&unreviewed);
     let created = web.rpc("session.create", json!({"cwd":home})).await;
     assert_ok(&created);
     let session_id = created["result"]["sessionId"].as_str().unwrap();
@@ -599,7 +652,10 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         "mcp.test",
         "mcp.inspect",
         "plugin.install",
-    ] {
+    ]
+    .into_iter()
+    .chain(SCHEDULE_METHODS.iter().copied())
+    {
         assert!(!bare.features.as_array().unwrap().contains(&json!(method)));
         assert_eq!(
             bare.rpc(method, json!({})).await["error"]["data"]["appError"],
@@ -614,8 +670,10 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         ("ui.shutdown", json!({"uiId":"other-ui"})),
         ("account.credential", json!({"providerId":"x"})),
         ("provider.import_legacy", json!({"path":"/private/config"})),
+        ("schedule.unreviewed", json!({})),
         ("settings.read", json!({"source":"web","scope":"user"})),
         ("settings.read", json!({"source":"mcp","scope":"user"})),
+        ("settings.read", json!({"source":"schedule","scope":"user"})),
         (
             "settings.update",
             json!({"source":"web","scope":"user","document":{}}),

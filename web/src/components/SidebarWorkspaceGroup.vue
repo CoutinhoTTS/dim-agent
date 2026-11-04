@@ -62,11 +62,11 @@ function toggleReveal(): void {
           :to="{ name: 'chat-session', params: { sessionId: session.sessionId } }"
           :data-open="session.sessionId === activeSessionId ? 'true' : undefined"
           :aria-current="session.sessionId === activeSessionId ? 'page' : undefined"
-          :title="session.preview"
+          :title="session.title ?? session.preview"
           @click="emit('navigate')"
         >
           <span class="status-dot" :data-state="session.running ? 'running' : 'idle'" aria-hidden="true" />
-          <strong>{{ session.preview ?? t("sidebar.untitled") }}</strong>
+          <strong>{{ session.title ?? session.preview ?? t("sidebar.untitled") }}</strong>
           <small>{{ formatRelativeTimeShort(new Date(session.updatedAt), nowMs) }}</small>
         </RouterLink>
       </li>

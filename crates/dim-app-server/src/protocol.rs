@@ -273,6 +273,12 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "plugin.reload",
     "plugin.update",
     "plugin.remove",
+    "schedule.list",
+    "schedule.save",
+    "schedule.delete",
+    "schedule.set_enabled",
+    "schedule.run_now",
+    "schedule.history",
 ];
 
 pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log", "execution"];

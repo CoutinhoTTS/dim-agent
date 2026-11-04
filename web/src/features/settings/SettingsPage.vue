@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from "vue"
 import { onBeforeRouteLeave, onBeforeRouteUpdate, RouterLink, RouterView, useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
-import { Activity, Archive, ArrowLeft, Box, Brain, Palette, Plug, Settings2, ShieldCheck, SlidersHorizontal, UserCircle, Wrench } from "lucide-vue-next"
+import { Activity, Archive, ArrowLeft, Box, Brain, Clock3, Palette, Plug, Settings2, ShieldCheck, SlidersHorizontal, UserCircle, Wrench } from "lucide-vue-next"
 import ConfirmDialog from "../../components/ConfirmDialog.vue"
 import { settingsMessages } from "../../i18n/settings"
 import { useConnectionStore } from "../../stores/connection"
@@ -21,6 +21,7 @@ const categories = [
   { id: "account", icon: UserCircle }, { id: "appearance", icon: Palette }, { id: "agent", icon: Settings2 },
   { id: "providers", icon: Brain }, { id: "modality", icon: SlidersHorizontal }, { id: "mcp", icon: Wrench },
   { id: "plugins", icon: Plug }, { id: "skills", icon: Box }, { id: "permissions", icon: ShieldCheck },
+  { id: "scheduled", icon: Clock3 },
   { id: "archived", icon: Archive }, { id: "diagnostics", icon: Activity },
 ]
 const compact = computed(() => ui.shellMode === "compact")

@@ -19,7 +19,7 @@ registerHooks({
       return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true }
     }
     if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:key=>key})", shortCircuit: true }
-    if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>({params:{}});export const useRouter=()=>({push:async()=>{}});export const RouterLink={render:()=>null}", shortCircuit: true }
+    if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>({params:{}});export const useRouter=()=>({push:async to=>globalThis.chatInputNavigations.push(to)});export const RouterLink={render:()=>null}", shortCircuit: true }
     if (specifier.endsWith(".vue") && !components.test(specifier)) return { url: "data:text/javascript,export default {render:()=>null}", shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
       if (specifier.startsWith(".") && !/\.(ts|vue)$/.test(specifier)) return next(`${specifier}.ts`, context)
@@ -75,6 +75,7 @@ const question = (branchId, callId, multiSelect = false) => ({
 
 function mount(t, branchId, questions = [], component, stores = {}) {
   const replies = [], submissions = []
+  globalThis.chatInputNavigations = []
   const view = reactive({
     status: "ready", rows: [], running: true, stopping: false, sessionRunning: true,
     approvals: [], questions, methods: ["attachment.put", "session.files.search"], queued: [],
@@ -313,6 +314,30 @@ test("explicitly disabled attachments leave the clipboard's native paste behavio
   const field = all(root).find((element) => element.type === "textarea")
   field.props.onPaste({ clipboardData: { files: [{ type: "image/png" }] }, preventDefault() { assert.fail("attachments are disabled") } })
   assert(!all(root).some((element) => element.type === "img"))
+})
+
+test("schedule commands navigate only when admitted and not escaped", async t => {
+  for (const command of ["/schedule", "/scheduled"]) {
+    for (const [admitted, escaped] of [[true, false], [true, true], [false, false]]) {
+      const { root, submissions } = mount(t, "main", [], undefined, { connection: { supports: method => admitted && method === "schedule.list" } })
+      const field = all(root).find(element => element.type === "textarea")
+      field.props.onFocus()
+      field.props["onUpdate:modelValue"](command)
+      await flush()
+      const key = key => field.props.onKeydown({ key, preventDefault() {}, stopPropagation() {} })
+      if (escaped) key("Escape")
+      await flush()
+      key("Enter")
+      await flush()
+      if (admitted && !escaped) {
+        assert.deepEqual(globalThis.chatInputNavigations, [{ name: "settings-scheduled" }])
+        assert.deepEqual(submissions, [])
+      } else {
+        assert.deepEqual(globalThis.chatInputNavigations, [])
+        assert.equal(submissions[0].value, command)
+      }
+    }
+  }
 })
 
 test("files picked with overlapping names keep their own paths in the submitted message", async (t) => {
