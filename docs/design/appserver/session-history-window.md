@@ -333,7 +333,10 @@ The anchors and the page are the branch's Timeline service, which
 `Connection::history` already has the loaded Session for: each anchor is a kind
 selection and the page is a range selection, both through `Session::query`,
 with `Session::batch_end` for the page's ends. The App Server has no store read
-on this path. The window requires the native store: a host without one
+on this path. A window read requires a live line: its anchors and its page are
+the loaded branch's Timeline, and an ended line's Timeline is gone. An ended
+line's history is read forward through the tree's page (§1.1). The window also
+requires the native store: a host without one
 (`ServerConfig.database_path: None`) advertises no
 `session.history.latestTurn` and answers a window request
 `invalid`, as `session.catalog` is advertised only with a database path. No

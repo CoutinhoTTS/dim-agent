@@ -19,7 +19,7 @@ It does not restate the query contract ([plugin contract §5.4](plugin-contract.
 | Read | Served by | Reads |
 | --- | --- | --- |
 | A live line's facts | `Timeline::query`, the checkpoint selection, the segments | its own hot window and the store, to the published head, plus the branch's not-yet-published facts when the request asks for them |
-| An ended line's page | `TimelineTree`, through the tree's service | the stored facts of a line whose `Timeline` is gone, at the fixed head the tree owns |
+| An ended line's page | `TimelineTree`, through the tree's service | the stored facts of a line whose `Timeline` is gone, at the fixed head the tree owns, up to the caller's `through`; its history is read forward, since a window page needs the line's Timeline |
 | A collaboration peer's facts | the peer Session's `Timeline`; the read acquires the peer first | the same as any live line |
 | Branches and their metadata | the store port's branch listing and head; titles from `session.summaries` | branch records and title metadata, not events |
 | Session files, titles, grants, fork, delete | `SessionStore` | not events; its event reads are gone from the client path |
