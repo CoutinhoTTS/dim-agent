@@ -6,9 +6,10 @@ The TimelineTree plugin registers TimelineTree in every Session and TreeTimeline
 
 Owner: [timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs).
 Owns Session branches, reservations and asynchronous creation/restore/close,
-and a line's end: the identity block in every child's opening input, the
-`info.source` a line was opened with, `branch/end` to `branch/ended` on the
-parent, and the restore rule that leaves an ended line closed
+and a line's end: the identity block in every child's opening input, the parent
+block a nested line is told at open, the `info.source` a line was opened with,
+`branch/end` to `branch/ended` on the parent, and the restore rule that leaves
+an ended line closed
 ([timeline branches §5–§10](../../../design/timeline-branches.md#10-ending-a-line)).
 Provides the TreeCommands/TimelineTreeControl ports. The `branch` tool is
 [BranchTool](BranchTool.md)'s. Its model-facing texts — every child's identity
@@ -22,7 +23,7 @@ block and the branch markers — with their classes are listed on
 | `S:TimelineFactory` | Build branch capability scopes. |
 | `S:SessionIdentity` | Identify the persisted Session. |
 | `S:dyn TimelineStore` | Persist/load branch directories and timeline facts. |
-| `S:GuideEntries` | Register the `<dim-branch-line>` entry, until this part unloads. |
+| `S:GuideEntries` | Register the `<dim-branch-line>` and `<dim-branch-parent>` entries for the Session, until this part unloads. |
 
 ### Events and lifetime
 
@@ -38,7 +39,19 @@ checks a cursor against that line's published or ended head and its atomic
 batch boundaries. `query` selects one line's own facts: it forwards to the
 Timeline while open and uses the ended head after closing, with the event
 query's anchors, selection, ordering and paging. It rejects chain scope.
-Candidate branches remain private until opening
+
+A child's opening input
+is the identity block, and when the prefix it inherits holds a live parent
+block, one more parent block after it naming the line that opened it at the
+cut; the keyed state is read over the chain the child
+inherits, never from the rendered history, while the child opens, as a resumed
+line's facts are, and a failed read fails the create like any other opening
+failure (branch/create-failed). Each line's node publishes the
+sequence of its latest `turn/end`, which the line's BranchLine waits on for the
+parent block (design
+[§7.1.1](../../../design/timeline-branches.md#711-the-parent-block-branchparent)). `TreeCommands` also
+answers whether a line's parent has new activity past a sequence, through the
+one event query ([ADR 019](../../../adr/019-event-query.md)). Candidate branches remain private until opening
 receipts/dispatch fences and initial input acceptance succeed. Creation retains
 its fixed ancestry cut even if a waiter disappears. One opening budget requests
 cancellation; rollback and accepted host work must still settle. Cleanup closes
@@ -88,8 +101,9 @@ identity, and releases pending child reservations when the parent unloads.
 ### Events and lifetime
 
 Consumes `branch/create` and `branch/end` (with the next turn end of a line
-that ended through a tool call); tree-owned work produces the opening, failure
-and end facts (see TimelineTree). The handler registers creation, not a long-running build future.
+that ended through a tool call), and reports every `turn/end` to the tree,
+which publishes it for the line's children; tree-owned work produces the
+opening, failure and end facts (see TimelineTree). The handler registers creation, not a long-running build future.
 Cleanup cancels pending reservations for this parent and settles their waiters.
 No independent worker or persistent tree is owned here. Reload does not by
 itself replay arbitrary old create events; recovery belongs to TimelineTree.

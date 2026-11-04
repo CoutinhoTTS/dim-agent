@@ -71,9 +71,11 @@ impl AimuxModels {
                         "compatible.preset requires openai-compatible",
                     ));
                 }
-                aimux_providers::provider_registry_entry(preset).ok_or_else(|| {
-                    HostError::failed(format!("Unknown compatible preset: {preset}"))
-                })?;
+                if !crate::driver::compatible_preset(preset) {
+                    return Err(HostError::failed(format!(
+                        "Unknown compatible preset: {preset}"
+                    )));
+                }
             }
             let mut models = HashMap::new();
             for entry in provider.models {

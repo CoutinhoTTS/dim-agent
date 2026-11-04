@@ -7,8 +7,8 @@
 //! directly.
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::error::AiMuxError;
 use crate::shared::{SharedHeaders, SharedProviderMetadata, SharedProviderOptions, Warning};
@@ -24,27 +24,31 @@ pub type Embedding = Vec<f32>;
 /// Options passed to [`EmbeddingModel::do_embed`].
 ///
 /// Aligned with V4 `EmbeddingModelV4CallOptions`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EmbeddingCallOptions {
     /// List of text values to generate embeddings for.
     pub values: Vec<String>,
 
     /// Abort signal for cancelling the operation.
     #[serde(skip)]
-    #[ts(skip)]
     pub abort_signal: Option<AbortSignal>,
 
-    /// Per-call retry override. `None` uses the model default.
+    /// Maximum number of retries, the AI SDK's `maxRetries`; `Some(0)` disables
+    /// retrying. `None` uses 2, the AI SDK default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
 
     /// Per-call operation timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<crate::options::TimeoutConfiguration>,
 
     /// Additional provider-specific options, keyed by provider name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_options: Option<SharedProviderOptions>,
 
     /// Additional HTTP headers to send with the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<SharedHeaders>,
 }
 
@@ -63,8 +67,8 @@ impl EmbeddingCallOptions {
 }
 
 /// Token usage for an embedding call. Embeddings only report input tokens.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct EmbeddingUsage {
     /// Number of input tokens consumed.
     pub tokens: u32,
@@ -73,19 +77,22 @@ pub struct EmbeddingUsage {
 /// The result of [`EmbeddingModel::do_embed`].
 ///
 /// Aligned with V4 `EmbeddingModelV4Result`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct EmbeddingResult {
     /// Generated embeddings, in the same order as the input `values`.
     pub embeddings: Vec<Embedding>,
 
     /// Token usage (input tokens only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<EmbeddingUsage>,
 
     /// Additional provider-specific metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<SharedProviderMetadata>,
 
     /// Optional response information for debugging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<EmbeddingResponse>,
 
     /// Warnings for the call, e.g. unsupported settings.
@@ -93,12 +100,19 @@ pub struct EmbeddingResult {
 }
 
 /// Debugging response info specific to embedding calls.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct EmbeddingResponse {
     /// Response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<SharedHeaders>,
     /// The response body (opaque JSON).
+    #[serde(
+        default,
+        deserialize_with = "crate::wire::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(extend("x-aimux-codec" = "presence"))]
     pub body: Option<serde_json::Value>,
 }
 
@@ -128,10 +142,6 @@ pub trait EmbeddingModel: Send + Sync {
     /// Provider-specific model ID, e.g. `"text-embedding-3-small"`.
     fn model_id(&self) -> &str;
 
-    fn retry_config(&self) -> crate::retry::RetryConfig {
-        crate::retry::RetryConfig::default()
-    }
-
     /// Limit of how many embeddings can be generated in a single API call.
     ///
     /// `None` means the model has no fixed limit. The TS spec allows this to
@@ -159,11 +169,7 @@ pub async fn embed(
 ) -> Result<EmbeddingResult, AiMuxError> {
     let timeout = timeout::OperationTimeout::new(options.timeout.unwrap_or_default())?;
     let abort_signal = options.abort_signal.clone();
-    let retries = retry::prepare_retries(
-        options.max_retries,
-        model.retry_config(),
-        abort_signal.clone(),
-    );
+    let retries = retry::prepare_retries(options.max_retries, abort_signal.clone());
     timeout::run(
         retries.retry(|| model.do_embed(&options)),
         abort_signal.as_ref(),
