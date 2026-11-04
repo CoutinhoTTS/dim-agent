@@ -185,8 +185,8 @@
       "unexpandedMacros": [
         "format",
         "matches",
-        "serde_json::json",
-        "tokio::select"
+        "tokio::select",
+        "unreachable"
       ]
     },
     {
@@ -291,8 +291,7 @@
         "async_stream::stream",
         "format",
         "matches",
-        "tracing::debug",
-        "unreachable"
+        "tracing::debug"
       ]
     },
     {
@@ -6310,6 +6309,7 @@
       "references": [
         "path stream",
         "path stream::convert",
+        "path stream::error",
         "use crate::stream"
       ]
     },
@@ -6317,13 +6317,13 @@
       "from": "dim_agent_aimux::driver",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path BedrockAuth::Bearer",
+        "path BedrockAuth::SigV4",
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::classified",
         "path HostErrorKind::InvalidRequest",
         "path HostErrorKind::OwnerClosed",
-        "path HostErrorKind::Transport",
-        "path HostErrorKind::Unsupported",
         "path HostFuture",
         "path ModelChunk",
         "path ModelConnection",
@@ -6340,11 +6340,17 @@
       "from": "dim_agent_aimux::driver",
       "to": "dim_agent_types::model",
       "references": [
+        "path ModelProtocol",
         "path ModelProtocol::Anthropic",
         "path ModelProtocol::Bedrock",
         "path ModelProtocol::Gemini",
+        "path ModelProtocol::OpenaiChat",
+        "path ModelProtocol::OpenaiCompatible",
         "path ModelProtocol::OpenaiResponses",
+        "path ModelProtocol::Xai",
+        "path ModelProtocol::XaiResponses",
         "path ModelRequest",
+        "path model",
         "use dim_agent_types::ModelRequest"
       ]
     },
@@ -6628,7 +6634,10 @@
         "path ProviderKind::Anthropic",
         "path ProviderKind::Bedrock",
         "path ProviderKind::Gemini",
+        "path ProviderKind::OpenaiChat",
+        "path ProviderKind::OpenaiCompatible",
         "path ProviderKind::OpenaiResponses",
+        "path ProviderKind::Xai",
         "path ProviderKind::XaiResponses",
         "path SystemPrompt::Parts",
         "path SystemPrompt::Text",
@@ -6735,7 +6744,6 @@
         "path ProviderKind::OpenaiChat",
         "path ProviderKind::OpenaiCompatible",
         "path ProviderKind::OpenaiResponses",
-        "path ProviderKind::Xai",
         "path ProviderKind::XaiResponses",
         "path SystemPrompt::Parts",
         "path SystemPrompt::Text"
@@ -6760,7 +6768,8 @@
       "from": "dim_agent_aimux::stream",
       "to": "dim_agent_aimux::stream::content",
       "references": [
-        "mod content"
+        "mod content",
+        "path content::metadata"
       ]
     },
     {
@@ -6800,7 +6809,8 @@
       "from": "dim_agent_aimux::stream",
       "to": "dim_agent_types::content",
       "references": [
-        "use dim_agent_types::ContentMetadata",
+        "path dim_agent_types::ContentMetadata",
+        "path dim_agent_types::ContentMetadata::Bedrock",
         "use dim_agent_types::MessagePart"
       ]
     },
@@ -6809,6 +6819,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path ModelProtocol",
+        "path ModelProtocol::Bedrock",
         "path Usage",
         "use dim_agent_capabilities::host::ModelProtocol",
         "use dim_agent_types::Usage"
@@ -39115,6 +39126,10 @@
     {
       "module": "dim_acp::lody",
       "path": "OptionValue::Text"
+    },
+    {
+      "module": "dim_agent_aimux::recording",
+      "path": "F::Output"
     },
     {
       "module": "dim_agent_capabilities::file_storage::windows",

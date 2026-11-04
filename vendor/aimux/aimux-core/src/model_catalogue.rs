@@ -2,7 +2,7 @@
 //!
 //! Two independent data surfaces:
 //! - [`RuntimeModel`] — what a provider's `/models` endpoint returns (sparse:
-//!   id, owned_by, created). Produced by `Provider::list_models`.
+//!   id, owned_by, created). Produced by `ProviderDiscovery::list_models`.
 //! - [`ModelSpec`] — community knowledge portrait (context length, capabilities,
 //!   reasoning). Produced by `get_model_specs` (anya2a).
 //!
@@ -10,8 +10,8 @@
 //! combines them as needed (see RFC-0027 docs). All `ModelSpec` fields are
 //! advisory — aimux never auto-applies them in the request path.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Runtime discovery (provider `/models`)
@@ -23,8 +23,8 @@ use ts_rs::TS;
 /// Carries only what the provider returns — typically just `id`. Configuration
 /// comes from [`ModelSpec`] (community knowledge); the host merges the two as
 /// needed (RFC-0027). aimux itself does not combine them.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeModel {
     /// Model identifier, e.g. `"gpt-4o"`.
     pub id: String,
@@ -33,8 +33,14 @@ pub struct RuntimeModel {
     pub owned_by: Option<String>,
     /// `created` unix timestamp from OpenAI-compatible `/models` responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
     pub created: Option<u64>,
+    /// The token limits the provider declared for the model in the same list
+    /// response (OpenRouter's `context_length` and
+    /// `top_provider.max_completion_tokens`, vLLM's `max_model_len`). Absent
+    /// when the provider declared none; never filled from the community
+    /// catalogue or inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ModelLimits>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -42,10 +48,9 @@ pub struct RuntimeModel {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Where a [`ModelSpec`] came from.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub enum CatalogueSource {
-    /// `models.anya2a.com` (community provider catalogue, aggregates models.dev).
+    /// `models.anya2a.com` (DeepChat PublicProviderConf, aggregates models.dev).
     #[default]
     Anya2a,
     /// `models.dev/api.json` (degraded fallback).
@@ -55,8 +60,7 @@ pub enum CatalogueSource {
 }
 
 /// Coarse model category, used to route to the right modality surface.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub enum ModelType {
     #[default]
     Chat,
@@ -75,8 +79,7 @@ pub enum ModelType {
 }
 
 /// A single input or output modality.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub enum Modality {
     Text,
     Image,
@@ -92,26 +95,23 @@ pub enum Modality {
 }
 
 /// Token / request limits for a model.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelLimits {
     /// Maximum total context window (input + output), in tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
     pub context: Option<u64>,
     /// Maximum output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
     pub output: Option<u64>,
     /// Maximum input tokens (when distinct from `context`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
     pub input: Option<u64>,
 }
 
 /// Input/output modality sets.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelModalities {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input: Vec<Modality>,
@@ -120,14 +120,14 @@ pub struct ModelModalities {
 }
 
 /// Model-level capability flags (more precise than provider-level `supports_*`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelCapabilities {
     /// Supports function/tool calling.
     #[serde(default)]
     pub tool_call: bool,
     /// Supports structured / JSON-schema output.
-    #[serde(default, rename = "structured_output")]
+    #[serde(default)]
     pub structured_output: bool,
     /// Accepts a `temperature` parameter.
     #[serde(default)]
@@ -138,8 +138,7 @@ pub struct ModelCapabilities {
 }
 
 /// How reasoning / thinking is controlled for a model.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub enum ReasoningMode {
     /// Token-budget control (e.g. Anthropic `budget_tokens`).
     Budget,
@@ -158,8 +157,7 @@ pub enum ReasoningMode {
 }
 
 /// Visibility of reasoning output to the caller.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub enum ReasoningVisibility {
     Hidden,
     Summary,
@@ -171,8 +169,8 @@ pub enum ReasoningVisibility {
 }
 
 /// Reasoning / thinking portrait for a model (advisory).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ReasoningSpec {
     /// Whether the model family supports reasoning at all.
     #[serde(default)]
@@ -181,7 +179,7 @@ pub struct ReasoningSpec {
     #[serde(default)]
     pub default_enabled: bool,
     /// Primary control mode.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ReasoningMode>,
     /// Default effort level (when `mode` is Effort/Mixed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,20 +189,19 @@ pub struct ReasoningSpec {
     pub effort_options: Vec<String>,
     /// Minimum token budget (when `mode` is Budget/Mixed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "number | null")]
     pub budget_min: Option<u64>,
     /// Interleaved reasoning (thinking blocks between tool calls).
     #[serde(default)]
     pub interleaved: bool,
     /// Output visibility.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<ReasoningVisibility>,
 }
 
 /// Pricing (advisory, read-only metadata). Units follow the source catalog
 /// (anya2a uses USD per 1M tokens).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelCost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<f64>,
@@ -219,10 +216,9 @@ pub struct ModelCost {
 /// The full static portrait for a model, supplemented from community knowledge.
 ///
 /// All fields are advisory — aimux never auto-applies them in the request path.
-/// The caller reads them to decide how to configure `GenerateTextOptions` /
-/// `bodyOverrides`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
-#[ts(export)]
+/// The caller reads them to decide how to configure `GenerateTextOptions`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -262,6 +258,7 @@ mod tests {
             id: "gpt-4o".into(),
             owned_by: Some("openai".into()),
             created: Some(1715367049),
+            limits: None,
         };
         assert_eq!(r.id, "gpt-4o");
         assert_eq!(r.owned_by.as_deref(), Some("openai"));

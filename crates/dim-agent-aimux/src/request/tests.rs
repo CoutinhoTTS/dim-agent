@@ -1,6 +1,14 @@
 use super::*;
-use aimux_core::{LanguageModel, stream_part::StreamPart};
-use aimux_providers::openai::{OpenAIConfig, OpenAIModel};
+use aimux_core::{
+    LanguageModel, language_model_message::LanguageModelMessage, stream_part::StreamPart,
+};
+use aimux_provider_utils::Resolvable;
+use aimux_providers::{
+    anthropic::{AnthropicProviderSettings, create_anthropic},
+    bedrock::{AmazonBedrockProviderSettings, create_amazon_bedrock},
+    google::{GoogleProviderSettings, create_google},
+    openai_compatible::{OpenAICompatibleProviderSettings, create_openai_compatible},
+};
 use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
@@ -9,39 +17,46 @@ use tokio::{
     net::TcpListener,
 };
 
+async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Value) {
+    let mut bytes = Vec::new();
+    let header_end = loop {
+        let mut chunk = [0; 4096];
+        let count = socket.read(&mut chunk).await.unwrap();
+        assert_ne!(count, 0);
+        bytes.extend_from_slice(&chunk[..count]);
+        if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+    let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+    let request_line = headers.lines().next().unwrap_or_default().to_string();
+    let length: usize = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap())
+        })
+        .unwrap();
+    while bytes.len() < header_end + length {
+        let mut chunk = [0; 4096];
+        let count = socket.read(&mut chunk).await.unwrap();
+        assert_ne!(count, 0);
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+    (
+        request_line,
+        serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap(),
+    )
+}
+
 async fn send(options: CallOptions, provider: &str) -> Value {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut bytes = Vec::new();
-        let header_end = loop {
-            let mut chunk = [0; 4096];
-            let count = socket.read(&mut chunk).await.unwrap();
-            assert_ne!(count, 0);
-            bytes.extend_from_slice(&chunk[..count]);
-            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-                break index + 4;
-            }
-        };
-        let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
-        assert!(headers.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
-        let length: usize = headers
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse().unwrap())
-            })
-            .unwrap();
-        while bytes.len() < header_end + length {
-            let mut chunk = [0; 4096];
-            let count = socket.read(&mut chunk).await.unwrap();
-            assert_ne!(count, 0);
-            bytes.extend_from_slice(&chunk[..count]);
-        }
-        let request: Value =
-            serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+        let (line, request) = read_request(&mut socket).await;
+        assert_eq!(line, "POST /v1/chat/completions HTTP/1.1");
         let response = concat!(
             "data: {\"id\":\"completion\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
             "data: {\"id\":\"completion\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
@@ -50,12 +65,15 @@ async fn send(options: CallOptions, provider: &str) -> Value {
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
         request
     });
-    let model = OpenAIModel::new(
-        "gpt-4o".into(),
-        OpenAIConfig::new("test-key")
-            .with_base_url(format!("http://{address}/v1"))
-            .with_provider(provider),
-    );
+    let model = create_openai_compatible(OpenAICompatibleProviderSettings {
+        name: provider.into(),
+        base_url: format!("http://{address}/v1"),
+        api_key: Some("test-key".into()),
+        include_usage: Some(true),
+        ..OpenAICompatibleProviderSettings::default()
+    })
+    .unwrap()
+    .chat("gpt-4o");
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let mut stream = model.do_stream(&options).await.unwrap().stream;
         let mut finished = false;
@@ -67,6 +85,33 @@ async fn send(options: CallOptions, provider: &str) -> Value {
             }
         }
         assert!(finished);
+        server.await.unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+/// One request as the model sends it to a server that only records it.
+async fn capture<F>(build: F, options: CallOptions) -> Value
+where
+    F: FnOnce(String) -> Arc<dyn LanguageModel>,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model = build(format!("http://{address}/v1"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (_line, request) = read_request(&mut socket).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        request
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let _ = model.do_stream(&options).await;
         server.await.unwrap()
     })
     .await
@@ -123,15 +168,21 @@ async fn final_request_replays_multimodal_tool_history_and_only_model_readable_r
             .original("dim_tool_plugin_notio_ion_notion-list-recent-pages_27e3aae889c3"),
         name
     );
+    let LanguageModelMessage::Tool { content, .. } = &prepared.options.prompt[4] else {
+        panic!("missing tool message")
+    };
+    let ToolPart::ToolResult(result) = &content[0] else {
+        panic!("missing tool result")
+    };
     assert_eq!(
-        prepared.options.prompt[4].content[0],
-        ContentPart::ToolResult {
+        *result,
+        ToolResultPart {
             tool_call_id: "call-1".into(),
-            result: json!("part 1\npart 2"),
-            tool_name: Some("notion-list-recent-pages_27e3aae889c3".into()),
-            is_error: Some(false),
-            preliminary: None,
-            dynamic: None,
+            tool_name: "notion-list-recent-pages_27e3aae889c3".into(),
+            output: ToolResultOutput::Text {
+                value: "part 1\npart 2".into(),
+                provider_options: None,
+            },
             provider_options: None,
         }
     );
@@ -428,125 +479,235 @@ fn tool_request(tools: Vec<Value>) -> ModelRequest {
 }
 
 fn options(kind: ProviderKind) -> CallOptions {
-    options_with(mcp_shaped_tool(), kind)
+    options_with(mcp_shaped_tool(), kind, None)
 }
 
-fn options_with(tool: Value, kind: ProviderKind) -> CallOptions {
-    convert(&tool_request(vec![tool]), &kind, None)
+fn options_with(tool: Value, kind: ProviderKind, preset: Option<&str>) -> CallOptions {
+    convert(&tool_request(vec![tool]), &kind, preset)
         .unwrap()
         .options
 }
 
-/// The same tool with `additionalProperties: false`, which xAI's body strips.
+/// The same tool with `additionalProperties: false`.
 fn mcp_shaped_tool_closed() -> Value {
     let mut tool = mcp_shaped_tool();
     tool["inputSchema"]["additionalProperties"] = json!(false);
     tool
 }
 
-#[test]
-fn the_openai_chat_and_compatible_bodies_carry_the_canonical_tool_schema() {
-    for kind in [ProviderKind::OpenaiChat, ProviderKind::OpenaiCompatible] {
-        let body =
-            aimux_providers::openai::convert::build_request_body("gpt-4o", &options(kind), false)
-                .unwrap();
+#[tokio::test]
+async fn the_openai_chat_and_compatible_bodies_carry_the_canonical_tool_schema() {
+    for preset in [None, Some("deepseek")] {
+        let name = preset.unwrap_or("openai");
+        let options = options_with(mcp_shaped_tool(), ProviderKind::OpenaiCompatible, preset);
+        let body = capture(
+            move |url| {
+                Arc::new(
+                    create_openai_compatible(OpenAICompatibleProviderSettings {
+                        name: name.into(),
+                        base_url: url,
+                        api_key: Some("test-key".into()),
+                        ..OpenAICompatibleProviderSettings::default()
+                    })
+                    .unwrap()
+                    .chat("gpt-4o"),
+                )
+            },
+            options,
+        )
+        .await;
         assert_eq!(
             body["tools"][0]["function"]["parameters"],
             canonical_shaped_schema(),
-            "{kind:?}"
+            "{preset:?}"
         );
     }
+    let options = options(ProviderKind::OpenaiChat);
+    let body = capture(
+        |url| {
+            Arc::new(
+                create_openai_compatible(OpenAICompatibleProviderSettings {
+                    name: "openai".into(),
+                    base_url: url,
+                    api_key: Some("test-key".into()),
+                    ..OpenAICompatibleProviderSettings::default()
+                })
+                .unwrap()
+                .chat("gpt-4o"),
+            )
+        },
+        options,
+    )
+    .await;
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"],
+        canonical_shaped_schema()
+    );
+}
+
+/// Zenmux takes the registry's wire field: `max_completion_tokens`, not the
+/// `max_tokens` dim wrote before the upgrade.
+#[tokio::test]
+async fn a_zenmux_chat_request_carries_max_completion_tokens() {
+    let mut options = options(ProviderKind::OpenaiCompatible);
+    options.max_output_tokens = Some(1234);
+    let body = capture(
+        |url| {
+            aimux_providers::create_provider(
+                "zenmux",
+                aimux_providers::PresetSettings {
+                    api_key: Some(Resolvable::Value(String::new())),
+                    base_url: Some(url),
+                    ..aimux_providers::PresetSettings::default()
+                },
+            )
+            .unwrap()
+            .language_model("some-model")
+            .unwrap()
+        },
+        options,
+    )
+    .await;
+    assert_eq!(body["max_completion_tokens"], 1234);
+    assert!(body.get("max_tokens").is_none());
 }
 
 #[test]
 fn the_openai_responses_body_carries_the_canonical_tool_schema() {
-    let body = aimux_providers::openai::responses::convert::build_responses_request_body(
+    let body = aimux_providers::openai::responses::build_responses_request_body(
         "gpt-5",
         &options(ProviderKind::OpenaiResponses),
         false,
     )
+    .unwrap()
     .body;
     assert_eq!(body["tools"][0]["parameters"], canonical_shaped_schema());
 }
 
-#[test]
-fn the_anthropic_body_carries_the_canonical_tool_schema() {
-    let body = aimux_providers::anthropic::convert::build_request_body(
-        "claude-sonnet-4-5",
-        &options(ProviderKind::Anthropic),
-        false,
+#[tokio::test]
+async fn the_anthropic_body_carries_the_canonical_tool_schema() {
+    let options = options(ProviderKind::Anthropic);
+    let body = capture(
+        |url| {
+            Arc::new(
+                create_anthropic(AnthropicProviderSettings {
+                    base_url: Some(url),
+                    api_key: Some("test-key".into()),
+                    ..AnthropicProviderSettings::default()
+                })
+                .unwrap()
+                .chat("claude-sonnet-4-5"),
+            )
+        },
+        options,
     )
-    .unwrap();
+    .await;
     assert_eq!(body["tools"][0]["input_schema"], canonical_shaped_schema());
 }
 
-#[test]
-fn the_xai_body_carries_the_canonical_tool_schema_without_additional_properties() {
-    let body = aimux_providers::xai::convert::build_request_body_with_warnings(
-        "grok-4",
-        &options_with(mcp_shaped_tool_closed(), ProviderKind::Xai),
-        false,
-    )
-    .unwrap()
-    .body;
-    let parameters = &body["tools"][0]["function"]["parameters"];
-    assert_eq!(parameters, &canonical_shaped_schema());
-    assert!(
-        parameters.get("additionalProperties").is_none(),
-        "xAI strips additionalProperties: false: {parameters}"
+#[tokio::test]
+async fn the_xai_body_carries_the_canonical_tool_schema() {
+    // dim's xai protocol is served by the OpenAI-compatible Chat model, which
+    // passes the stored schema through as it is: the dedicated xAI Chat model
+    // that removed `additionalProperties: false` is gone with aimux 0.6.
+    let options = options_with(
+        mcp_shaped_tool_closed(),
+        ProviderKind::OpenaiCompatible,
+        Some("xai"),
     );
+    let body = capture(
+        |url| {
+            Arc::new(
+                create_openai_compatible(OpenAICompatibleProviderSettings {
+                    name: "xai".into(),
+                    base_url: url,
+                    api_key: Some("test-key".into()),
+                    ..OpenAICompatibleProviderSettings::default()
+                })
+                .unwrap()
+                .chat("grok-4"),
+            )
+        },
+        options,
+    )
+    .await;
+    let parameters = &body["tools"][0]["function"]["parameters"];
+    let mut expected = canonical_shaped_schema();
+    expected["additionalProperties"] = json!(false);
+    assert_eq!(parameters, &expected);
 }
 
 #[test]
-fn the_xai_responses_body_carries_the_canonical_tool_schema_without_additional_properties() {
-    let body = aimux_providers::xai::responses::convert::build_responses_request_body(
+fn the_xai_responses_body_carries_the_canonical_tool_schema_as_stored() {
+    let body = aimux_providers::xai::responses::build_responses_request_body(
         "grok-4",
-        &options_with(mcp_shaped_tool_closed(), ProviderKind::XaiResponses),
+        &options_with(mcp_shaped_tool_closed(), ProviderKind::XaiResponses, None),
         false,
     )
     .unwrap()
     .body;
     let parameters = &body["tools"][0]["parameters"];
-    assert_eq!(parameters, &canonical_shaped_schema());
-    assert!(
-        parameters.get("additionalProperties").is_none(),
-        "xAI strips additionalProperties: false: {parameters}"
-    );
+    let mut expected = canonical_shaped_schema();
+    expected["additionalProperties"] = json!(false);
+    assert_eq!(parameters, &expected);
 }
 
-#[test]
-fn the_bedrock_body_carries_the_canonical_tool_schema() {
-    let body = aimux_providers::bedrock::convert::build_request_body(
-        "anthropic.claude-sonnet-4-5-20250929-v1:0",
-        &options(ProviderKind::Bedrock),
+#[tokio::test]
+async fn the_bedrock_body_carries_the_canonical_tool_schema() {
+    let options = options(ProviderKind::Bedrock);
+    let body = capture(
+        |url| {
+            Arc::new(
+                create_amazon_bedrock(AmazonBedrockProviderSettings {
+                    region: Some("us-east-1".into()),
+                    api_key: Some(Resolvable::Value(String::new())),
+                    access_key_id: Some("access-key".into()),
+                    secret_access_key: Some("secret-key".into()),
+                    base_url: Some(url),
+                    ..AmazonBedrockProviderSettings::default()
+                })
+                .unwrap()
+                .chat("anthropic.claude-sonnet-4-5-20250929-v1:0"),
+            )
+        },
+        options,
     )
-    .unwrap();
+    .await;
     assert_eq!(
         body["toolConfig"]["tools"][0]["toolSpec"]["inputSchema"]["json"],
         canonical_shaped_schema()
     );
 }
 
-#[test]
-fn the_gemini_body_folds_the_nullable_type_into_a_nullable_field() {
-    let body = aimux_providers::google::convert::build_request_body(
-        "gemini-2.5-pro",
-        &options(ProviderKind::Gemini),
-    );
-    let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
-    assert_eq!(
-        parameters["properties"]["space_id"],
-        json!({"type": "string", "nullable": true})
-    );
+#[tokio::test]
+async fn the_gemini_body_carries_the_stored_nullable_type_verbatim() {
+    let options = options(ProviderKind::Gemini);
+    let body = capture(
+        |url| {
+            Arc::new(
+                create_google(GoogleProviderSettings {
+                    base_url: Some(url),
+                    api_key: Some("test-key".into()),
+                    ..GoogleProviderSettings::default()
+                })
+                .unwrap()
+                .chat("gemini-2.5-pro"),
+            )
+        },
+        options,
+    )
+    .await;
+    let parameters = &body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
+    assert_eq!(parameters, &canonical_shaped_schema());
     assert_eq!(parameters["required"], json!(["space_id"]));
 }
 
-/// Gemini's OpenAPI 3.0 subset drops `not`, so a property stored as `{}` (from
-/// the boolean subschema `true`) and one stored as `{"not": {}}` (from `false`)
-/// both reach the wire as the empty schema. Recorded here so a change in the
-/// converter is visible; dim does not compensate.
-#[test]
-fn gemini_emits_stored_boolean_subschemas_as_empty_schemas() {
+/// The Gemini model carries the stored JSON Schema as `parametersJsonSchema`;
+/// the converter turns the boolean subschemas into object schemas there, so
+/// `true` reaches the wire as `{}` and `false` as `{"not": {}}`. Recorded here
+/// so a change in the converter is visible; dim does not compensate.
+#[tokio::test]
+async fn gemini_emits_stored_boolean_subschemas_as_object_schemas() {
     let request = tool_request(vec![json!({
         "name": "flags", "description": "", "source": "dynamic",
         "inputSchema": {"type": "object", "properties": {"x": true, "y": false}}
@@ -554,8 +715,23 @@ fn gemini_emits_stored_boolean_subschemas_as_empty_schemas() {
     let options = convert(&request, &ProviderKind::Gemini, None)
         .unwrap()
         .options;
-    let body = aimux_providers::google::convert::build_request_body("gemini-2.5-pro", &options);
-    let properties = &body["tools"][0]["functionDeclarations"][0]["parameters"]["properties"];
+    let body = capture(
+        |url| {
+            Arc::new(
+                create_google(GoogleProviderSettings {
+                    base_url: Some(url),
+                    api_key: Some("test-key".into()),
+                    ..GoogleProviderSettings::default()
+                })
+                .unwrap()
+                .chat("gemini-2.5-pro"),
+            )
+        },
+        options,
+    )
+    .await;
+    let properties =
+        &body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]["properties"];
     assert_eq!(properties["x"], json!({}));
-    assert_eq!(properties["y"], json!({}));
+    assert_eq!(properties["y"], json!({"not": {}}));
 }

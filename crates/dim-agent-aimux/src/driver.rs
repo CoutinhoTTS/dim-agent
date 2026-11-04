@@ -1,9 +1,22 @@
 use crate::{request, stream};
 use aimux_core::{AbortSignal, AiMuxError, language_model::LanguageModel};
+use aimux_provider_utils::{
+    Fetch, FetchError, FetchFunction, FetchRequest, FetchResponse, HeaderMapOpt, ProxyConfig,
+    ReqwestFetch, Resolvable,
+};
+use aimux_providers::{
+    anthropic::{AnthropicProviderSettings, create_anthropic},
+    bedrock::{AmazonBedrockProviderSettings, create_amazon_bedrock},
+    google::{GoogleProviderSettings, create_google},
+    openai::{OpenAIProviderSettings, create_openai},
+    openai_compatible::{OpenAICompatibleProviderSettings, create_openai_compatible},
+    xai::{XAIProviderSettings, create_xai},
+};
 use dim_agent_capabilities::host::*;
 use dim_agent_types::ModelRequest;
 use futures_util::Stream;
 use std::{
+    collections::HashMap,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{Context, Poll},
@@ -13,20 +26,129 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const OPENAI_CODEX_PRESET: &str = "openai-codex";
 const MAX_REDIRECTS: usize = 10;
+/// Names a redirect the transport refused, which the error text then reports:
+/// the helper layer above the transport follows any `3xx` that carries a
+/// `Location`, so a refused one must not carry it.
+const REDIRECT_TARGET_HEADER: &str = "x-dim-redirect-target";
 
-fn redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        let keeps_method = matches!(attempt.status().as_u16(), 307 | 308);
-        let same_origin = attempt
-            .previous()
-            .last()
-            .is_some_and(|previous| previous.origin() == attempt.url().origin());
-        if keeps_method && same_origin && attempt.previous().len() <= MAX_REDIRECTS {
-            attempt.follow()
-        } else {
-            attempt.stop()
+/// Whether a status is one the fetch layers treat as a redirect.
+fn is_redirect(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
+}
+
+/// The transport dim hands every provider: reqwest with dim's redirect policy.
+///
+/// The tag's helper layer follows a redirect the transport returns, so the
+/// policy is applied here, hop by hop, and a hop that ends the chain is
+/// returned without its `Location` (its target goes in
+/// [`REDIRECT_TARGET_HEADER`]) so nothing above follows it.
+struct DimFetch {
+    transport: ReqwestFetch,
+    timeout: Option<Duration>,
+    /// The connection base URL's query, applied to every request URL. The
+    /// models build an endpoint URL by appending the path to the base URL, so
+    /// the query travels here instead of on the base URL itself.
+    query: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for DimFetch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DimFetch")
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl Fetch for DimFetch {
+    async fn fetch(&self, request: FetchRequest) -> Result<FetchResponse, FetchError> {
+        let mut request = with_connection_query(request, &self.query);
+        // The transport's request timeout covers the response body, as the
+        // connection's timeout did before the upgrade; a wrapper future here
+        // would end at the headers.
+        request.timeout = request.timeout.or(self.timeout);
+        follow_redirects(&self.transport, request).await
+    }
+}
+
+/// Moves a connection base URL's query onto a request URL: the model's own
+/// query pairs stay first, and a connection pair the URL already names is not
+/// repeated.
+fn with_connection_query(mut request: FetchRequest, query: &[(String, String)]) -> FetchRequest {
+    if query.is_empty() {
+        return request;
+    }
+    let mut pairs: Vec<(String, String)> = request
+        .url
+        .query_pairs()
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    for (name, value) in query {
+        if !pairs.iter().any(|(existing, _)| existing == name) {
+            pairs.push((name.clone(), value.clone()));
         }
-    })
+    }
+    request.url.query_pairs_mut().clear().extend_pairs(pairs);
+    request
+}
+
+/// Splits a connection base URL into the part the models append a path to and
+/// the query pairs every request carries, in the order the base URL lists them.
+fn split_query(base_url: &str) -> (String, Vec<(String, String)>) {
+    let Some((base, query)) = base_url.split_once('?') else {
+        return (base_url.to_owned(), Vec::new());
+    };
+    let query = query.split('#').next().unwrap_or_default();
+    let pairs = url::form_urlencoded::parse(query.as_bytes())
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    (base.to_owned(), pairs)
+}
+
+async fn follow_redirects(
+    transport: &ReqwestFetch,
+    mut request: FetchRequest,
+) -> Result<FetchResponse, FetchError> {
+    let mut followed = 0;
+    loop {
+        let response = transport.fetch(request.clone()).await?;
+        if !is_redirect(response.status) {
+            return Ok(response);
+        }
+        let Some(location) = response.headers().get(http::header::LOCATION) else {
+            return Ok(response);
+        };
+        let Ok(location) = location.to_str() else {
+            return Ok(response);
+        };
+        let Ok(target) = request.url.join(location) else {
+            return Ok(response);
+        };
+        let keeps_method = matches!(response.status.as_u16(), 307 | 308);
+        let same_origin = target.origin() == request.url.origin();
+        if keeps_method && same_origin && followed < MAX_REDIRECTS {
+            followed += 1;
+            request.url = target;
+            continue;
+        }
+        return Ok(refuse(response, &target));
+    }
+}
+
+/// The redirect the policy refuses, with its target named out of band so the
+/// error can report it and no layer above follows it.
+fn refuse(mut response: FetchResponse, target: &url::Url) -> FetchResponse {
+    let mut target = target.clone();
+    target.set_query(None);
+    target.set_fragment(None);
+    let _ = target.set_username("");
+    let _ = target.set_password(None);
+    response.headers.remove(http::header::LOCATION);
+    if let Ok(value) = http::HeaderValue::from_str(target.as_str()) {
+        response.headers.insert(REDIRECT_TARGET_HEADER, value);
+    }
+    response
 }
 
 /// Restates a redirect that the client did not follow with its target, which
@@ -41,70 +163,223 @@ fn name_redirect_target(mut error: AiMuxError) -> AiMuxError {
     if !matches!(status, 301 | 302 | 303 | 307 | 308) {
         return error;
     }
-    let Some(location) = detail
+    let Some(target) = detail
         .response_headers
         .as_ref()
-        .and_then(|headers| headers.get("location"))
+        .and_then(|headers| headers.get(REDIRECT_TARGET_HEADER))
         .cloned()
     else {
         return error;
     };
-    let Ok(base) = url::Url::parse(&detail.url) else {
-        return error;
-    };
-    let Ok(target) = base.join(&location) else {
-        return error;
-    };
-    let reason = if target.origin() != base.origin() {
-        "the target is a different origin"
-    } else if !matches!(status, 307 | 308) {
+    let reason = if !matches!(status, 307 | 308) {
         "the request would be re-sent as a GET without its body; update the provider URL to the target"
+    } else if url::Url::parse(&detail.url)
+        .ok()
+        .zip(url::Url::parse(&target).ok())
+        .is_some_and(|(base, target)| base.origin() != target.origin())
+    {
+        "the target is a different origin"
     } else {
         "the redirect limit was reached"
     };
-    let mut target = target;
-    target.set_query(None);
-    target.set_fragment(None);
-    let _ = target.set_username("");
-    let _ = target.set_password(None);
     detail.message = format!("redirect to {target} was not followed: {reason}");
     error
 }
 
-fn client(network: &ModelNetwork) -> Result<reqwest::Client, HostError> {
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(10)
-        .pool_idle_timeout(Duration::from_secs(30))
-        .tcp_keepalive(Duration::from_secs(20))
-        .redirect(redirect_policy());
-    if let Some(proxy) = &network.proxy {
-        builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|_| {
-            HostError::classified(HostErrorKind::InvalidRequest, "Invalid model proxy")
-        })?);
-    }
-    if let Some(timeout) = network.timeout_ms {
-        builder = builder.timeout(Duration::from_millis(timeout));
-    }
-    builder.build().map_err(|_| {
-        HostError::classified(
-            HostErrorKind::Transport,
-            "Model HTTP client initialization failed",
-        )
+/// A transport carrying one connection's proxy and timeout.
+fn fetch(network: &ModelNetwork, query: Vec<(String, String)>) -> FetchFunction {
+    let transport = ReqwestFetch::new(ProxyConfig {
+        all_url: network.proxy.clone(),
+        ..ProxyConfig::default()
+    });
+    Arc::new(DimFetch {
+        transport,
+        timeout: network.timeout_ms.map(Duration::from_millis),
+        query,
     })
 }
 
+/// The endpoint base the Anthropic model appends `/messages` to: the
+/// connection's base URL with the version segment, unless it already names it.
+fn anthropic_base_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/v1") {
+        base_url.to_owned()
+    } else {
+        format!("{base_url}/v1")
+    }
+}
+
+/// The provider headers that keep provider-settings auth out of the way: dim
+/// sends every credential through `options.headers`, so the provider itself
+/// must produce none, not even an empty one.
+fn no_credential(header: &str) -> HeaderMapOpt {
+    HashMap::from([(header.to_string(), None)])
+}
+
+fn build_model(
+    connection: &ModelConnection,
+    base_url: &str,
+    protocol: &ModelProtocol,
+    preset: Option<&str>,
+    model_id: &str,
+    fetch: FetchFunction,
+) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
+    if matches!(connection, ModelConnection::Local) {
+        return Err(AiMuxError::invalid_argument(
+            "Aimux requires a resolved model connection",
+        ));
+    }
+    let base_url = base_url.to_owned();
+    match protocol {
+        ModelProtocol::OpenaiChat => {
+            let provider = create_openai_compatible(OpenAICompatibleProviderSettings {
+                name: "openai".into(),
+                base_url,
+                api_key: None,
+                headers: None,
+                include_usage: Some(true),
+                fetch: Some(fetch),
+                ..OpenAICompatibleProviderSettings::default()
+            })?;
+            Ok(Arc::new(provider.chat(model_id)))
+        }
+        ModelProtocol::OpenaiCompatible => {
+            // A registry preset supplies the row's wire profile (for example
+            // Zenmux's `max_completion_tokens`). A name that is a vendor
+            // package instead (DeepSeek) has no registry row; the generic
+            // Chat model is what dim's protocols need there, so that the
+            // provider-option fields dim writes reach the body unchanged.
+            if let Some(preset) = preset
+                && aimux_providers::preset::lookup(preset).is_some()
+            {
+                let provider = aimux_providers::preset::create(
+                    preset,
+                    aimux_providers::PresetSettings {
+                        api_key: Some(Resolvable::Value(String::new())),
+                        base_url: Some(base_url),
+                        headers: Some(no_credential("authorization")),
+                        fetch: Some(fetch),
+                        ..aimux_providers::PresetSettings::default()
+                    },
+                )?;
+                return Ok(Arc::new(provider.chat(model_id)));
+            }
+            let provider = create_openai_compatible(OpenAICompatibleProviderSettings {
+                name: preset.unwrap_or("openai").to_owned(),
+                base_url,
+                api_key: None,
+                headers: None,
+                include_usage: Some(true),
+                fetch: Some(fetch),
+                ..OpenAICompatibleProviderSettings::default()
+            })?;
+            Ok(Arc::new(provider.chat(model_id)))
+        }
+        ModelProtocol::OpenaiResponses => {
+            let provider = create_openai(OpenAIProviderSettings {
+                base_url: Some(base_url),
+                api_key: Some(String::new()),
+                headers: Some(no_credential("authorization")),
+                fetch: Some(fetch),
+                ..OpenAIProviderSettings::default()
+            })?;
+            Ok(Arc::new(provider.responses(model_id)))
+        }
+        ModelProtocol::Xai => {
+            let provider = create_openai_compatible(OpenAICompatibleProviderSettings {
+                name: "xai".into(),
+                base_url,
+                api_key: None,
+                headers: None,
+                include_usage: Some(true),
+                fetch: Some(fetch),
+                ..OpenAICompatibleProviderSettings::default()
+            })?;
+            Ok(Arc::new(provider.chat(model_id)))
+        }
+        ModelProtocol::XaiResponses => {
+            let provider = create_xai(XAIProviderSettings {
+                base_url: Some(base_url),
+                api_key: Some(String::new()),
+                headers: Some(no_credential("authorization")),
+                fetch: Some(fetch),
+            })?;
+            Ok(Arc::new(provider.responses(model_id)))
+        }
+        ModelProtocol::Anthropic => {
+            let provider = create_anthropic(AnthropicProviderSettings {
+                // The v0.6 model appends only `/messages`; the endpoint base
+                // carries the version segment, as the v0.5 model's URL builder
+                // supplied it.
+                base_url: Some(anthropic_base_url(&base_url)),
+                api_key: Some(String::new()),
+                auth_token: None,
+                headers: Some(no_credential("x-api-key")),
+                fetch: Some(fetch),
+                ..AnthropicProviderSettings::default()
+            })?;
+            Ok(Arc::new(provider.chat(model_id)))
+        }
+        ModelProtocol::Gemini => {
+            let provider = create_google(GoogleProviderSettings {
+                base_url: Some(base_url),
+                api_key: Some(String::new()),
+                headers: Some(no_credential("x-goog-api-key")),
+                fetch: Some(fetch),
+                ..GoogleProviderSettings::default()
+            })?;
+            Ok(Arc::new(provider.chat(model_id)))
+        }
+        ModelProtocol::Bedrock => {
+            let ModelConnection::Bedrock(connection) = connection else {
+                return Err(AiMuxError::invalid_argument(
+                    "Bedrock requires a native Bedrock connection",
+                ));
+            };
+            let (key, credentials) = match &connection.auth {
+                BedrockAuth::Bearer(token) => (
+                    Some(Resolvable::Value(token.clone())),
+                    (None, None, None, None),
+                ),
+                BedrockAuth::SigV4 {
+                    credentials,
+                    region,
+                } => (
+                    Some(Resolvable::Value(String::new())),
+                    (
+                        Some(credentials.access_key_id.clone()),
+                        Some(credentials.secret_access_key.clone()),
+                        credentials.session_token.clone(),
+                        Some(region.clone()),
+                    ),
+                ),
+            };
+            let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+                region: credentials.3,
+                api_key: key,
+                access_key_id: credentials.0,
+                secret_access_key: credentials.1,
+                session_token: credentials.2,
+                base_url: Some(base_url.clone()),
+                fetch: Some(fetch),
+                ..AmazonBedrockProviderSettings::default()
+            })?;
+            Ok(Arc::new(provider.chat(model_id)))
+        }
+    }
+}
+
 pub(crate) struct AimuxDriver {
-    client: Mutex<Option<reqwest::Client>>,
+    fetch: FetchFunction,
     generation: CancellationToken,
     tasks: TaskTracker,
     streams: Mutex<Vec<Weak<Mutex<Option<ModelStream>>>>>,
 }
 impl AimuxDriver {
     pub fn new(generation: CancellationToken) -> Result<Arc<Self>, HostError> {
-        let client = client(&ModelNetwork::default())?;
         Ok(Arc::new(Self {
-            client: Mutex::new(Some(client)),
+            fetch: fetch(&ModelNetwork::default(), Vec::new()),
             generation,
             tasks: TaskTracker::new(),
             streams: Mutex::new(Vec::new()),
@@ -112,7 +387,6 @@ impl AimuxDriver {
     }
     pub async fn close(&self) {
         {
-            let _admission = self.client.lock().unwrap();
             self.generation.cancel();
         }
         for stream in self
@@ -126,7 +400,6 @@ impl AimuxDriver {
         }
         self.tasks.close();
         self.tasks.wait().await;
-        self.client.lock().unwrap().take();
     }
 }
 impl ModelDriver for AimuxDriver {
@@ -137,18 +410,14 @@ impl ModelDriver for AimuxDriver {
         cancel: CancellationToken,
     ) -> HostFuture<'_, ModelStream> {
         Box::pin(async move {
-            let (default_client, lease) = {
-                let client = self.client.lock().unwrap();
+            let lease = {
                 if self.generation.is_cancelled() {
                     return Err(HostError::classified(
                         HostErrorKind::OwnerClosed,
                         "Aimux owner is closed",
                     ));
                 }
-                let client = client.as_ref().ok_or_else(|| {
-                    HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")
-                })?;
-                (client.clone(), self.tasks.token())
+                self.tasks.token()
             };
             if cancel.is_cancelled() {
                 return Err(HostError::Cancelled("Model invocation cancelled".into()));
@@ -183,11 +452,17 @@ impl ModelDriver for AimuxDriver {
                     ));
                 }
             };
-            let client = if network.proxy.is_none() && network.timeout_ms.is_none() {
-                default_client
-            } else {
-                client(network)?
+            let (base_url, query) = match &connection {
+                ModelConnection::Http(connection) => split_query(&connection.base_url),
+                ModelConnection::Bedrock(connection) => split_query(&connection.base_url),
+                ModelConnection::Local => unreachable!("the connection was checked above"),
             };
+            let fetch =
+                if network.proxy.is_none() && network.timeout_ms.is_none() && query.is_empty() {
+                    self.fetch.clone()
+                } else {
+                    fetch(network, query)
+                };
             if preset == Some(OPENAI_CODEX_PRESET) && protocol != ModelProtocol::OpenaiResponses {
                 return Err(HostError::classified(
                     HostErrorKind::InvalidRequest,
@@ -199,35 +474,16 @@ impl ModelDriver for AimuxDriver {
                 tool_names,
                 recording,
             } = request::convert(&request, &protocol, preset)?;
-            let (provider, profile) = match preset {
-                Some(OPENAI_CODEX_PRESET) => (
-                    "openai",
-                    aimux_providers::openai::OpenAICompatProfile::full(),
-                ),
-                Some(preset) => (
-                    preset,
-                    aimux_providers::provider_registry_entry(preset).ok_or_else(|| {
-                        HostError::classified(
-                            HostErrorKind::Unsupported,
-                            "Unknown compatible preset",
-                        )
-                    })?,
-                ),
-                None => (
-                    "openai",
-                    aimux_providers::openai::OpenAICompatProfile::full(),
-                ),
-            };
             if preset == Some(OPENAI_CODEX_PRESET) {
                 options.max_output_tokens = None;
                 options
                     .provider_options
                     .get_or_insert_default()
                     .entry("openai".into())
-                    .or_insert_with(|| serde_json::json!({}))["store"] =
-                    serde_json::Value::Bool(false);
+                    .or_default()
+                    .insert("store".into(), serde_json::Value::Bool(false));
             }
-            let mut headers = std::collections::HashMap::new();
+            let mut headers = HashMap::new();
             let authorization = if protocol == ModelProtocol::Anthropic {
                 "authorization"
             } else {
@@ -256,11 +512,24 @@ impl ModelDriver for AimuxDriver {
                 };
                 headers.insert(name, value.clone());
             }
-            options.headers = Some(headers.clone());
+            options.headers = Some(headers);
             let abort = AbortSignal::new();
             options.abort_signal = Some(abort.clone());
+            let model = match build_model(
+                &connection,
+                &base_url,
+                &protocol,
+                preset,
+                &request.model_id,
+                fetch,
+            ) {
+                Ok(model) => model,
+                Err(error) => {
+                    return Err(stream::error(name_redirect_target(error), &cancel));
+                }
+            };
             let mut pending = recording.as_ref().map(|capture| {
-                capture.input(&options, provider, &request.model_id);
+                capture.input(&options, model.provider(), &request.model_id);
                 capture.pending()
             });
             let result = tokio::select! {
@@ -276,58 +545,9 @@ impl ModelDriver for AimuxDriver {
                     return Err(HostError::Cancelled("Model invocation cancelled".into()));
                 }
                 result = async {
-                    match &connection {
-                        ModelConnection::Http(connection) => match protocol {
-                        ModelProtocol::OpenaiChat | ModelProtocol::OpenaiCompatible => {
-                            let mut endpoint = url::Url::parse(&connection.base_url)
-                                .map_err(|_| aimux_core::AiMuxError::InvalidArgument("Invalid model endpoint".into()))?;
-                            endpoint.set_path(&format!("{}/chat/completions", endpoint.path().trim_end_matches('/')));
-                            aimux_providers::openai::model::execute_stream_with_client(
-                                endpoint.as_str(), &headers, &request.model_id, &options, provider, &profile, Some(client)
-                            ).await
-                        }
-                        ModelProtocol::OpenaiResponses => {
-                            let config = aimux_providers::openai::OpenAIConfig::new(connection.bearer.clone().unwrap_or_default()).with_base_url(&connection.base_url);
-                            aimux_providers::openai::responses::OpenAIResponsesModel::new(request.model_id.clone(), config).with_client(client).do_stream(&options).await
-                        }
-                        ModelProtocol::Xai => {
-                            let config = aimux_providers::xai::XAIConfig::new("").with_base_url(&connection.base_url);
-                            aimux_providers::xai::XaiModel::new(request.model_id.clone(), config).with_client(client).do_stream(&options).await
-                        }
-                        ModelProtocol::XaiResponses => {
-                            let config = aimux_providers::xai::XAIConfig::new("").with_base_url(&connection.base_url);
-                            aimux_providers::xai::XaiResponsesModel::new(request.model_id.clone(), config).with_client(client).do_stream(&options).await
-                        }
-                        ModelProtocol::Anthropic => {
-                            let mut config = aimux_providers::anthropic::AnthropicConfig::new(connection.api_key.clone().unwrap_or_default()).with_base_url(&connection.base_url);
-                            config.auth_token = connection.bearer.clone();
-                            aimux_providers::anthropic::model::AnthropicModel::new(request.model_id.clone(), config).with_client(client).do_stream(&options).await
-                        }
-                        ModelProtocol::Gemini => {
-                            let config = aimux_providers::google::GoogleConfig::new(connection.api_key.clone().unwrap_or_default()).with_base_url(&connection.base_url);
-                            aimux_providers::google::GoogleModel::new(request.model_id.clone(), config).with_client(client).do_stream(&options).await
-                        }
-                        ModelProtocol::Bedrock => unreachable!(),
-                        },
-                        ModelConnection::Bedrock(connection) => {
-                            use aimux_providers::bedrock::{AwsCredentials as NativeCredentials, BedrockAuth as NativeAuth, BedrockConfig, BedrockModel};
-                            let auth = match &connection.auth {
-                                BedrockAuth::Bearer(token) => NativeAuth::BearerToken(token.clone()),
-                                BedrockAuth::SigV4 { credentials, region } => NativeAuth::SigV4(NativeCredentials {
-                                    access_key_id: credentials.access_key_id.clone(),
-                                    secret_access_key: credentials.secret_access_key.clone(),
-                                    session_token: credentials.session_token.clone(),
-                                    region: region.clone(),
-                                }),
-                            };
-                            BedrockModel::new(request.model_id.clone(), BedrockConfig {
-                                base_url: connection.base_url.clone(),
-                                auth,
-                                retry_config: aimux_core::retry::RetryConfig { max_retries: 0, ..Default::default() },
-                                api_key_source: None,
-                            }).with_client(client).do_stream(&options).await
-                        }
-                        ModelConnection::Local => unreachable!(),
+                    match &recording {
+                        Some(capture) => capture.scope(model.do_stream(&options)).await,
+                        None => model.do_stream(&options).await,
                     }
                 } => match result.map_err(|error| stream::error(name_redirect_target(error), &cancel)) {
                     Ok(result) => result,
@@ -342,10 +562,11 @@ impl ModelDriver for AimuxDriver {
             let result = match recording {
                 Some(capture) => {
                     let mut result = result;
+                    let stream = capture.scope_stream(result.stream);
                     result.stream = Box::pin(aimux_core::recording::RecordingOutcomeStream::new(
-                        result.stream,
-                        Some(capture.recorder),
-                        capture.call_id,
+                        stream,
+                        Some(capture.recorder.clone()),
+                        capture.call_id.clone(),
                     ));
                     result
                 }

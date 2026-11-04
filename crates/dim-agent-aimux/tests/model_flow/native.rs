@@ -7,7 +7,11 @@ const IMAGE: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
 
 fn bedrock_frame(name: &str, payload: Value) -> Vec<u8> {
-    aimux_providers::bedrock::event_stream::encode_message("event", name, &payload.to_string())
+    aimux_providers::bedrock::event_stream_decoder::encode_message(
+        "event",
+        name,
+        &payload.to_string(),
+    )
 }
 
 #[tokio::test]
@@ -729,7 +733,10 @@ async fn codex_request_profile_is_isolated_to_responses() {
     assert_eq!(sent_headers["chatgpt-account-id"], "account-1");
     assert_eq!(sent_headers["oai-product-sku"], "codex");
     assert_eq!(sent_headers["originator"], "codex-tui");
-    assert_eq!(sent_headers["user-agent"], "dimagent/0.144.1");
+    assert_eq!(
+        sent_headers["user-agent"],
+        "dimagent/0.144.1 ai-sdk-provider-utils/5.0.53"
+    );
     assert_eq!(body["store"], false);
     assert!(body.get("max_output_tokens").is_none());
     assert_eq!(body["service_tier"], "priority");
@@ -892,7 +899,7 @@ async fn malformed_native_block_lifecycle_is_a_classified_failure() {
     for (events, diagnostic) in [
         (
             vec![text_delta.clone()],
-            "Text delta without an active text block",
+            "text-delta for text block `0` that was not started",
         ),
         (
             vec![
@@ -901,31 +908,31 @@ async fn malformed_native_block_lifecycle_is_a_classified_failure() {
                 text_start.clone(),
                 text_delta.clone(),
             ],
-            "Duplicate text start",
+            "text block `0` started twice",
         ),
         (
             vec![text_start.clone(), text_delta.clone(), end, text_delta],
-            "Text delta without an active text block",
+            "text-delta for text block `0` that was not started",
         ),
         (
             vec![
                 json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
                 json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
             ],
-            "Duplicate reasoning start",
+            "reasoning block `0` started twice",
         ),
         (
             vec![
                 text_start,
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"wrong kind"}}),
             ],
-            "Reasoning delta without an active reasoning block",
+            "reasoning-delta for reasoning block `0` that was not started",
         ),
         (
             vec![
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"missing start"}}),
             ],
-            "Reasoning delta without an active reasoning block",
+            "reasoning-delta for reasoning block `0` that was not started",
         ),
     ] {
         server.reset().await;
@@ -969,10 +976,12 @@ async fn chat_reasoning_can_reopen_a_completed_segment_identity() {
     let body = frame(
         json!({"reasoning_content":"first", "content":""}),
         Value::Null,
-    ) + &frame(
-        json!({"reasoning_content":" second", "content":""}),
-        Value::Null,
-    ) + &frame(json!({"content":"answer"}), json!("stop"))
+    ) + &frame(json!({"content":"answer"}), Value::Null)
+        + &frame(
+            json!({"reasoning_content":" second", "content":""}),
+            Value::Null,
+        )
+        + &frame(json!({}), json!("stop"))
         + "data: [DONE]\n\n";
     Mock::given(method("POST"))
         .respond_with(
@@ -1174,7 +1183,7 @@ async fn native_failures_expose_only_normalized_model_facts() {
     .await;
     assert_model_failure(
         &error,
-        (Some(200), Some("server_error")),
+        (Some(500), Some("server_error")),
         ModelFailureOrigin::StreamEvent,
         Some("api_error"),
         Some("responses unavailable"),
@@ -1223,6 +1232,38 @@ async fn native_failures_expose_only_normalized_model_facts() {
     chat.close().await;
     responses.close().await;
     anthropic.close().await;
+}
+
+/// A stream-event failure whose code is neither permanent nor transient is not
+/// retried: the event's code decides, not the status the tag synthesizes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
+    let responses = NativeServer::start("openai-responses").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let error = invoke_failure(
+        &host,
+        ModelProtocol::OpenaiResponses,
+        responses.url.clone(),
+        "facts-unrecognized-stream",
+    )
+    .await;
+    let HostError::Failed {
+        model: Some(model), ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(model.origin, ModelFailureOrigin::StreamEvent);
+    assert!(!model.transient, "{model:?}");
+    assert_eq!(
+        responses.endpoint.requests.lock().unwrap().len(),
+        1,
+        "an unrecognized stream-event failure is not retried"
+    );
+    responses.close().await;
+    root.shutdown().await.unwrap();
 }
 
 async fn respond_native(
@@ -1396,6 +1437,19 @@ async fn respond_native(
             sse(vec![chunk])
         }
         "openai-responses" => {
+            if request_text.contains("facts-unrecognized-stream") {
+                return Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(sse(vec![
+                        json!({"type":"response.created","response":{"id":"resp-error","created_at":1,"model":"test-model"}}),
+                        json!({
+                            "type": "response.failed",
+                            "response": {"error": {"code": "unrecognized_failure", "type": "unexpected_failure", "message": "unrecognized"}}
+                        }),
+                    ])))
+                    .unwrap();
+            }
             if request_text.contains("facts-responses-stream") {
                 return Response::builder()
                     .status(200)
@@ -1604,25 +1658,26 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
             agent.close().await.unwrap();
             for stream in [&mut unpolled,&mut partial] { assert!(matches!(stream.next().await,Some(Err(HostError::Failed{kind:HostErrorKind::OwnerClosed,..})))); }
             if kind == "gemini" {
-                use aimux_core::{content::ContentPart, language_model::LanguageModel, language_model_message::LanguageModelPromptMessage, message::Role as NativeRole, options::CallOptions, stream_part::StreamPart, types::FinishReasonUnified};
-                use aimux_providers::vertex::{VertexAuth, VertexConfig, VertexModel};
-                let model = VertexModel::new(server.model_id().into(), VertexConfig {
-                    base_url: server.url.trim_end_matches("?tenant=sandbox").into(),
-                    auth: VertexAuth::BearerToken("vertex-secret".into()),
-                    api_key_source: None,
-                    retry_config: Default::default(),
-                });
+                use aimux_core::{language_model::LanguageModel, language_model_message::{LanguageModelMessage, TextPart, UserPart}, options::CallOptions, stream_part::StreamPart, types::FinishReasonUnified};
+                use aimux_provider_utils::Resolvable;
+                use aimux_providers::vertex::{VertexProviderSettings, create_google_vertex};
+                let provider = create_google_vertex(VertexProviderSettings {
+                    api_key: Some(Resolvable::Value(String::new())),
+                    base_url: Some(server.url.trim_end_matches("?tenant=sandbox").into()),
+                    access_token: Some(Resolvable::Value("vertex-secret".into())),
+                    ..VertexProviderSettings::default()
+                }).unwrap();
+                let model = provider.chat(server.model_id());
                 let options = CallOptions {
-                    prompt: vec![LanguageModelPromptMessage {
-                        role: NativeRole::User,
-                        content: vec![ContentPart::Text { text: "tool".into(), provider_options: None }],
+                    prompt: vec![LanguageModelMessage::User {
+                        content: vec![UserPart::Text(TextPart { text: "tool".into(), provider_options: None })],
                         provider_options: None,
                     }],
                     ..Default::default()
                 };
                 let result = model.do_stream(&options).await.unwrap();
                 let parts = tokio::time::timeout(Duration::from_secs(1), result.stream.collect::<Vec<_>>()).await.expect("Vertex terminal must finish while HTTP stays open");
-                assert!(parts.iter().any(|part| matches!(part, Ok(StreamPart::ToolCall { tool_name, .. }) if tool_name == "echo")));
+                assert!(parts.iter().any(|part| matches!(part, Ok(StreamPart::ToolCall(call)) if call.tool_name == "echo")));
                 assert!(matches!(parts.last().unwrap(), Ok(StreamPart::Finish { finish_reason, usage, .. }) if finish_reason.unified == FinishReasonUnified::ToolCalls && usage.input_tokens.total == Some(5) && usage.output_tokens.total == Some(3)));
             }
             server.close().await;
@@ -2094,7 +2149,10 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             session.idle("main").await.unwrap();
             let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.starts_with("before"))), "{kind}: {prompt}");
-            assert!(events.iter().any(|event| matches!(event.kind, EventKind::ToolUse(_))), "complete native tool input must precede EOF");
+            // Strict mode holds a client tool call until the finish and
+            // drops it when the stream fails, so it does not appear in the
+            // history. At main it appeared but was never executed.
+            assert!(!events.iter().any(|event| matches!(event.kind, EventKind::ToolUse(_))), "{kind}: {prompt}");
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))), "{kind}: {prompt}");
             assert!(!events.iter().any(|event| matches!(&event.kind, EventKind::ModelContent(_) | EventKind::ToolCall(_) | EventKind::ModelUsage(_)) || matches!(&event.kind, EventKind::ToolResult(data) if data.call_event_id.is_some())), "{kind}: {prompt}");
             assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { .. }, .. })), "{kind}: {prompt}");
@@ -2378,7 +2436,7 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
 fn error_tool_result_request() -> ModelRequest {
     let mut input = serde_json::Map::new();
     input.insert("text".into(), json!("result text"));
-    ModelRequest::new(
+    let mut request = ModelRequest::new(
         "local",
         "test-model",
         vec![
@@ -2415,11 +2473,14 @@ fn error_tool_result_request() -> ModelRequest {
                 }]),
             },
         ],
-    )
+    );
+    // Bedrock keeps tool content only while a tool is active.
+    request.tools = Some(MockTools.definitions().into());
+    request
 }
 
-/// An error tool result that carries an image keeps both the error flag and
-/// the image, for each protocol whose tool message carries the image inside.
+/// An error tool result that carries an image keeps the image, for each
+/// protocol whose tool message carries the image inside.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -2546,5 +2607,324 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     );
     assert_eq!(result["toolResult"]["status"], "error", "{body}");
 
+    root.shutdown().await.unwrap();
+}
+
+/// A native stream that ends without its own terminal event is an invalid
+/// response: classified as such, and not retried.
+#[tokio::test]
+async fn a_native_stream_without_its_terminal_is_classified_and_not_retried() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    json!({"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}),
+                ])),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let failure =
+        invoke_failure(&host, ModelProtocol::Anthropic, server.uri(), "no-terminal").await;
+    assert!(
+        matches!(
+            &failure,
+            HostError::Failed {
+                kind: HostErrorKind::Other,
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert!(
+        failure.to_string().contains("invalid_response_data"),
+        "{failure}"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "an invalid response is not retried"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// A thinking part stored by an older session carries `summaryIndex`; the
+/// event still loads, and the reasoning item continues.
+#[tokio::test]
+async fn a_stored_summary_index_loads_and_continues() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let part = MessagePart::Thinking {
+        thinking: "earlier summary".into(),
+        start_time: None,
+        end_time: None,
+        provider_metadata: Some(ContentMetadata::OpenaiResponses {
+            item_id: "rs-old".into(),
+            encrypted_content: Some("opaque".into()),
+            summary_index: Some(1),
+            phase: None,
+        }),
+    };
+    // What the event store holds, as a session written before the upgrade.
+    let stored = serde_json::to_value(&part).unwrap();
+    let loaded: MessagePart = serde_json::from_value(stored).unwrap();
+    assert_eq!(loaded, part);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"alias"}}),
+                    json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}),
+                ])),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let request = ModelRequest::new(
+        "local",
+        "alias",
+        vec![
+            Message::text(Role::User, "start"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![loaded]),
+            },
+        ],
+    );
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    let sent = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    let reasoning = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .unwrap();
+    assert_eq!(reasoning["id"], "rs-old");
+    assert_eq!(reasoning["encrypted_content"], "opaque");
+    assert_eq!(
+        reasoning["summary"],
+        json!([{"type":"summary_text","text":"earlier summary"}])
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// The `xai` protocol is served by the OpenAI-compatible Chat model: the
+/// request goes to `/chat/completions` and carries the xAI options dim sends.
+#[tokio::test]
+async fn an_xai_chat_request_uses_the_compatible_chat_path() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    frame(json!({"content":"visible"}), json!("stop")) + "data: [DONE]\n\n",
+                ),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut request = ModelRequest::new(
+        "xai",
+        "fixture-model",
+        vec![Message::text(Role::User, "hello")],
+    );
+    request.config = Some(
+        serde_json::from_value(json!({"providerOptions":{"xai":{"reasoningEffort":"high"}}}))
+            .unwrap(),
+    );
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::Xai,
+                base_url: format!("{}/v1", server.uri()),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].url.path(), "/v1/chat/completions");
+    let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    assert_eq!(body["model"], "fixture-model");
+    assert_eq!(body["reasoning_effort"], "high");
+    root.shutdown().await.unwrap();
+}
+
+/// An alias with an explicit reasoning setting becomes a reasoning model, so a
+/// temperature is unsupported; dim fails with that classification.
+#[tokio::test]
+async fn an_alias_with_explicit_reasoning_and_temperature_is_unsupported() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"alias"}}),
+                    json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}),
+                ])),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut request = ModelRequest::new("local", "alias", vec![Message::text(Role::User, "hello")]);
+    request.config = Some(
+        serde_json::from_value(json!({"temperature":0.2,"reasoning":{"effort":"high"}})).unwrap(),
+    );
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let failure = loop {
+        match stream.next().await {
+            Some(Err(failure)) => break failure,
+            Some(Ok(_)) => {}
+            None => panic!("the request did not fail"),
+        }
+    };
+    assert!(
+        matches!(
+            &failure,
+            HostError::Failed {
+                kind: HostErrorKind::Unsupported,
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert!(failure.to_string().contains("temperature"), "{failure}");
+    root.shutdown().await.unwrap();
+}
+
+/// A Chat refusal delta becomes visible text (vendored patch for
+/// arcships/aimux#461).
+#[tokio::test]
+async fn chat_refusal_delta_is_visible_text() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = frame(json!({"refusal":"I cannot help with that."}), Value::Null)
+        + &frame(json!({}), json!("stop"))
+        + "data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiCompatible,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut text = String::new();
+    let mut stop = None;
+    while let Some(chunk) = stream.next().await {
+        match chunk.unwrap() {
+            ModelChunk::Text(delta) => text.push_str(&delta),
+            ModelChunk::MessageStop { reason, .. } => stop = Some(reason),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "I cannot help with that.");
+    assert_eq!(stop, Some(ModelStopReason::EndTurn));
     root.shutdown().await.unwrap();
 }

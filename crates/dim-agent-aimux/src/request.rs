@@ -9,10 +9,12 @@ pub(crate) use names::ToolNames;
 
 use crate::config::ProviderKind;
 use aimux_core::{
-    content::ContentPart,
-    language_model_message::LanguageModelPromptMessage,
-    message::Role as AimuxRole,
-    options::{CallOptions, ToolChoice},
+    language_model_message::{
+        AssistantPart, FilePart, LanguageModelMessage, ReasoningPart, TextPart, ToolCallPart,
+        ToolPart, ToolResultContent, ToolResultOutput, ToolResultPart, UserPart,
+    },
+    options::{CallOptions, LanguageModelV4ToolChoice},
+    shared::{FileBytes, FileData, SharedProviderOptions, provider_namespace},
     tool::{FunctionTool, Tool},
 };
 use dim_agent_capabilities::host::HostError;
@@ -39,8 +41,9 @@ const ANTHROPIC_CACHE_BREAKPOINTS: usize = 4;
 
 /// The breakpoint this port marks on the System and the conversation tail: the
 /// API's five-minute lifetime, refreshed on each use.
-fn cache_breakpoint() -> Value {
-    json!({"anthropic": {"cacheControl": {"type": "ephemeral"}}})
+fn cache_breakpoint() -> SharedProviderOptions {
+    provider_namespace("anthropic", json!({"cacheControl": {"type": "ephemeral"}}))
+        .expect("a cache breakpoint is an object")
 }
 
 pub(crate) fn convert(
@@ -55,13 +58,10 @@ pub(crate) fn convert(
         Some(SystemPrompt::Text(text)) => {
             let provider_options = (*kind == ProviderKind::Anthropic).then(cache_breakpoint);
             cache_breakpoints = usize::from(provider_options.is_some());
-            prompt.push(message(
-                AimuxRole::System,
-                vec![ContentPart::Text {
-                    text: text.clone(),
-                    provider_options,
-                }],
-            ));
+            prompt.push(LanguageModelMessage::System {
+                content: text.clone(),
+                provider_options,
+            });
         }
         Some(SystemPrompt::Parts(parts)) => {
             let explicit = parts
@@ -94,17 +94,19 @@ pub(crate) fn convert(
                     ));
                 }
                 let provider_options = if let Some(control) = cache_control {
-                    Some(json!({"anthropic":{"cacheControl":control}}))
+                    Some(
+                        provider_namespace("anthropic", json!({"cacheControl": control}))
+                            .expect("a cache control value is an object"),
+                    )
                 } else if implicit && index + 1 == parts.len() {
                     Some(cache_breakpoint())
                 } else {
                     None
                 };
-                let part = ContentPart::Text {
-                    text: text.clone(),
+                prompt.push(LanguageModelMessage::System {
+                    content: text.clone(),
                     provider_options,
-                };
-                prompt.push(message(AimuxRole::System, vec![part]));
+                });
             }
         }
         None => {}
@@ -142,12 +144,15 @@ pub(crate) fn convert(
     let mut following = Vec::new();
     for (index, source) in request.messages.iter().enumerate() {
         if source.role != Role::ToolResult && !following.is_empty() {
-            prompt.push(message(AimuxRole::User, std::mem::take(&mut following)));
+            prompt.push(LanguageModelMessage::User {
+                content: std::mem::take(&mut following),
+                provider_options: None,
+            });
         }
         let path = format!("messages[{index}].content");
         let content = match &source.content {
             MessageContent::Text(text) if source.role != Role::ToolResult => {
-                vec![ContentPart::text(text)]
+                vec![ContentPart::text(text.clone())]
             }
             MessageContent::Text(_) => {
                 return Err(error(request, &path, "tool results require a tool call ID"));
@@ -156,12 +161,12 @@ pub(crate) fn convert(
                 let mut content = Vec::with_capacity(parts.len());
                 for (part_index, part) in parts.iter().enumerate() {
                     let path = format!("{path}[{part_index}]");
-                    let mapped = match (source.role, part) {
+                    let mut mapped = match (source.role, part) {
                         (Role::User | Role::Assistant, MessagePart::Text { text, .. }) => {
-                            Ok(ContentPart::text(text))
+                            Ok(ContentPart::text(text.clone()))
                         }
                         (Role::Assistant, MessagePart::Thinking { thinking, .. }) => {
-                            Ok(ContentPart::reasoning(thinking))
+                            Ok(ContentPart::reasoning(thinking.clone()))
                         }
                         (Role::User, MessagePart::Image { source }) => {
                             image_part(request, &path, source)
@@ -176,11 +181,12 @@ pub(crate) fn convert(
                                 error(request, &format!("{path}.name"), &reason)
                             })?;
                             calls.insert(id.as_str(), name.clone());
-                            Ok(ContentPart::tool_call(
-                                id,
+                            Ok(ContentPart::ToolCall {
+                                id: id.clone(),
                                 name,
-                                Value::Object(input.clone()),
-                            ))
+                                input: Value::Object(input.clone()),
+                                provider_options: None,
+                            })
                         }
                         (
                             Role::ToolResult,
@@ -198,7 +204,7 @@ pub(crate) fn convert(
                                     "no preceding tool call",
                                 )
                             })?;
-                            let result = tool_result(
+                            let output = tool_result(
                                 request,
                                 kind,
                                 &path,
@@ -208,19 +214,9 @@ pub(crate) fn convert(
                                 &mut following,
                             )?;
                             Ok(ContentPart::ToolResult {
-                                tool_call_id: tool_use_id.clone(),
-                                result: if *kind == ProviderKind::Anthropic
-                                    && *is_error == Some(true)
-                                    && !matches!(result, Value::Object(_))
-                                {
-                                    json!({"type":"error", "value":result})
-                                } else {
-                                    result
-                                },
-                                tool_name: Some(name.clone()),
-                                is_error: *is_error,
-                                preliminary: None,
-                                dynamic: None,
+                                tool_use_id: tool_use_id.clone(),
+                                name: name.clone(),
+                                output,
                                 provider_options: None,
                             })
                         }
@@ -229,41 +225,61 @@ pub(crate) fn convert(
                             &path,
                             "content cannot be represented for this message role",
                         )),
-                    };
-                    let mut mapped = mapped?;
-                    if continuation(request, kind, &path, part, &mut mapped)? {
+                    }?;
+                    let later_encrypted = source.role == Role::Assistant
+                        && *kind == ProviderKind::OpenaiResponses
+                        && later_encrypted(&parts[part_index + 1..], part);
+                    if continuation(request, kind, &path, part, &mut mapped, later_encrypted)? {
                         content.push(mapped);
                     }
                 }
                 content
             }
         };
-        let role = match source.role {
-            Role::User => AimuxRole::User,
-            Role::Assistant => AimuxRole::Assistant,
-            Role::ToolResult => AimuxRole::Tool,
-        };
-        prompt.push(message(role, content));
+        prompt.push(match source.role {
+            Role::User => LanguageModelMessage::User {
+                content: content.into_iter().map(user_part).collect(),
+                provider_options: None,
+            },
+            Role::Assistant => LanguageModelMessage::Assistant {
+                content: content.into_iter().map(assistant_part).collect(),
+                provider_options: None,
+            },
+            Role::ToolResult => LanguageModelMessage::Tool {
+                content: content.into_iter().filter_map(tool_part).collect(),
+                provider_options: None,
+            },
+        });
     }
     if !following.is_empty() {
-        prompt.push(message(AimuxRole::User, following));
+        prompt.push(LanguageModelMessage::User {
+            content: following,
+            provider_options: None,
+        });
     }
     if *kind == ProviderKind::Anthropic
         && cache_breakpoints < ANTHROPIC_CACHE_BREAKPOINTS
         && let Some(last) = prompt.last_mut()
-        && matches!(last.role, AimuxRole::User | AimuxRole::Tool)
     {
-        last.provider_options = Some(cache_breakpoint());
+        match last {
+            LanguageModelMessage::User {
+                provider_options, ..
+            }
+            | LanguageModelMessage::Tool {
+                provider_options, ..
+            } => *provider_options = Some(cache_breakpoint()),
+            _ => {}
+        }
     }
 
     let mut options = CallOptions {
-        tool_choice: if tools.is_some() {
-            ToolChoice::Auto
+        tool_choice: Some(if tools.is_some() {
+            LanguageModelV4ToolChoice::Auto
         } else {
-            ToolChoice::None
-        },
+            LanguageModelV4ToolChoice::None
+        }),
         tools,
-        max_retries: Some(0),
+        strict_stream: Some(true),
         ..CallOptions::new(prompt)
     };
     if let Some(config) = &request.config {
@@ -271,23 +287,39 @@ pub(crate) fn convert(
         options.top_p = config.top_p;
         options.top_k = config.top_k;
         options.stop_sequences = config.stop_sequences.clone();
-        options.max_output_tokens = config
-            .max_tokens
-            .map(|value| {
-                if !value.is_finite()
-                    || value.fract() != 0.0
-                    || !(1.0..=f64::from(u32::MAX)).contains(&value)
-                {
-                    Err(error(
-                        request,
-                        "config.maxTokens",
-                        "must be an integer in 1..=4294967295 for aimux",
-                    ))
-                } else {
-                    Ok(value as u32)
-                }
-            })
-            .transpose()?;
+        // The xAI Chat protocol is the generic compatible one, whose own
+        // token-limit key is `max_tokens`. The API documents
+        // `max_completion_tokens`, written through the provider namespace
+        // after `reasoning::apply` below, next to `top_k`.
+        if *kind != ProviderKind::Xai {
+            options.max_output_tokens = config
+                .max_tokens
+                .map(|value| {
+                    if !value.is_finite()
+                        || value.fract() != 0.0
+                        || !(1.0..=f64::from(u32::MAX)).contains(&value)
+                    {
+                        Err(error(
+                            request,
+                            "config.maxTokens",
+                            "must be an integer in 1..=4294967295 for aimux",
+                        ))
+                    } else {
+                        Ok(value as u32)
+                    }
+                })
+                .transpose()?;
+        } else if let Some(value) = config.max_tokens
+            && (!value.is_finite()
+                || value.fract() != 0.0
+                || !(1.0..=f64::from(u32::MAX)).contains(&value))
+        {
+            return Err(error(
+                request,
+                "config.maxTokens",
+                "must be an integer in 1..=4294967295 for aimux",
+            ));
+        }
     }
     reasoning::apply(
         request,
@@ -296,12 +328,47 @@ pub(crate) fn convert(
         preset,
         &mut options,
     )?;
+    // The OpenAI-compatible Chat model consumes the fields of its generic
+    // schema and passes any other namespace field to the request body, which
+    // is how the wire keeps `top_k`: its own `topK` switch stays off for the
+    // generic endpoint.
+    if matches!(
+        kind,
+        ProviderKind::OpenaiChat | ProviderKind::OpenaiCompatible
+    ) && let Some(top_k) = options.top_k.take()
+    {
+        let namespace = match kind {
+            ProviderKind::OpenaiChat => "openai",
+            ProviderKind::OpenaiCompatible => preset.unwrap_or("openai"),
+            _ => unreachable!(),
+        };
+        options
+            .provider_options
+            .get_or_insert_default()
+            .entry(namespace.into())
+            .or_default()
+            .insert("top_k".into(), json!(top_k));
+    }
+    // Same forwarding for the xAI Chat protocol's `max_completion_tokens`.
+    if *kind == ProviderKind::Xai
+        && let Some(max_tokens) = request.config.as_ref().and_then(|config| config.max_tokens)
+    {
+        options
+            .provider_options
+            .get_or_insert_default()
+            .entry("xai".into())
+            .or_default()
+            .insert("max_completion_tokens".into(), json!(max_tokens as u32));
+    }
     if *kind == ProviderKind::Anthropic
         && options.prompt.iter().any(|message| {
-            message
-                .content
-                .iter()
-                .any(|part| matches!(part, ContentPart::Reasoning { .. }))
+            matches!(
+                message,
+                LanguageModelMessage::Assistant { content, .. }
+                    if content
+                        .iter()
+                        .any(|part| matches!(part, AssistantPart::Reasoning(_)))
+            )
         })
         && !options
             .provider_options
@@ -330,7 +397,7 @@ pub(crate) fn convert(
         .as_ref()
         .and_then(|metadata| metadata.startup.as_ref())
         .is_some_and(|startup| startup.connection.is_some());
-    let recording = crate::recording::capture(call_id, &mut options, startup);
+    let recording = crate::recording::capture(call_id, startup);
     Ok(PreparedRequest {
         options,
         tool_names,
@@ -338,15 +405,137 @@ pub(crate) fn convert(
     })
 }
 
-fn message(role: AimuxRole, content: Vec<ContentPart>) -> LanguageModelPromptMessage {
-    LanguageModelPromptMessage {
-        role,
-        content,
-        provider_options: None,
+/// One content part of a message, before its role decides the protocol type.
+enum ContentPart {
+    Text {
+        text: String,
+        provider_options: Option<SharedProviderOptions>,
+    },
+    Reasoning {
+        text: String,
+        provider_options: Option<SharedProviderOptions>,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        input: Value,
+        provider_options: Option<SharedProviderOptions>,
+    },
+    ToolResult {
+        tool_use_id: String,
+        name: String,
+        output: ToolResultOutput,
+        provider_options: Option<SharedProviderOptions>,
+    },
+    File {
+        data: FileData,
+        media_type: String,
+    },
+}
+
+impl ContentPart {
+    fn text(text: String) -> Self {
+        Self::Text {
+            text,
+            provider_options: None,
+        }
+    }
+
+    fn reasoning(text: String) -> Self {
+        Self::Reasoning {
+            text,
+            provider_options: None,
+        }
+    }
+
+    fn provider_options(&mut self) -> Option<&mut Option<SharedProviderOptions>> {
+        match self {
+            Self::Text {
+                provider_options, ..
+            }
+            | Self::Reasoning {
+                provider_options, ..
+            }
+            | Self::ToolCall {
+                provider_options, ..
+            }
+            | Self::ToolResult {
+                provider_options, ..
+            } => Some(provider_options),
+            Self::File { .. } => None,
+        }
     }
 }
 
-/// An image block as the protocols' user messages carry it.
+fn user_part(part: ContentPart) -> UserPart {
+    match part {
+        ContentPart::Text {
+            text,
+            provider_options,
+        } => UserPart::Text(TextPart {
+            text,
+            provider_options,
+        }),
+        ContentPart::File { data, media_type } => UserPart::File(FilePart {
+            data,
+            media_type,
+            filename: None,
+            provider_options: None,
+        }),
+        _ => unreachable!("a user message holds text and file parts"),
+    }
+}
+
+fn assistant_part(part: ContentPart) -> AssistantPart {
+    match part {
+        ContentPart::Text {
+            text,
+            provider_options,
+        } => AssistantPart::Text(TextPart {
+            text,
+            provider_options,
+        }),
+        ContentPart::Reasoning {
+            text,
+            provider_options,
+        } => AssistantPart::Reasoning(ReasoningPart {
+            text,
+            provider_options,
+        }),
+        ContentPart::ToolCall {
+            id,
+            name,
+            input,
+            provider_options,
+        } => AssistantPart::ToolCall(ToolCallPart {
+            tool_call_id: id,
+            tool_name: name,
+            input,
+            provider_executed: None,
+            provider_options,
+        }),
+        _ => unreachable!("an assistant message holds text, reasoning and tool calls"),
+    }
+}
+
+fn tool_part(part: ContentPart) -> Option<ToolPart> {
+    match part {
+        ContentPart::ToolResult {
+            tool_use_id,
+            name,
+            output,
+            provider_options,
+        } => Some(ToolPart::ToolResult(ToolResultPart {
+            tool_call_id: tool_use_id,
+            tool_name: name,
+            output,
+            provider_options,
+        })),
+        _ => None,
+    }
+}
+
+/// An image part as the protocols' user messages carry it.
 fn image_part(
     request: &ModelRequest,
     path: &str,
@@ -361,7 +550,12 @@ fn image_part(
                     "base64 image has no data",
                 )
             })?;
-            Ok(ContentPart::file_base64(data, &source.media_type))
+            Ok(ContentPart::File {
+                data: FileData::Data {
+                    data: FileBytes::Base64(data.clone()),
+                },
+                media_type: source.media_type.clone(),
+            })
         }
         ImageSourceType::Url => {
             let url = source.url.as_ref().ok_or_else(|| {
@@ -371,14 +565,20 @@ fn image_part(
                     "URL image has no URL",
                 )
             })?;
-            Ok(ContentPart::file_url(url, &source.media_type))
+            Ok(ContentPart::File {
+                data: FileData::Url {
+                    url: url.clone(),
+                    original_url: None,
+                },
+                media_type: source.media_type.clone(),
+            })
         }
     }
 }
 
-/// A tool result's `output` value. Protocols whose tool message carries an
-/// image keep it inside the result; the others mark its place in the text and
-/// put the image in `following` (one user message after the step's tools).
+/// A tool result's output. Protocols whose tool message carries an image keep
+/// it inside the result; the others mark its place in the text and put the
+/// image in `following` (one user message after the step's tools).
 fn tool_result(
     request: &ModelRequest,
     kind: &ProviderKind,
@@ -386,10 +586,22 @@ fn tool_result(
     tool_use_id: &str,
     content: &ToolContent,
     is_error: bool,
-    following: &mut Vec<ContentPart>,
-) -> Result<Value, HostError> {
+    following: &mut Vec<UserPart>,
+) -> Result<ToolResultOutput, HostError> {
     let blocks = match content {
-        ToolContent::Text(text) => return Ok(Value::String(text.clone())),
+        ToolContent::Text(text) => {
+            return Ok(if is_error {
+                ToolResultOutput::ErrorText {
+                    value: text.clone(),
+                    provider_options: None,
+                }
+            } else {
+                ToolResultOutput::Text {
+                    value: text.clone(),
+                    provider_options: None,
+                }
+            });
+        }
         ToolContent::Blocks(blocks) => blocks,
     };
     // A result without images keeps its existing text-only form.
@@ -403,7 +615,17 @@ fn tool_result(
                 text.push_str(block);
             }
         }
-        return Ok(Value::String(text));
+        return Ok(if is_error {
+            ToolResultOutput::ErrorText {
+                value: text,
+                provider_options: None,
+            }
+        } else {
+            ToolResultOutput::Text {
+                value: text,
+                provider_options: None,
+            }
+        });
     }
     let inside = matches!(kind, ProviderKind::Anthropic | ProviderKind::Bedrock);
     let mut result = Vec::with_capacity(blocks.len());
@@ -412,7 +634,10 @@ fn tool_result(
         let marker = match block {
             ContentBlock::Text { text: block } => {
                 if inside {
-                    result.push(json!({"type":"text","text":block}));
+                    result.push(ToolResultContent::Text(TextPart {
+                        text: block.clone(),
+                        provider_options: None,
+                    }));
                 } else {
                     text.push_str(block);
                 }
@@ -420,35 +645,52 @@ fn tool_result(
             }
             ContentBlock::Image { source } => match (inside, base64_data(source)) {
                 (true, Some(data)) => {
-                    result.push(inside_image(kind, source, data));
+                    result.push(inside_image(source, data));
                     continue;
                 }
                 _ => {
-                    following.push(ContentPart::text(format!(
-                        "{TOOL_IMAGE_LABEL} {tool_use_id}: the image after this text is that call's result."
-                    )));
-                    following.push(image_part(request, path, source)?);
+                    following.push(UserPart::Text(TextPart {
+                        text: format!(
+                            "{TOOL_IMAGE_LABEL} {tool_use_id}: the image after this text is that call's result."
+                        ),
+                        provider_options: None,
+                    }));
+                    match image_part(request, path, source)? {
+                        ContentPart::File { data, media_type } => {
+                            following.push(UserPart::File(FilePart {
+                                data,
+                                media_type,
+                                filename: None,
+                                provider_options: None,
+                            }));
+                        }
+                        _ => unreachable!(),
+                    }
                     TOOL_IMAGE_MARKER
                 }
             },
         };
         if inside {
-            result.push(json!({"type":"text","text":marker}));
+            result.push(ToolResultContent::Text(TextPart {
+                text: marker.to_owned(),
+                provider_options: None,
+            }));
         } else {
             text.push_str(marker);
         }
     }
     if inside {
-        // The Anthropic converter takes the error flag from the output's type
-        // (`resolve_tool_result_output`); Bedrock reads the part's flag, so it
-        // keeps `content`.
-        let output = match kind {
-            ProviderKind::Anthropic if is_error => "error",
-            _ => "content",
-        };
-        Ok(json!({"type": output, "value": result}))
+        Ok(ToolResultOutput::Content { value: result })
+    } else if is_error {
+        Ok(ToolResultOutput::ErrorText {
+            value: text,
+            provider_options: None,
+        })
     } else {
-        Ok(Value::String(text))
+        Ok(ToolResultOutput::Text {
+            value: text,
+            provider_options: None,
+        })
     }
 }
 
@@ -459,23 +701,16 @@ fn base64_data(source: &ImageSource) -> Option<&str> {
     source.data.as_deref()
 }
 
-/// An image inside a tool result, in the form that protocol's converter reads.
-fn inside_image(kind: &ProviderKind, source: &ImageSource, data: &str) -> Value {
-    match kind {
-        ProviderKind::Anthropic => json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": source.media_type,
-                "data": data,
-            },
-        }),
-        _ => json!({
-            "type": "file",
-            "mediaType": source.media_type,
-            "data": {"type": "data", "data": data},
-        }),
-    }
+/// An image inside a tool result, in the form both protocols' converters read.
+fn inside_image(source: &ImageSource, data: &str) -> ToolResultContent {
+    ToolResultContent::File(FilePart {
+        data: FileData::Data {
+            data: FileBytes::Base64(data.to_owned()),
+        },
+        media_type: source.media_type.clone(),
+        filename: None,
+        provider_options: None,
+    })
 }
 
 fn error(request: &ModelRequest, path: &str, reason: &str) -> HostError {
@@ -496,6 +731,7 @@ fn continuation(
     path: &str,
     part: &MessagePart,
     native: &mut ContentPart,
+    later_encrypted: bool,
 ) -> Result<bool, HostError> {
     let thinking = matches!(part, MessagePart::Thinking { .. });
     let metadata = match part {
@@ -531,32 +767,34 @@ fn continuation(
         }
         return Ok(true);
     };
-    let options = match (kind, metadata) {
+    let (namespace, fields) = match (kind, metadata) {
         (ProviderKind::Bedrock, ContentMetadata::Bedrock { signature }) if thinking => {
             match signature {
-                Some(signature) => json!({"bedrock":{"signature":signature}}),
-                None => json!({"bedrock":{}}),
+                Some(signature) => ("bedrock", json!({"signature":signature})),
+                None => ("bedrock", json!({})),
             }
         }
         (ProviderKind::Bedrock, ContentMetadata::BedrockRedacted { data }) if thinking => {
-            json!({"bedrock":{"redactedData":data}})
+            // The canonical namespace key; the model also reads the older
+            // `redactedData` spelling, which reaches the wire in another form.
+            ("bedrock", json!({"redactedContent":data}))
         }
         (ProviderKind::Anthropic, ContentMetadata::Anthropic { signature }) if thinking => {
             if signature.is_empty() {
                 warn_dropped(kind);
                 return Ok(false);
             }
-            json!({"anthropic":{"signature":signature}})
+            ("anthropic", json!({"signature":signature}))
         }
         (ProviderKind::Anthropic, ContentMetadata::AnthropicRedacted { data }) if thinking => {
             if data.is_empty() {
                 warn_dropped(kind);
                 return Ok(false);
             }
-            json!({"anthropic":{"redactedData":data}})
+            ("anthropic", json!({"redactedData":data}))
         }
         (ProviderKind::Gemini, ContentMetadata::Gemini { thought_signature }) => {
-            json!({"google":{"thoughtSignature":thought_signature}})
+            ("google", json!({"thoughtSignature":thought_signature}))
         }
         (
             ProviderKind::XaiResponses,
@@ -573,7 +811,7 @@ fn continuation(
             if let Some(encrypted) = encrypted_content {
                 options.insert("reasoningEncryptedContent".into(), json!(encrypted));
             }
-            json!({"xai": options})
+            ("xai", Value::Object(options))
         }
         (
             ProviderKind::OpenaiResponses,
@@ -584,7 +822,10 @@ fn continuation(
                 phase,
             },
         ) => {
-            if thinking && encrypted_content.as_ref().is_none_or(String::is_empty) {
+            if thinking
+                && encrypted_content.as_ref().is_none_or(String::is_empty)
+                && !later_encrypted
+            {
                 warn_dropped(kind);
                 return Ok(false);
             }
@@ -598,7 +839,7 @@ fn continuation(
             if let Some(phase) = phase {
                 options.insert("phase".into(), json!(phase));
             }
-            json!({"openai":options})
+            ("openai", Value::Object(options))
         }
         _ => {
             return Err(error(
@@ -608,19 +849,50 @@ fn continuation(
             ));
         }
     };
-    match native {
-        ContentPart::Text {
-            provider_options, ..
-        }
-        | ContentPart::Reasoning {
-            provider_options, ..
-        }
-        | ContentPart::ToolCall {
-            provider_options, ..
-        } => *provider_options = Some(options),
-        _ => unreachable!(),
-    }
+    let Some(provider_options) = native.provider_options() else {
+        return Err(error(
+            request,
+            &format!("{path}.providerMetadata"),
+            "continuation metadata belongs to a different content kind",
+        ));
+    };
+    *provider_options =
+        Some(provider_namespace(namespace, fields).expect("continuation fields are an object"));
     Ok(true)
+}
+
+/// Whether a later part of the same assistant message continues the same
+/// OpenAI reasoning item with encrypted content. The Responses endpoint takes
+/// the item's summary parts together, so an earlier summary-only part belongs
+/// in the request even though it cannot continue the item by itself; a lone
+/// unsigned part cannot, and is left out.
+fn later_encrypted(rest: &[MessagePart], part: &MessagePart) -> bool {
+    let item_id = match part {
+        MessagePart::Thinking {
+            provider_metadata:
+                Some(ContentMetadata::OpenaiResponses {
+                    item_id,
+                    encrypted_content: None,
+                    ..
+                }),
+            ..
+        } => item_id,
+        _ => return false,
+    };
+    rest.iter().any(|part| {
+        matches!(
+            part,
+            MessagePart::Thinking {
+                provider_metadata:
+                    Some(ContentMetadata::OpenaiResponses {
+                        item_id: later,
+                        encrypted_content: Some(encrypted),
+                        ..
+                    }),
+                ..
+            } if later == item_id && !encrypted.is_empty()
+        )
+    })
 }
 
 fn warn_dropped(kind: &ProviderKind) {

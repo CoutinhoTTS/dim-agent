@@ -1,10 +1,10 @@
 use super::error;
 use crate::config::ProviderKind;
 use aimux_core::options::CallOptions;
+use aimux_core::shared::provider_namespace;
 use dim_agent_capabilities::host::HostError;
 use dim_agent_types::{ModelConfig, ModelRequest, ThinkingType};
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
 
 #[derive(Default)]
 struct Controls<'a> {
@@ -28,6 +28,14 @@ pub(super) fn apply(
     ) {
         return super::native::apply(request, config, kind, options);
     }
+    // Both Chat protocols are served by the OpenAI-compatible Chat model, so
+    // the provider-options namespace is the provider name the adapter creates
+    // it with: `openai` for the native protocol, the preset otherwise.
+    let namespace = match kind {
+        ProviderKind::OpenaiChat => "openai",
+        ProviderKind::OpenaiCompatible => preset.unwrap_or("openai"),
+        _ => unreachable!(),
+    };
     let mut levels = [
         Controls::default(),
         Controls::default(),
@@ -189,7 +197,7 @@ pub(super) fn apply(
     }
     let intent = intents.into_iter().flatten().next();
     let keep = |value: bool| intent.is_none_or(|intent| intent == value);
-    let mut openai = Map::new();
+    let mut fields = Map::new();
     let mut enabled_parameter = false;
     if let Some((index, effort)) = effort {
         if effort.is_empty() {
@@ -205,7 +213,7 @@ pub(super) fn apply(
             ));
         }
         if effort != "provider-default" && keep(effort != "none") {
-            openai.insert("reasoningEffort".into(), Value::String(effort.to_owned()));
+            fields.insert("reasoningEffort".into(), Value::String(effort.to_owned()));
             enabled_parameter |= effort != "none";
         }
     }
@@ -217,20 +225,21 @@ pub(super) fn apply(
                 "must not be empty",
             ));
         }
-        openai.insert("serviceTier".into(), Value::String(tier.to_owned()));
+        // The compatible Chat model forwards a namespace key it does not
+        // consume to the request body, so the wire spelling is written here.
+        fields.insert("service_tier".into(), Value::String(tier.to_owned()));
     }
-    let mut overrides = Map::new();
     for level in &levels {
         if let Some(thinking) = level.thinking
             && keep(thinking == ThinkingType::Enabled)
         {
-            overrides.insert("thinking".into(), json!({"type": thinking}));
+            fields.insert("thinking".into(), json!({"type": thinking}));
             enabled_parameter |= thinking == ThinkingType::Enabled;
         }
         if let Some(enabled) = level.enable_thinking
             && keep(enabled)
         {
-            overrides.insert("enable_thinking".into(), Value::Bool(enabled));
+            fields.insert("enable_thinking".into(), Value::Bool(enabled));
             enabled_parameter |= enabled;
         }
     }
@@ -241,11 +250,11 @@ pub(super) fn apply(
             "requires an explicit enabling effort or thinking setting",
         ));
     }
-    if !openai.is_empty() {
-        options.provider_options = Some(HashMap::from([("openai".into(), Value::Object(openai))]));
-    }
-    if !overrides.is_empty() {
-        options.body_overrides = Some(Value::Object(overrides));
+    if !fields.is_empty() {
+        options.provider_options = Some(
+            provider_namespace(namespace, Value::Object(fields))
+                .expect("reasoning fields are an object"),
+        );
     }
     Ok(())
 }

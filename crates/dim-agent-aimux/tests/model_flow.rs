@@ -575,7 +575,9 @@ fn overlapping_recorders_append_complete_jsonl_lines() {
         aimux_core::language_model_message::convert_to_language_model_prompt(
             &[aimux_core::message::ModelMessage::user("x".repeat(16_384))],
             None,
-        ),
+            None,
+        )
+        .unwrap(),
     );
     for index in 0..128 {
         for (writer, recorder) in recorders.iter().enumerate() {
@@ -604,7 +606,7 @@ fn overlapping_recorders_append_complete_jsonl_lines() {
     assert_eq!(records.len(), 256);
     let ids: std::collections::HashSet<_> = records
         .iter()
-        .map(|record| record["call_id"].as_str().unwrap())
+        .map(|record| record["callId"].as_str().unwrap())
         .collect();
     assert_eq!(ids.len(), 256);
     for record in records {
@@ -634,12 +636,12 @@ async fn recorded_requests_write_their_wire_exchange() {
             })
             .await;
         let recorded = &lines[0];
-        let call_id = recorded["call_id"].as_str().unwrap();
+        let call_id = recorded["callId"].as_str().unwrap();
         assert_eq!(
             recording
                 .lines()
                 .iter()
-                .filter(|line| line["call_id"] == call_id)
+                .filter(|line| line["callId"] == call_id)
                 .count(),
             1,
             "one line per call, including the transport close"
@@ -652,9 +654,9 @@ async fn recorded_requests_write_their_wire_exchange() {
                 .unwrap()
                 .contains("\"messages\"")
         );
-        assert!(exchange["timing"]["latency_ms"].is_number());
-        assert_eq!(recorded["provider"]["provider"], "openai");
-        assert_eq!(recorded["provider"]["model_id"], "test-model");
+        assert!(exchange["timing"]["latencyMs"].is_number());
+        assert_eq!(recorded["provider"]["provider"], "openai.chat");
+        assert_eq!(recorded["provider"]["modelId"], "test-model");
         assert_eq!(recorded["outcome"]["status"], "success");
         assert!(recorded["complete"].as_bool().unwrap());
         assert!(recorded["input"]["prompt"].is_array());
@@ -673,7 +675,7 @@ async fn recorded_requests_write_their_wire_exchange() {
         assert_eq!(recorded.len(), 2, "the enable/disable cycle records again");
         let calls: std::collections::HashSet<_> = recorded
             .iter()
-            .map(|line| line["call_id"].as_str())
+            .map(|line| line["callId"].as_str())
             .collect();
         assert_eq!(calls.len(), 2);
         for call in &recorded {
@@ -684,6 +686,71 @@ async fn recorded_requests_write_their_wire_exchange() {
         recording.assert_private();
 
         agent.close().await.unwrap();
+        server.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+/// Connection headers with credential names are redacted in the recorded
+/// call options; an ordinary header stays readable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_connection_headers_redact_sensitive_names() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let recording = Recording::start().await;
+        let server = TestServer::start().await;
+        let url = format!("{}/chat/completions", server.url);
+        let root = rutis::Ctx::root().unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        let connection = ModelConnection::Http(HttpModelConnection {
+            api_key: None,
+            network: Default::default(),
+            protocol: ModelProtocol::OpenaiCompatible,
+            base_url: server.url.clone(),
+            bearer: None,
+            headers: std::collections::HashMap::from([
+                (
+                    "x-portkey-virtual-key".to_owned(),
+                    "pk-virtual-secret".to_owned(),
+                ),
+                ("helicone-auth".to_owned(), "helicone-secret".to_owned()),
+                ("x-team-secret".to_owned(), "zz-team-credential".to_owned()),
+                ("x-trace-id".to_owned(), "trace-visible".to_owned()),
+            ]),
+            preset: None,
+        });
+        let mut stream = host
+            .0
+            .invoke(
+                Arc::new(ModelRequest::new(
+                    "logical-provider",
+                    "test-model",
+                    vec![Message::text(Role::User, "recorded headers")],
+                )),
+                connection,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        while let Some(chunk) = stream.next().await {
+            chunk.unwrap();
+        }
+        let lines = recording
+            .wait(1, |line| {
+                line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+            })
+            .await;
+        let headers = lines[0]["input"]["options"]["headers"].as_object().unwrap();
+        assert_eq!(headers["x-portkey-virtual-key"], "[REDACTED]");
+        assert_eq!(headers["helicone-auth"], "[REDACTED]");
+        assert_eq!(headers["x-team-secret"], "[REDACTED]");
+        assert_eq!(headers["x-trace-id"], "trace-visible");
+        let recorded = lines[0].to_string();
+        for secret in ["pk-virtual-secret", "helicone-secret", "zz-team-credential"] {
+            assert!(!recorded.contains(secret), "{secret} was recorded");
+        }
+        root.shutdown().await.unwrap();
         server.close().await;
     })
     .await

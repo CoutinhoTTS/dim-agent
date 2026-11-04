@@ -3,17 +3,19 @@ mod content;
 use std::collections::{HashMap, HashSet};
 
 use aimux_core::{
-    AbortSignal, AiMuxError,
-    parse_tool_call::{RawToolCall, parse_json_input},
+    AbortSignal, AiMuxError, ErrorCause,
+    parse_tool_call::parse_json_input,
     result::StreamResult,
+    shared::SharedProviderMetadata,
     stream_part::StreamPart,
+    tool::RawToolCall,
     types::{FinishReasonUnified, Usage as NativeUsage, Warning},
 };
 use dim_agent_capabilities::host::{
     HostError, HostErrorKind, ModelChunk, ModelFailureFacts, ModelFailureOrigin, ModelProtocol,
     ModelStopReason, ModelStream,
 };
-use dim_agent_types::{ContentMetadata, MessagePart, ToolCall, Usage};
+use dim_agent_types::{MessagePart, ToolCall, Usage};
 use futures_util::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -86,9 +88,7 @@ pub(crate) fn convert(
                     yield Ok(ModelChunk::MessageStart { message_id: message_id.clone() });
                 }
                 StreamPart::TextStart { id, provider_metadata } => {
-                    if !block_active.insert((false, id.clone())) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Duplicate text start".into()), &cancel)));
-                    }
+                    block_active.insert((false, id.clone()));
                     if preserve {
                         let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
                         blocks.insert((false, id), parts.len());
@@ -96,24 +96,19 @@ pub(crate) fn convert(
                     }
                 }
                 StreamPart::ReasoningStart { id, provider_metadata } => {
-                    if !block_active.insert((true, id.clone())) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Duplicate reasoning start".into()), &cancel)));
-                    }
+                    block_active.insert((true, id.clone()));
                     thinking.insert(id.clone(), String::new());
                     if preserve {
-                        let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
+                        let metadata = match reasoning_metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
                         blocks.insert((true, id), parts.len());
                         parts.push(MessagePart::Thinking { thinking: String::new(), start_time: None, end_time: None, provider_metadata: metadata });
                     }
                 }
                 StreamPart::TextDelta { id, delta, provider_metadata } => {
-                    if !block_active.contains(&(false, id.clone())) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Text delta without an active text block".into()), &cancel)));
-                    }
                     if preserve {
                         let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
                         let Some(part) = blocks.get(&(false, id)).and_then(|index| parts.get_mut(*index)) else {
-                            break Some(Err(error(AiMuxError::InvalidResponseData("Missing text block".into()), &cancel)));
+                            break Some(Err(error(AiMuxError::invalid_response_data("Missing text block"), &cancel)));
                         };
                         if let MessagePart::Text { text, .. } = part { text.push_str(&delta); }
                         content::update(part, metadata);
@@ -121,17 +116,14 @@ pub(crate) fn convert(
                     if !delta.is_empty() { yield Ok(ModelChunk::Text(delta)); }
                 }
                 StreamPart::ReasoningDelta { id, delta, provider_metadata } => {
-                    if !block_active.contains(&(true, id.clone())) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Reasoning delta without an active reasoning block".into()), &cancel)));
-                    }
                     let Some(thought) = thinking.get_mut(&id) else {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Missing reasoning block".into()), &cancel)));
+                        break Some(Err(error(AiMuxError::invalid_response_data("Missing reasoning block"), &cancel)));
                     };
                     thought.push_str(&delta);
                     if preserve {
                         let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
                         let Some(part) = blocks.get(&(true, id)).and_then(|index| parts.get_mut(*index)) else {
-                            break Some(Err(error(AiMuxError::InvalidResponseData("Missing reasoning content".into()), &cancel)));
+                            break Some(Err(error(AiMuxError::invalid_response_data("Missing reasoning content"), &cancel)));
                         };
                         if let MessagePart::Thinking { thinking, .. } = part { thinking.push_str(&delta); }
                         content::update(part, metadata);
@@ -141,13 +133,11 @@ pub(crate) fn convert(
                 end @ (StreamPart::TextEnd { .. } | StreamPart::ReasoningEnd { .. }) => {
                     let reasoning = matches!(&end, StreamPart::ReasoningEnd { .. });
                     let (id, provider_metadata) = match end { StreamPart::TextEnd { id, provider_metadata } | StreamPart::ReasoningEnd { id, provider_metadata } => (id, provider_metadata), _ => unreachable!() };
-                    if !block_active.remove(&(reasoning, id.clone())) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Block end without a matching active block".into()), &cancel)));
-                    }
+                    block_active.remove(&(reasoning, id.clone()));
                     if preserve {
                         let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
                         let Some(part) = blocks.remove(&(reasoning, id.clone())).and_then(|index| parts.get_mut(index)) else {
-                            break Some(Err(error(AiMuxError::InvalidResponseData("Missing ended block".into()), &cancel)));
+                            break Some(Err(error(AiMuxError::invalid_response_data("Missing ended block"), &cancel)));
                         };
                         content::update(part, metadata);
                     }
@@ -158,9 +148,6 @@ pub(crate) fn convert(
                     }
                 }
                 StreamPart::ToolInputStart { id, tool_name, provider_executed, provider_metadata, .. } => {
-                    if calls.contains_key(&id) || ended_inputs.contains(&id) || completed_calls.contains(&id) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Duplicate tool input start".into()), &cancel)));
-                    }
                     if provider_executed == Some(true) {
                         break Some(Err(HostError::failed("Provider-executed tools are not supported")));
                     }
@@ -174,42 +161,26 @@ pub(crate) fn convert(
                     yield Ok(ModelChunk::ToolStart { id, name });
                 }
                 StreamPart::ToolInputDelta { id, delta, .. } => {
-                    let Some(name) = calls.get(&id).filter(|_| !ended_inputs.contains(&id)).cloned() else {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Tool delta without an active tool input".into()), &cancel)));
+                    let Some(name) = calls.get(&id).cloned() else {
+                        continue;
                     };
                     yield Ok(ModelChunk::ToolArguments { id, name, delta });
                 }
                 StreamPart::ToolInputEnd { id, .. } => {
-                    if completed_calls.contains(&id) || !ended_inputs.insert(id) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Duplicate or late tool input end".into()), &cancel)));
-                    }
+                    ended_inputs.insert(id);
                 }
-                StreamPart::ToolCall {
-                    tool_call_id, tool_name, input, provider_executed, dynamic,
-                    thought_signature, invalid, error: failure, provider_metadata,
-                } => {
+                StreamPart::ToolCall(raw) => {
+                    let RawToolCall { tool_call_id, tool_name, input, provider_executed, dynamic, provider_metadata } = raw;
                     let name = tool_names.original(&tool_name).to_owned();
                     if completed_calls.contains(&tool_call_id) || calls.get(&tool_call_id).is_some_and(|started| started != &name) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Duplicate or mismatched tool call".into()), &cancel)));
-                    }
-                    if let Some(failure) = failure {
-                        break Some(Err(error(failure, &cancel)));
-                    }
-                    if invalid == Some(true) {
-                        break Some(Err(HostError::failed("aimux returned an invalid tool call")));
+                        break Some(Err(error(AiMuxError::invalid_response_data("Duplicate or mismatched tool call"), &cancel)));
                     }
                     if provider_executed == Some(true) {
                         break Some(Err(HostError::failed("Provider-executed tools are not supported")));
                     }
-                    if thought_signature.is_some() && protocol != ModelProtocol::Gemini {
-                        break Some(Err(HostError::failed("Tool thought signatures are not supported")));
-                    }
-                    let Value::String(input) = input else {
-                        break Some(Err(HostError::failed("aimux do_stream tool input must be serialized argument text")));
-                    };
                     let raw = RawToolCall {
                         tool_call_id, tool_name, input, provider_executed, dynamic,
-                        thought_signature, provider_metadata,
+                        provider_metadata,
                     };
                     let input = match parse_json_input(&raw) {
                         Ok(Value::Object(input)) => input,
@@ -222,10 +193,7 @@ pub(crate) fn convert(
                     ended_inputs.remove(&id);
                     completed_calls.insert(id.clone());
                     if preserve {
-                        let metadata = match raw.thought_signature.as_ref() {
-                            Some(signature) => Some(ContentMetadata::Gemini { thought_signature: signature.clone() }),
-                            None => match content::metadata(protocol, raw.provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) },
-                        };
+                        let metadata = match content::metadata(protocol, raw.provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
                         if let Some(index) = tool_blocks.remove(&id) {
                             let part = &mut parts[index];
                             if let MessagePart::ToolUse { input: arguments, .. } = part { *arguments = input.clone(); }
@@ -256,22 +224,23 @@ pub(crate) fn convert(
                         }
                     };
                     if reason != ModelStopReason::MaxTokens && (!block_active.is_empty() || !calls.is_empty() || !ended_inputs.is_empty()) {
-                        break Some(Err(error(AiMuxError::InvalidResponseData("Model finished with incomplete blocks or tool calls".into()), &cancel)));
+                        break Some(Err(error(AiMuxError::invalid_response_data("Model finished with incomplete blocks or tool calls"), &cancel)));
                     }
                     break Some(Ok((usage_chunk(usage), reason)));
                 }
                 StreamPart::Error { error: failure } => break Some(Err(error(failure, &cancel))),
-                StreamPart::ToolResult { .. } => {
+                StreamPart::ToolResult(_) | StreamPart::ToolApprovalRequest(_) => {
                     break Some(Err(HostError::failed("Provider-executed tool results are not supported")));
                 }
-                StreamPart::File { .. } => {
+                StreamPart::File(_) | StreamPart::ReasoningFile(_) => {
                     break Some(Err(HostError::failed("Generated files are not supported")));
                 }
-                StreamPart::Source { .. } => {
+                StreamPart::Source(_) => {
                     break Some(Err(HostError::failed("Model source results are not supported")));
                 }
-                StreamPart::ResponseMetadata { .. }
-                | StreamPart::Raw { .. } => {}
+                StreamPart::ResponseMetadata(_)
+                | StreamPart::Raw { .. }
+                | StreamPart::Custom { .. } => {}
             }
         };
 
@@ -299,6 +268,22 @@ pub(crate) fn convert(
     })
 }
 
+/// The metadata of a reasoning block. A Bedrock reasoning block without a
+/// signature or redacted payload is still a Bedrock block, so it is stored as
+/// an unsigned one and replays that way.
+fn reasoning_metadata(
+    protocol: ModelProtocol,
+    value: Option<&SharedProviderMetadata>,
+) -> Result<Option<dim_agent_types::ContentMetadata>, HostError> {
+    let metadata = content::metadata(protocol, value)?;
+    if metadata.is_none() && protocol == ModelProtocol::Bedrock {
+        return Ok(Some(dim_agent_types::ContentMetadata::Bedrock {
+            signature: None,
+        }));
+    }
+    Ok(metadata)
+}
+
 fn usage_chunk(usage: NativeUsage) -> Option<Usage> {
     let prompt_tokens = usage.input_tokens.total?;
     let completion_tokens = usage.output_tokens.total?;
@@ -317,6 +302,16 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
     if matches!(failure, AiMuxError::Aborted(_)) && cancel.is_cancelled() {
         return HostError::Cancelled("Model request cancelled".into());
     }
+    // The strict stream reports its failures as `Other` caused by the
+    // `InvalidResponseData` it found; that has to classify as
+    // `InvalidResponseData` itself, not as a transport failure.
+    let failure = match failure {
+        AiMuxError::Other {
+            message: _,
+            cause: Some(ErrorCause::AiMux(inner)),
+        } if matches!(inner.as_ref(), AiMuxError::InvalidResponseData { .. }) => *inner,
+        failure => failure,
+    };
     let mut model = None;
     let classification = match &failure {
         AiMuxError::ApiCall(detail) => {
@@ -386,14 +381,21 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
                             | "overloaded_error"
                     )
                 });
-                let transient = !permanent
-                    && !matches!(detail.status_code, Some(409 | 501 | 505))
-                    && (origin == ModelFailureOrigin::Transport
-                        || transient_code
-                        || matches!(
-                            detail.status_code,
-                            Some(408 | 429 | 500 | 502..=504 | 520..=527 | 529)
-                        ));
+                let transient = if origin == ModelFailureOrigin::StreamEvent {
+                    // A stream-event failure carries the response's HTTP status,
+                    // not the event's. The tag synthesizes a status from the
+                    // event code, so only the codes may decide.
+                    !permanent && transient_code
+                } else {
+                    !permanent
+                        && !matches!(detail.status_code, Some(409 | 501 | 505))
+                        && (origin == ModelFailureOrigin::Transport
+                            || transient_code
+                            || matches!(
+                                detail.status_code,
+                                Some(408 | 429 | 500 | 502..=504 | 520..=527 | 529)
+                            ))
+                };
                 let request_id = detail.response_headers.as_ref().and_then(|headers| {
                     ["x-request-id", "request-id", "x-amzn-requestid"]
                         .iter()
@@ -418,11 +420,11 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
                 code,
             }
         }
-        AiMuxError::InvalidArgument(_) | AiMuxError::InvalidPrompt(_) => {
+        AiMuxError::InvalidArgument { .. } | AiMuxError::InvalidPrompt { .. } => {
             HostErrorKind::InvalidRequest
         }
         AiMuxError::UnsupportedFunctionality(_) => HostErrorKind::Unsupported,
-        AiMuxError::Other(_) | AiMuxError::Timeout(_) => HostErrorKind::Transport,
+        AiMuxError::Other { .. } | AiMuxError::Timeout(_) => HostErrorKind::Transport,
         _ => HostErrorKind::Other,
     };
     let (kind, message) = error_message(failure);
@@ -467,19 +469,19 @@ fn error_message(failure: AiMuxError) -> (&'static str, String) {
         ),
         failure => {
             let kind = match &failure {
-                AiMuxError::JsonParse(_) => "json_parse",
-                AiMuxError::InvalidResponseData(_) => "invalid_response_data",
+                AiMuxError::JsonParse { .. } => "json_parse",
+                AiMuxError::InvalidResponseData { .. } => "invalid_response_data",
                 AiMuxError::NoSuchTool { .. } => "no_such_tool",
-                AiMuxError::InvalidArgument(_) => "invalid_argument",
-                AiMuxError::InvalidPrompt(_) => "invalid_prompt",
+                AiMuxError::InvalidArgument { .. } => "invalid_argument",
+                AiMuxError::InvalidPrompt { .. } => "invalid_prompt",
                 AiMuxError::TokenExpired(_) => "token_expired",
                 AiMuxError::UnsupportedFunctionality(_) => "unsupported_functionality",
                 AiMuxError::NoSuchModel { .. } => "no_such_model",
                 AiMuxError::NoSuchProvider { .. } => "no_such_provider",
                 AiMuxError::Timeout(_) => "timeout",
                 AiMuxError::Aborted(_) => "aborted",
-                AiMuxError::Other(_) => "other",
-                _ => unreachable!(),
+                AiMuxError::Other { .. } => "other",
+                _ => "other",
             };
             (kind, format!("{kind}: {failure}"))
         }
