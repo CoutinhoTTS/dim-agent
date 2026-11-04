@@ -72,6 +72,8 @@ try {
     copyFileSync(path.join(directory,manifest.nativeArchives[0].file),path.join(native,manifest.nativeArchives[0].file));
   }
   cpSync(path.join(repo,'npm'),path.join(scratch,'package'),{recursive:true});
+  if (alpha) copyFileSync(path.join(repo,'npm/README.alpha.md'),path.join(scratch,'package/README.md'));
+  rmSync(path.join(scratch,'package/README.alpha.md'));
   if (alpha || platforms.length < all.length) {
     const wrapper = path.join(scratch,'package/package.json');
     const data = JSON.parse(readFileSync(wrapper));
@@ -83,6 +85,7 @@ try {
     writeFileSync(wrapper,`${JSON.stringify(data,null,2)}\n`);
   }
   copyFileSync(path.join(repo,'LICENSE'),path.join(scratch,'package/LICENSE'));
+  copyFileSync(path.join(repo,'NOTICE'),path.join(scratch,'package/NOTICE'));
   const archive = `${wrapperName}-${first.version}.tgz`;
   const packed = spawnSync('tar',['-czf',path.join(npm,archive),'-C',scratch,'package'],{encoding:'utf8',env:{...process.env,COPYFILE_DISABLE:'1'}});
   assert.ifError(packed.error);
