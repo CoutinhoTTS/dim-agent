@@ -70,6 +70,13 @@ struct Remote {
     grown: AtomicBool,
     /// The `x-generation` and `Authorization` every request carried.
     seen: Mutex<Vec<(String, String)>>,
+    /// Holds both `lookup/item` attempts: the first answers 404 after 1.5 s,
+    /// and the retry answers successfully after another 2.8 s.
+    hold_retry: AtomicBool,
+    /// The id of every `lookup/item` request the server received.
+    lookup_ids: Mutex<Vec<Value>>,
+    /// The params of every `notifications/cancelled` the server received.
+    cancelled: Mutex<Vec<Value>>,
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -94,6 +101,9 @@ impl Remote {
             expire_once: AtomicBool::new(false),
             grown: AtomicBool::new(false),
             seen: Mutex::default(),
+            hold_retry: AtomicBool::new(false),
+            lookup_ids: Mutex::default(),
+            cancelled: Mutex::default(),
         })
     }
 
@@ -101,13 +111,32 @@ impl Remote {
     fn seen(&self) -> Vec<(String, String)> {
         self.seen.lock().unwrap().clone()
     }
+
+    /// The id of every `lookup/item` request the server received so far.
+    fn lookup_ids(&self) -> Vec<Value> {
+        self.lookup_ids.lock().unwrap().clone()
+    }
+
+    /// The params of every `notifications/cancelled` the server received so
+    /// far.
+    fn cancelled(&self) -> Vec<Value> {
+        self.cancelled.lock().unwrap().clone()
+    }
 }
 async fn rpc(
     State(remote): State<Arc<Remote>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    let method = body["method"].as_str().unwrap_or_default().to_owned();
     let Some(id) = body.get("id") else {
+        if method == "notifications/cancelled" {
+            remote
+                .cancelled
+                .lock()
+                .unwrap()
+                .push(body["params"].clone());
+        }
         return StatusCode::ACCEPTED.into_response();
     };
     remote.seen.lock().unwrap().push((
@@ -122,7 +151,7 @@ async fn rpc(
             .unwrap_or_default()
             .to_owned(),
     ));
-    let method = body["method"].as_str().unwrap();
+    let method = method.as_str();
     let checked = remote.session_check.load(Ordering::SeqCst);
     let current_session = format!("s{}", remote.session.load(Ordering::SeqCst));
     if checked
@@ -191,16 +220,20 @@ async fn rpc(
             }
         }
         "tools/call" => {
-            remote
-                .calls
-                .lock()
-                .unwrap()
-                .push(body["params"]["name"].as_str().unwrap().into());
-            if body["params"]["name"] == "lookup/item"
-                && remote.expire_once.swap(false, Ordering::SeqCst)
-            {
+            let name = body["params"]["name"].as_str().unwrap();
+            remote.calls.lock().unwrap().push(name.into());
+            if name == "lookup/item" {
+                remote.lookup_ids.lock().unwrap().push(body["id"].clone());
+            }
+            if name == "lookup/item" && remote.expire_once.swap(false, Ordering::SeqCst) {
+                if remote.hold_retry.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                }
                 remote.session.fetch_add(1, Ordering::SeqCst);
                 return StatusCode::NOT_FOUND.into_response();
+            }
+            if name == "lookup/item" && remote.hold_retry.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2800)).await;
             }
             if body["params"]["name"] == "chart" {
                 if remote.app_hold.load(Ordering::SeqCst) {
@@ -222,7 +255,10 @@ async fn rpc(
             } else {
                 let a = body["params"]["arguments"]["a"].as_i64().unwrap();
                 let b = body["params"]["arguments"]["b"].as_i64().unwrap();
-                let generation = headers.get("x-generation").unwrap().to_str().unwrap();
+                let generation = headers
+                    .get("x-generation")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
                 json!({"content":[{"type":"text","text":format!("{generation}:{}", a-b)}]})
             }
         }
@@ -3360,5 +3396,60 @@ async fn a_probe_patch_replaces_the_stored_overlay_once() {
 
     stop.cancel();
     patched_server.await.unwrap().unwrap();
+    env.close().await;
+}
+
+/// #953: a tool call has one deadline measured from its start and shared by
+/// its 404 retry. The retry answers after the deadline, so a shared deadline
+/// fails the call before that answer; a fresh one would return it.
+#[tokio::test]
+async fn a_tool_call_deadline_is_shared_by_its_404_retry() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::User,
+        "docs",
+        McpChange::Put(
+            serde_json::from_value(json!({"type":"http","url":env.url,"timeout":3000})).unwrap(),
+        ),
+    )
+    .await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    env.remote.expire_once.store(true, Ordering::SeqCst);
+    env.remote.session_check.store(true, Ordering::SeqCst);
+    env.remote.hold_retry.store(true, Ordering::SeqCst);
+    *env.model.actions.lock().unwrap() = VecDeque::from([
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+        Action::Text,
+    ]);
+    session
+        .submit("go".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), session.idle("main"))
+        .await
+        .expect("the 30 s hang guard fired; the turn never ended")
+        .unwrap();
+
+    let result = results(&session).await.last().unwrap().clone();
+    assert!(result.contains("3000 ms"), "{result}");
+    assert!(result.contains("the entry's timeout"), "{result}");
+    let lookup_ids = env.remote.lookup_ids();
+    assert_eq!(
+        lookup_ids.len(),
+        2,
+        "the timeout did not happen during the retry: {lookup_ids:?}"
+    );
+    let cancelled = env.remote.cancelled();
+    assert_eq!(
+        cancelled.len(),
+        1,
+        "the call did not send one cancellation notice: {cancelled:?}"
+    );
+    assert_eq!(cancelled[0]["requestId"], lookup_ids[1], "{cancelled:?}");
+
     env.close().await;
 }

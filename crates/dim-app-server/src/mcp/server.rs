@@ -1129,6 +1129,7 @@ impl McpServer {
         cancel: &CancellationToken,
     ) -> std::result::Result<ServerResult, ViewFailure> {
         let limit = request_limit(&request, self.tool_call_timeout);
+        let deadline = tokio::time::Instant::now() + limit.limit;
         let mut retried = false;
         loop {
             let (peer, generation) = self
@@ -1145,7 +1146,7 @@ impl McpServer {
             let failure = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => McpServerError::Cancelled,
-                _ = tokio::time::sleep(limit.limit) => limit.timeout(),
+                _ = tokio::time::sleep_until(deadline) => limit.timeout(),
                 response = &mut handle.rx => {
                     match response {
                         Err(_) => McpServerError::RequestFailed,
