@@ -6,9 +6,10 @@ import path from 'node:path';
 
 const [directory, version, sourceCommit, mode, releasePath, ...extra] = process.argv.slice(2);
 assert(directory && version && sourceCommit && extra.length === 0,
-  'Usage: node scripts/publish-npm.mjs DIRECTORY VERSION SOURCE_COMMIT [--publish GITHUB_RELEASE_JSON | --publish-local]');
-assert([undefined, '--publish', '--publish-local'].includes(mode), 'Unknown publish mode');
-assert.equal(Boolean(releasePath), mode === '--publish', 'Publishing requires GitHub Release metadata');
+  'Usage: node scripts/publish-npm.mjs DIRECTORY VERSION SOURCE_COMMIT [--check-release GITHUB_RELEASE_JSON | --publish GITHUB_RELEASE_JSON | --publish-local]');
+assert([undefined, '--check-release', '--publish', '--publish-local'].includes(mode), 'Unknown publish mode');
+const fromRelease = mode === '--check-release' || mode === '--publish';
+assert.equal(Boolean(releasePath), fromRelease, 'Release validation requires GitHub Release metadata');
 const channel = version.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta)\.(0|[1-9]\d*))?$/);
 assert(channel, 'Release version must be X.Y.Z, X.Y.Z-alpha.N or X.Y.Z-beta.N');
 const tag = channel[4] ?? 'latest';
@@ -40,7 +41,7 @@ const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode-w
 assert.deepEqual(manifest.npmPackages.map(({ name }) => name).sort(), [...names].sort(),
   'Release must contain exactly its platform packages, the Web workspace and one wrapper');
 
-if (mode === '--publish') {
+if (fromRelease) {
   const release = JSON.parse(readFileSync(releasePath, 'utf8'));
   assert.equal(release.draft, false, 'Cannot publish npm packages from a draft Release');
   assert(typeof release.published_at === 'string' && release.published_at.length > 0, 'GitHub Release must be published');
@@ -92,7 +93,7 @@ for (const name of names) {
 }
 
 console.log(`Validated ${archives.length} npm packages for ${version} (${sourceCommit}).`);
-if (mode) {
+if (mode === '--publish' || mode === '--publish-local') {
   if (tag === 'alpha') {
     const listed = spawnSync('npm', ['view', 'dimcode', 'versions', '--json',
       '--registry', 'https://registry.npmjs.org'], { encoding: 'utf8' });

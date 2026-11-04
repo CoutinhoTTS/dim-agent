@@ -1,6 +1,6 @@
 # Release packaging
 
-Dim uses self-hosted runners for PR checks and the complete GitHub release workflow. npm publication stays disabled in `.github/workflows/npm-publish.yml.disabled`. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) walks through publishing a `-alpha.N` version end to end (Chinese).
+Dim uses self-hosted runners for PR checks, alpha builds and npm package verification. Only an explicitly enabled npm publication job uses a GitHub-hosted runner. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) covers the alpha channels and local publication alternative (Chinese).
 
 The source, including the Dim account plugin, uses MIT. An account-enabled distribution differs from the API-key one only by the OAuth client IDs compiled in from repository secrets.
 
@@ -62,12 +62,12 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 ### Action pins and updates
 
-External Actions in `ci.yml`, `release.yml` and the disabled npm publication workflow use full commit SHAs. PR checks use the same policy because their Actions execute on persistent self-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
+External Actions in `ci.yml`, `release.yml` and `npm-publish.yml` use full commit SHAs. PR checks use the same policy because their Actions execute on persistent self-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
 
 Update an Action in a normal pull request:
 
 1. Select a release in the Action's original upstream repository. Review its release notes and the changes since the pinned commit, including runner requirements and input changes.
-2. Resolve the release tag to its commit. For example, `git ls-remote https://github.com/actions/checkout.git 'refs/tags/v6.1.0' 'refs/tags/v6.1.0^{}'` shows the commit; for an annotated tag use the peeled `^{}` entry, not the tag object's SHA. Verify the commit in the upstream repository, then update every use of that Action and its version comment together. Keep npm publication disabled.
+2. Resolve the release tag to its commit. For example, `git ls-remote https://github.com/actions/checkout.git 'refs/tags/v6.1.0' 'refs/tags/v6.1.0^{}'` shows the commit; for an annotated tag use the peeled `^{}` entry, not the tag object's SHA. Verify the commit in the upstream repository, then update every use of that Action and its version comment together. Keep `NPM_ALPHA_PUBLISH_ENABLED` unset or `false` while validating publication changes.
 3. Run `node --test scripts/*.test.mjs`, review the workflow diff and require PR CI to pass before merging. A change to release-only behavior also needs the affected platform's release-build validation before shipping.
 
 The release script suite rejects external Action references that are not full commit SHAs, including those in disabled workflows. Upstream tag movement never updates a pin automatically.
@@ -143,7 +143,7 @@ Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's
 
 Accepting contributions from forks or outside collaborators requires moving their checks to ephemeral runners first.
 
-`release.yml` runs when a `v*.*.*` tag is pushed, or when manually dispatched with an existing tag:
+`release.yml` builds only `vX.Y.Z-alpha.N` tags, on tag push or manual dispatch with an existing alpha tag. Beta and stable tags are rejected. Every build and draft assembly job uses a self-hosted runner:
 
 ```sh
 gh workflow run release.yml --ref main -f tag=vVERSION
@@ -153,7 +153,7 @@ Preflight checks the exact tag commit is reachable from `origin/main`, and verif
 
 The draft receives seven native archives (six platforms and the Web workspace), eight original npm tarballs (six platform packages, `dimcode-web` and the wrapper), `release-manifest.json` and `SHA256SUMS`: seventeen attachments in total. `SHA256SUMS` covers the native archives; the manifest records digests for both native and npm archives. npm tarballs are not published to a registry by this workflow. Existing releases, including drafts, are rejected to avoid replacing attachments. If an upload leaves an incomplete draft, inspect it and remove that draft only when authorized before retrying; keep its tag.
 
-All Actions artifacts, including the disabled npm publication receipt, use `retention-days: 1`. GitHub Release attachments persist independently of Actions retention. A retry after artifacts expire must rebuild all targets.
+All Actions artifacts, including the npm publication receipt, use `retention-days: 1`. GitHub Release attachments persist independently of Actions retention. A retry after build artifacts expire must rebuild all targets; npm publication can download the original Release attachments again.
 
 ## Local packaging
 
@@ -192,7 +192,7 @@ release-manifest.json         # `account` records whether this is the account bu
 
 The alpha publisher stages the plugin tree once on the build host and gives every platform the same copy, as `publish-alpha.mjs` does, so it runs `stage-plugins.mjs --portable`. That refuses, before installing anything, a listed plugin whose `package-lock.json` names a package with `os`, `cpu` or `libc`: one shared tree cannot carry another platform's package. `release.yml` stages on each platform's own runner and does not pass the flag.
 
-`pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets and `release-web` from `stage-web.mjs`, checks identical source/version/toolchain/account provenance and artifact digests, creates the thin npm wrapper, then validates all seven npm archives without publishing.
+`pack-release.mjs` rejects changed staged files, then creates a native tar.gz (Windows zip) and a platform npm tgz from the same payload. It records SHA-256 for both. `collect-release.mjs` requires `release-<platform>` directories for all six targets and `release-web` from `stage-web.mjs`, checks identical source/version/toolchain/account provenance and artifact digests, creates the thin npm wrapper, then validates all eight npm archives without publishing.
 
 ```sh
 node scripts/collect-release.mjs staging/platforms staging/complete
@@ -202,23 +202,52 @@ node scripts/check-native.mjs staging/complete/native VERSION FULL_SOURCE_COMMIT
 
 The wrapper resolves the installed platform optional dependency and forwards arguments, terminal streams and exit status. Installation runs no lifecycle scripts or executable downloads. Package checks include a real offline npm install of local tarballs.
 
-## Disabled npm publication
+## Alpha npm publication
 
-`.github/workflows/npm-publish.yml.disabled` is not registered and cannot run. Do not activate it until package ownership and npm trusted publishing are configured and activation is explicitly requested. It is the only workflow intended to use a GitHub-hosted `ubuntu-latest` runner. No npm token is injected into self-hosted build jobs.
+The registered `.github/workflows/npm-publish.yml` accepts only published alpha GitHub Releases and runs only from `main`. Its default is verification on `[self-hosted, linux, x64]`. The GitHub-hosted `ubuntu-latest` publication job is scheduled only when both the `publish` input and repository variable `NPM_ALPHA_PUBLISH_ENABLED` are `true`. Leave the variable unset or `false` during setup. No npm token or OIDC permission is given to a self-hosted job.
 
-Future activation needs one trusted publisher for `dimcode`, `dimcode-web` and each of the six platform packages, bound to `arcships/dim`, `npm-publish.yml` and `npm-release`. [npm trusted publishing documentation](https://docs.npmjs.com/trusted-publishers/).
+```text
+alpha tag -> self-hosted builds -> draft GitHub Release -> maintainer publishes prerelease
+          -> self-hosted package verification
+          -> publish=true + NPM_ALPHA_PUBLISH_ENABLED=true
+          -> GitHub-hosted npm OIDC publication (no build or tests)
+```
+
+Configure each of these eight existing npm packages: `dimcode-alpha`, `dimcode-web`, `dimcode-darwin-arm64`, `dimcode-darwin-x64`, `dimcode-linux-arm64`, `dimcode-linux-x64`, `dimcode-windows-arm64` and `dimcode-windows-x64`. The `dimcode` package is not part of this workflow.
+
+In each package's npm Settings → Trusted publishing, add GitHub Actions with:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `arcships` |
+| Repository | `dim` |
+| Workflow filename | `npm-publish.yml` |
+| Environment name | `npm-release` |
+| Allowed action | Allow direct `npm publish` |
+
+Use only the filename, without `.github/workflows/`. npm requires Node >=22.14.0 and npm >=11.5.1; the workflow uses `.node-version` and checks npm's minimum version. A new trusted publisher must complete its first publication within two days, so configure it close to the intended release. No `NPM_TOKEN` or `NODE_AUTH_TOKEN` secret is required. The repository must be public for npm's automatic provenance generation. [npm trusted publishing documentation](https://docs.npmjs.com/trusted-publishers/).
+
+Create the GitHub `npm-release` environment and restrict it to the `main` branch. After all eight publishers are configured and a release is ready, set the repository Actions variable `NPM_ALPHA_PUBLISH_ENABLED=true`. Setting it alone does not schedule a runner or publish a package.
 
 Release construction and npm publication are separate operations. Review and publish the GitHub draft first. The npm workflow has only `workflow_dispatch`; it takes the tag of an existing **non-draft** GitHub Release and can run from `main` regardless of that release's age:
 
 ```sh
-gh workflow run npm-publish.yml --ref main -f release_tag=vVERSION
+gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N
 ```
 
-This command becomes available only after explicit workflow activation. Publication downloads the original eight `.tgz` attachments and manifest from the specified Release, resolves the tag's commit, and verifies published status, exact package names, versions, source commit and digests before any registry write. It rechecks Release status and tag identity immediately before publishing. It does not rebuild packages or consume expiring Actions artifacts. [Release attachment download](https://cli.github.com/manual/gh_release_download).
+The command above performs verification only and never schedules a GitHub-hosted runner. It downloads the original eight `.tgz` attachments and manifest, then checks published status, exact package names, versions, source commit and digests with `publish-npm.mjs --check-release`. It neither rebuilds nor publishes. [Release attachment download](https://cli.github.com/manual/gh_release_download).
 
-Publication validates every package before the first registry write. A retry compares an already published version's SHA-512 integrity with the original local archive and skips an exact match. A different archive, authentication error or network error fails; only an explicit registry E404 permits publication. All platform packages precede `dimcode`; versions are `X.Y.Z`, `X.Y.Z-beta.N` or `X.Y.Z-alpha.N` and publish to `latest`, `beta` or `alpha` respectively, so each channel upgrades only within itself. An alpha must stay below the newest `dimcode` beta on the registry, because installed TypeScript betas upgrade to the highest prerelease of any identifier; publication checks this before any write.
+For an explicitly authorized publication, with the repository variable enabled:
 
-`npm-packages` contains eight tgz files and a release manifest; `native-packages` contains seven native archives, the matching manifest and `SHA256SUMS`. The GitHub Release retains all fifteen original archives and the shared metadata independently of Actions retention. Future npm publication uploads an Actions receipt containing the Release ID, tag and package digests; that receipt also expires after one day.
+```sh
+gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N -f publish=true
+```
+
+The self-hosted job verifies the originals first and transfers those same archives to the GitHub-hosted job as a one-day artifact. That job rechecks the Release and tag identity, validates the packages again, and publishes with npm OIDC. It runs no build, install or test suite. Retrying the workflow downloads the originals from the Release again, independently of any previous run's artifact retention.
+
+Publication validates every package before the first registry write. A retry compares an already published version's SHA-512 integrity with the original local archive and skips an exact match. A different archive, authentication error or network error fails; only an explicit registry E404 permits publication. The six platform packages and `dimcode-web` precede `dimcode-alpha`; all eight use the `alpha` dist-tag. `dimcode`, `latest` and `beta` are untouched. An alpha must stay below the newest `dimcode` beta on the registry, because installed TypeScript betas upgrade to the highest prerelease of any identifier; publication checks this before any write.
+
+`npm-packages` contains eight tgz files and a release manifest; `native-packages` contains seven native archives, the matching manifest and `SHA256SUMS`. The GitHub Release retains all fifteen original archives and the shared metadata independently of Actions retention. npm publication uploads an Actions receipt containing the Release ID, tag and package digests; that receipt also expires after one day.
 
 ## Public source export
 

@@ -63,16 +63,24 @@ printf "%s\\n" "$*" >> "$PUBLISH_LOG"
   const release = { tag_name: `v${version}`, draft: false, published_at: '2026-10-14T00:00:00Z',
     assets: [...manifest.npmPackages.map(({ file }) => ({ name: file })), { name: 'release-manifest.json' }] };
   const releasePath = path.join(root, 'github-release.json');
-  function run({ publish = false, local = false, commit = sourceCommit, registry = 'missing', versions = [] } = {}) {
+  function run({ publish = false, checkRelease = false, local = false, commit = sourceCommit, registry = 'missing', versions = [] } = {}) {
     writeFileSync(path.join(root, 'release-manifest.json'), JSON.stringify(manifest));
     writeFileSync(releasePath, JSON.stringify(release));
-    return spawnSync(process.execPath, [script, root, version, commit, ...(local ? ['--publish-local'] : publish ? ['--publish', releasePath] : [])], {
+    return spawnSync(process.execPath, [script, root, version, commit, ...(local ? ['--publish-local'] : publish ? ['--publish', releasePath] : checkRelease ? ['--check-release', releasePath] : [])], {
       encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, PUBLISH_LOG: log,
         REGISTRY_MODE: registry, REGISTRY_VERSIONS: JSON.stringify(versions), EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
     });
   }
   return { root, names, manifest, release, log, run };
 }
+
+test('validates Release packages without accessing npm or publishing', (t) => {
+  const { release, log, run } = fixture(t, '1.2.3-alpha.2');
+  assert.equal(run({ checkRelease: true, registry: 'fail' }).status, 0);
+  release.draft = true;
+  assert.notEqual(run({ checkRelease: true }).status, 0);
+  assert.equal(readFileSync(log, 'utf8'), '');
+});
 
 test('rejects draft, unpublished, mismatched and incomplete Releases before registry writes', (t) => {
   const fixtureRelease = fixture(t);

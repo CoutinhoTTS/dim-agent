@@ -86,7 +86,11 @@
   </div>
   <p>只有想去掉上面那条「alpha 必须低于 beta」的限制时，才需要在 TS 仓库改 <code>packages/cli/src/core/upgrade/update-version.ts</code>，让预发布轨道只选同一标识的版本，然后发一版 beta。这个改动只对升级到新 beta 的用户生效，没升级的老版本仍按旧逻辑选。</p>
 
-  <h2>一条命令：build + 发布</h2>
+  <h2>GitHub CI：自有 runner 构建，官方 runner 发布</h2>
+  <p><a href="README.md#alpha-npm-publication">CI 配置与 npm Trusted Publisher 配置</a>是 GitHub 发布入口。只接受 <code>vX.Y.Z-alpha.N</code>：自有 runner 构建六个平台和 Web，生成 GitHub Release 草稿；维护者发布该 prerelease 后，<code>npm-publish.yml</code> 默认只在自有 Linux runner 上校验原始包。</p>
+  <p>只有仓库变量 <code>NPM_ALPHA_PUBLISH_ENABLED=true</code> 且手动输入 <code>publish=true</code> 时，才会启动官方 Ubuntu runner，通过 OIDC 发布同一份包。官方 runner 不编译、不跑测试；没有配置 npm token。未设置变量或不传 <code>publish=true</code> 都不会启动官方 runner。必须为 alpha 主包、Web 和六个平台包分别配置 Trusted Publisher。</p>
+
+  <h2>本机替代方案：一条命令 build + 发布</h2>
   <p>和 TS 版的 <code>bun publish:bin</code> 一样，在本机 Mac 上一次完成编译、打包和发布：</p>
 <pre><code>npm login --registry https://registry.npmjs.org   # 第一次
 node scripts/publish-alpha.mjs                       # 自动取下一个 alpha
@@ -117,7 +121,7 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（�
     </li>
     <li>
       <strong>发布 npm</strong>
-      <code>publish-npm.mjs --publish-local</code> 先发 6 个平台包，最后发 <code>dimcode</code>，全部打 <code>alpha</code> tag，然后打印 dist-tags。开了 2FA 的话每个包都会提示输入 OTP。
+      <code>publish-npm.mjs --publish-local</code> 先发 6 个平台包和 Web，最后发 <code>dimcode-alpha</code>，全部打 <code>alpha</code> tag，然后打印 dist-tags。开了 2FA 的话每个包都会提示输入 OTP。
       <code>--publish-local</code> 只接受 alpha；beta 和正式版只能从已发布的 GitHub Release 发。
     </li>
     <li>

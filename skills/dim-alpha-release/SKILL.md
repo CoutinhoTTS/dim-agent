@@ -1,6 +1,6 @@
 ---
 name: dim-alpha-release
-description: Build and publish the Rust dimcode CLI as an npm alpha (X.Y.Z-alpha.N on the `alpha` dist-tag) with one local command, scripts/publish-alpha.mjs. Use for "release/publish an alpha", a dry run of one, choosing the next alpha version, or resuming a failed alpha publish. Stable and beta releases follow dim-release.
+description: Build and publish the Rust dimcode CLI as an npm alpha (X.Y.Z-alpha.N on the `alpha` dist-tag), using self-hosted release builds and guarded GitHub-hosted npm OIDC publication, or the local scripts/publish-alpha.mjs alternative. Use for alpha preparation, publication, version selection or recovery.
 ---
 
 # Dim alpha release
@@ -13,7 +13,9 @@ Releases and betas ship as the npm package `dimcode` (command `dim`). Alphas shi
 | `X.Y.Z-beta.N` | `beta` | `npm i -g dimcode@beta` (TypeScript) |
 | `X.Y.Z-alpha.N` | `alpha` | `npm i -g dimcode-alpha@alpha`, run `dima` (Rust) |
 
-Alphas are built and published from the maintainer's Mac in one command, like the TypeScript CLI's `publish:bin`. Beta and stable releases come only from a published GitHub Release ([dim-release](../../.agents/skills/dim-release/SKILL.md)); `publish-npm.mjs --publish-local` refuses them. The human-readable walkthrough is [docs/release/alpha.html](../../docs/release/alpha.html); keep both in step.
+The [GitHub Actions route](../../docs/release/README.md#alpha-npm-publication) builds on self-hosted runners, creates a draft GitHub Release, and publishes its original packages with npm OIDC on a GitHub-hosted runner only when explicitly enabled. Its default verification mode uses self-hosted runners only. The [dim-release skill](../../.agents/skills/dim-release/SKILL.md) covers that route. Beta and stable CI publication is not configured.
+
+The maintainer's Mac can also build and publish an alpha in one command, like the TypeScript CLI's `publish:bin`. `publish-npm.mjs --publish-local` accepts only alpha versions. The human-readable walkthrough is [docs/release/alpha.html](../../docs/release/alpha.html); keep both in step.
 
 ## The command
 
