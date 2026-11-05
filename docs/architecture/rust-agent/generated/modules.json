@@ -4957,8 +4957,7 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/sessions_panel.rs",
       "unexpandedMacros": [
-        "format",
-        "matches"
+        "format"
       ]
     },
     {
@@ -31178,8 +31177,7 @@
         "path SessionPort",
         "path SessionsScope",
         "path SessionsScope::All",
-        "path SessionsScope::Repository",
-        "path SessionsScope::Workspace",
+        "path SessionsScope::Local",
         "path SubagentModelPolicy",
         "path SuggestionSetting",
         "path SwitchKind",
@@ -35837,8 +35835,7 @@
         "path SessionItem",
         "path SessionsScope",
         "path SessionsScope::All",
-        "path SessionsScope::Repository",
-        "path SessionsScope::Workspace",
+        "path SessionsScope::Local",
         "path stored_title",
         "use crate::model::session::Command",
         "use crate::model::session::SessionItem",
@@ -35923,7 +35920,10 @@
       "from": "dim_cli::ui::sessions_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
-        "path SessionItem"
+        "path Command::ListSessions",
+        "path SessionItem",
+        "path SessionsScope",
+        "path SessionsScope::Local"
       ]
     },
     {
@@ -35957,9 +35957,22 @@
         "path KeyCode::Enter",
         "path KeyCode::Up",
         "path KeyEvent::new",
+        "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::sessions_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path terminal_palette",
+        "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode",
+        "use crate::ui::theme::palette::terminal_palette"
       ]
     },
     {
@@ -42083,14 +42096,6 @@
     {
       "module": "dim_cli::ui::render::fullscreen",
       "path": "char::len_utf8"
-    },
-    {
-      "module": "dim_cli::ui::sessions_panel::tests",
-      "path": "Appearance::Dark"
-    },
-    {
-      "module": "dim_cli::ui::sessions_panel::tests",
-      "path": "ColorMode::TrueColor"
     },
     {
       "module": "dim_cli::ui::terminal::input",
