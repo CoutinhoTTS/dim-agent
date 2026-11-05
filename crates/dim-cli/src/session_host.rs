@@ -723,14 +723,10 @@ impl Worker {
         Ok(())
     }
 
-    /// The catalog `cwd` for `scope`: one workspace, the repository's set, or
-    /// none.
+    /// The catalog `cwd` for `scope`: the launch workspace, the git set (which
+    /// may hold one entry), or none.
     fn scope_cwd(&self, scope: &SessionsScope) -> Option<serde_json::Value> {
-        match scope {
-            SessionsScope::Workspace => Some(json!(self.options.workspace().as_str())),
-            SessionsScope::Repository(workspaces) => Some(json!(workspaces)),
-            SessionsScope::All => None,
-        }
+        scope_cwd(self.options.workspace().as_str(), scope)
     }
 
     /// Resumes the requested Session; an ordinary startup stays at Home.
@@ -1332,7 +1328,11 @@ impl Worker {
                     let workspace = self.options.workspace().as_str().to_owned();
                     tokio::spawn(async move {
                         let workspaces = repository_workspaces(&workspace).await;
-                        if workspaces.len() > 1 {
+                        // Any git success answers with the launch workspace at
+                        // least, one worktree or several; a failure answers
+                        // nothing, and the local scope keeps the exact launch
+                        // workspace.
+                        if !workspaces.is_empty() {
                             let _ = updates.send(Update::RepositoryWorkspaces(workspaces));
                         }
                     });
@@ -3833,8 +3833,8 @@ impl Worker {
                     sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
                     let workspace = self.options.workspace().as_str();
                     sessions.retain(|session| match &scope {
-                        SessionsScope::Workspace => session.cwd == workspace,
-                        SessionsScope::Repository(workspaces) => workspaces.contains(&session.cwd),
+                        SessionsScope::Local(None) => session.cwd == workspace,
+                        SessionsScope::Local(Some(workspaces)) => workspaces.contains(&session.cwd),
                         SessionsScope::All => true,
                     });
                 }
@@ -4471,10 +4471,21 @@ fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> Option<
     }
 }
 
+/// The catalog `cwd` for `scope`: the launch workspace, the git set (which
+/// may hold one entry), or none.
+fn scope_cwd(workspace: &str, scope: &SessionsScope) -> Option<serde_json::Value> {
+    match scope {
+        SessionsScope::Local(None) => Some(json!(workspace)),
+        SessionsScope::Local(Some(workspaces)) => Some(json!(workspaces)),
+        SessionsScope::All => None,
+    }
+}
+
 /// The workspaces `/resume` offers as one repository: the launch workspace
-/// and the same relative directory in every worktree of its git repository.
-/// Both reads share one two-second bound; a git that fails or does not answer
-/// leaves the set empty, and the picker keeps its two other scopes.
+/// and the same relative directory in every worktree of its git repository,
+/// one worktree or several. Both reads share one two-second bound; a git that
+/// fails or does not answer leaves the set empty, and the local scope keeps
+/// the exact launch workspace.
 async fn repository_workspaces(workspace: &str) -> Vec<String> {
     let read = async {
         let path = std::path::Path::new(workspace);
@@ -4519,7 +4530,14 @@ fn worktree_workspaces(list: &[u8], relative: &std::path::Path, workspace: &str)
             {
                 let path = std::path::Path::new(path);
                 let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-                let joined = path.join(relative);
+                // A launch at the repository root keeps the worktree path
+                // as it is: `join` with an empty relative path would add a
+                // trailing separator and list the launch workspace twice.
+                let joined = if relative.as_os_str().is_empty() {
+                    path
+                } else {
+                    path.join(relative)
+                };
                 if let Some(joined) = joined.to_str()
                     && !workspaces.iter().any(|workspace| workspace == joined)
                 {
@@ -4715,5 +4733,109 @@ mod tests {
             session_create_params(&options)["cwd"],
             directory.to_str().unwrap()
         );
+    }
+
+    /// The three cases the catalog `cwd` maps: the exact launch workspace,
+    /// the git set — even one entry, which the catalog canonicalizes to the
+    /// same filter — and no filter for every workspace.
+    #[test]
+    fn the_catalog_asks_for_the_launch_workspace_the_git_set_or_everything() {
+        assert_eq!(
+            scope_cwd("/repo/app", &SessionsScope::Local(None)),
+            Some(json!("/repo/app"))
+        );
+        let set = vec!["/repo/app".to_owned(), "/repo-fix/app".to_owned()];
+        assert_eq!(
+            scope_cwd("/repo/app", &SessionsScope::Local(Some(set.clone()))),
+            Some(json!(set))
+        );
+        assert_eq!(
+            scope_cwd(
+                "/repo/app",
+                &SessionsScope::Local(Some(vec!["/repo/app".to_owned()]))
+            ),
+            Some(json!(["/repo/app"]))
+        );
+        assert_eq!(scope_cwd("/repo/app", &SessionsScope::All), None);
+    }
+
+    /// One worktree, several, a bare entry, and a launch in a subdirectory:
+    /// each worktree contributes the same relative directory, and the launch
+    /// workspace appears once.
+    #[test]
+    fn the_worktree_set_holds_the_launch_workspace_and_each_sibling() {
+        let one = b"worktree /repo\0HEAD 111\0branch refs/heads/main\0\0";
+        assert_eq!(
+            worktree_workspaces(one, std::path::Path::new(""), "/repo"),
+            ["/repo"]
+        );
+        let several = b"worktree /repo\0HEAD 111\0branch refs/heads/main\0\0\
+                        worktree /repo-fix\0HEAD 222\0branch refs/heads/fix\0\0";
+        assert_eq!(
+            worktree_workspaces(several, std::path::Path::new(""), "/repo"),
+            ["/repo", "/repo-fix"]
+        );
+        let bare = b"worktree /repo\0bare\0\0";
+        assert_eq!(
+            worktree_workspaces(bare, std::path::Path::new(""), "/repo"),
+            ["/repo"]
+        );
+        // The launch workspace is the first worktree joined with the relative
+        // directory, so it is built the same way: `Path::join` gives the
+        // platform's separator, and the launch workspace is listed once.
+        let launch = std::path::Path::new("/repo").join("app");
+        let sibling = std::path::Path::new("/repo-fix").join("app");
+        assert_eq!(
+            worktree_workspaces(
+                several,
+                std::path::Path::new("app"),
+                launch.to_str().unwrap()
+            ),
+            [launch.to_str().unwrap(), sibling.to_str().unwrap()]
+        );
+    }
+
+    /// The git read itself: one worktree answers one entry, a sibling
+    /// worktree joins, and a directory outside git answers nothing.
+    #[tokio::test]
+    async fn the_git_read_answers_one_worktree_several_and_nothing_outside_git() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(root.path()).unwrap();
+        assert!(
+            repository_workspaces(repo.to_str().unwrap())
+                .await
+                .is_empty()
+        );
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "test"]);
+        std::fs::write(repo.join("file"), "one\n").unwrap();
+        git(&repo, &["add", "file"]);
+        git(&repo, &["commit", "-qm", "one"]);
+        assert_eq!(
+            repository_workspaces(repo.to_str().unwrap()).await,
+            [repo.to_str().unwrap().to_owned()]
+        );
+        let sibling_root = tempfile::tempdir().unwrap();
+        let sibling = sibling_root.path().join("worktree");
+        git(&repo, &["worktree", "add", sibling.to_str().unwrap()]);
+        let sibling = std::fs::canonicalize(sibling).unwrap();
+        assert_eq!(
+            repository_workspaces(repo.to_str().unwrap()).await,
+            [
+                repo.to_str().unwrap().to_owned(),
+                sibling.to_str().unwrap().to_owned()
+            ]
+        );
+    }
+
+    fn git(directory: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(directory)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
     }
 }

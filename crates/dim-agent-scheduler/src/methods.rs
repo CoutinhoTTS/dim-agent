@@ -85,6 +85,7 @@ impl DynPlugin for SchedulerPlugin {
                 files,
                 permissions,
                 pruning: tokio::sync::Mutex::new(()),
+                wakeups: tokio::sync::Mutex::new(()),
                 texts: self.texts.clone(),
                 stop: ctx.cancellation_token(),
                 tasks: TaskTracker::new(),
@@ -101,6 +102,10 @@ impl DynPlugin for SchedulerPlugin {
             ctx.provide_as::<ScheduleJobs>(Arc::new(ScheduleJobs {
                 shared: shared.clone(),
             }))?;
+            let wakeups = Arc::new(crate::wakeups::Wakeups {
+                shared: shared.clone(),
+            });
+            ctx.provide_as::<crate::wakeups::Wakeups>(wakeups.clone())?;
             methods.register(
                 ctx,
                 NAMESPACE,
@@ -117,6 +122,13 @@ impl DynPlugin for SchedulerPlugin {
             let active = runs::read(&shared.files).await.map_err(|error| {
                 rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
                     format!("scheduler run history: {error}").into(),
+                ))
+            })?;
+            // A wakeup file that is not valid v1 fails the row like an invalid
+            // run history; the bytes stay unchanged (A.7's rule).
+            crate::wakeups::read(&shared.files).await.map_err(|error| {
+                rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    format!("scheduler wakeups: {error}").into(),
                 ))
             })?;
             crate::engine::recover(
@@ -146,6 +158,9 @@ impl DynPlugin for SchedulerPlugin {
                     if let Err(error) = crate::engine::tick(&timer).await {
                         tracing::warn!(%error, "scheduler tick failed");
                     }
+                    if let Err(error) = wakeups.evaluate().await {
+                        tracing::warn!(%error, "scheduler wakeup pass failed");
+                    }
                     ticks += 1;
                     if ticks.is_multiple_of(60) && timer.retention_pending() {
                         crate::engine::prune(timer.clone()).await;
@@ -165,6 +180,11 @@ pub(crate) struct Shared {
     pub(crate) texts: Arc<crate::SchedulerTexts>,
     /// Serializes retention passes, so a pass never deletes what another reads.
     pub(crate) pruning: tokio::sync::Mutex<()>,
+    /// Serializes a wakeup cancel and the whole timer pass — the snapshot
+    /// read, the input writes and the settle batch — so the two order at the
+    /// record level: a cancel that takes it first prevents the input, one
+    /// that takes it after reports the settled state (design §10.3).
+    pub(crate) wakeups: tokio::sync::Mutex<()>,
     /// Cancelled when this generation starts to unload.
     pub(crate) stop: CancellationToken,
     /// The timer, run tasks and retention passes; cleanup waits for them.

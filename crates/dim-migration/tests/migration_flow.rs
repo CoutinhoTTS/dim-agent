@@ -217,7 +217,9 @@ async fn migration_retains_unsafe_objects_and_cleans_interrupted_snapshots() {
             })
             .unwrap()
     );
-    assert_eq!(native.query_row("SELECT count(*) FROM session_catalog c JOIN timeline_events e ON e.session_id=c.session_id AND e.branch_id='main' AND e.last_sequence=(SELECT sequence FROM timeline_branches WHERE session_id=c.session_id AND branch_id='main') WHERE c.updated_at_ms!=json_extract(e.body,'$.record.event.create_at')", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    // #1099: the catalog's activity time is the newest activity event on
+    // `main`, or the Session's creation time when there is none.
+    assert_eq!(native.query_row("SELECT count(*) FROM session_catalog c WHERE c.updated_at_ms!=COALESCE((SELECT json_extract(e.body,'$.record.event.create_at') FROM timeline_events e WHERE e.session_id=c.session_id AND e.branch_id='main' AND e.kind IN ('input/message','turn/end','branch/create','session/forked') AND NOT (e.kind='input/message' AND json_extract(e.body,'$.record.event.data.user') IS NULL) ORDER BY e.sequence DESC LIMIT 1), (SELECT a.created_at_ms FROM agent_sessions a WHERE a.session_id=c.session_id))", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     assert_eq!(
         native
             .query_row(

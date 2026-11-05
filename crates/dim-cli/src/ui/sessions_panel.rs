@@ -14,7 +14,10 @@ const HINT: &str = "Enter open · Ctrl+S scope · Ctrl+R refresh · Esc close";
 const TITLE_WORKSPACE: &str = "Sessions · This workspace";
 const TITLE_REPOSITORY: &str = "Sessions · This repository";
 const TITLE_ALL: &str = "Sessions · All workspaces";
+/// Shown by the empty list of the exact launch workspace and of a one-entry
+/// git set, which lists the same.
 const EMPTY_WORKSPACE: &str = "No saved sessions in this workspace. Ctrl+S shows more.";
+const EMPTY_OTHER: &str = "No saved sessions yet.";
 
 pub struct SessionsPanel {
     list: ListPanel,
@@ -25,8 +28,10 @@ pub struct SessionsPanel {
     next_cursor: Option<String>,
     show_acp: bool,
     scope: SessionsScope,
-    /// The launch workspace's repository workspaces, when the daemon can read
-    /// a set and it holds more than one; the scope is offered while it does.
+    /// The launch workspace's git set, when git answered: the local scope
+    /// adopts it, and the cycle returns to it from `All`. A failed git read
+    /// leaves it `None`, and the local scope stays the exact launch
+    /// workspace.
     repository: Option<Vec<String>>,
 }
 
@@ -39,7 +44,7 @@ impl SessionsPanel {
             append: false,
             next_cursor: None,
             show_acp,
-            scope: SessionsScope::Workspace,
+            scope: SessionsScope::Local(None),
             repository: None,
             list: ListPanel::new(
                 TITLE_WORKSPACE,
@@ -110,10 +115,32 @@ impl SessionsPanel {
         })
     }
 
-    /// The launch workspace's repository set arrived: the scope joins the
-    /// cycle, without touching the read already under way.
+    /// The launch workspace's git set arrived: the local scope adopts it. A
+    /// set of more than one changes what it lists, so the cursor is dropped
+    /// and the first page is read again; a one-entry set lists exactly the
+    /// launch workspace — canonical `cwd` treats it as the same filter — so
+    /// only the title changes, and a list already read stays.
     pub fn repository(&mut self, workspaces: Vec<String>) {
-        self.repository = Some(workspaces);
+        if workspaces.is_empty() {
+            // A failed git read sends nothing; keep the exact launch
+            // workspace.
+            return;
+        }
+        self.repository = Some(workspaces.clone());
+        if let SessionsScope::Local(_) = &self.scope {
+            self.scope = SessionsScope::Local(Some(workspaces));
+            if self.names_workspaces() {
+                // A set of more than one changes what the local scope lists:
+                // drop the cursor and read the first page again.
+                self.list.set_title(t(TITLE_REPOSITORY));
+                self.list.set_empty_text(EMPTY_OTHER);
+                self.refresh();
+            } else {
+                // Only the title changes: a one-entry set lists exactly the
+                // launch workspace, so `cwd` is the filter already under way.
+                self.list.set_title(t(TITLE_REPOSITORY));
+            }
+        }
     }
 
     pub fn refresh(&mut self) {
@@ -137,17 +164,19 @@ impl SessionsPanel {
     }
 
     fn names_workspaces(&self) -> bool {
-        !matches!(self.scope, SessionsScope::Workspace)
+        match &self.scope {
+            SessionsScope::All => true,
+            SessionsScope::Local(Some(workspaces)) => workspaces.len() > 1,
+            SessionsScope::Local(None) => false,
+        }
     }
 
     fn next_scope(&self) -> SessionsScope {
         match &self.scope {
-            SessionsScope::Workspace => match &self.repository {
-                Some(workspaces) => SessionsScope::Repository(workspaces.clone()),
-                None => SessionsScope::All,
-            },
-            SessionsScope::Repository(_) => SessionsScope::All,
-            SessionsScope::All => SessionsScope::Workspace,
+            SessionsScope::Local(_) => SessionsScope::All,
+            // The local scope returns as it now is: the git set when git
+            // answered, the exact launch workspace otherwise.
+            SessionsScope::All => SessionsScope::Local(self.repository.clone()),
         }
     }
 
@@ -156,9 +185,13 @@ impl SessionsPanel {
     fn cycle_scope(&mut self) {
         self.scope = self.next_scope();
         let (title, empty) = match &self.scope {
-            SessionsScope::Workspace => (TITLE_WORKSPACE, EMPTY_WORKSPACE),
-            SessionsScope::Repository(_) => (TITLE_REPOSITORY, "No saved sessions yet."),
-            SessionsScope::All => (TITLE_ALL, "No saved sessions yet."),
+            SessionsScope::Local(None) => (TITLE_WORKSPACE, EMPTY_WORKSPACE),
+            SessionsScope::Local(Some(workspaces)) if workspaces.len() > 1 => {
+                (TITLE_REPOSITORY, EMPTY_OTHER)
+            }
+            // A one-entry local set lists exactly the launch workspace.
+            SessionsScope::Local(Some(_)) => (TITLE_REPOSITORY, EMPTY_WORKSPACE),
+            SessionsScope::All => (TITLE_ALL, EMPTY_OTHER),
         };
         self.list.set_title(t(title));
         self.list.set_empty_text(empty);
@@ -290,16 +323,43 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::ui::terminal::{KeyCode, Modifiers};
+    use crate::ui::theme::{Appearance, ColorMode, palette::terminal_palette};
 
     fn item(id: &str, title: Option<&str>, preview: Option<&str>) -> SessionItem {
         SessionItem {
             id: id.into(),
             title: title.map(str::to_owned),
             preview: preview.map(str::to_owned),
-            cwd: "/w".into(),
+            cwd: "/work/alpha".into(),
             updated_at: 0,
             model: "p/m".into(),
             origin: Some("client".into()),
+        }
+    }
+
+    /// The panel's drawn text, title and empty line included.
+    fn shown(panel: &SessionsPanel) -> String {
+        let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
+        panel
+            .render(72, 12, &palette)
+            .iter()
+            .map(|row| crate::ui::render::panel::strip_escapes(row))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Ctrl+S, followed by what the TUI does for `Effect::Refresh`: refresh
+    /// the panel and ask it for the next page.
+    fn ctrl_s(panel: &mut SessionsPanel) -> SessionsScope {
+        let effect = panel.handle_key(KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL));
+        assert!(matches!(effect, Effect::Refresh));
+        panel.refresh();
+        match panel.request() {
+            Some(Command::ListSessions { scope, cursor, .. }) => {
+                assert!(cursor.is_none(), "a scope change reads the first page");
+                scope
+            }
+            _ => panic!("a scope change asks for the first page"),
         }
     }
 
@@ -375,5 +435,147 @@ mod tests {
             Effect::Resume(id) => assert_eq!(id, "two"),
             _ => panic!("expected resume"),
         }
+    }
+
+    /// Two stops whatever git answered: the exact launch workspace, a
+    /// one-worktree repository, sibling worktrees, or nothing at all.
+    #[test]
+    fn the_cycle_has_two_states_after_every_kind_of_git_answer() {
+        let mut panel = SessionsPanel::new(false);
+        assert_eq!(ctrl_s(&mut panel), SessionsScope::All);
+        assert_eq!(ctrl_s(&mut panel), SessionsScope::Local(None));
+
+        let mut panel = SessionsPanel::new(false);
+        panel.repository(vec!["/repo".to_owned()]);
+        assert_eq!(ctrl_s(&mut panel), SessionsScope::All);
+        assert_eq!(
+            ctrl_s(&mut panel),
+            SessionsScope::Local(Some(vec!["/repo".to_owned()]))
+        );
+
+        let mut panel = SessionsPanel::new(false);
+        let set = vec!["/repo".to_owned(), "/repo-fix".to_owned()];
+        panel.repository(set.clone());
+        assert_eq!(ctrl_s(&mut panel), SessionsScope::All);
+        assert_eq!(ctrl_s(&mut panel), SessionsScope::Local(Some(set)));
+
+        // git answers while every workspace is shown: the local stop
+        // returns to the repository, without disturbing the list shown.
+        let mut panel = SessionsPanel::new(false);
+        ctrl_s(&mut panel);
+        let set = vec!["/repo".to_owned(), "/repo-fix".to_owned()];
+        panel.repository(set.clone());
+        assert_eq!(ctrl_s(&mut panel), SessionsScope::Local(Some(set)));
+    }
+
+    /// The local title comes from git detection: any set, one entry
+    /// included, is the repository.
+    #[test]
+    fn the_title_names_the_repository_however_many_worktrees_git_found() {
+        let mut panel = SessionsPanel::new(false);
+        assert!(shown(&panel).contains(TITLE_WORKSPACE));
+        ctrl_s(&mut panel);
+        assert!(shown(&panel).contains(TITLE_ALL));
+        ctrl_s(&mut panel);
+        assert!(shown(&panel).contains(TITLE_WORKSPACE));
+
+        let mut panel = SessionsPanel::new(false);
+        panel.repository(vec!["/repo".to_owned()]);
+        assert!(shown(&panel).contains(TITLE_REPOSITORY));
+        ctrl_s(&mut panel);
+        assert!(shown(&panel).contains(TITLE_ALL));
+        ctrl_s(&mut panel);
+        assert!(shown(&panel).contains(TITLE_REPOSITORY));
+    }
+
+    /// `/resume` opens before git replies: the answer changes the title,
+    /// and only a set of more than one reads the list again.
+    #[test]
+    fn a_one_entry_set_changes_only_the_title_and_a_multi_entry_set_reads_again() {
+        for (set, reread) in [
+            (vec!["/repo".to_owned()], false),
+            (vec!["/repo".to_owned(), "/repo-fix".to_owned()], true),
+        ] {
+            let mut panel = SessionsPanel::new(false);
+            let Some(Command::ListSessions {
+                id,
+                scope: SessionsScope::Local(None),
+                cursor: None,
+                ..
+            }) = panel.request()
+            else {
+                panic!("the opening read lists the exact launch workspace");
+            };
+            panel.page(
+                &id,
+                true,
+                Ok((vec![item("a", Some("Fix bug"), None)], None)),
+            );
+            panel.repository(set.clone());
+            assert!(shown(&panel).contains(TITLE_REPOSITORY));
+            let next = panel.request();
+            if reread {
+                match next {
+                    Some(Command::ListSessions {
+                        scope: SessionsScope::Local(Some(asked)),
+                        cursor: None,
+                        ..
+                    }) => assert_eq!(asked, set),
+                    _ => panic!("a multi-entry set reads the first page again"),
+                }
+            } else {
+                assert!(
+                    next.is_none(),
+                    "a one-entry set lists the filter already read"
+                );
+            }
+        }
+    }
+
+    /// The workspace line names the launch workspace only while the local
+    /// scope lists exactly it; a one-entry set lists the same, so the line
+    /// stays.
+    #[test]
+    fn the_empty_text_keeps_the_workspace_line_while_the_local_scope_lists_it() {
+        let mut panel = SessionsPanel::new(false);
+        panel.set_items(Ok(Vec::new()));
+        assert!(shown(&panel).contains(EMPTY_WORKSPACE));
+        panel.repository(vec!["/repo".to_owned()]);
+        assert!(shown(&panel).contains(EMPTY_WORKSPACE));
+
+        let mut all = SessionsPanel::new(false);
+        ctrl_s(&mut all);
+        all.set_items(Ok(Vec::new()));
+        assert!(shown(&all).contains(EMPTY_OTHER));
+        assert!(!shown(&all).contains(EMPTY_WORKSPACE));
+
+        let mut several = SessionsPanel::new(false);
+        several.repository(vec!["/repo".to_owned(), "/repo-fix".to_owned()]);
+        several.set_items(Ok(Vec::new()));
+        assert!(shown(&several).contains(EMPTY_OTHER));
+        assert!(!shown(&several).contains(EMPTY_WORKSPACE));
+    }
+
+    /// A row names its workspace inside the local scope only when the scope
+    /// holds more than one, so a one-worktree repository adds no path.
+    #[test]
+    fn rows_name_their_workspace_only_when_the_local_scope_holds_more_than_one() {
+        let rows = || vec![item("a", Some("Fix bug"), None)];
+        let workspace = "/work/alpha";
+
+        let mut panel = SessionsPanel::new(false);
+        panel.set_items(Ok(rows()));
+        assert!(!shown(&panel).contains(workspace));
+        panel.repository(vec![workspace.to_owned()]);
+        assert!(!shown(&panel).contains(workspace));
+
+        panel.repository(vec![workspace.to_owned(), "/work/beta".to_owned()]);
+        panel.set_items(Ok(rows()));
+        assert!(shown(&panel).contains(workspace));
+
+        let mut all = SessionsPanel::new(false);
+        ctrl_s(&mut all);
+        all.set_items(Ok(rows()));
+        assert!(shown(&all).contains(workspace));
     }
 }

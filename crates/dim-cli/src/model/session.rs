@@ -100,12 +100,14 @@ impl SubmitMode {
     }
 }
 
-/// What `/resume` lists: the launch workspace, the same directory in its
-/// repository's worktrees, or every workspace.
+/// What `/resume` lists: the local scope — exactly the launch workspace, or
+/// the same directory in its repository's worktrees once git answers — or
+/// every workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionsScope {
-    Workspace,
-    Repository(Vec<String>),
+    /// The local scope: exactly the launch workspace (`None`), or the git
+    /// set (`Some`), which may hold one entry.
+    Local(Option<Vec<String>>),
     All,
 }
 
@@ -1105,8 +1107,9 @@ pub enum Update {
         paged: bool,
         result: Result<(Vec<SessionItem>, Option<String>), String>,
     },
-    /// The workspaces the picker may offer as its repository scope: more than
-    /// one, found once per picker open.
+    /// The workspaces the picker's local scope may list: the launch
+    /// workspace and the same relative directory in every worktree of its git
+    /// repository, found once per picker open. The set may hold one entry.
     RepositoryWorkspaces(Vec<String>),
     /// A command failed without ending the session.
     Notice(String),

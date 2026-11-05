@@ -54,7 +54,7 @@ flowchart LR
 | Session facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)) | Session, branch | Existing |
 | InputQueue | Branch | Change: consumes `input/withdraw`, writes `input/deleted`; withdrawal service |
 
-Contracts defined here are the `sessions` service with `LaunchRequest`, `InputWrite`, `RawBlock`, `HistoryRequest`, `HistoryPage`, `LookupReply`, `WithdrawRequest`, `WithdrawReply` and `SessionsError`; the `SessionConfig` field `interactive` and the `interactive` parameter of `session.create`; the source marker, key and `submissionId` conventions; and the withdrawal contract. Contracts used are the runtime facade, Agents loading, the `input/message` data and consumption contract, the existing context-block element format and the Session input path.
+Contracts defined here are the `sessions` service with `LaunchRequest`, `InputWrite`, `RawBlock`, `HistoryRequest`, `HistoryPage`, `LookupReply`, `WithdrawRequest`, `WithdrawReply` and `SessionsError`; the live keyed-block projection `session.keys` (Rpc built-in, `KeysRequest`, `KeysResult`, `KeyEntry`); the `SessionConfig` field `interactive` and the `interactive` parameter of `session.create`; the source marker, key and `submissionId` conventions; and the withdrawal contract. Contracts used are the runtime facade, Agents loading, the `input/message` data and consumption contract, the existing context-block element format and the Session input path.
 
 ## 2. Data and state
 
@@ -139,7 +139,7 @@ Full table: Appendix B.
 | User content (text, images) | One user message | After all blocks of the same input |
 | Keyed block (`Live`) | As a raw block; the latest block per key stays in effect | Consumed position |
 | Retire block | Delivered once; the key leaves effect | Consumed position |
-| Deleted input (never applied) | Nothing: its user content and raw blocks never enter context, its keyed blocks never take effect, and compaction never sees it. Clients may show it as deleted from `input/deleted` | — |
+| Deleted input (never applied) | Nothing: its user content and raw blocks never enter context, its keyed blocks never take effect, and compaction never sees it. Clients may show it as deleted from `input/deleted`, and it is absent from `session.keys` | — |
 
 Queue inputs are consumed when Loop starts the turn they drive. Steer inputs are consumed at the next boundary of the running turn and start a turn when the branch is idle. Append inputs are consumed with the next model request and never start a turn. Through compaction, consumed inputs survive only in the summary, except that the latest block of each live key is replayed verbatim. A child branch sees the ancestor prefix up to its cut, including the keys in effect at the cut, and never adopts the parent's pending inputs. The model never sees `submissionId`, mode, `SessionConfig` fields or leases.
 
@@ -258,6 +258,19 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 // HistoryPage: the branch's own events in (after, through], ending on a batch boundary,
 // as AgentEvent records in the form session.history returns them
 { "through": 0, "events": [ { "id": "string", "sequence": 0, "type": "turn/end", "data": {} } ] }
+// KeysRequest: the live keyed blocks of one branch segment at a fixed position
+// (appserver/keyed-blocks)
+{ "sessionId": "string",
+  "branchId": "string",               // required on v3, as for every v3 session read; "main" for the root line
+  "through?": 0 }                     // fixed read position; absent: the published head
+// KeysResult
+{ "through": 0,                       // where the projection is fixed
+  "entries": [ KeyEntry ] }           // one per live key of the branch's own segment; empty, never null
+// KeyEntry
+{ "key": "string",                    // RawBlock.key.name
+  "sequence": 0,                      // the carrying input/message event's sequence
+  "inputId": "string",                // that event's id
+  "text": "string" }                  // RawBlock.text, byte for byte
 // WithdrawRequest
 { "sessionId": "string", "branchId": "string", "inputId": "string",
   "reason?": "string" }                 // copied into input/withdraw; shown by clients

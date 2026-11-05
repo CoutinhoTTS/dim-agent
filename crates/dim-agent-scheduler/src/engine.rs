@@ -27,7 +27,7 @@ const RETAINED_TERMINAL_RUNS: usize = 100;
 /// the capability set is still loading after a restart (`reloading`, `capability reloading`).
 /// The error a run task returns when the owner unloads mid-run. The run stays
 /// active in the file, and the next generation's recovery resumes it.
-const UNLOADING: &str = "service_reloading";
+pub(crate) const UNLOADING: &str = "service_reloading";
 
 fn unloading() -> SchedulerError {
     SchedulerError::new(UNLOADING, "Scheduler is unloading")
@@ -37,11 +37,20 @@ fn is_reloading(code: &str) -> bool {
     code.ends_with("reloading")
 }
 
+/// The codes that say the target can never accept the input: its Session or
+/// branch is gone. The fire path and the stale lookup both settle the record
+/// `cancelled` on these and never retry them (design §10.3, §10.4); any other
+/// failure says nothing about the target.
+pub(crate) fn target_gone(code: &str) -> bool {
+    matches!(code, "session_closed" | "branch_missing" | "branch_ended")
+}
+
 fn is_launched(run: &Run) -> bool {
     run.session_origin == Some(SessionOrigin::Launch)
 }
-/// A window this far behind the clock is missed, not run (A.4).
-const GRACE_SECONDS: i64 = 60;
+/// A window this far behind the clock is missed, not run (A.4). The wakeup
+/// policy uses the same grace (design §10).
+pub(crate) const GRACE_SECONDS: i64 = 60;
 pub(crate) const REPORT_GUIDANCE: &str = "Inspect schedule.history for this job.";
 /// A run detail set when a first-reuse binding conflicts twice (A.5.1).
 const BINDING_CONFLICT: &str = "binding_conflict";
@@ -516,7 +525,7 @@ async fn resume(shared: &Arc<Shared>, run: &Run) -> Result<(), SchedulerError> {
     };
     let (input_id, start) = match &run.input_event_id {
         Some(input_id) => (input_id.clone(), None),
-        None => match lookup_input(shared, &session_id, &run.submission_id).await {
+        None => match lookup_input(shared, &session_id, "main", &run.submission_id).await {
             Ok(Some((input_id, sequence))) => {
                 let accepted = input_id.clone();
                 update_run(shared, &run.run_id, move |run| {
@@ -546,13 +555,17 @@ async fn resume(shared: &Arc<Shared>, run: &Run) -> Result<(), SchedulerError> {
 
 /// `Ok(None)` when the Session never accepted the submission. A service error
 /// other than `reloading` is returned as its code; a transport failure or a
-/// reloading Session is retried until it answers.
-async fn lookup_input(
+/// reloading Session is retried until it answers. The run path resolves an
+/// uncertain write with it, and the wakeup pass settles a record past the
+/// grace with the same exact submission-id check (design §10.4).
+pub(crate) async fn lookup_input(
     shared: &Arc<Shared>,
     session_id: &str,
+    branch_id: &str,
     submission_id: &str,
 ) -> Result<Option<(String, u64)>, String> {
-    let args = json!({"sessionId": session_id, "branchId": "main", "submissionId": submission_id});
+    let args =
+        json!({"sessionId": session_id, "branchId": branch_id, "submissionId": submission_id});
     loop {
         match sessions(shared.sessions.as_ref(), "lookup", args.clone()).await {
             Ok(Ok(value)) => {
@@ -580,7 +593,7 @@ async fn lookup_input(
 
 /// A `sessions` call. The outer error is a transport failure, whose outcome
 /// is unknown; the inner error is the service's own code.
-async fn sessions(
+pub(crate) async fn sessions(
     service: &dyn HostDispatch,
     method: &str,
     args: Value,
@@ -603,7 +616,7 @@ async fn sessions(
     }
 }
 
-fn escaped(text: &str) -> String {
+pub(crate) fn escaped(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -912,22 +925,25 @@ async fn drive(shared: &Arc<Shared>, job: &Job, run: &Run) -> Result<(), Schedul
         {
             return finish(shared, &run.run_id, RunState::Failed, code).await;
         }
-        Ok(Err(_)) | Err(_) => match lookup_input(shared, &session_id, &run.submission_id).await {
-            Ok(Some(accepted)) => accepted,
-            Ok(None) => {
-                return finish(shared, &run.run_id, RunState::Lost, "input_unknown".into()).await;
+        Ok(Err(_)) | Err(_) => {
+            match lookup_input(shared, &session_id, "main", &run.submission_id).await {
+                Ok(Some(accepted)) => accepted,
+                Ok(None) => {
+                    return finish(shared, &run.run_id, RunState::Lost, "input_unknown".into())
+                        .await;
+                }
+                Err(code) if code == UNLOADING => return Err(unloading()),
+                Err(code) => {
+                    return finish(
+                        shared,
+                        &run.run_id,
+                        RunState::Lost,
+                        format!("lookup_failed: {code}"),
+                    )
+                    .await;
+                }
             }
-            Err(code) if code == UNLOADING => return Err(unloading()),
-            Err(code) => {
-                return finish(
-                    shared,
-                    &run.run_id,
-                    RunState::Lost,
-                    format!("lookup_failed: {code}"),
-                )
-                .await;
-            }
-        },
+        }
     };
     {
         let input_id = input_id.clone();

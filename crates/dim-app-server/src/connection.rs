@@ -69,8 +69,10 @@ pub(crate) struct Connection {
     pub shutdown_reply: Mutex<Option<RequestId>>,
     ids: Mutex<HashMap<RequestId, Option<CancellationToken>>>,
     attachments: Mutex<HashMap<String, Attachment>>,
+    /// Serializes attach, detach and finish so one retirement per connection
+    /// is in flight and the window an attachment lives in is private.
+    transitions: tokio::sync::Mutex<()>,
     next_attachment: AtomicU64,
-    subscriptions: TaskTracker,
 }
 struct Inflight {
     connection: Arc<Connection>,
@@ -104,8 +106,8 @@ impl Connection {
             hub,
             ids: Mutex::new(HashMap::new()),
             attachments: Mutex::new(HashMap::new()),
+            transitions: tokio::sync::Mutex::new(()),
             next_attachment: AtomicU64::new(1),
-            subscriptions: TaskTracker::new(),
         });
         connection
             .hub
@@ -141,19 +143,28 @@ impl Connection {
         }
         self.hub.ui.release(&self.id);
         self.hub.ui.finished(&self.id);
-        let sessions: Vec<String> = self
-            .attachments
-            .lock()
-            .expect("attachments")
-            .keys()
-            .cloned()
-            .collect();
-        self.attachments.lock().expect("attachments").clear();
+        // Every attachment settles before the connection ends: a detached
+        // connection leaves no listener, task or usage behind for the
+        // Session's next attach.
+        let _transition = self.transitions.lock().await;
+        let (sessions, attachments): (Vec<String>, Vec<Attachment>) = {
+            let mut attachments = self.attachments.lock().expect("attachments");
+            let sessions = attachments.keys().cloned().collect();
+            (
+                sessions,
+                attachments
+                    .drain()
+                    .map(|(_, attachment)| attachment)
+                    .collect(),
+            )
+        };
         for session in sessions {
             self.hub.notify_clients(&session);
         }
-        self.subscriptions.close();
-        self.subscriptions.wait().await;
+        for attachment in attachments {
+            attachment.retire().await;
+        }
+        drop(_transition);
         self.hub
             .connections
             .lock()
@@ -439,6 +450,7 @@ impl Connection {
                 call,
                 Call::InputLookup(_)
                     | Call::History(_)
+                    | Call::Keys(_)
                     | Call::Summaries(_)
                     | Call::Catalog(_)
                     | Call::CatalogCancel(_)
@@ -479,6 +491,7 @@ impl Connection {
             }
             Call::InputLookup(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::History(p) => (Some(&p.session_id), Some(&p.branch_id)),
+            Call::Keys(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Stop(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Idle(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::ApprovalRespond(p) => (Some(&p.session_id), Some(&p.branch_id)),
@@ -651,6 +664,7 @@ impl Connection {
             Call::Submit(p) => Some(&p.session_id),
             Call::InputLookup(p) => Some(&p.session_id),
             Call::History(p) => Some(&p.session_id),
+            Call::Keys(p) => Some(&p.session_id),
             Call::Stop(p) => Some(&p.session_id),
             Call::Idle(p) => Some(&p.session_id),
             Call::ApprovalRespond(p) => Some(&p.session_id),
@@ -888,17 +902,26 @@ impl Connection {
                     .map(Err);
             }
             Call::Detach(params) => {
-                self.attachments
+                // The attachment settles before the reply: its listener,
+                // tasks and usage are gone when the client learns the detach
+                // happened, so a count read now is the count after the work.
+                let _transition = self.transitions.lock().await;
+                let retired = self
+                    .attachments
                     .lock()
                     .expect("attachments")
                     .remove(&params.session_id);
                 self.hub.ui.detach(&self.id, &params.session_id);
                 self.hub.notify_clients(&params.session_id);
+                if let Some(retired) = retired {
+                    retired.retire().await;
+                }
                 Ok(Reply::empty())
             }
             Call::Submit(params) => self.submit(rpc, params).await,
             Call::InputLookup(params) => self.input_lookup(rpc, params).await,
             Call::History(params) => self.history(rpc, params).await,
+            Call::Keys(params) => self.keys(rpc, params).await,
             Call::Stop(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
                     let branch = params.branch_id.as_deref().unwrap_or("main");
@@ -1628,6 +1651,13 @@ pub(crate) struct ConnectionHub {
     rpc: RwLock<Option<Arc<RpcService>>>,
     pub web: crate::web_entry::WebEntry,
     pub ui: Arc<crate::ui_host::UiHost>,
+    /// Feature `testing`: holds the next subscription's `follow` task.
+    #[cfg(feature = "testing")]
+    follow_hold: Mutex<Option<Arc<crate::FollowHold>>>,
+    /// Feature `testing`: fails the next attach before it registers its
+    /// listener.
+    #[cfg(feature = "testing")]
+    fail_attach_before_registration: std::sync::atomic::AtomicBool,
 }
 impl ConnectionHub {
     fn new(
@@ -1646,6 +1676,10 @@ impl ConnectionHub {
             rpc: RwLock::new(None),
             control,
             config,
+            #[cfg(feature = "testing")]
+            follow_hold: Mutex::new(None),
+            #[cfg(feature = "testing")]
+            fail_attach_before_registration: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub fn config(&self) -> &ServerConfig {
@@ -1724,6 +1758,30 @@ impl ConnectionHub {
             .filter_map(Weak::upgrade)
             .filter(|conn| conn.is_attached(session))
             .count()
+    }
+    /// Holds the next subscription's `follow` task until `release`, so a test
+    /// can keep a retirement in flight. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_follow(&self) -> Arc<crate::FollowHold> {
+        let hold = Arc::new(crate::FollowHold::default());
+        *self.follow_hold.lock().expect("follow hold") = Some(hold.clone());
+        hold
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_follow_hold(&self) -> Option<Arc<crate::FollowHold>> {
+        self.follow_hold.lock().expect("follow hold").take()
+    }
+    /// Feature `testing`: the next attach fails before it registers its
+    /// listener.
+    #[cfg(feature = "testing")]
+    pub(crate) fn fail_next_attach_before_registration(&self) {
+        self.fail_attach_before_registration
+            .store(true, Ordering::SeqCst);
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_attach_failure_before_registration(&self) -> bool {
+        self.fail_attach_before_registration
+            .swap(false, Ordering::SeqCst)
     }
     fn set_client_emitter(&self, ctx: rutis::Ctx) {
         *self.client_emitter.lock().expect("client emitter") = Some(ctx);

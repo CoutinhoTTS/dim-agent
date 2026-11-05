@@ -277,7 +277,7 @@ sequenceDiagram
   提供方调用 --> 回复（未声明的名称：-32601 unknown_method）
 ```
 
-目前注册的 Session 命名空间：`session.question`（Questions）、`session.goal`（Goal）、`session.rename`（SessionTitle）、`session.input`（InputQueue）、`session.context`（ContextCompaction）、`session.exec.output`（WorkspaceTools，[后台任务输出](../../../design/background-task-output.md)）、`session.agent`（[模型配置](../../../design/model-configuration.md)）、`attachment`（Attachments）、`shell`（ShellInput）。Hooks 不注册 Session 命名空间：它的 `hooks.*` 方法是管理方法（[Hooks A.7](../plugins/Hooks.md#a7-管理方法)）。各插件文档对其方法具有权威性。
+目前注册的 Session 命名空间：`session.question`（Questions）、`session.goal`（Goal）、`session.rename`（SessionTitle）、`session.input`（InputQueue）、`session.context`（ContextCompaction）、`session.exec.output`（WorkspaceTools，[后台任务输出](../../../design/background-task-output.md)）、`session.agent`（[模型配置](../../../design/model-configuration.md)）、`attachment`（Attachments）、`shell`（ShellInput）、`session.wakeup`（Scheduler，[Scheduler §10](../plugins/Scheduler.md#10-session-作用域的一次性唤醒)）。Hooks 不注册 Session 命名空间：它的 `hooks.*` 方法是管理方法（[Hooks A.7](../plugins/Hooks.md#a7-管理方法)）。各插件文档对其方法具有权威性。
 
 ### A.2 调用通道
 

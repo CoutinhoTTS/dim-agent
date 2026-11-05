@@ -597,10 +597,11 @@ fn real_git() -> String {
     "git".into()
 }
 
-/// The scope key cycles this workspace, this repository and all workspaces,
-/// and the repository read names the same relative directory in each worktree.
+/// Ctrl+S toggles between the local scope and all workspaces, two states; the
+/// local one is the repository git detected, naming the same relative
+/// directory in each worktree, and it returns as itself.
 #[test]
-fn tui_resume_cycles_through_the_repository_worktrees() {
+fn tui_resume_toggles_between_the_repository_and_all_workspaces() {
     let home = Home::new();
     let scratch = Scratch::new();
     let (repo, linked) = scratch_repository(scratch.path(), true);
@@ -637,14 +638,14 @@ fn tui_resume_cycles_through_the_repository_worktrees() {
         wire.reply(&providers, json!([]));
         let first = wire.read("session.catalog");
         assert_eq!(first["params"]["cwd"], json!(mine), "{first}");
-        // The set is read in a background task: reply to the page only after
-        // the worktree read returns, so the set reaches the panel first.
+        // The set is read in a background task: answer only after the
+        // worktree read returns, so the set reaches the panel first. The
+        // panel adopts it and reads the first page again, dropping this
+        // page's reply.
         wait_for(&marker, "the repository read");
-        wire.reply(
-            &first,
-            json!({"sessions":[{"sessionId":"mine","cwd":mine,"preview":"mine preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5}]}),
-        );
         let repository = wire.read("session.catalog");
+        let mut want = vec![mine.clone(), linked.clone()];
+        want.sort();
         let mut got: Vec<String> = repository["params"]["cwd"]
             .as_array()
             .expect("a set of workspaces")
@@ -652,18 +653,26 @@ fn tui_resume_cycles_through_the_repository_worktrees() {
             .map(|value| value.as_str().unwrap().to_owned())
             .collect();
         got.sort();
-        let mut want = vec![mine.clone(), linked.clone()];
-        want.sort();
         assert_eq!(got, want, "{repository}");
         wire.reply(
             &repository,
-            json!({"sessions":[{"sessionId":"linked","cwd":linked,"preview":"linked preview","model":{"providerId":"test","modelId":"model"},"updatedAt":4}]}),
+            json!({"sessions":[
+                {"sessionId":"mine","cwd":mine,"preview":"mine preview","model":{"providerId":"test","modelId":"model"},"updatedAt":5},
+                {"sessionId":"linked","cwd":linked,"preview":"linked preview","model":{"providerId":"test","modelId":"model"},"updatedAt":4}
+            ]}),
         );
         let all = wire.read("session.catalog");
         assert!(all["params"].get("cwd").is_none(), "{all}");
         wire.reply(&all, json!({"sessions":[]}));
         let back = wire.read("session.catalog");
-        assert_eq!(back["params"]["cwd"], json!(mine), "{back}");
+        let mut got: Vec<String> = back["params"]["cwd"]
+            .as_array()
+            .expect("the local scope returns as the set")
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect();
+        got.sort();
+        assert_eq!(got, want, "{back}");
         wire.reply(&back, json!({"sessions":[]}));
         no_catalog(wire);
     });
@@ -673,15 +682,14 @@ fn tui_resume_cycles_through_the_repository_worktrees() {
     let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
-    terminal.until("mine preview");
-    terminal.write(b"\x13");
     terminal.until("Sessions · This repository");
+    terminal.until("mine preview");
     terminal.until("linked preview");
     terminal.until(&linked_shown);
     terminal.write(b"\x13");
     terminal.until("Sessions · All workspaces");
     terminal.write(b"\x13");
-    terminal.until("Sessions · This workspace");
+    terminal.until("Sessions · This repository");
     terminal.write(b"\x1b[27u");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
@@ -701,7 +709,6 @@ fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
     let workspace = workspace.to_str().unwrap().to_owned();
     let linked = std::fs::canonicalize(linked.unwrap().join("sub")).unwrap();
     let linked = linked.to_str().unwrap().to_owned();
-    let linked_shown = linked.clone();
     let mine = workspace.clone();
     let marker = scratch.path().join("worktree-read");
     let path = gated_git(scratch.path(), &marker);
@@ -722,11 +729,12 @@ fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
             {"sessionId":"linked","cwd":linked,"preview":"linked preview","model":{"providerId":"test","modelId":"model"},"updatedAt":4},
             {"sessionId":"other","cwd":"/elsewhere/project","preview":"other preview","model":{"providerId":"test","modelId":"model"},"updatedAt":3}
         ]);
-        let first = wire.read("session.summaries");
-        // The set is read in a background task: reply to the page only after
-        // the worktree read returns, so the set reaches the panel first.
+        let _ = wire.read("session.summaries");
+        // The set is read in a background task: answer only after the
+        // worktree read returns, so the set reaches the panel first. The
+        // panel adopts it and reads the first page again, dropping this
+        // one.
         wait_for(&marker, "the repository read");
-        wire.reply(&first, rows.clone());
         let repository = wire.read("session.summaries");
         wire.reply(&repository, rows);
         no_catalog(wire);
@@ -737,20 +745,12 @@ fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
     let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
-    terminal.until("mine preview");
-    assert!(
-        !terminal.transcript.contains("linked preview")
-            && !terminal.transcript.contains("other preview"),
-        "the workspace scope listed another workspace: {}",
-        terminal.transcript
-    );
-    terminal.write(b"\x13");
     terminal.until("Sessions · This repository");
+    terminal.until("mine preview");
     terminal.until("linked preview");
-    terminal.until(&linked_shown);
     assert!(
         !terminal.transcript.contains("other preview"),
-        "the repository scope listed another workspace: {}",
+        "the local scope listed another workspace: {}",
         terminal.transcript
     );
     terminal.write(b"\x1b[27u");
@@ -760,8 +760,10 @@ fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
     daemon.join().unwrap();
 }
 
+/// One worktree still names the local scope the repository; it changes only
+/// the title, and the cycle keeps its two states.
 #[test]
-fn tui_resume_skips_the_repository_scope_without_a_second_worktree() {
+fn tui_resume_names_a_one_worktree_repository() {
     let home = Home::new();
     let (repo, _) = scratch_repository(&home.0, false);
     let workspace = std::fs::canonicalize(repo.join("sub")).unwrap();
@@ -785,6 +787,11 @@ fn tui_resume_skips_the_repository_scope_without_a_second_worktree() {
         let all = wire.read("session.catalog");
         assert!(all["params"].get("cwd").is_none(), "{all}");
         wire.reply(&all, json!({"sessions":[]}));
+        // The local stop returns as the single-entry set; the catalog's
+        // canonical cwd treats it as the same filter.
+        let back = wire.read("session.catalog");
+        assert_eq!(back["params"]["cwd"], json!([mine]), "{back}");
+        wire.reply(&back, json!({"sessions":[]}));
         no_catalog(wire);
     });
     let mut command = home.command();
@@ -793,13 +800,11 @@ fn tui_resume_skips_the_repository_scope_without_a_second_worktree() {
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");
+    terminal.until("Sessions · This repository");
     terminal.write(b"\x13");
     terminal.until("Sessions · All workspaces");
-    assert!(
-        !terminal.transcript.contains("Sessions · This repository"),
-        "one worktree offers no repository scope: {}",
-        terminal.transcript
-    );
+    terminal.write(b"\x13");
+    terminal.until("Sessions · This repository");
     terminal.write(b"\x1b[27u");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");

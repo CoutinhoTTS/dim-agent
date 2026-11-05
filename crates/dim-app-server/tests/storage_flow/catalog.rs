@@ -270,3 +270,120 @@ async fn catalog_projection_preserves_the_preview_window_and_commits_atomically(
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
+
+/// #1099: the v34 data-only step rewrites `session_catalog.updated_at_ms`
+/// as the newest activity event on `main`. A store whose row was inflated by
+/// a trailing `branch/resume` is recomputed to the last activity event, a
+/// Session with no activity at all lands on its creation time, and every
+/// other column of both rows stays as stored.
+#[tokio::test]
+async fn a_v33_store_recomputes_the_catalog_activity_time_on_upgrade() {
+    let database = Database::new();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statements = schema_of(33);
+    statements.sort_by_key(|sql| !sql.starts_with("CREATE TABLE"));
+    for sql in statements {
+        connection.execute_batch(&sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (33)", [])
+        .unwrap();
+    assert_eq!(schema(&connection), schema_of(33));
+    connection
+        .execute_batch(
+            "INSERT INTO agents VALUES ('a1', '{}', 1, NULL);
+             INSERT INTO agent_sessions (session_id, config, created_at_ms, origin) VALUES
+               ('inflated', '{}', 100, 'client'),
+               ('quiet', '{}', 200, 'client');
+             INSERT INTO session_owners VALUES ('inflated', 'a1', 3), ('quiet', 'a1', 3);
+             INSERT INTO timeline_branches VALUES
+               ('inflated', 'main', '{\"id\":\"main\"}', 2),
+               ('quiet', 'main', '{\"id\":\"main\"}', 0);",
+        )
+        .unwrap();
+    let event = |id: &str, sequence: u64, create_at: u64, name: &str, data: serde_json::Value| {
+        serde_json::json!({"encoding":"event","record":{"event":{
+            "id":id,"sequence":sequence,"create_at":create_at,"type":"input","name":name,"data":data
+        },"refs":null,"trace":null,"batch_end":sequence}})
+    };
+    connection
+        .execute(
+            "INSERT INTO timeline_events VALUES (?1,'main',1,1,'input/message',?2,?3,0,0)",
+            params![
+                "inflated",
+                event(
+                    "e1",
+                    1,
+                    1000,
+                    "message",
+                    serde_json::json!({"user":{"content":[{"type":"text","text":"Hi"}]}})
+                )
+                .to_string(),
+                "e1"
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO timeline_events VALUES (?1,'main',2,2,'branch/resume',?2,?3,0,0)",
+            params![
+                "inflated",
+                event("e2", 2, 9000, "resume", serde_json::json!({})).to_string(),
+                "e2"
+            ],
+        )
+        .unwrap();
+    // The v33 writer gave both rows the trailing resume's time. `inflated`
+    // carries its first user text as the preview, as a v33 row of a Session
+    // with a user message does.
+    connection
+        .execute(
+            "INSERT INTO session_catalog VALUES ('inflated', 9000, 'Hi', '/w'), ('quiet', 9000, NULL, '/w')",
+            [],
+        )
+        .unwrap();
+    let stored = |connection: &Connection, session: &str| {
+        connection
+            .query_row(
+                "SELECT updated_at_ms, preview, cwd FROM session_catalog WHERE session_id=?1",
+                [session],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let before = [
+        stored(&connection, "inflated"),
+        stored(&connection, "quiet"),
+    ];
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), Some(33));
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
+    let recomputed = |before: &(i64, Option<String>, String), time: i64| {
+        (time, before.1.clone(), before.2.clone())
+    };
+    assert_eq!(
+        stored(&connection, "inflated"),
+        recomputed(&before[0], 1000),
+        "the upgrade puts the row back on the rule and changes nothing else"
+    );
+    assert_eq!(
+        stored(&connection, "quiet"),
+        recomputed(&before[1], 200),
+        "a Session with no activity sits at its creation time"
+    );
+    drop(connection);
+    db.close().await.unwrap();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+}

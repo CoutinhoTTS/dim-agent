@@ -39,8 +39,9 @@ const INLINE_OUTPUT_CHAR_LIMIT: usize = 30_000;
 const OUTPUT_PREVIEW_MAX_LINES: usize = 2_000;
 const OUTPUT_PREVIEW_MAX_BYTES: usize = 50 * 1024;
 const PREVIEW_BUFFER_HEADROOM_BYTES: usize = OUTPUT_PREVIEW_MAX_BYTES * 2;
-/// Maximum bytes written to one exec output file.
-const OUTPUT_FILE_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
+/// Maximum bytes written to one exec output file. Read by the paged output
+/// read (`BackgroundExec::output_page`) as the file-level truncation signal.
+pub(super) const OUTPUT_FILE_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
 /// Pipe reading continues this long after the root process exits.
 pub const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const DESCRIPTION_CHARS: usize = 200;
@@ -801,6 +802,10 @@ pub(super) struct Output {
 impl Output {
     pub(super) async fn preview(&self) -> String {
         truncate_preview(&self.capture.lock().await.preview)
+    }
+    /// Whether the capture stopped appending at `OUTPUT_FILE_BYTE_LIMIT`.
+    pub(super) async fn truncated(&self) -> bool {
+        self.capture.lock().await.truncated
     }
 }
 impl OutputSink for Output {

@@ -54,7 +54,7 @@ flowchart LR
 | Session 门面（[agent.rs](../../../../crates/dim-agent-runtime/src/agent.rs)、[branch.rs](../../../../crates/dim-agent-runtime/src/branch.rs)） | Session、分支 | 已存在 |
 | InputQueue | 分支 | 变更：消费 `input/withdraw`，写入 `input/deleted`；撤回服务 |
 
-本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`LookupReply`、`WithdrawRequest`、`WithdrawReply` 与 `SessionsError`；`SessionConfig` 字段 `interactive` 与 `session.create` 的 `interactive` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、以及 Session 输入路径。
+本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`LookupReply`、`WithdrawRequest`、`WithdrawReply` 与 `SessionsError`；存活带 key 块投影 `session.keys`（Rpc 内建，`KeysRequest`、`KeysResult`、`KeyEntry`）；`SessionConfig` 字段 `interactive` 与 `session.create` 的 `interactive` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、以及 Session 输入路径。
 
 ## 2. 数据与状态
 
@@ -139,7 +139,7 @@ sequenceDiagram
 | 用户内容（文本、图像） | 一条用户消息 | 在同一输入的所有块之后 |
 | 带 key 的块（`Live`） | 作为 raw 块；每个 key 的最新块保持生效 | 消费位置 |
 | Retire 块 | 投递一次；该 key 失效 | 消费位置 |
-| 已删除的输入（从未应用） | 无：其用户内容与 raw 块从不进入上下文，其带 key 的块从不生效，压缩也从不看到它。客户端可依据 `input/deleted` 将其显示为已删除 | — |
+| 已删除的输入（从未应用） | 无：其用户内容与 raw 块从不进入上下文，其带 key 的块从不生效，压缩也从不看到它。客户端可依据 `input/deleted` 将其显示为已删除，且它不出现在 `session.keys` 中 | — |
 
 Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在运行中 turn 的下一个边界被消费，分支空闲时会启动一个 turn。Append 输入随下一次模型请求被消费，从不启动 turn。经过压缩后，已消费的输入只保留在摘要中，但每个生效 key 的最新块会原样重放。子分支看到截至其切点的祖先前缀，包括切点处生效的 key，且从不采纳父分支的待处理输入。模型从不看到 `submissionId`、模式、`SessionConfig` 字段或租约。
 
@@ -258,6 +258,18 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 // HistoryPage：该分支自己在 (after, through] 内的事件，止于批次边界，
 // 为 AgentEvent 记录，形式与 session.history 返回的相同
 { "through": 0, "events": [ { "id": "string", "sequence": 0, "type": "turn/end", "data": {} } ] }
+// KeysRequest：固定位置上某分支自身段的存活带 key 块（appserver/keyed-blocks）
+{ "sessionId": "string",
+  "branchId": "string",               // v3 必填，与所有 v3 session 读一致；根线用 "main"
+  "through?": 0 }                     // 固定读取位置；缺省：发布头
+// KeysResult
+{ "through": 0,                       // 投影固定的位置
+  "entries": [ KeyEntry ] }           // 分支自身段上每个存活 key 恰一条；空数组，从不为 null
+// KeyEntry
+{ "key": "string",                    // RawBlock.key.name
+  "sequence": 0,                      // 携带该块的 input/message 事件序号
+  "inputId": "string",                // 该事件的 id
+  "text": "string" }                  // RawBlock.text 原字节
 // WithdrawRequest
 { "sessionId": "string", "branchId": "string", "inputId": "string",
   "reason?": "string" }                 // 复制到 input/withdraw，由客户端显示
