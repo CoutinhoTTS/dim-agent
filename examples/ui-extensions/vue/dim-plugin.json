@@ -1,0 +1,15 @@
+{
+  "name": "vue-activity",
+  "ui": {
+    "version": 1,
+    "root": "dist",
+    "panels": [{
+      "id": "activity",
+      "title": { "default": "Vue activity", "translations": { "zh": "Vue 状态面板" } },
+      "entry": "panel.js",
+      "placement": "session-panel",
+      "requires": ["session.state"],
+      "methods": []
+    }]
+  }
+}

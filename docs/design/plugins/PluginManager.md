@@ -2,9 +2,9 @@
 
 Status: Draft, aligned with the maintainer on 2026-10-27. Requirements: [plugin management](../plugin-management.md) ([#432](https://github.com/arcships/dim/issues/432)). Issues: [#3](https://github.com/arcships/dim/issues/3), [#384](https://github.com/arcships/dim/issues/384). Scope: [ADR 002](../../adr/002-plugin-scope.md) (process: installation is per host). Language: Rust. Milestone: M1 for the parts marked in §0.
 
-PluginManager keeps the plugin configuration of a host: which plugins are installed, where they came from, which plugin each name uses, and which names are turned off. It keeps this configuration in its own file, `plugins.json`, in Dim's own format. It keeps no runtime state, except, in memory, the content it refused itself (§3.7). Whether a plugin is loaded, running or failed is rutis' state, read from rutis-loader. What content an owner holds (skills, MCP servers, hooks) is that owner's state. PluginManager carries out a configuration change by giving commands to the owners: rutis-loader for plugin code, and SkillsCatalog, Mcp and Hooks for content. Each owner decides and keeps its own state.
+PluginManager keeps the plugin configuration of a host: which plugins are installed, where they came from, which plugin each name uses, and which names are turned off. It keeps this configuration in its own file, `plugins.json`, in Dim's own format. It keeps no runtime state, except, in memory, the content it refused itself (§3.7). Whether a plugin is loaded, running or failed is rutis' state, read from rutis-loader. What content an owner holds (skills, MCP servers, hooks, client UI) is that owner's state. PluginManager carries out a configuration change by giving commands to the owners: rutis-loader for plugin code, and SkillsCatalog, Mcp, Hooks and UiExtensions for content. Each owner decides and keeps its own state.
 
-A plugin is a directory with a manifest. It may carry code (a rutis plugin in TypeScript or Python), content (skills, MCP configuration, hooks), or both. Plugins are identified by **name**. Several plugins with the same name may be installed, but only one of them is used at a time. Turning another one on replaces the one in use. This is how a built-in plugin is replaced.
+A plugin is a directory with a manifest. It may carry code (a rutis plugin in TypeScript or Python), content (skills, MCP configuration, hooks, client UI), or both. Plugins are identified by **name**. Several plugins with the same name may be installed, but only one of them is used at a time. Turning another one on replaces the one in use. This is how a built-in plugin is replaced.
 
 ## 0. Implementation boundary
 
@@ -29,7 +29,7 @@ flowchart LR
     PM["PluginManager<br/>plugins.json, plugin.* methods"]:::new
     LOADER["rutis-loader<br/>rows: built-in, default, installed"]
     RPC["Rpc"]
-    OWN["Content owners<br/>SkillsCatalog, Mcp, Hooks"]
+    OWN["Content owners<br/>SkillsCatalog, Mcp, Hooks, UiExtensions"]
     SET["Settings"]
     CODE["Plugin code rows"]
     PT["PluginTools (Session part)<br/>plugin tool"]:::new
@@ -79,8 +79,9 @@ A plugin is a directory with `dim-plugin.json` at its root. The keys present say
 | `skills` | skills | A directory inside the plugin of Skill documents, registered with SkillsCatalog. |
 | `mcp` | MCP | A file inside the plugin holding MCP server entries, registered with Mcp. |
 | `hooks` | hooks | A file inside the plugin holding a hooks document, registered with Hooks. |
+| `ui` | UI | Optional client content declaration, registered with UiExtensions ([client UI contract](../client-ui-extensions.md)). |
 
-Every path is relative, resolved inside the directory after following symbolic links; a path that leaves the directory is refused at install and at reload (`invalid_manifest`). The manifest is parsed at this boundary; owners receive documents already read.
+Code, skills, MCP and hooks paths are relative, resolved inside the directory after following symbolic links; a path that leaves the directory is refused at install and at reload (`invalid_manifest`). UI validation follows its content contract below. The manifest is parsed at this boundary; owners receive documents already read.
 
 **Row configuration.** A row's `config` is the manifest's `code.config` with the host's patch for that plugin name deep-merged over it: objects merge member by member, and any other value, arrays included, replaces the manifest's. A host sets a patch before startup; the product sets none, so a shipped plugin reads its manifest's value. A host that runs a candidate text puts the text at the member the plugin's author exposed, as the evaluation tooling does ([model-prompts §8.1](../model-prompts.md#81-the-rule)), so both arms run the same plugin code.
 
@@ -90,13 +91,22 @@ A plugin's business configuration (its Settings sources) is not in the manifest:
 
 The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.json` in place of their row files (`web.json`, `process.json`, `settings.json`). SessionTitle is a built-in plugin, not a TypeScript package.
 
+`ui` is an optional manifest member owned by
+[UiExtensions](../client-ui-extensions.md#附录-a-manifest-绑定). A UI-only package
+has kind `ui` and needs no code row. PluginManager forwards the validated
+content declaration and stable plugin name to UiExtensions; unsupported versions
+and invalid UI declarations appear as content refusals without stopping the
+package's backend code or other content. When UiExtensions is absent, `ui` is
+reported as skipped. Withdrawals use the installed id, as for other content.
+
+
 ### 2.2 `plugins.json`
 
 `<home>/plugins.json`, read and written only by PluginManager. It holds configuration only.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "installed": [
     {
       "id": "my-tool",
@@ -137,6 +147,14 @@ A persisted `use: "default"` selects the same-name built-in when the distributio
 ships that default package. An existing default package remains the explicit selection while
 it is shipped. This source transition does not rewrite the record; `off` and installed source
 selections retain their meaning.
+
+`plugins.json` uses version 2. Reading version 1 preserves every installation,
+choice and `off` flag. Before the first version 2 write, the exact version 1
+bytes are synced to `plugins.json.v1.backup`. An existing identical backup is
+reused; a different or unreadable backup refuses the write. Backup or record
+write failure leaves the original record in place. Unknown versions fail
+without overwriting data. Older readers reject version 2; rollback requires
+restoring the saved version 1 record.
 
 ### 2.3 The default configuration file
 
@@ -217,7 +235,7 @@ When a content owner itself is turned on (Hooks, for example), PluginManager reg
 
 `plugin.reload {name}` reloads the plugin the name uses. The host watches no files; the call is the signal that something changed.
 
-1. Read the manifest again. A read that fails refuses the reload (`invalid_manifest`) before changing anything: the plugin keeps its last good row and content until the next change of the record, from any command, or a restart. Both read the manifest again and run none of the plugin's content while it cannot be read (§3.1). If its name changed, refuse (`name_changed`); the user installs it again under the new name.
+1. Read the manifest again. A read that fails refuses the reload (`invalid_manifest`) and withdraws its UI snapshot. The plugin keeps its last good code row and other content until the next change of the record, from any command, or a restart. Both read the manifest again and run none of the plugin's content while it cannot be read (§3.1). If its name changed, refuse (`name_changed`); the user installs it again under the new name.
 2. Code: `Loader::reload("plugin:<name>")`, and nothing else: there is no resolver cache to clear, since the runtime describes the module again at every resolution. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager reconciles the derived layer, which carries the row with the new fields.
 3. Content: register each kind again with its present owner; the new document replaces the old one. A kind the manifest no longer carries is withdrawn.
 4. Update `kinds` in `plugins.json` if they changed.
@@ -235,7 +253,7 @@ A name using a built-in Rust plugin cannot be reloaded (`not_reloadable`): it ne
 
 ### 3.7 Content registration
 
-For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's id: its installed id, or a default plugin's name (§7), so it is safe in server ids and file names. When a name switches from one plugin to another, the old plugin's content is withdrawn; a kind the plugin no longer carries is withdrawn. The owner keeps what was registered as its own state, persists it, and restores it after its own reload. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. An owner reports the plugin ids it holds. At startup, and when PluginManager turns an owner's name on, PluginManager registers that kind of content of every plugin in use and withdraws it for every other id the owner holds; owners never look for plugins. So content restored by an owner for a plugin removed while the owner was off, or left by a process that stopped between writing `plugins.json` and commanding the owner, does not run again, and a refusal is reported again after a restart.
+For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's id: its installed id, or a default plugin's name (§7), so it is safe in server ids and file names. When a name switches from one plugin to another, the old plugin's content is withdrawn; a kind the plugin no longer carries is withdrawn. The owner keeps registrations and restores them after its own reload. UiExtensions retains the validated source declarations across process-row generations and rebuilds its transient snapshots; process restart obtains registrations from PluginManager. Other content owners persist their own documents. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. An owner reports the plugin ids it holds. At startup, and when PluginManager turns an owner's name on, PluginManager registers that kind of content of every plugin in use and withdraws it for every other id the owner holds; owners never look for plugins. So content restored by an owner for a plugin removed while the owner was off, or left by a process that stopped between writing `plugins.json` and commanding the owner, does not run again, and a refusal is reported again after a restart.
 
 An owner validates what it is given. Content it refuses (an MCP document that fails Mcp's validation, a Skill whose `SKILL.md` does not parse) does not stop the plugin's other content or code: the reply names it under `refused`, and `plugin.list` shows what the owners report for the plugin at the time of the call. PluginManager refuses a JSON content file it cannot read or that is not JSON. It keeps that refusal in memory, keyed by plugin id and kind, only while the last read of that kind failed: any later handling of the kind that reads nothing or reads it successfully clears it (the document handed over, the manifest no longer naming the kind, the kind skipped because its owner is absent), as do withdrawing the kind and removing the plugin. `plugin.list` shows it in the same `refused` entry, in place of the owner's, and only while the kind's owner is present; the replies of `plugin.install`, `plugin.enable`, `plugin.reload` and `plugin.update` name it under `refused`. A refusal in the startup or owner-on reconcile is logged at `warn` with the plugin id, the kind and the error.
 

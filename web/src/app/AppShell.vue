@@ -6,6 +6,7 @@ import { Menu, PanelLeftOpen, X } from "lucide-vue-next"
 import AppSidebar from "../components/AppSidebar.vue"
 import ToastRegion from "../components/ToastRegion.vue"
 import EndLineDialog from "../features/lines/EndLineDialog.vue"
+import ExtensionPanel from "../features/extensions/ExtensionPanel.vue"
 import LinesPanel from "../features/lines/LinesPanel.vue"
 import NewLineDialog from "../features/lines/NewLineDialog.vue"
 import { settingsMessages } from "../i18n/settings"
@@ -181,8 +182,9 @@ function resizeBy(delta: number): void {
         @keydown.left.prevent="resizeBy(-16)"
         @keydown.right.prevent="resizeBy(16)"
       />
-      <aside v-if="detailOpen && sessionId" class="detail-region" data-active="true" :aria-label="t('lines.panelAria')" @pointerdown="ui.detailFocused = true" @focusin="ui.detailFocused = true">
-        <LinesPanel :session-id="sessionId" />
+      <aside v-if="detailOpen && sessionId" class="detail-region" data-active="true" :aria-label="ui.extension ? undefined : t('lines.panelAria')" @pointerdown="ui.detailFocused = true" @focusin="ui.detailFocused = true">
+        <ExtensionPanel v-if="ui.extension" :session-id="sessionId" />
+        <LinesPanel v-else :session-id="sessionId" />
       </aside>
     </div>
 

@@ -687,3 +687,45 @@ Legacy permission patterns and tracing behavior do not override the current
 the Permissions page follows
 [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds). A change to
 either contract requires separate design alignment.
+
+## Client UI extensions
+
+The [client UI contract](client-ui-extensions.md) owns the manifest, mount
+boundary, bound capabilities and resource semantics. The Web adapter adds the
+exact read method `ui.extensions.list` to its management allowlist and subscribes
+to `ui.extensions.changed` on the reliable control channel before hello completes.
+It reads the directory after hello and refreshes on each invalidation; reconnect
+clears stale directory and panel state before binding again.
+
+Authenticated resource routes share this listener:
+
+| Route | Owner |
+| --- | --- |
+| `/api/ui/extensions/{generation}/{path}` | UiExtensions snapshot |
+| `/api/ui/sessions/{sessionId}/resources/{id}` | Session UiResources |
+
+Both routes preserve Host checking and cookies, reject an explicit foreign
+Origin or cross-site fetch, and allow same-origin GET without an Origin header.
+There is no resource SPA fallback. MIME and `nosniff` remain explicit; CSP and
+CORS are unchanged. Snapshot replies use private revalidation and ETags; Session
+files use private no-store. GET supports a single byte range, including suffix
+and open-ended ranges. HEAD ignores Range. Unsatisfiable ranges return 416 and
+the total length; multiple ranges and unknown units return the full file.
+Bounded producers apply backpressure and release file reads on disconnect or
+owner withdrawal. Active content from Session files is downloaded as octet-stream.
+
+AppShell places the selected extension in the existing Lines detail region.
+The UI store persists only its stable selection and existing size. Each panel
+component owns its ShadowRoot and mount lifetime; the connection store owns
+catalog synchronization and the chat store owns Session activity. Compact mode
+uses a native modal dialog with a host-owned close button, Escape handling and
+focus restoration. Panel keyboard events stay within the panel.
+
+```text
+Wide:    [Conversation] | [Extension title] [Lines] [Close]
+                       | [Bound line selector]
+                       | [Plugin ShadowRoot]
+Compact: [Modal title] [Close]
+         [Bound line selector]
+         [Plugin ShadowRoot]
+```

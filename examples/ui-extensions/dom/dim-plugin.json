@@ -1,0 +1,15 @@
+{
+  "name": "conversation-inspector",
+  "ui": {
+    "version": 1,
+    "root": "ui",
+    "panels": [{
+      "id": "activity",
+      "title": { "default": "Activity", "translations": { "zh": "会话状态" } },
+      "entry": "panel.js",
+      "placement": "session-panel",
+      "requires": ["session.state", "session.history"],
+      "methods": []
+    }]
+  }
+}

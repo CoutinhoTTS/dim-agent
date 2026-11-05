@@ -2,6 +2,8 @@
 //! assets and admits browsers holding a token issued to the local user. See
 //! `docs/design/web-workspace.md` §2.
 
+mod resources;
+
 use crate::{
     connection::{ConnectionHub, Entry},
     outbound::MAX_FRAME_BYTES,
@@ -211,6 +213,14 @@ impl WebEntry {
             .route("/api/auth/exchange", post(exchange))
             .route("/api/auth/session", get(session))
             .route("/api/auth/logout", post(logout))
+            .route(
+                "/api/ui/extensions/{generation}/{*path}",
+                get(resources::extension),
+            )
+            .route(
+                "/api/ui/sessions/{session_id}/resources/{id}",
+                get(resources::session_resource),
+            )
             .route("/ws", get(upgrade))
             .route("/api/{*rest}", axum::routing::any(api_not_found))
             .fallback(asset)

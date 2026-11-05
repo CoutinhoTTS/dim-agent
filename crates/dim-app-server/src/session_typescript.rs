@@ -30,8 +30,12 @@ use std::{
 
 /// The Session and branch services marked `#[rutis::service]`: provided in
 /// their instance, each is served by name there.
-fn crossing_instance_names() -> [(String, &'static str); 8] {
+fn crossing_instance_names() -> [(String, &'static str); 9] {
     [
+        (
+            name_of::<crate::ui_extensions::UiResources>(),
+            SESSION_GROUP,
+        ),
         (
             name_of::<dim_agent_capabilities::timeline_tree::TreeCommands>(),
             SESSION_GROUP,

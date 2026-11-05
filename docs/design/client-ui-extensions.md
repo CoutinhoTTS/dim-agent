@@ -321,7 +321,7 @@ UiExtensions、UiResources 和客户端面板都不是 Capability：没有分支
 
 ## 附录 A：Manifest 绑定
 
-下列是拟增加的 UI 内容项；`code` 等其他内容项继续使用 [PluginManager](plugins/PluginManager.md) 的定义。
+下列是 UI 内容项；`code` 等其他内容项继续使用 [PluginManager](plugins/PluginManager.md) 的定义。
 
 ```json
 {
