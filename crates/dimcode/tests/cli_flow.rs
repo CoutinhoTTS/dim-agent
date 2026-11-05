@@ -6236,6 +6236,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     "plugin",
                     "read",
                     "recall",
+                    "settings",
                     "skill",
                     "wait",
                     "web_fetch",
