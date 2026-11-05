@@ -1500,8 +1500,8 @@ async fn a_restore_reads_a_line_end_in_one_page_and_no_range() {
         }]
     );
     let pages = counting.pages("B", &["branch/end"]);
-    assert!(
-        pages <= 2,
+    assert_eq!(
+        pages, 1,
         "a line with no end costs one page, whatever its length; the restore asked {pages} times"
     );
     soon(agent.close()).await.unwrap();
