@@ -302,18 +302,17 @@ impl BackgroundExec {
         }
         // The file holds the pipe decoder's output, so its bytes are valid
         // UTF-8; every completed write ends on a character boundary, though a
-        // read can land inside one write and see the file end inside a
-        // character. The page ends at the last character boundary at or
-        // before `limit`, so a character the limit splits is served whole: at
-        // the start of the next page when the cut falls after other
-        // characters, and whole in this page when the budget cuts the very
-        // first character. A page therefore consumes at least one character
-        // while the file holds one, and can carry up to `limit` plus three
-        // bytes. A cursor the method handed out always names a boundary;
-        // neither a client's own cursor inside a character, which no read can
-        // complete, nor a read that lands inside one write has a whole
-        // character to serve, and both stay an empty page with no
-        // `nextCursor`, which ends a following walk.
+        // reader can catch a write while it is in progress and see the file
+        // end inside a character. The page ends at the last character
+        // boundary at or before `limit`, so a character the limit splits is
+        // served whole: at the start of the next page when the cut falls
+        // after other characters, and whole in this page when the budget cuts
+        // the very first character. A page therefore consumes at least one
+        // character while the file holds one, and can carry up to `limit`
+        // plus three bytes. Complete characters before a trailing partial one
+        // are served normally; only a cursor opening inside a character, or a
+        // file ending inside the first character at the cursor, leaves the
+        // page with nothing whole to serve, and it stays empty for that call.
         let mut end = read.min(limit);
         while end > 0 && std::str::from_utf8(&buffer[..end]).is_err() {
             end -= 1;
