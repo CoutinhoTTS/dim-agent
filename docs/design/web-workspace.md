@@ -529,7 +529,10 @@ because the reply carries none.
 
 Each previewed entry has an action: Import, Skip, Replace the existing entry, or
 Import under a new id with a new-id field. The defaults match the CLI: `changed`
-and `identical` import, `conflict` and `invalid` skip. For a project preview, an
+and `identical` import, `conflict` and `invalid` skip. `--only` restricts the
+default selection, and `--replace` or `--rename` — or this page's explicit
+action — selects the id it names whether or not `--only` lists it; a `conflict`
+or `invalid` entry only comes in through such an action. For a project preview, an
 entry whose confirm list is not empty shows a checkbox naming those fields;
 Apply stays disabled until every such entry is ticked, so a literal `args`,
 `env`, `headers` or URL value never reaches `.mcp.json` without an explicit

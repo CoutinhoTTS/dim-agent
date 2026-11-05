@@ -1149,10 +1149,12 @@ exits 0, since it answered what the import would do.
 `--yes` applies the default selection at the preview's revision: `changed` and `identical` entries
 import, `conflict` and `invalid` entries skip. `--replace ID` replaces the target's entry with the
 document's, `--rename OLD=NEW` writes the entry under a new id (the target's `OLD` entry stays),
-and `--only ID` restricts the import to the named ids; each flag may repeat. A project import
-needs `--confirm-literals` to confirm the fields the preview listed; without it the command stops
-before `mcp.import.apply` and names the ids and fields, exiting 1. The apply is one
-`settings.update` at one revision: imported user entries are written with `enabled: false`,
+and `--only ID` restricts the default selection to the named ids; each flag may repeat. `--replace`
+or `--rename` selects the id it names whether or not `--only` lists it, and a `conflict` or
+`invalid` entry only comes in through `--replace`, `--rename`, or an explicit action in the preview.
+A project import needs `--confirm-literals` to confirm the fields the preview listed; without it
+the command stops before `mcp.import.apply` and names the ids and fields, exiting 1. The apply is
+one `settings.update` at one revision: imported user entries are written with `enabled: false`,
 imported project entries carry no enablement record, and both start disabled. A source that
 changed since the preview refuses the whole import (`mcp_settings_conflict`, exit 1), as do
 `mcp_import_conflict`, `mcp_import_unconfirmed`, `mcp_credentials_are_user_scoped` and
