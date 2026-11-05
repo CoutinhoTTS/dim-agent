@@ -25,10 +25,13 @@
     "model_reported": "deepseek-flash",
     "provider": "deepseek"
   },
-  "notes": null,
+  "notes": "Manual in-place retry of 21 trials with `harbor job resume` after removing their directories: 8 NonZeroAgentExitCodeError whose last model event was `error decoding response body`, and 13 AgentTimeoutError whose last model event was `error sending request`. +5 passes came from the NonZero replacements; no timeout became a pass. The committed pipeline does not retry these classes.",
   "params": {
     "agent_timeout_multiplier": 1.0,
     "harbor_version": "0.18.0",
+    "k": 3,
+    "model_config_sha256": "2d69904abf165c3310a827af67602ae0f070c4a35d928bf18a278ec0a575cd12",
+    "model_name": "deepseek/deepseek-flash",
     "n_concurrent_trials": 10,
     "timeout_multiplier": 1.0,
     "verifier_no_proxy": "localhost,127.0.0.1,::1,host.docker.internal",
@@ -190,7 +193,7 @@
     "subject": "Merge pull request #1024 from arcships/fix/973-runtime-block-references",
     "version": "0.1.0-alpha.8-source"
   },
-  "taken_at": "2026-11-05T03:36:32.660923+00:00",
+  "taken_at": "2026-11-05T03:59:29.027263+00:00",
   "tasks": {
     "databricks/officeqa-pro__UID0001": {
       "fully_scored": true,
