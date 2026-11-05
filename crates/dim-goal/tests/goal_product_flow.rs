@@ -812,14 +812,9 @@ async fn goal_on_a_line_behaves_as_on_main() {
         "the continuation after the operator input counts {expected}: {reset}"
     );
     let after = after_of(&reset).expect("the continuation's after");
-    // The operator's input restarts the count; the idle streak depends on
-    // whether its turn joined the continuation's, so the marker states it.
-    let idle: usize = reset
-        .split("idle=\"")
-        .nth(1)
-        .and_then(|value| value.split('"').next())
-        .and_then(|value| value.parse().ok())
-        .expect("the continuation's idle");
+    // The operator's input restarts the count; the continuation after it
+    // states the streak as a literal, so a wrong streak fails here.
+    let idle = 2;
     assert_eq!(
         goal_block(&session, &child, &format!(r#"count="{expected}""#)).await,
         texts::continuation(&child, expected, Some(1000), idle, after),
