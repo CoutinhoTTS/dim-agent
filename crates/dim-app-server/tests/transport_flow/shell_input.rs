@@ -8,6 +8,7 @@ use dim_agent_runtime::BranchLifecycle;
 use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 use std::{
+    io::Write,
     os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
@@ -356,10 +357,11 @@ async fn next_exec_started(shell: &mut Shell) -> Value {
 }
 
 /// `session.exec.output.page` beside the tail: a running task's growing file
-/// pages forward with a byte cursor that stays valid, an ended task's file
-/// pages after `exec/ended` with the preview's sanitization and no events or
-/// Session holds, and a task rebuilt after an idle unload pages from the
-/// retained file with its terminal still `exec/ended`.
+/// pages forward by `cursor + bytes`, including a short page that ends inside
+/// a character the writer has not completed; an ended task's file pages after
+/// `exec/ended` with the preview's sanitization and no events or Session
+/// holds; and a task rebuilt after an idle unload pages from the retained
+/// file with its terminal still `exec/ended`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_exec_output_pages_running_finished_and_restored_tasks() {
     let mut shell = Shell::launch_with(json!({
@@ -424,9 +426,46 @@ async fn background_exec_output_pages_running_finished_and_restored_tasks() {
     let reread = exec_output_page(&mut shell, &params, 0, 64).await;
     assert_ok(&reread);
     assert_eq!(reread["result"], first["result"]);
+    // A page can meet the file ending inside a character, which a read sees
+    // when it catches a write in progress; completed writes end on a
+    // boundary, so write the first byte of a two-byte character directly to
+    // hold that state while the task runs. The page serves the complete
+    // characters before it, and the walk advances by `cursor + bytes`: a page
+    // advanced by anything else misses the character once the rest arrives.
+    let path = shell
+        .home
+        .join("rust/outputs")
+        .join(&shell.sid)
+        .join(format!("{}.log", task.as_str().unwrap()));
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&[0xc3]).unwrap();
+    drop(file);
+    let partial = exec_output_page(&mut shell, &params, 0, 64).await;
+    assert_ok(&partial);
+    assert_eq!(
+        partial["result"],
+        json!({"text":"alpha\n","bytes":6,"truncated":false})
+    );
+    let next = partial["result"]["bytes"].as_u64().unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&[0xa9]).unwrap();
+    drop(file);
+    let completed = exec_output_page(&mut shell, &params, next, 64).await;
+    assert_ok(&completed);
+    assert_eq!(
+        completed["result"],
+        json!({"text":"é","bytes":2,"truncated":false})
+    );
     std::fs::write(shell.work.join("go2"), b"go").unwrap();
-    // A short page carries no next cursor; the same cursor yields the new
-    // bytes once the file grows.
+    // A short page carries no next cursor; the walk advances by `cursor +
+    // bytes` (0 + 6) and the same offset yields the new bytes once the file
+    // grows.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let reply = exec_output_page(&mut shell, &params, 6, 64).await;
@@ -495,11 +534,12 @@ async fn background_exec_output_pages_running_finished_and_restored_tasks() {
         assert_ok(&reply);
         let result = &reply["result"];
         assert!(result["text"].as_str().unwrap().len() <= 5);
-        assert!(result["bytes"].as_u64().unwrap() <= 5);
+        let bytes = result["bytes"].as_u64().unwrap();
+        assert!(bytes <= 5);
         text.push_str(result["text"].as_str().unwrap());
-        match result["nextCursor"].as_u64() {
-            Some(next) => cursor = next,
-            None => break,
+        cursor += bytes;
+        if bytes == 0 {
+            break;
         }
     }
     assert_eq!(text, file.replace('\u{1}', ""));
@@ -610,22 +650,24 @@ async fn background_exec_output_page_clamps_scopes_and_errors() {
         cut["result"],
         json!({"text":"é","bytes":2,"nextCursor":11,"truncated":false})
     );
-    // Walking the whole file at `limit: 1` terminates and reassembles it.
+    // Walking the whole file at `limit: 1` by `cursor + bytes` terminates and
+    // reassembles it.
     let (mut text, mut cursor) = (String::new(), 9u64);
     loop {
         let reply = exec_output_page(&mut shell, &params, cursor, 1).await;
         assert_ok(&reply);
         let result = &reply["result"];
         text.push_str(result["text"].as_str().unwrap());
-        match result["nextCursor"].as_u64() {
-            Some(next) => cursor = next,
-            None => break,
+        let bytes = result["bytes"].as_u64().unwrap();
+        cursor += bytes;
+        if bytes == 0 {
+            break;
         }
     }
     assert_eq!(text, "éX\n");
     // A cursor inside a character, which the method never hands out, cannot
-    // be completed by any read: the page is empty and has no `nextCursor`,
-    // so a following walk ends.
+    // be completed by any read: the page is empty and carries no
+    // `nextCursor`.
     let inside = exec_output_page(&mut shell, &params, 10, 1).await;
     assert_ok(&inside);
     assert_eq!(
