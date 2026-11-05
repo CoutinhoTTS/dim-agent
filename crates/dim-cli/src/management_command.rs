@@ -347,7 +347,7 @@ fn import_resolutions(
 /// What a preview prints: one row per entry, then the fields the owner's cap
 /// left out, the top-level members the import would not carry and the
 /// revision the source was read at. `--yes` prints the same rows before it
-/// applies, so a confirmation names fields the user has seen.
+/// applies, so the user sees what is written.
 fn print_import_preview(preview: &mcp::ImportPreview, source: &str, apply: bool) {
     let rows = preview
         .entries
