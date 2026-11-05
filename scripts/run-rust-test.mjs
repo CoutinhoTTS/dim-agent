@@ -21,8 +21,22 @@ function terminate(child){
   if(process.platform==='win32'){
     spawnSync('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore'});
   }else{
-    try{process.kill(-child.pid,'SIGKILL');}
-    catch(error){if(error.code!=='ESRCH') throw error;}
+    const pids=[-child.pid];
+    if(child.exitCode===null&&child.signalCode===null){
+      const listed=spawnSync('ps',['-A','-o','pid=,ppid='],{encoding:'utf8'});
+      if(listed.status===0){
+        const processes=listed.stdout.trim().split('\n').map(line=>line.trim().split(/\s+/).map(Number));
+        const descendants=[child.pid];
+        for(const parent of descendants){
+          for(const [pid,ppid] of processes) if(ppid===parent) descendants.push(pid);
+        }
+        pids.unshift(...descendants.slice(1).reverse());
+      }else console.error(`[test] Cannot list descendants of ${child.pid}: ${listed.error?.message??listed.stderr}`);
+    }
+    for(const pid of pids){
+      try{process.kill(pid,'SIGKILL');}
+      catch(error){if(error.code!=='ESRCH') throw error;}
+    }
   }
 }
 for(const [signal,code] of [['SIGINT',130],['SIGTERM',143]]){

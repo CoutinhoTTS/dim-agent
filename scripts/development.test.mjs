@@ -81,8 +81,8 @@ test('compiled targets stream output and stop descendants on timeout or cancella
     writeFileSync(artifacts, JSON.stringify({ reason: 'compiler-artifact', profile: { test: true }, target: { name: 'held' }, manifest_path: path.join(temporary, 'Cargo.toml'), executable: process.execPath }));
     const fixture = `
       const {spawn} = require('node:child_process');
-      const child = spawn(process.execPath, ['--eval', 'setInterval(()=>{},1000)'], {stdio:'inherit'});
-      require('node:fs').writeFileSync('descendant', String(child.pid));
+      const child = spawn(process.execPath, ['--eval', 'setInterval(()=>{},1000)'], {stdio:'inherit', detached:true});
+      require('node:fs').writeFileSync('descendant', JSON.stringify([process.pid, child.pid]));
       console.log('ready');
       setInterval(()=>{},1000);
     `;
@@ -92,8 +92,11 @@ test('compiled targets stream output and stop descendants on timeout or cancella
     t.after(() => {
       child.kill('SIGKILL');
       if (existsSync(pidFile)) {
-        try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); }
-        catch (error) { if (error.code !== 'ESRCH') throw error; }
+        const [target, descendant] = JSON.parse(readFileSync(pidFile, 'utf8'));
+        for (const pid of [-target, descendant]) {
+          try { process.kill(pid, 'SIGKILL'); }
+          catch (error) { if (error.code !== 'ESRCH') throw error; }
+        }
       }
       rmSync(temporary, { recursive: true, force: true });
     });
@@ -103,7 +106,7 @@ test('compiled targets stream output and stop descendants on timeout or cancella
     const [output] = await once(child.stdout, 'data');
     assert.match(output.toString(), /ready/);
     assert.equal(child.exitCode, null, 'target output is visible before it finishes');
-    const descendant = Number(readFileSync(pidFile, 'utf8'));
+    const [, descendant] = JSON.parse(readFileSync(pidFile, 'utf8'));
     if (cancel) child.kill('SIGTERM');
     const [code] = await exited;
     assert.equal(code, cancel ? 143 : 124, stderr);
