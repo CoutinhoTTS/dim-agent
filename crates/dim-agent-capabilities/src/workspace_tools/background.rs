@@ -74,11 +74,14 @@ pub enum OutputPageError {
 pub struct OutputPage {
     /// The page's text, sanitized like the tail preview.
     pub text: String,
-    /// The raw bytes consumed from the file for this page; `text` can be
-    /// shorter because sanitization drops control characters.
+    /// The file bytes this page consumed; a client's next cursor is always
+    /// `cursor + bytes`. `text` can be shorter because sanitization drops
+    /// control characters.
     pub bytes: u64,
-    /// The byte offset after this page; absent when the file ended at this
-    /// page. A growing file continues from the same cursor when it has more.
+    /// Present when the read found at least `limit` bytes, so the client may
+    /// continue immediately; always `cursor + bytes`. Absent on a shorter or
+    /// empty page, which does not mean the file ended: the client advances by
+    /// `bytes` and asks again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<u64>,
     /// Whether the output file reached `OUTPUT_FILE_BYTE_LIMIT`.
@@ -331,12 +334,13 @@ impl BackgroundExec {
         }
         let text =
             sanitize(std::str::from_utf8(&buffer[..end]).expect("the page ends on a boundary"));
-        // A read that filled the page's budget may have more behind it; a
-        // shorter one means the file ended at that moment, and a growing file
-        // continues when the client retries the same cursor. The read length
-        // decides it: the file's size races with the appender. An empty page
-        // (the file ended, or a client cursor inside a character) carries no
-        // `nextCursor`.
+        // A read that reached the page budget found at least `limit` bytes,
+        // so `nextCursor` lets the client continue immediately; a shorter
+        // read ended at the file's current length, which a running task may
+        // extend later, so the client advances by `bytes` and asks again.
+        // The read length decides it: the file's size races with the
+        // appender. An empty page (caught up, ended, or a client cursor
+        // inside a character) carries no `nextCursor`.
         let next_cursor = (read >= limit && end > 0).then_some(cursor + end as u64);
         let truncated = match ended
             .as_ref()

@@ -102,10 +102,23 @@ exactly like the preview; and a page ends on a character boundary, so a
 character the limit splits is served whole — at the start of the next page when
 the cut falls after other characters, and in the page itself when the budget
 cuts the very first character, so a page carries at most `limit` plus three
-bytes and consumes at least one character while the file has one. The file is append-only, so a `nextCursor` the
-method handed out always names a byte that never changes; `nextCursor` is absent
-once the file ended at that page, and a running task's growing file continues
-when the client retries the same cursor. `truncated` is `exec/ended`'s
+bytes and consumes at least one character while the file has one.
+
+A client walks the file by served bytes, not by `nextCursor`: the next offset is
+always `cursor + bytes`, where `bytes` is the file bytes this page consumed
+(sanitization can make `text` shorter). `nextCursor` is present only when the
+read found at least `limit` bytes — the page was full — and it equals that same
+offset, so the client may continue immediately; a shorter page carries no
+`nextCursor` even while the task is still writing, and that is not the end of
+the walk. `bytes == 0` means the cursor is caught up or ended: the file has
+ended at or before it, or a running task has not written the bytes at the cursor
+yet, and the client retries the same cursor later. A client-supplied cursor
+inside a character answers the same empty page; a cursor the method handed out
+never sits inside one. The file is append-only, so a cursor the method handed
+out always names a byte that never changes, and rereading it returns the same
+bytes.
+
+`truncated` is `exec/ended`'s
 `outputTruncated`, the live capture's flag while the task runs, and the file's
 size at the 64 MiB cap only for a task whose owner restarted (no flag exists
 there). The method opens the path the branch's own `exec/started` fact
