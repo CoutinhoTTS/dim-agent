@@ -1270,18 +1270,20 @@ pub(super) async fn plugin_active(server: &RunningServer, row: &Value) {
 /// The reply of `method` once the optional row that serves it has registered
 /// it: a Session is published without waiting for its optional rows, and a
 /// namespace is `unknown_method` until its row registers it.
+/// The availability deadline does not cancel an admitted call.
 pub(super) async fn when_served(client: &mut Client, method: &str, params: Value) -> Value {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let reply = client.rpc(method, params.clone()).await;
-            if !waiting(&reply) {
-                return reply;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let reply = client.rpc(method, params.clone()).await;
+        if !waiting(&reply) {
+            return reply;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{method} is served"))
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{method} is served: {reply}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Reconciles the loader's layers with a fixture layer `name` of
