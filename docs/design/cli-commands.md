@@ -187,9 +187,10 @@ Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
 - A queued message runs after the current run ends, one message per run. A
   steered message joins the current run at its next turn boundary.
 - Taking a message back, and interrupting, withdraw the message through
-  `session.input.withdraw`. The text
-  enters the draft only after the withdrawal is deleted. A message that already left
-  the queue is not put back, and its text is not sent again.
+  `session.input.withdraw`. Its content enters the draft only after the withdrawal
+  is deleted. Shift+Left accepts only a single text block; interrupt restores
+  every held message, including its image blocks and stored paste/file links.
+  A message that already left the queue is not put back or sent again.
 - Withdrawals of an interrupt are sent before the stop, so the run does not start the
   next queued message.
 - `Ctrl+C` clears the draft. `Esc` never clears it.
@@ -204,10 +205,12 @@ Only held messages can change; `notHeld` is a notice, not a failed run. Esc
 closes the panel without interrupting. Committed events refresh the panel,
 and changing attachment or shown line closes it.
 
-Recall only withdraws a message with one text block. Images and multi-block
+Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
-text draft replaces their attachments. Stored paste/file links within a single
-text block are kept verbatim. Steering always uses the owner's full held input.
+text draft replaces their attachments. Esc interrupt instead withdraws all held
+messages before stopping, restoring their complete content to the draft, oldest
+first, so they cannot start a new run automatically. Stored paste/file links are
+kept verbatim. Steering always uses the owner's full held input.
 
 ### Queue strip
 
@@ -219,11 +222,11 @@ or the oldest held message when the draft is empty; empty Enter does the same.
 Up/Down remain input history outside the panel.
 
 ```text
-┌─ Queue (2) ─────────────────────────────────────┐
-│ › Incorporating · fix the failing test          │
-│ › Held · then update the design note            │
-│ /queue manage · shift+← edit last · ctrl+s steer │
-└────────────────────────────────────────────────┘
+┌─ Queue (2) ──────────────────────────────────────────────┐
+│ › Incorporating · fix the failing test                   │
+│ › Held · then update the design note                     │
+│ /queue manage · shift+← edit last · ctrl+s steer         │
+└──────────────────────────────────────────────────────────┘
 ```
 
 A queued message the strip does not show adds its count to the hint. The strip shows at most five messages and keeps the height it reached while the queue drains.

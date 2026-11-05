@@ -29942,6 +29942,13 @@
     },
     {
       "from": "dim_cli::model::session",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
       "to": "dim_agent_types::permission",
       "references": [
         "path dim_agent_types::PermissionPolicy",
@@ -31425,6 +31432,7 @@
         "path Update::Compacted",
         "path Update::Context",
         "path Update::EffortChoices",
+        "path Update::Exported",
         "path Update::Failed",
         "path Update::Isolation",
         "path Update::IsolationBackend",
@@ -32319,7 +32327,16 @@
       "from": "dim_cli::ui::composer",
       "to": "dim_agent_types::content",
       "references": [
-        "path dim_agent_types::ContentBlock"
+        "path dim_agent_types::ContentBlock",
+        "path dim_agent_types::ContentBlock::Image",
+        "path dim_agent_types::ContentBlock::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
       ]
     },
     {
@@ -35452,6 +35469,14 @@
     },
     {
       "from": "dim_cli::ui::queue_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "use crate::ui::i18n::t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::queue_panel",
       "to": "dim_cli::ui::list_panel",
       "references": [
         "path Event::Close",
@@ -38119,6 +38144,7 @@
         "path Update::Compacted",
         "path Update::Context",
         "path Update::EffortChoices",
+        "path Update::Exported",
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Isolation",
@@ -39003,6 +39029,13 @@
       "to": "dim_agent_capabilities::prompt_suggestion",
       "references": [
         "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
       ]
     },
     {

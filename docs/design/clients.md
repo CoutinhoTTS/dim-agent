@@ -163,9 +163,9 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 Undesigned capabilities from §3, in feature-list order:
 
 1. Message copying (`/timeline` and its other message actions: [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message)).
-4. A prose reference for protocol v3: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
-5. Questions in the Web workspace: it handles approvals but not `ask_user`, and web-workspace §4 does not list it as deferred.
-6. Session list project/all switch, `/debug`, the remaining `/settings` items, `dimcode upgrade`.
+2. A prose reference for protocol v3: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
+3. Questions in the Web workspace: it handles approvals but not `ask_user`, and web-workspace §4 does not list it as deferred.
+4. Session list project/all switch, `/debug`, the remaining `/settings` items, `dimcode upgrade`.
 
 Documents that disagree with the code or with each other:
 
@@ -205,7 +205,7 @@ flowchart LR
 
 1. **Fullscreen terminal UI.** The code ships it; the overview says it is out of scope. Either accept it in scope (update the overview and CLI commands, and decide whether rollback and `/stats` stay out) or freeze it.
 2. **Web phase 2 scope**, including whether the loopback web entry may carry management methods for settings pages (web-workspace Q2), and whether Questions is required in the Web workspace.
-3. **Which §4 gaps get designs**, and in which milestone: `/timeline` and message actions, `/queue`, queued attachments.
-4. **A protocol v3 reference** (§4 item 4): write one, or keep the code as the reference.
+3. **Which §4 gaps get designs**, and in which milestone: message copying and the remaining `/timeline` actions.
+4. **A protocol v3 reference** (§4 item 2): write one, or keep the code as the reference.
 5. **Milestones for the open client issues**: [#263](https://github.com/arcships/dim/issues/263) (member transcript cards, subagent model policy runtime), [#264](https://github.com/arcships/dim/issues/264) (Workflow view), [#386](https://github.com/arcships/dim/issues/386) (UI events toward the agent).
 6. **Owner of the client lane** in the roadmap.

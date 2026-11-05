@@ -997,9 +997,6 @@ struct App {
     /// The entry a management action the panel sent names, with the label the
     /// panel showed then: the panel may close before the reply lands.
     management_named: Option<(Area, ManagementAction, Option<String>)>,
-    /// Queued messages withdrawn for the draft, by input id, until the host
-    /// confirms each withdrawal; a confirmed one goes into the draft.
-    recovering: Vec<(String, String)>,
     /// The message the Session offered for the turn its composer belongs to.
     suggestion: Option<Suggestion>,
     /// The `prompt-suggestion` switch as last read or written; none until a
@@ -1308,7 +1305,6 @@ impl App {
             fork_draft: None,
             management_edits: Vec::new(),
             management_named: None,
-            recovering: Vec::new(),
             suggestion: None,
             suggestion_setting: None,
             suggestion_methods: false,
@@ -1524,7 +1520,7 @@ impl App {
     /// Sends the oldest queued message in as steering (Ctrl+S, and Enter on an
     /// empty draft).
     fn steer(&mut self) {
-        if let Some((id, _)) = self.queued().into_iter().next() {
+        if let Some(id) = self.queued().into_iter().next() {
             self.host.send(Command::InputControl {
                 input_id: id,
                 action: "steer",
@@ -1546,8 +1542,8 @@ impl App {
 
     /// Withdraws the newest queued message into the draft (Shift+Left).
     fn recall_newest_queued(&mut self) {
-        if let Some((id, text)) = self.queued().pop() {
-            self.withdraw(id, text);
+        if let Some(id) = self.queued().pop() {
+            self.withdraw(id);
         }
     }
 
@@ -1555,12 +1551,15 @@ impl App {
     /// withdrawals reach the session before its stop, so no queued message
     /// starts the next run.
     fn recall_all_queued(&mut self) {
-        for (id, text) in self.queued() {
-            self.withdraw(id, text);
+        for id in self.queued() {
+            self.host.send(Command::InputControl {
+                input_id: id,
+                action: "withdraw",
+            });
         }
     }
 
-    fn withdraw(&mut self, id: String, text: String) {
+    fn withdraw(&mut self, id: String) {
         if self.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot
                 .queued
@@ -1568,30 +1567,15 @@ impl App {
                 .any(|input| input.id == id && !input.recallable)
         }) {
             self.notices.push(
-                "Messages with attachments stay queued; use /queue to steer or delete them".into(),
+                t("Messages with attachments stay queued; use /queue to steer or delete them")
+                    .into(),
             );
             return;
         }
-        self.recovering.push((id.clone(), text));
         self.host.send(Command::InputControl {
             input_id: id,
             action: "withdraw",
         });
-    }
-
-    /// Puts a withdrawn message into the draft after the text already there,
-    /// once the session confirmed the withdrawal.
-    fn restore_withdrawn(&mut self, input_id: &str) {
-        let Some(at) = self.recovering.iter().position(|(id, _)| id == input_id) else {
-            return;
-        };
-        let (_, text) = self.recovering.remove(at);
-        let draft = self.composer.text();
-        if draft.trim().is_empty() {
-            self.set_draft(&text);
-        } else {
-            self.set_draft(&format!("{draft}\n{text}"));
-        }
     }
 
     fn set_notice(&mut self, text: impl Into<String>) {
@@ -1805,7 +1789,7 @@ impl App {
 
     /// Queued inputs, oldest first: submitted while a turn was already
     /// running, without their `input/applied` yet.
-    fn queued(&self) -> Vec<(String, String)> {
+    fn queued(&self) -> Vec<String> {
         self.snapshot
             .as_ref()
             .map(|snapshot| {
@@ -1813,7 +1797,7 @@ impl App {
                     .queued
                     .iter()
                     .filter(|input| input.held)
-                    .map(|input| (input.id.clone(), input.text.clone()))
+                    .map(|input| input.id.clone())
                     .collect()
             })
             .unwrap_or_default()
@@ -1821,7 +1805,17 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Withdrawn { input_id } => self.restore_withdrawn(&input_id),
+            Update::Withdrawn(input) => {
+                self.dismiss_suggestion();
+                self.composer.restore(input);
+            }
+            Update::Exported { format, path } => self.notices.push(tf(
+                "Exported {format}: {path}",
+                &[
+                    ("format", format.label()),
+                    ("path", &crate::sanitize::safe(&path.display().to_string())),
+                ],
+            )),
             Update::Ready(configuration) => {
                 self.label = Some(ModelLabel::new(&configuration));
             }
@@ -2396,7 +2390,7 @@ impl App {
                 }
             }
             Update::Notice(text) => {
-                self.notices.push(text);
+                self.notices.push(t(&text).to_owned());
             }
             Update::Upgrade(offer) => {
                 self.upgrade = Some(UpgradeDialog::new(offer));
@@ -4081,7 +4075,7 @@ impl App {
             "export" => {
                 let mut panel = ListPanel::new(
                     "Export session",
-                    "Enter export · Esc cancel",
+                    t("Enter export · Esc cancel"),
                     "",
                     "",
                     "",
@@ -4541,7 +4535,7 @@ impl App {
                         input.id.clone(),
                         format!(
                             "{} · {}",
-                            if input.held { "Held" } else { "Incorporating" },
+                            t(if input.held { "Held" } else { "Incorporating" }),
                             input.display.as_deref().unwrap_or(&input.text)
                         ),
                     )
@@ -10353,12 +10347,16 @@ mod tests {
             ["withdraw:a", "withdraw:b", "stop"]
         );
         assert!(app.composer.is_empty());
-        app.apply(Update::Withdrawn {
-            input_id: "a".into(),
-        });
-        app.apply(Update::Withdrawn {
-            input_id: "b".into(),
-        });
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "second".into(),
+            }],
+        }));
         assert_eq!(app.composer.text(), "first\nsecond");
     }
 
@@ -10373,9 +10371,11 @@ mod tests {
         )));
         assert_eq!(describe(&sent.borrow()), ["withdraw:b"]);
         assert!(app.composer.is_empty());
-        app.apply(Update::Withdrawn {
-            input_id: "b".into(),
-        });
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "second".into(),
+            }],
+        }));
         assert_eq!(app.composer.text(), "second");
     }
 

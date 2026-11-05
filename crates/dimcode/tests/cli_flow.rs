@@ -2623,6 +2623,7 @@ struct Terminal {
     master: Option<fs::File>,
     child: Child,
     transcript: String,
+    utf8_pending: Vec<u8>,
     consumed: usize,
 }
 impl Terminal {
@@ -2681,8 +2682,22 @@ impl Terminal {
             master: Some(master),
             child: command.spawn().unwrap(),
             transcript: String::new(),
+            utf8_pending: Vec::new(),
             consumed: 0,
         }
+    }
+    fn record(&mut self, bytes: &[u8]) {
+        self.utf8_pending.extend_from_slice(bytes);
+        let complete = match std::str::from_utf8(&self.utf8_pending) {
+            Ok(text) => text.len(),
+            Err(error) => {
+                assert!(error.error_len().is_none(), "non-UTF-8 terminal output");
+                error.valid_up_to()
+            }
+        };
+        self.transcript
+            .push_str(std::str::from_utf8(&self.utf8_pending[..complete]).unwrap());
+        self.utf8_pending.drain(..complete);
     }
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
@@ -2716,8 +2731,7 @@ impl Terminal {
             let mut bytes = [0u8; 4096];
             match self.master.as_mut().unwrap().read(&mut bytes) {
                 Ok(size) if size > 0 => {
-                    self.transcript
-                        .push_str(&String::from_utf8_lossy(&bytes[..size]));
+                    self.record(&bytes[..size]);
                     continue;
                 }
                 Ok(_) => {}
@@ -2810,8 +2824,7 @@ impl Terminal {
                 "Terminal closed before {expected}: {}",
                 self.transcript
             );
-            self.transcript
-                .push_str(&String::from_utf8_lossy(&bytes[..size]));
+            self.record(&bytes[..size]);
         }
     }
     fn write(&mut self, bytes: &[u8]) {
@@ -2833,9 +2846,7 @@ impl Terminal {
                     let mut output = [0u8; 4096];
                     match self.master.as_mut().unwrap().read(&mut output) {
                         Ok(0) => panic!("Terminal output closed while writing"),
-                        Ok(size) => self
-                            .transcript
-                            .push_str(&String::from_utf8_lossy(&output[..size])),
+                        Ok(size) => self.record(&output[..size]),
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                         Err(error) => panic!("{error}"),
                     }
@@ -8239,9 +8250,19 @@ fn tui_export_and_queue_require_an_open_session() {
 
 #[test]
 fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
-    for fullscreen in [false, true] {
+    for (fullscreen, locale) in [
+        (false, "en"),
+        (true, "en"),
+        (false, "zh-CN"),
+        (true, "zh-CN"),
+    ] {
         for format in ["markdown", "json"] {
             let home = Home::new();
+            fs::write(
+                home.0.join("config.json"),
+                json!({"locale":locale}).to_string(),
+            )
+            .unwrap();
             let directory = home.0.join("client");
             fs::create_dir_all(&directory).unwrap();
             let events = json!([
@@ -8273,8 +8294,14 @@ fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
             let mut terminal = Terminal::resume_tui(command);
             terminal.until("test / model");
             terminal.write(b"/export\r");
+            terminal.until(if locale == "en" {
+                "Export session"
+            } else {
+                "导出会话"
+            });
             terminal.until("Markdown (.md)");
             terminal.until("JSON (.json)");
+            terminal.until(if locale == "en" { "cancel" } else { "取消" });
             terminal.write(b"\x1b");
             terminal.until("\x1b[?25h");
             terminal.write(b"/export\r");
@@ -8284,10 +8311,12 @@ fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
                 terminal.write(b"\x1b[B");
             }
             terminal.write(b"\r");
-            terminal.until(&format!(
-                "Exported {}: ",
-                if format == "json" { "JSON" } else { "Markdown" }
-            ));
+            let label = if format == "json" { "JSON" } else { "Markdown" };
+            terminal.until(&if locale == "en" {
+                format!("Exported {label}: ")
+            } else {
+                format!("已导出 {label}：")
+            });
             let files: Vec<_> = fs::read_dir(&directory)
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
@@ -8401,8 +8430,18 @@ fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
 
 #[test]
 fn tui_queue_recall_refuses_attachments_and_steering_preserves_all_content() {
-    for fullscreen in [false, true] {
+    for (fullscreen, locale) in [
+        (false, "en"),
+        (true, "en"),
+        (false, "zh-CN"),
+        (true, "zh-CN"),
+    ] {
         let home = Home::new();
+        fs::write(
+            home.0.join("config.json"),
+            json!({"locale":locale}).to_string(),
+        )
+        .unwrap();
         let content = json!({"content":[
             {"type":"text","text":"compare attachments"},
             {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/one.png"}},
@@ -8432,13 +8471,34 @@ fn tui_queue_recall_refuses_attachments_and_steering_preserves_all_content() {
             command.arg("--fullscreen");
         }
         let mut terminal = Terminal::resume_tui(command);
-        terminal.until("Queue (1)");
+        terminal.until(if locale == "en" {
+            "Queue (1)"
+        } else {
+            "队列（1）"
+        });
         terminal.write(b"\x1b[1;2D");
-        terminal.until("Messages with attachments stay queued");
+        terminal.until(if locale == "en" {
+            "Messages with attachments stay queued"
+        } else {
+            "带附件的消息会留在队列中"
+        });
         terminal.write(b"/queue\r");
-        terminal.until("awaiting application");
+        terminal.until(if locale == "en" {
+            "awaiting application"
+        } else {
+            "暂存中 · 等待应用"
+        });
+        terminal.until(if locale == "en" {
+            "delete held"
+        } else {
+            "删除暂存消息"
+        });
         terminal.write(b"\r");
-        terminal.until("No queued messages.");
+        terminal.until(if locale == "en" {
+            "No queued messages."
+        } else {
+            "队列中没有消息。"
+        });
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
@@ -8610,46 +8670,95 @@ fn tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress() {
 
 #[test]
 fn tui_escape_withdraws_the_queue_before_the_run_stops() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
-        wire.hello(&[]);
-        wire.created();
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
-        let history = wire.read("session.history");
-        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        wire.no_context();
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
-        let first = wire.read("session.submit");
-        assert_eq!(first["params"]["text"], "first");
-        wire.reply(&first, json!({"event":{}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
-        let queued = wire.read("session.submit");
-        assert_eq!(queued["params"]["text"], "second");
-        assert_eq!(queued["params"]["mode"], "queue");
-        wire.reply(&queued, json!({"event":{}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-2","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}}));
-        let withdraw = wire.read("session.input.withdraw");
-        assert_eq!(withdraw["params"]["inputId"], "in-2");
-        assert!(withdraw["params"].get("steer").is_none());
-        wire.reply(&withdraw, json!({"status":"deleted","sequence":12}));
-        let stop = wire.read("session.stop");
-        wire.reply(&stop, json!({"sequence":13}));
-    });
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("test / model");
-    terminal.write(b"first\r");
-    terminal.until("first");
-    terminal.until("working…");
-    terminal.write(b"second\r");
-    terminal.until("Queue (2)");
-    terminal.write(b"\x1b");
-    daemon.join().unwrap();
-    home.kill(&terminal);
-    terminal.wait();
+    for fullscreen in [false, true] {
+        for (draft, content, expected) in [
+            (
+                "existing draft",
+                json!([{"type":"text","text":"first"}]),
+                json!({"text":"existing draft\nfirst\nsecond"}),
+            ),
+            (
+                "!existing draft",
+                json!([{"type":"text","text":"first"}]),
+                json!({"text":"existing draft\nfirst\nsecond"}),
+            ),
+            (
+                "existing draft",
+                json!([
+                    {"type":"text","text":"compare"},
+                    {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/queued.png"}},
+                    {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)"}
+                ]),
+                json!({"user":{"content":[
+                    {"type":"text","text":"existing draft\ncompare"},
+                    {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/queued.png"}},
+                    {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)\nsecond"}
+                ]}}),
+            ),
+            (
+                "existing draft",
+                json!([{ "type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/image-only.png"}}]),
+                json!({"user":{"content":[
+                    {"type":"text","text":"existing draft\n"},
+                    {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/image-only.png"}},
+                    {"type":"text","text":"\nsecond"}
+                ]}}),
+            ),
+        ] {
+            let home = Home::new();
+            let (checked, checked_done) = std::sync::mpsc::channel();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[]);
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(&history, json!({"events":[
+                    {"id":"first","sequence":7,"create_at":1,"type":"input","name":"message","data":{"user":{"content":content},"mode":"queue"}},
+                    {"id":"second","sequence":8,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}
+                ],"through":8,"nextAfter":8,"done":true}));
+                wire.no_context();
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+                for (index, input) in ["first", "second"].into_iter().enumerate() {
+                    let withdraw = wire.read("session.input.withdraw");
+                    assert_eq!(withdraw["params"]["inputId"], input);
+                    assert!(withdraw["params"].get("steer").is_none());
+                    wire.reply(&withdraw, json!({"status":"deleted","sequence":9+index}));
+                    wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":format!("deleted-{input}"),"sequence":9+index,"create_at":1,"type":"input","name":"deleted","data":{"input_id":input}}}));
+                }
+                let stop = wire.read("session.stop");
+                wire.reply(&stop, json!({"sequence":11}));
+                wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+                wire.event(11, "text", json!({"turn_id":"t","request_id":"r","delta":"interrupt settled"}));
+                wire.no_context();
+                let submitted = wire.read("session.submit");
+                assert_eq!(submitted["params"]["mode"], "queue");
+                for key in ["text", "user"] {
+                    assert_eq!(submitted["params"][key], expected[key]);
+                }
+                wire.reply(&submitted, json!({"event":{}}));
+                checked.send(()).unwrap();
+                wire.hold();
+            });
+            let mut command = home.command();
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::resume_tui(command);
+            terminal.until("Queue (2)");
+            terminal.until_anywhere("working…");
+            terminal.until("\x1b[?2026l");
+            terminal.write(draft.as_bytes());
+            terminal.write(b"\x1b");
+            terminal.until("interrupt settled");
+            terminal.write(b"\r");
+            checked_done.recv_timeout(PATIENCE).unwrap();
+            home.kill(&terminal);
+            terminal.wait();
+            daemon.join().unwrap();
+        }
+    }
 }
 
 #[test]

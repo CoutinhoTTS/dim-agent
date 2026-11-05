@@ -173,6 +173,36 @@ impl Composer {
         self.area.set_cursor(text.len());
     }
 
+    /// Appends withdrawn input after the current draft, preserving image blocks.
+    pub fn restore(&mut self, input: dim_agent_types::UserInput) {
+        self.shell = None;
+        self.area.set_cursor(self.area.text().len());
+        if !self.area.text().trim().is_empty() {
+            self.area.insert_str("\n");
+        }
+        for block in input.content {
+            match block {
+                dim_agent_types::ContentBlock::Text { text } => self.area.insert_str(&text),
+                block @ dim_agent_types::ContentBlock::Image { .. } => {
+                    let buffer = "[Image]".to_owned();
+                    let id =
+                        self.area
+                            .insert_element(&buffer, TOKEN_KIND, Some(token_line(&buffer)));
+                    self.tokens.push(Token {
+                        id,
+                        label: buffer.clone(),
+                        buffer,
+                        content: String::new(),
+                        block: Some(block),
+                        file: None,
+                        details: String::new(),
+                    });
+                }
+            }
+        }
+        self.renumber();
+    }
+
     /// Appends `text` to the draft as a Markdown quote and a blank line,
     /// keeping what is already there; the cursor goes to the end. The
     /// format is the one the Web composer writes (member-conversation

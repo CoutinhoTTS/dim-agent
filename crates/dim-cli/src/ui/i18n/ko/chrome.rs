@@ -1,5 +1,29 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "대기열",
+        "Export session" => "세션 내보내기",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter steer · x 보류 중인 메시지 삭제 · Esc 닫기"
+        }
+        "No queued messages." => "대기열에 메시지가 없습니다.",
+        "Held · awaiting application" => "보류 중 · 적용 대기",
+        "Incorporating · awaiting model consumption" => "반영 중 · 모델 읽기 대기",
+        "Held" => "보류 중",
+        "Incorporating" => "반영 중",
+        "Enter export · Esc cancel" => "Enter 내보내기 · Esc 취소",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "첨부 파일이 있는 메시지는 대기열에 남습니다. /queue에서 steer하거나 삭제하세요"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue 관리 · shift+← 마지막 편집 · ctrl+s 지금 steer"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count}개 더 · /queue 관리 · shift+← 마지막 편집 · ctrl+s 지금 steer"
+        }
+        "steer or delete queued messages" => "대기열 메시지 steer 또는 삭제",
+        "export this conversation" => "이 대화 내보내기",
+        "That message has already left the queue." => "해당 메시지는 이미 대기열에서 나갔습니다.",
+        "Exported {format}: {path}" => "{format} 내보내기 완료: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 출력/멤버 중단 · x 명령 중지 · Esc 닫기"

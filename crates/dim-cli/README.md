@@ -260,9 +260,10 @@ fixed main-branch history. Existing files are never overwritten.
 Up/Down selects a row; Enter steers a held message and `x` deletes it. Applied
 messages are labelled Incorporating and cannot be withdrawn; a raced operation
 reports that the input has already left the queue. Esc closes the panel.
-Shift+Left and interrupt recall keep messages with images or multiple content
-blocks queued with a notice rather than losing attachments. Plain text, including
-stored paste/file links, is restored unchanged after withdrawal succeeds.
+Shift+Left keeps messages with images or multiple content blocks queued with a
+notice rather than losing attachments. Esc interrupt withdraws every held message
+before stopping and restores its complete content, including images and stored
+paste/file links, after withdrawal succeeds. No held message starts another run.
 
 ```text
 Queue

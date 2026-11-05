@@ -1388,14 +1388,7 @@ impl Worker {
                 match crate::export::write(&mut self.client, &self.session_id, format, Some(&path))
                     .await
                 {
-                    Ok(()) => self.report(
-                        format!(
-                            "Exported {}: {}",
-                            format.label(),
-                            crate::sanitize::safe(&path.display().to_string())
-                        ),
-                        false,
-                    ),
+                    Ok(()) => self.send(Update::Exported { format, path }),
                     Err(error) => self.report(error.to_string(), true),
                 }
             }
@@ -1957,9 +1950,9 @@ impl Worker {
                     "branchId": self.focus,
                     "inputId": input_id,
                 });
+                let user = self.shown().held_input(&input_id).cloned();
                 if action == "steer" {
-                    let user = self.shown().held_input(&input_id).cloned();
-                    let Some(user) = user else {
+                    let Some(user) = &user else {
                         self.send(Update::Notice(QUEUE_LEFT.into()));
                         return Ok(());
                     };
@@ -1969,20 +1962,21 @@ impl Worker {
                 struct Withdrawn {
                     status: String,
                 }
-                match self
+                let result = self
                     .client
                     .typed::<Withdrawn>("session.input.withdraw", params)
-                    .await
-                {
-                    Ok(withdrawn) if withdrawn.status == "notHeld" => {
+                    .await;
+                match (result, user) {
+                    (Ok(withdrawn), _) if withdrawn.status == "notHeld" => {
                         self.send(Update::Notice(QUEUE_LEFT.into()))
                     }
-                    Ok(withdrawn) if withdrawn.status == "deleted" && action == "withdraw" => self
-                        .send(Update::Withdrawn {
-                            input_id: input_id.clone(),
-                        }),
-                    Ok(_) => {}
-                    Err(error) => self.send(Update::Notice(error.to_string())),
+                    (Ok(withdrawn), Some(user))
+                        if withdrawn.status == "deleted" && action == "withdraw" =>
+                    {
+                        self.send(Update::Withdrawn(user));
+                    }
+                    (Ok(_), _) => {}
+                    (Err(error), _) => self.send(Update::Notice(error.to_string())),
                 }
             }
         }

@@ -1,5 +1,31 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "キュー",
+        "Export session" => "セッションをエクスポート",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter steer · x 保留中のメッセージを削除 · Esc 閉じる"
+        }
+        "No queued messages." => "キューにメッセージはありません。",
+        "Held · awaiting application" => "保留中 · 適用待ち",
+        "Incorporating · awaiting model consumption" => "取り込み中 · モデルの読み取り待ち",
+        "Held" => "保留中",
+        "Incorporating" => "取り込み中",
+        "Enter export · Esc cancel" => "Enter エクスポート · Esc キャンセル",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "添付ファイル付きのメッセージはキューに残ります。/queue で steer または削除してください"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue 管理 · shift+← 最後を編集 · ctrl+s 今すぐ steer"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count} 件 · /queue 管理 · shift+← 最後を編集 · ctrl+s 今すぐ steer"
+        }
+        "steer or delete queued messages" => "キューのメッセージを steer または削除",
+        "export this conversation" => "この会話をエクスポート",
+        "That message has already left the queue." => {
+            "そのメッセージはすでにキューから外れています。"
+        }
+        "Exported {format}: {path}" => "{format} をエクスポートしました: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 出力/メンバー中断 · x コマンド停止 · Esc 閉じる"

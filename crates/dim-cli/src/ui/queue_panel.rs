@@ -1,5 +1,6 @@
 use crate::model::view::ViewSnapshot;
 use crate::sanitize::safe;
+use crate::ui::i18n::t;
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
@@ -20,7 +21,7 @@ impl QueuePanel {
             focus: snapshot.focus.clone(),
             list: ListPanel::new(
                 "Queue",
-                "Enter steer · x delete held · Esc close",
+                t("Enter steer · x delete held · Esc close"),
                 "",
                 "No queued messages.",
                 "No queued messages.",
@@ -48,11 +49,11 @@ impl QueuePanel {
                 Item::new(
                     input.id.clone(),
                     safe(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
-                    if input.held {
+                    t(if input.held {
                         "Held · awaiting application"
                     } else {
                         "Incorporating · awaiting model consumption"
-                    },
+                    }),
                 )
             })
             .collect();
