@@ -14,24 +14,30 @@ use rutis::Disposer;
 use rutis::host::FiberStatusChanged;
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 use tokio::sync::{mpsc, watch};
+use tokio_util::task::TaskTracker;
 
 /// Replacing, detaching or closing ends the subscription and its listener.
 pub(super) struct Attachment {
     pub generation: u64,
-    pub _usage: Option<crate::agents::SessionUse>,
+    /// Released when the attachment is dropped, after `retire` awaited the
+    /// work below.
+    pub _usage: crate::agents::SessionUse,
     pub cancel: CancellationToken,
     pub listener: Option<Disposer>,
     /// v3: signals plugin activation, so a reloaded progress cell is reacquired.
     pub availability: Option<Disposer>,
     /// The `follow` and `follow_mcp` tasks this subscription spawned.
-    pub tasks: Vec<tokio::task::JoinHandle<()>>,
+    pub tasks: TaskTracker,
     pub delivery: Arc<Delivery>,
 }
 impl Attachment {
     /// Ends the subscription and waits until nothing of it remains: the
     /// listeners are disposed, the tasks it spawned have returned, and the
     /// usage is released last, so a later attach, detach or finish starts
-    /// from none of it. Disposal errors are logged, never dropped.
+    /// from none of it. Disposal errors are logged, never dropped. When the
+    /// follow task ends the Session itself it removes its own attachment and
+    /// this value is dropped instead; that runs off-thread, so `finish`
+    /// settles such a subscription by its absence from the map.
     pub(super) async fn retire(mut self) {
         self.cancel.cancel();
         for disposer in [self.listener.take(), self.availability.take()]
@@ -42,17 +48,14 @@ impl Attachment {
                 tracing::warn!(%error, "subscription listener disposal failed");
             }
         }
-        for task in self.tasks.drain(..) {
-            if let Err(error) = task.await {
-                tracing::warn!(%error, "subscription task ended abnormally");
-            }
-        }
-        drop(self._usage.take());
+        self.tasks.close();
+        self.tasks.wait().await;
     }
 }
 impl Drop for Attachment {
-    /// Panic/abort fallback only: `retire` awaits these, but a drop must not
-    /// block, so it cancels and runs the disposal off-thread.
+    /// The fallback that cannot wait: the Session ended and the follow task
+    /// removed its own attachment, or the attach reply could not be sent.
+    /// Cancels and runs the listener disposal off-thread.
     fn drop(&mut self) {
         self.cancel.cancel();
         for listener in [self.listener.take(), self.availability.take()]
@@ -506,6 +509,7 @@ impl Connection {
         };
         let (availability, active) = availability.unzip();
         let ended = session.is_closing();
+        let tasks = TaskTracker::new();
         // The reply carries the count this attach produces. The hub reads every
         // connection's attachment map, including this one's, and the reply must
         // be sent under that same map so no notice precedes it.
@@ -516,12 +520,12 @@ impl Connection {
             let previous = attachments.insert(
                 session_id.clone(),
                 Attachment {
-                    _usage: Some(usage),
+                    _usage: usage,
                     generation,
                     cancel: cancel.clone(),
                     listener: Some(listener),
                     availability,
-                    tasks: Vec::new(),
+                    tasks: tasks.clone(),
                     delivery,
                 },
             );
@@ -585,19 +589,18 @@ impl Connection {
                 approval_request(version, &session_id, branch_id.to_owned(), request.clone()),
             );
         });
-        let mut tasks = Vec::new();
         if version >= 3 && rpc.mcp.is_some() {
             let this = self.clone();
             let host = host.clone();
             let session = session.clone();
             let cancel = cancel.clone();
-            tasks.push(self.subscriptions.spawn(async move {
+            tasks.spawn(async move {
                 this.follow_mcp(host, session, generation, cancel).await;
-            }));
+            });
         }
         let this = self.clone();
         let followed = session_id.clone();
-        tasks.push(self.subscriptions.spawn(async move {
+        tasks.spawn(async move {
             this.follow(
                 session, generation, cancel, watched, receiver, active, ended,
             )
@@ -611,17 +614,7 @@ impl Connection {
                 this.hub.ui.detach(&this.id, &followed);
                 this.hub.notify_clients(&followed);
             }
-        }));
-        // The transition lock keeps this attach's window private: no detach,
-        // attach or finish can retire this attachment before its tasks are
-        // recorded. A follow task that already ended removed the entry, and
-        // then there is nothing left to wait for.
-        let mut attachments = self.attachments.lock().expect("attachments");
-        if let Some(attachment) = attachments.get_mut(&session_id)
-            && attachment.generation == generation
-        {
-            attachment.tasks = tasks;
-        }
+        });
         Ok(())
     }
 

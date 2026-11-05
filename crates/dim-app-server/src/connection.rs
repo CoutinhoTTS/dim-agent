@@ -73,7 +73,6 @@ pub(crate) struct Connection {
     /// is in flight and the window an attachment lives in is private.
     transitions: tokio::sync::Mutex<()>,
     next_attachment: AtomicU64,
-    subscriptions: TaskTracker,
 }
 struct Inflight {
     connection: Arc<Connection>,
@@ -109,7 +108,6 @@ impl Connection {
             attachments: Mutex::new(HashMap::new()),
             transitions: tokio::sync::Mutex::new(()),
             next_attachment: AtomicU64::new(1),
-            subscriptions: TaskTracker::new(),
         });
         connection
             .hub
@@ -145,9 +143,9 @@ impl Connection {
         }
         self.hub.ui.release(&self.id);
         self.hub.ui.finished(&self.id);
-        // Every attachment settles before the connection's task tracker is
-        // closed: a detached connection leaves no listener, task or usage
-        // behind for the Session's next attach.
+        // Every attachment settles before the connection ends: a detached
+        // connection leaves no listener, task or usage behind for the
+        // Session's next attach.
         let _transition = self.transitions.lock().await;
         let (sessions, attachments): (Vec<String>, Vec<Attachment>) = {
             let mut attachments = self.attachments.lock().expect("attachments");
@@ -167,8 +165,6 @@ impl Connection {
             attachment.retire().await;
         }
         drop(_transition);
-        self.subscriptions.close();
-        self.subscriptions.wait().await;
         self.hub
             .connections
             .lock()
@@ -1778,19 +1774,6 @@ impl ConnectionHub {
     #[cfg(feature = "testing")]
     pub(crate) fn take_attach_failure(&self) -> bool {
         self.fail_attach.swap(false, Ordering::SeqCst)
-    }
-    /// Subscription tasks the live connections still track. A detach or
-    /// finish awaits its attachment, so a settled connection reads its
-    /// baseline here. Feature `testing` only.
-    #[cfg(feature = "testing")]
-    pub(crate) fn live_subscriptions(&self) -> usize {
-        self.connections
-            .lock()
-            .expect("connection index")
-            .values()
-            .filter_map(Weak::upgrade)
-            .map(|connection| connection.subscriptions.len())
-            .sum()
     }
     fn set_client_emitter(&self, ctx: rutis::Ctx) {
         *self.client_emitter.lock().expect("client emitter") = Some(ctx);

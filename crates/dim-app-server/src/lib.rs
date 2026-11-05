@@ -280,15 +280,6 @@ impl RunningServer {
             .get::<ConnectionHub>()
             .map(|hub| hub.hold_next_follow())
     }
-    /// Subscription tasks the server's live connections still track: zero
-    /// once every attach, detach and finish has settled. Feature `testing`
-    /// only.
-    #[cfg(feature = "testing")]
-    pub fn live_subscriptions(&self) -> usize {
-        self.root
-            .get::<ConnectionHub>()
-            .map_or(0, |hub| hub.live_subscriptions())
-    }
     /// Makes the next attach fail its listener registration. Feature `testing`
     /// only.
     #[cfg(feature = "testing")]
