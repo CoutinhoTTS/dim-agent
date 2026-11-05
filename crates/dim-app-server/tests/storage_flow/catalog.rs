@@ -273,8 +273,9 @@ async fn catalog_projection_preserves_the_preview_window_and_commits_atomically(
 
 /// #1099: the v34 data-only step rewrites `session_catalog.updated_at_ms`
 /// as the newest activity event on `main`. A store whose row was inflated by
-/// a trailing `branch/resume` is recomputed to the last activity event, and
-/// a Session with no activity at all lands on its creation time.
+/// a trailing `branch/resume` is recomputed to the last activity event, a
+/// Session with no activity at all lands on its creation time, and every
+/// other column of both rows stays as stored.
 #[tokio::test]
 async fn a_v33_store_recomputes_the_catalog_activity_time_on_upgrade() {
     let database = Database::new();
@@ -332,14 +333,34 @@ async fn a_v33_store_recomputes_the_catalog_activity_time_on_upgrade() {
             ],
         )
         .unwrap();
-    // The v33 writer gave both rows the trailing resume's time; the upgrade
-    // must put them back on the rule.
+    // The v33 writer gave both rows the trailing resume's time. `inflated`
+    // carries its first user text as the preview, as a v33 row of a Session
+    // with a user message does.
     connection
         .execute(
-            "INSERT INTO session_catalog VALUES ('inflated', 9000, NULL, '/w'), ('quiet', 9000, NULL, '/w')",
+            "INSERT INTO session_catalog VALUES ('inflated', 9000, 'Hi', '/w'), ('quiet', 9000, NULL, '/w')",
             [],
         )
         .unwrap();
+    let stored = |connection: &Connection, session: &str| {
+        connection
+            .query_row(
+                "SELECT updated_at_ms, preview, cwd FROM session_catalog WHERE session_id=?1",
+                [session],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let before = [
+        stored(&connection, "inflated"),
+        stored(&connection, "quiet"),
+    ];
     drop(connection);
 
     let db = SqliteStorage::open(database.0.clone()).unwrap();
@@ -347,23 +368,17 @@ async fn a_v33_store_recomputes_the_catalog_activity_time_on_upgrade() {
     let connection = Connection::open(&database.0).unwrap();
     assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
     assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
-    let updated = |session: &str| {
-        connection
-            .query_row(
-                "SELECT updated_at_ms FROM session_catalog WHERE session_id=?1",
-                [session],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap()
+    let recomputed = |before: &(i64, Option<String>, String), time: i64| {
+        (time, before.1.clone(), before.2.clone())
     };
     assert_eq!(
-        updated("inflated"),
-        1000,
-        "a trailing branch/resume no longer inflates the row"
+        stored(&connection, "inflated"),
+        recomputed(&before[0], 1000),
+        "the upgrade puts the row back on the rule and changes nothing else"
     );
     assert_eq!(
-        updated("quiet"),
-        200,
+        stored(&connection, "quiet"),
+        recomputed(&before[1], 200),
         "a Session with no activity sits at its creation time"
     );
     drop(connection);
