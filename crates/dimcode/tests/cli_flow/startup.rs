@@ -346,10 +346,9 @@ fn resume_startup_is_adopted_or_explicitly_rejected_before_input_in_every_client
             if tui {
                 let mut terminal = Terminal::launch_tui(command);
                 terminal.until("Cannot adopt startup configuration");
-                if !leaf {
-                    terminal.signal(libc::SIGKILL);
-                }
-                assert!(!terminal.wait().success());
+                assert_eq!(terminal.wait().code(), Some(1));
+                assert_ne!(terminal.local_mode() & libc::ICANON, 0);
+                assert_ne!(terminal.local_mode() & libc::ECHO, 0);
                 assert!(!terminal.transcript.contains("resume-secret"));
             } else {
                 let output = command.args(["exec", "-p", "Hello"]).output().unwrap();

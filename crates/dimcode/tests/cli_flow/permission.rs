@@ -17,6 +17,66 @@ fn branch() -> Value {
     json!({"sessionId":"session","branchId":"main"})
 }
 
+#[test]
+fn tui_resume_requires_the_explicit_permission_before_attaching() {
+    for fullscreen in [false, true] {
+        for leaf in [false, true] {
+            for failure in ["unsupported", "read", "update"] {
+                let home = Home::new();
+                let daemon = home.daemon(move |wire| {
+                    let mut methods = Vec::new();
+                    if leaf {
+                        methods.push("ui.leaf.2");
+                    }
+                    if failure != "unsupported" {
+                        methods.extend(PRESET_METHODS);
+                    }
+                    wire.hello(&methods);
+                    if failure != "unsupported" {
+                        let get = wire.read("session.permission.get");
+                        assert_eq!(get["params"], branch());
+                        if failure == "read" {
+                            fail(wire, &get, "service_reloading");
+                        } else {
+                            wire.reply(
+                                &get,
+                                json!({"version":7,"policy":policy("full-access", &["fixture-tool"], &["blocked"])}),
+                            );
+                            let update = wire.read("session.permission.update");
+                            assert_eq!(
+                                update["params"],
+                                json!({"sessionId":"session","branchId":"main","expectedVersion":7,
+                                    "policy":policy("read-only", &["fixture-tool"], &["blocked"])})
+                            );
+                            fail(wire, &update, "permission_failed");
+                        }
+                    }
+                    assert_eq!(
+                        wire.trailing_request(),
+                        None,
+                        "a refused explicit permission must not adopt, attach, open a UI or submit"
+                    );
+                });
+                let mut command = home.command();
+                command.args(["--permission", "read-only", "--model", "replacement"]);
+                if fullscreen {
+                    command.arg("--fullscreen");
+                }
+                let mut terminal = Terminal::resume_tui(command);
+                terminal.until(match failure {
+                    "unsupported" => "cannot change a Session's permission preset",
+                    "read" => "fixture service_reloading",
+                    _ => "fixture permission_failed",
+                });
+                assert_eq!(terminal.wait().code(), Some(1));
+                assert_ne!(terminal.local_mode() & libc::ICANON, 0);
+                assert_ne!(terminal.local_mode() & libc::ECHO, 0);
+                daemon.join().unwrap();
+            }
+        }
+    }
+}
+
 /// One submitted turn that completes without tool calls.
 fn quiet_turn(wire: &mut Wire) {
     let submit = wire.read("session.submit");

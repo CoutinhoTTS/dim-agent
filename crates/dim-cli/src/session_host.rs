@@ -457,12 +457,7 @@ async fn run(
         ..Default::default()
     })));
     if let Err(error) = worker.open().await {
-        let failure = if worker.client.offers("ui.leaf.2") {
-            Update::StartupFailed
-        } else {
-            Update::Failed
-        };
-        let _ = updates.send(failure(error.to_string()));
+        let _ = updates.send(Update::StartupFailed(error.to_string()));
         return;
     }
     loop {
@@ -732,6 +727,17 @@ impl Worker {
     /// Resumes the requested Session; an ordinary startup stays at Home.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
+            if let Some(preset) = self.options.permission {
+                if !self.client.supports(&permission::PRESET_METHODS) {
+                    return Err(
+                        "This daemon cannot change a Session's permission preset; omit --permission"
+                            .into(),
+                    );
+                }
+                permission::select(&mut self.client, &id, preset)
+                    .await
+                    .map_err(|error| format!("Cannot set the permission preset: {error}"))?;
+            }
             adopt_startup(&mut self.client, &self.options, &id).await?;
             return self.attach(id, SwitchKind::Resumed).await;
         }
@@ -826,14 +832,6 @@ impl Worker {
         kind: SwitchKind,
         attached_session: String,
     ) -> crate::Result<()> {
-        if let (SwitchKind::Resumed, Some(preset)) = (kind, self.options.permission)
-            && self.client.supports(&permission::PRESET_METHODS)
-            && let Err(error) = permission::select(&mut self.client, &session_id, preset).await
-        {
-            self.send(Update::Notice(format!(
-                "The permission preset was not applied: {error}"
-            )));
-        }
         if !attached_session.is_empty() && attached_session != session_id {
             self.client
                 .rpc("session.detach", json!({"sessionId": attached_session}))
@@ -1285,6 +1283,15 @@ impl Worker {
                 }
             }
             Command::Resume(session_id) => {
+                if let Some(preset) = self.options.permission
+                    && self.client.supports(&permission::PRESET_METHODS)
+                    && let Err(error) =
+                        permission::select(&mut self.client, &session_id, preset).await
+                {
+                    self.send(Update::Notice(format!(
+                        "The permission preset was not applied: {error}"
+                    )));
+                }
                 self.attach(session_id, SwitchKind::Resumed).await?;
             }
             Command::ListSessions {

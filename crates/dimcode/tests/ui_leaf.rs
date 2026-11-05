@@ -450,12 +450,27 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
     wait_unregistered(&mut rpc, &pty, &ui_id);
 
     let sessions = rpc.ok("session.summaries", json!({}));
+    let permission = rpc.ok(
+        "session.permission.get",
+        json!({"sessionId":first_session,"branchId":"main"}),
+    );
+    assert_ne!(permission["policy"]["preset"], "read-only");
     let resumed_pty = Pty::new();
-    let mut resumed = home.dimcode(&resumed_pty, &["--resume", &first_session]);
+    let mut resumed = home.dimcode(
+        &resumed_pty,
+        &["--resume", &first_session, "--permission", "read-only"],
+    );
     let leaf = wait_new_online(&mut rpc, &resumed_pty, &[]);
     let resumed_id = leaf["uiId"].as_str().unwrap();
     assert_eq!(leaf["sessionId"], first_session);
     assert_eq!(instances(&mut rpc).len(), 1);
+    let resumed_permission = rpc.ok(
+        "session.permission.get",
+        json!({"sessionId":first_session,"branchId":"main"}),
+    );
+    let mut expected_policy = permission["policy"].clone();
+    expected_policy["preset"] = json!("read-only");
+    assert_eq!(resumed_permission["policy"], expected_policy);
     assert_eq!(
         rpc.ok("session.summaries", json!({}))
             .as_array()

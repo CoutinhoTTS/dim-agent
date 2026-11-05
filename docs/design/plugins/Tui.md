@@ -357,9 +357,11 @@ a model at Home. A failed creation is reported at that submission and leaves
 Home available for configuration and retry. No UI leaf exists until a Session
 has been attached; the same `Tui` then opens its leaf with the existing
 `ui.open` contract. `--resume` still attaches immediately and adopts startup
-overrides before accepting input. Headless execution is unchanged. No fake
-model, implicit model substitution, new protocol or background setup process
-is introduced.
+overrides before accepting input. An explicit `--permission` must be applied
+before attachment; unsupported preset methods or a failed permission change
+abort startup without attaching or accepting input. Headless execution is
+unchanged. No fake model, implicit model substitution, new protocol or
+background setup process is introduced.
 
 ```text
 start -> Tui Home -> first message -> create / attach -> ui.open / ui.attach -> submit
@@ -389,7 +391,7 @@ listener of their names. The contract reserved here is unchanged:
 | Daemon still assembling when the client polls | The socket does not exist yet; the client keeps polling until the deadline. The daemon's `startup_timeout` is independent of the client's 10 s; a slow managed-plugin start surfaces as "App Server startup timed out; see daemon.log". |
 | Connection drops while the TUI runs | **Not a provider replacement.** The TUI keeps its draft and reports the failure. There is no automatic reconnect in the session thread. |
 | `apply` of `Tui` fails after raw mode was entered | The terminal effect was registered before raw mode, so rutis runs it on the failed load; the error is printed on a restored terminal. |
-| Resuming on a leaf-capable daemon fails during startup | Show the error, restore the terminal and exit nonzero. No new Session is created. |
+| Resuming fails during startup, with or without leaf support | Show the error, restore the terminal and exit nonzero. No new Session is created. |
 | Ctrl+C in the TUI | A key event in raw mode, handled by the render thread (cancel the turn or quit), as today. A SIGTERM or SIGHUP reaches the leaf process like any shell-started TUI; its terminal guard restores, and the session ends with the process. |
 | Daemon exits while a client holds `Client` | A direct TUI shows the failure and keeps running until the user quits. A leaf's session ends with the daemon, so the leaf disposes its tree (terminal restored) and exits. No automatic daemon restart from a running client. |
 | `daemon stop` while another client is attached | The daemon shuts down after settlement (`daemon.shutdown.completed`); disposing `UiHostPlugin` closes each leaf's session, and each leaf disposes its tree (terminal restored) and exits. |
@@ -449,7 +451,7 @@ Unchanged artifacts; the plugins are compiled into the client and ship with it, 
 | `release-manifest.json`, `SHA256SUMS` | Provenance | None |
 | Development: `./dev` | Build the executable, stage the local plugin archive, start the daemon through the CLI | None; the CLI still spawns the daemon the same way |
 
-No loader row is added, so there is nothing to enable, disable or persist ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)). Normal `dimcode` startup uses the daemon's internal `ui.open` management RPC; there is no `dimcode ui open` command. Whether the TUI or ACP front end runs is decided by the subcommand, as today. A client loader with `Builtins` rows (so that front ends could be toggled by configuration) is possible later without changing this document's plugins; it is out of scope.
+No loader row is added, so there is nothing to enable, disable or persist ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)). The first Session attachment uses the daemon's internal `ui.open` management RPC when leaf support is available; there is no `dimcode ui open` command. Whether the TUI or ACP front end runs is decided by the subcommand, as today. A client loader with `Builtins` rows (so that front ends could be toggled by configuration) is possible later without changing this document's plugins; it is out of scope.
 
 ## 8. Security
 
