@@ -304,7 +304,11 @@ impl Wakeups {
         let now = Utc::now();
         let snapshot = read(&self.shared.files).await?;
         let grace = Duration::seconds(GRACE_SECONDS);
-        let due: Vec<Wakeup> = snapshot
+        // Overdue records reach one Session in `at` order, which is the order
+        // their prompts were due, with the record id as the stable tie-breaker
+        // between records sharing an instant; the file's order is not a
+        // contract (§10.3).
+        let mut due: Vec<Wakeup> = snapshot
             .iter()
             .filter(|wakeup| wakeup.state == WakeupState::Scheduled)
             .filter(|wakeup| {
@@ -312,6 +316,7 @@ impl Wakeups {
             })
             .cloned()
             .collect();
+        due.sort_by(|a, b| a.at.cmp(&b.at).then(a.wakeup_id.cmp(&b.wakeup_id)));
         let stale: Vec<Wakeup> = snapshot
             .iter()
             .filter(|wakeup| wakeup.state == WakeupState::Scheduled)

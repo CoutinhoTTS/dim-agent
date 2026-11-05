@@ -477,7 +477,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 
 ### 10.3 触发与取消边界
 
-定时器把唤醒求值与任务窗口放在同一个每秒一趟的通道里；没有第二个调度器，也不经过 Job 引擎路径。`scheduled` 记录的时刻在宽限窗口内被观察到时触发一次：进程所有者经公共 `sessions.input` 写一个 Queue 输入，`submissionId` 为 `wakeup:<wakeup_id>`，首个 raw 块为 `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`，提示词作为内容。除此之外什么都不调：没有 `sessions.launch`、没有 `sessions.stop`、没有 `withdraw`、没有截止期。
+定时器把唤醒求值与任务窗口放在同一个每秒一趟的通道里；没有第二个调度器，也不经过 Job 引擎路径。`scheduled` 记录的时刻在宽限窗口内被观察到时触发一次：进程所有者经公共 `sessions.input` 写一个 Queue 输入，`submissionId` 为 `wakeup:<wakeup_id>`，首个 raw 块为 `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`，提示词作为内容。除此之外什么都不调：没有 `sessions.launch`、没有 `sessions.stop`、没有 `withdraw`、没有截止期。同一趟里多条到期的记录按其时刻（`at`）顺序到达各自的 Session，时刻相同的按记录 id 排序；文件顺序不是契约。
 
 目标自己的 InputQueue 与回合调度器决定输入变成什么：空闲 Session 起一个回合，运行中的在 `turn/end` 后每回合一个地排队，已卸载的 Session 由 `sessions.input` 内部的 acquire 恢复。Session 保持其 id、`main` 分支与整条 Timeline；fork 是不同的 Session id，不继承任何东西。
 

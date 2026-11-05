@@ -519,7 +519,7 @@ The `wakeup` tool takes `{at, prompt}` and defaults the Session and branch to th
 
 ### 10.3 Firing and the cancel boundary
 
-The timer evaluates wakeups as part of the same one-second pass as job windows; there is no second scheduler and no Job-engine path. A `scheduled` record whose instant is observed within the grace window fires once: the process owner writes one Queue input through the public `sessions.input` with `submissionId` `wakeup:<wakeup_id>`, a first raw block `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`, and the prompt as content. Nothing else is called: no `sessions.launch`, no `sessions.stop`, no `withdraw`, no deadline.
+The timer evaluates wakeups as part of the same one-second pass as job windows; there is no second scheduler and no Job-engine path. A `scheduled` record whose instant is observed within the grace window fires once: the process owner writes one Queue input through the public `sessions.input` with `submissionId` `wakeup:<wakeup_id>`, a first raw block `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`, and the prompt as content. Nothing else is called: no `sessions.launch`, no `sessions.stop`, no `withdraw`, no deadline. Several records due in one pass reach their Sessions in `at` order, with the record id as the stable tie-breaker between records sharing an instant; the file's order is not a contract.
 
 The target's own InputQueue and turn scheduler decide what the input becomes: an idle Session gets a turn, a running one queues the input behind it one turn per `turn/end`, and an unloaded Session is restored by the acquire inside `sessions.input`. The Session keeps its id, its `main` branch and its whole Timeline; a fork is a different Session id and inherits nothing.
 

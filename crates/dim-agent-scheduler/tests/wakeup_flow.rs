@@ -228,6 +228,20 @@ async fn wait_turn_end(client: &mut Client, session_id: &str) {
     .expect("the turn ends");
 }
 
+/// The wakeup id a delivered input's marker names.
+fn wakeup_id_of(event: &Value) -> String {
+    let marker = event["data"]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|block| block["text"].as_str())
+        .expect("an input carries a text block");
+    marker
+        .trim_start_matches("<dim-scheduler kind=\"wakeup\">")
+        .trim_end_matches("</dim-scheduler>")
+        .to_owned()
+}
+
 /// The stored wakeup records, as the file holds them.
 fn stored_wakeups(home: &Path) -> Vec<Value> {
     let path = home.join("scheduler/wakeups.json");
@@ -694,6 +708,68 @@ async fn an_ended_branch_cancels_its_record_and_never_retries() {
     assert!(
         wakeup_inputs(&events).is_empty(),
         "the ended line never takes the input: {events:?}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overdue_wakeups_fire_in_at_order_with_a_stable_tie_breaker() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &[], true).await;
+    let mut ids = Vec::new();
+    for prompt in ["last", "tied one", "tied two", "third"] {
+        let created: Value = client
+            .rpc(
+                "session.wakeup.create",
+                json!({"sessionId": session, "branchId": "main", "at": instant_after(120),
+                    "prompt": prompt}),
+            )
+            .await
+            .unwrap();
+        ids.push(created["wakeupId"].as_str().unwrap().to_owned());
+    }
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // The downtime leaves every record past its instant but inside the grace,
+    // and the file's order is not the due order: last, tied, tied, third.
+    edit_wakeups(home.path(), |wakeups| {
+        wakeups[0]["at"] = json!(instant_after(-20));
+        wakeups[1]["at"] = json!(instant_after(-40));
+        wakeups[2]["at"] = json!(instant_after(-40));
+        wakeups[3]["at"] = json!(instant_after(-30));
+    });
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    for id in &ids {
+        wait_state(home.path(), id, "fired").await;
+    }
+
+    let events = history(&mut client, &session).await;
+    let fired: Vec<String> = wakeup_inputs(&events)
+        .iter()
+        .map(|event| wakeup_id_of(event))
+        .collect();
+    let mut tied = [ids[1].clone(), ids[2].clone()];
+    tied.sort();
+    assert_eq!(
+        fired,
+        vec![
+            tied[0].clone(),
+            tied[1].clone(),
+            ids[3].clone(),
+            ids[0].clone()
+        ],
+        "overdue wakeups fire in at order, sharing an instant in id order"
     );
 
     drop(client);
