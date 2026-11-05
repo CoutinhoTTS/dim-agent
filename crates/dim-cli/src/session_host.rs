@@ -1066,7 +1066,7 @@ impl Worker {
             && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
             && let Err(error) = self.start_session().await
         {
-            self.send(Update::Notice(
+            self.send(Update::SubmitNotSent(
                 if self.options.startup.is_some() || self.model_session.is_some() {
                     error.to_string()
                 } else {

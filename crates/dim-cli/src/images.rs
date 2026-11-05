@@ -108,17 +108,18 @@ pub enum Item {
     Text(String),
 }
 
-/// The blocks one headless submission sends, and the lines its scaled images
-/// add to the run's diagnostics.
+/// The images one submission carries, in argument order, and the lines their
+/// scaling adds to the run's diagnostics.
 pub struct Loaded {
-    pub blocks: Vec<ContentBlock>,
+    pub images: Vec<Attached>,
     pub notes: Vec<String>,
 }
 
-/// The images given to a headless run, in argument order.
+/// The images given to a run or to the terminal interface's first message,
+/// in argument order.
 pub fn load(paths: &[PathBuf]) -> Result<Loaded> {
     let mut loaded = Loaded {
-        blocks: Vec::new(),
+        images: Vec::new(),
         notes: Vec::new(),
     };
     let mut encoded_size = 0;
@@ -139,7 +140,7 @@ pub fn load(paths: &[PathBuf]) -> Result<Loaded> {
         if encoded_size > MAX_ENCODED_FRAME {
             return Err("Images exceed 16 MiB after base64 encoding".into());
         }
-        loaded.blocks.push(image.block());
+        loaded.images.push(image);
     }
     Ok(loaded)
 }

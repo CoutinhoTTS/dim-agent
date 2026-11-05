@@ -938,3 +938,198 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
         daemon.join().unwrap();
     }
 }
+
+/// `-p` on `tui` is the interface's first message: one submission, and the
+/// interface stays open for the next one.
+#[test]
+fn a_first_prompt_is_submitted_once_and_the_interface_stays() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (submitted, seen) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "hello");
+            assert_eq!(submit["params"]["mode"], "queue");
+            wire.reply(&submit, json!({"event":{}}));
+            submitted.send(()).unwrap();
+            wire.hold();
+        });
+        let mut command = command(&home);
+        command.args([
+            "tui",
+            if fullscreen {
+                "--fullscreen"
+            } else {
+                "--scrollback"
+            },
+            "-p",
+            "hello",
+        ]);
+        let mut terminal = Terminal::launch_tui(command);
+        seen.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        let status = terminal.wait();
+        daemon.join().unwrap();
+        assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
+    }
+}
+
+/// A first prompt on a resumed Session attaches first and submits into it.
+#[test]
+fn a_first_prompt_on_a_resumed_session_submits_into_it() {
+    let home = Home::new();
+    let (submitted, seen) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["sessionId"], "session");
+        assert_eq!(submit["params"]["text"], "continue");
+        wire.reply(&submit, json!({"event":{}}));
+        submitted.send(()).unwrap();
+        wire.hold();
+    });
+    let mut command = command(&home);
+    command.args([
+        "tui",
+        "--scrollback",
+        "--resume",
+        "session",
+        "-p",
+        "continue",
+    ]);
+    let mut terminal = Terminal::launch_tui(command);
+    seen.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
+}
+
+/// A first prompt that names a command runs it instead of sending it.
+#[test]
+fn a_first_prompt_that_names_a_command_runs_it() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.hold();
+    });
+    let mut command = command(&home);
+    command.args(["tui", "--scrollback", "-p", "/goal"]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Usage: /goal");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
+}
+
+/// A first message no Session can take stays in the composer.
+#[test]
+fn a_first_prompt_without_a_session_stays_in_the_draft() {
+    let home = Home::new();
+    let (settled, seen) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        for attempt in 0..2 {
+            let create = wire.read("session.create");
+            wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{
+                "code":-32000,"message":"No available model","data":{"appError":"provider_failed"}}}));
+            if attempt == 0 {
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+            }
+        }
+        settled.send(wire.trailing_request()).unwrap();
+    });
+    let mut command = command(&home);
+    command.args(["tui", "--scrollback", "-p", "hello"]);
+    let mut terminal = Terminal::launch_tui(command);
+    // The Home hint arrives with the first frame, before the message is
+    // submitted; the draft follows the refusal.
+    terminal.until("Sign in with /login");
+    terminal.until("hello");
+    // The unsent message is in the composer, where a typed command would
+    // join it; clear it before naming the exit command.
+    terminal.write(b"\x03");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    let trailing = seen.recv_timeout(PATIENCE).unwrap();
+    assert!(
+        trailing
+            .as_deref()
+            .is_none_or(|frame| !frame.contains("session.submit")),
+        "a message no Session can take was submitted anyway: {trailing:?}"
+    );
+    assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
+}
+
+/// A first message stays in the composer when the resumed Session cannot
+/// attach, the other way no Session takes it.
+#[test]
+fn a_first_prompt_is_kept_when_the_resumed_session_cannot_attach() {
+    let home = Home::new();
+    let (settled, seen) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.send(json!({"jsonrpc":"2.0","id":attach["id"],"error":{
+            "code":-32000,"message":"Session not found","data":{"appError":"session_not_found"}}}));
+        settled.send(wire.trailing_request()).unwrap();
+    });
+    let mut command = command(&home);
+    command.args(["tui", "--scrollback", "--resume", "gone", "-p", "hello"]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("hello");
+    // A failed session ends on Ctrl+C, which keeps the draft on screen
+    // instead of taking an exit command's text.
+    terminal.write(b"\x03");
+    terminal.until("Bye!");
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    let trailing = seen.recv_timeout(PATIENCE).unwrap();
+    assert!(
+        trailing
+            .as_deref()
+            .is_none_or(|frame| !frame.contains("session.submit")),
+        "a message no Session can take was submitted anyway: {trailing:?}"
+    );
+    assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
+}

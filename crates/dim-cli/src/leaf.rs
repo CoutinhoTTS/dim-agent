@@ -112,6 +112,7 @@ pub(crate) struct Opened {
 /// its children, on the daemon's Session and registered as its leaf.
 pub(crate) struct LeafTui {
     options: Options,
+    initial: Option<ui::Initial>,
     leave: Mutex<Option<oneshot::Sender<Leave>>>,
 }
 
@@ -122,6 +123,7 @@ impl LeafTui {
         session_id: String,
         opened: Opened,
         leave: oneshot::Sender<Leave>,
+        initial: Option<ui::Initial>,
     ) -> Self {
         let mut options = options.clone();
         options.created_session = options.resume.is_none();
@@ -132,6 +134,7 @@ impl LeafTui {
         });
         Self {
             options,
+            initial,
             leave: Mutex::new(Some(leave)),
         }
     }
@@ -162,6 +165,7 @@ impl DynPlugin for LeafTui {
                     .options
                     .fullscreen
                     .unwrap_or_else(|| ui::config::saved_fullscreen(&self.options.home)),
+                initial: self.initial.clone(),
             };
             let tui = ctx.plugin(Tui {
                 env,

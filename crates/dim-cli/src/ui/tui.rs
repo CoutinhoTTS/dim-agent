@@ -20,6 +20,7 @@ use crate::model::view::{
     CompactionState, LineState, LineView, RowKind, SideLine, TaskTarget, ViewRow, ViewSnapshot,
 };
 use crate::ui::Env;
+use crate::ui::Initial;
 use crate::ui::approvals_panel::ApprovalsPanel;
 use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
 use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
@@ -270,6 +271,7 @@ fn run_terminal(
         cwd_key,
     );
     app.fullscreen = full.is_some();
+    app.initial = surroundings.initial;
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
@@ -463,7 +465,14 @@ fn run_terminal(
             _ if app.running() => FRAME_INTERVAL,
             _ => SESSION_POLL,
         };
-        match terminal.next_event(wait) {
+        // The first message waits for the first frame so it follows the
+        // banner, then enters the interface as the submission event.
+        let next = if app.initial.is_some() && last_frame.is_some() {
+            Wait::Event(InputEvent::Submit)
+        } else {
+            terminal.next_event(wait)
+        };
+        match next {
             Wait::Lost => {
                 let code = terminal.lost();
                 app.host.shutdown();
@@ -892,6 +901,12 @@ struct App {
     /// The second their running time was last drawn for.
     card_second: u64,
     session_id: String,
+    /// The invocation's first message, submitted once the first frame is
+    /// drawn.
+    initial: Option<Initial>,
+    /// A submitted first message no Session has taken yet: a refusal puts
+    /// it back into the draft.
+    unsent: Option<Initial>,
     permission_policy: dim_agent_types::PermissionPolicy,
     /// The main branch's context use.
     context: Option<ContextReading>,
@@ -1256,6 +1271,8 @@ impl App {
             message_blocks: Vec::new(),
             card_second: 0,
             session_id: String::new(),
+            initial: None,
+            unsent: None,
             permission_policy: dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
@@ -1913,7 +1930,12 @@ impl App {
                     &[("count", &count.to_string())],
                 ));
             }
-            Update::Switched { session_id, kind } => self.switch_session(session_id, kind),
+            Update::Switched { session_id, kind } => {
+                if !session_id.is_empty() {
+                    self.unsent = None;
+                }
+                self.switch_session(session_id, kind)
+            }
             Update::Skills(entries) => {
                 self.composer.set_skills(
                     entries
@@ -2393,8 +2415,13 @@ impl App {
                     .remove(&(branch_id.clone(), request_id.clone()));
             }
             Update::Failed(message) => {
+                self.restore_unsent();
                 self.failure = Some(message);
                 self.run_started = None;
+            }
+            Update::SubmitNotSent(message) => {
+                self.notices.push(message);
+                self.restore_unsent();
             }
             Update::Shutdown { reason } => {
                 self.notices.push(tf(
@@ -2421,6 +2448,7 @@ impl App {
 
     fn handle_input(&mut self, event: InputEvent) -> Outcome {
         let key = match event {
+            InputEvent::Submit => return self.submit_initial(),
             InputEvent::Paste(text) => {
                 if self.command_entry_open() {
                     self.paste(text);
@@ -2645,6 +2673,21 @@ impl App {
             _ => {}
         }
         match self.composer.handle_key(key) {
+            ComposerOutcome::Command { name, args } => return self.run_command(&name, &args),
+            outcome => {
+                self.dispatch_composer(outcome, mode);
+            }
+        }
+        if self.suggestion.is_some() && !self.composer.is_empty() {
+            self.dismiss_suggestion();
+        }
+        Outcome::Continue
+    }
+
+    /// What a composer outcome does, the same for Enter and for the
+    /// invocation's first message.
+    fn dispatch_composer(&mut self, outcome: ComposerOutcome, mode: SubmitMode) -> Outcome {
+        match outcome {
             ComposerOutcome::Submit(text) if self.line_draft.is_some() => {
                 self.open_line(&text);
             }
@@ -2693,10 +2736,51 @@ impl App {
             ComposerOutcome::Rejected(reason) => self.set_notice(reason),
             ComposerOutcome::Handled | ComposerOutcome::Pass => {}
         }
-        if self.suggestion.is_some() && !self.composer.is_empty() {
-            self.dismiss_suggestion();
-        }
         Outcome::Continue
+    }
+
+    /// Sends the invocation's first message as its first typed one: the text
+    /// becomes the draft and the images its tokens, then the composer
+    /// submits them through the same outcome the Enter key produces. A
+    /// submission no Session takes leaves the message unsent so a refusal
+    /// can put it back into the draft.
+    fn submit_initial(&mut self) -> Outcome {
+        let Some(initial) = self.initial.take() else {
+            return Outcome::Continue;
+        };
+        self.composer.set_draft(&initial.text);
+        for image in &initial.images {
+            let _ = self.composer.attach_image(image.clone());
+        }
+        // A failed session has taken the connection: the message is not
+        // sent, and stays a draft the user can carry to a restart.
+        if self.failure.is_some() {
+            return Outcome::Continue;
+        }
+        let outcome = self.composer.submit();
+        let submitted = matches!(
+            outcome,
+            ComposerOutcome::Submit(_) | ComposerOutcome::SubmitDraft { .. }
+        ) && self.line_draft.is_none();
+        if submitted && self.session_id.is_empty() {
+            self.unsent = Some(initial);
+        }
+        self.dispatch_composer(outcome, SubmitMode::Queue)
+    }
+
+    /// Puts a first message no Session took back into the draft, unless the
+    /// user has started another one.
+    fn restore_unsent(&mut self) {
+        let Some(initial) = self.unsent.take() else {
+            return;
+        };
+        if !self.composer.is_empty() {
+            return;
+        }
+        self.composer.set_draft(&initial.text);
+        for image in initial.images {
+            let _ = self.composer.attach_image(image);
+        }
     }
 
     /// A terminal paste, which is also how a terminal delivers a file

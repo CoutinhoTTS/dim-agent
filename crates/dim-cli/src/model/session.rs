@@ -1113,6 +1113,10 @@ pub enum Update {
     RepositoryWorkspaces(Vec<String>),
     /// A command failed without ending the session.
     Notice(String),
+    /// A submission could not be sent because no Session could be started
+    /// for it; the message says why, and whatever the interface held for it
+    /// is still unsent.
+    SubmitNotSent(String),
     /// A newer version the user has not skipped, once per start.
     Upgrade(crate::update::Offer),
     /// What installing the offered version came to.

@@ -543,7 +543,9 @@ impl Composer {
         ))
     }
 
-    fn submit(&mut self) -> Outcome {
+    /// What Enter makes of the draft; the invocation's first message
+    /// submits the same way without a key.
+    pub(crate) fn submit(&mut self) -> Outcome {
         let expanded = self.expanded_text();
         // An image submits no text of its own, so an image-only message draft
         // is not empty. A shell command is text only, so there an image is
