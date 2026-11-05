@@ -392,11 +392,13 @@ ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：�
 provider，读取也不返回逐项错误列表。需要该 provider 诊断的调用方使用 `provider.list` 或
 `provider.management`。
 
-**消费方。** Modality 用这两次读取计算每个操作的选项和自动默认值：adapter 服务某类别时，
-候选是 `selectableForModality` 返回的模型，并且只保留已收集 adapter 为该操作服务的那些，
-因此被执行拒绝的媒体模型只要 adapter 服务它，就仍在选项中；没有 adapter 服务的操作，候选
-是其条目声明了该操作 id 的模型。配置的模型不在其中时报告 "no adapter for the configured
-model"。它不调用 `provider.catalog`，也不自留可用性谓词。回复只带 ID 和能力，不带显示名：渲染选项
+**消费方。** Modality 用这两次读取计算每个操作的选项和自动默认值。adapter 服务的类别，
+候选是两次读取去重后的结果：先是执行可选的模型，后是 modality 读取的模型，各按其读取的
+顺序；每个操作只保留已收集 adapter 为它服务的那些。因此被执行拒绝的媒体模型只要 adapter
+服务它，就仍在选项中，不声明任何操作的可选模型也一样。没有 adapter 服务的操作，候选是
+modality 读取中条目声明了该操作 id 的模型；`image.understand` 的候选是带 `vision` 的可选
+模型。配置的模型不在其中时报告 "no adapter for the configured model"。它不调用
+`provider.catalog`，也不自留可用性谓词。回复只带 ID 和能力，不带显示名：渲染选项
 的客户端用 `provider.catalog` 或 `provider.management` 的模型列表按 ID join，Modality 不复制
 名称。Provider 不增加逐消费方的键、配置或过滤器：读取没有输入，需要单个 provider 的调用方
 自行筛选回复。Collaboration 的 `agent` 工具用同一次读取实现 `models` 动作，把其中的 ID 交给

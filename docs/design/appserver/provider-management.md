@@ -606,15 +606,19 @@ read returns no per-provider error list. A caller that needs a provider's
 diagnostic uses `provider.list` or `provider.management`.
 
 **Consumers.** Modality computes each operation's options and its automatic
-default from these reads: the candidates of an adapter-served category are the
-models `selectableForModality` returns, kept when a collected adapter serves them
-for the operation, so a media model execution rejects stays an option where an
-adapter serves it; for an operation no adapter serves, the candidates are the
-models whose entry declares that operation id. It reports "no adapter for the
-configured model" when the configured model is absent. It does not call
-`provider.catalog` and keeps no availability predicate of its own. The reply carries IDs and capabilities only,
-not a display name: a client that renders an option joins the ID with the model
-list of `provider.catalog` or `provider.management`, and Modality copies no name.
+default from these reads. For a category an adapter serves, the candidates are
+both reads deduplicated, the execution-selectable models first and the modality
+read's after, each in its read's order, and an operation keeps those a collected
+adapter serves for it; a media model execution rejects therefore stays an option
+where an adapter serves it, and a selectable model that declares no operation
+stays one too. An operation no adapter serves takes the modality read's models
+whose entry declares that operation id, and `image.understand` takes the
+selectable models with `vision`. It reports "no adapter for the configured
+model" when the configured model is absent. It does not call `provider.catalog`
+and keeps no availability predicate of its own. The reply carries IDs and
+capabilities only, not a display name: a client that renders an option joins the
+ID with the model list of `provider.catalog` or `provider.management`, and
+Modality copies no name.
 Provider gains no per-consumer key, setting or filter: the read has no input, so a
 caller that wants one provider filters the reply. Collaboration's `agent` tool
 reads the same reply for its `models` action and hands the IDs to the leader's
