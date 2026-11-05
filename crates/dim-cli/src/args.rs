@@ -1236,7 +1236,7 @@ impl Options {
         let images_for_tui = matches!(options.action, Action::Tui) && options.prompt.is_some();
         if !options.images.is_empty() && !matches!(options.action, Action::Exec) && !images_for_tui
         {
-            return Err("--image requires exec".into());
+            return Err("--image requires exec or tui -p".into());
         }
         if options.images.len() > crate::attachments::MAX_IMAGES {
             return Err("At most 20 images may be submitted".into());

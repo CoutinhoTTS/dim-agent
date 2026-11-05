@@ -1389,7 +1389,7 @@ first message. The command decides the lifetime: `exec -p` and the bare chat's
 that Session and sends the message there. `--image PATH` is accepted with `tui`
 only together with `-p`; the images are read and scaled at the CLI boundary like
 `exec`'s and attached to the first message in argument order (text first). Without
-`-p` the flag keeps its `--image requires exec` refusal. `--json` stays refused
+`-p` the flag keeps its `--image requires exec or tui -p` refusal. `--json` stays refused
 for `tui`, and `--no-tui` keeps the one-shot line-client behavior.
 
 The message is submitted once, after the first frame is drawn, through the same

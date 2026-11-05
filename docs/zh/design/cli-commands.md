@@ -915,7 +915,7 @@ help/version 与参数错误不会启动守护进程。
 `exec -p` 与裸 chat 的 `-p` 仍然运行一次后退出。`--resume SESSION_ID -p TEXT` 先附加到该
 Session，再把消息发送到那里。`--image PATH` 只有在与 `-p` 同时给出时才被 `tui` 接受；图片
 在 CLI 边界按 `exec` 的规则读取和缩放，并按参数顺序附到首条消息上（文本在前）。没有 `-p`
-时该选项保持 `--image requires exec` 的拒绝。`--json` 对 `tui` 仍然拒绝，`--no-tui` 保持
+时该选项保持 `--image requires exec or tui -p` 的拒绝。`--json` 对 `tui` 仍然拒绝，`--no-tui` 保持
 一次性行客户端行为。
 
 消息只提交一次：第一帧画出之后，走用户键入消息所用的同一个 composer，两种终端模式一致。
