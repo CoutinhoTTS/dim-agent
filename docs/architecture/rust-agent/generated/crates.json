@@ -148,6 +148,30 @@
     "to": "dim-app-server"
   },
   {
+    "from": "dim-app-server",
+    "to": "dim-modality"
+  },
+  {
+    "from": "dim-modality",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-modality",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-modality",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-modality",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-modality",
+    "to": "rutis"
+  },
+  {
     "from": "dim-client",
     "to": "dim-agent-types"
   },
@@ -345,6 +369,10 @@
   },
   {
     "from": "dimcode",
+    "to": "dim-modality"
+  },
+  {
+    "from": "dimcode",
     "to": "dim-oauth"
   },
   {
@@ -398,6 +426,10 @@
   {
     "from": "xtask",
     "to": "dim-goal"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-modality"
   },
   {
     "from": "xtask",

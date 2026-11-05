@@ -16,6 +16,7 @@ dim-agent-questions.workspace = true
 dim-app-server.workspace = true
 dim-session-title.workspace = true
 dim-goal.workspace = true
+dim-modality.workspace = true
 dim-agent-types.workspace = true
 dim-client.workspace = true
 rutis.workspace = true

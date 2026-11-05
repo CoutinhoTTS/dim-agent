@@ -1,0 +1,24 @@
+[package]
+name = "dim-modality"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Modality: the process owner of the non-conversational multimodal surface"
+
+[dependencies]
+dim-agent-capabilities.workspace = true
+dim-agent-runtime.workspace = true
+dim-agent-types.workspace = true
+dim-app-server.workspace = true
+rutis.workspace = true
+serde = { version = "1", features = ["derive"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio-tungstenite.workspace = true
+uuid.workspace = true
