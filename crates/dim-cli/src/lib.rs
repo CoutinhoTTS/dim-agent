@@ -650,6 +650,13 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             output,
         } => {
             export::write(&mut client, session_id, *format, output.as_deref()).await?;
+            if let Some(path) = output {
+                eprintln!(
+                    "Exported {}: {}",
+                    format.label(),
+                    sanitize::safe(&path.display().to_string())
+                );
+            }
             Ok(0)
         }
         Action::SessionRename {

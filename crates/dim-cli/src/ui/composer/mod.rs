@@ -1995,7 +1995,7 @@ mod tests {
 
     #[test]
     fn palette_requires_an_exact_exit_before_dispatch() {
-        for query in ["/ex", "/qui"] {
+        for query in ["/exi", "/qui"] {
             let mut c = Composer::new(Vec::new());
             typed(&mut c, query);
             assert_eq!(c.handle_key(key(KeyCode::Enter)), Outcome::Handled);
@@ -2033,7 +2033,8 @@ mod tests {
             ("/", "/new"),
             ("/ke", "/keys"),
             ("/ren", "/rename "),
-            ("/ex", "/exit"),
+            ("/exi", "/exit"),
+            ("/ex", "/export"),
         ] {
             let mut c = Composer::new(Vec::new());
             typed(&mut c, query);

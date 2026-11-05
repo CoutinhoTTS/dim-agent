@@ -2638,6 +2638,10 @@ impl Terminal {
         }
         Self::launch_tui(command)
     }
+    fn resume_tui(mut command: Command) -> Self {
+        command.args(["--resume", "session"]);
+        Self::launch_tui(command)
+    }
     fn launch_tui(mut command: Command) -> Self {
         let master = unsafe {
             libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
@@ -8210,6 +8214,238 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
 }
 
 #[test]
+fn tui_export_and_queue_require_an_open_session() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (quieted, quiet_done) = std::sync::mpsc::channel();
+        let daemon = no_session_daemon(&home, quieted);
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("Git branch");
+        terminal.write(b"/export\r");
+        terminal.until("/export needs a session");
+        terminal.write(b"/queue\r");
+        terminal.until("/queue needs a session");
+        quiet_done.recv_timeout(PATIENCE).unwrap();
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+        assert!(!terminal.transcript.contains("Export session"));
+    }
+}
+
+#[test]
+fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
+    for fullscreen in [false, true] {
+        for format in ["markdown", "json"] {
+            let home = Home::new();
+            let directory = home.0.join("client");
+            fs::create_dir_all(&directory).unwrap();
+            let events = json!([
+                {"id":"input","sequence":1,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"Export this code: ```rust```"}]}}},
+                {"id":"answer","sequence":3,"create_at":1,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"The exported answer"}}
+            ]);
+            let returned = events.clone();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[]);
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+                wire.no_context();
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                let history = wire.read("session.history");
+                assert_eq!(history["params"]["branchId"], "main");
+                wire.reply(&history, json!({"events":returned,"through":8,"nextAfter":8,"done":true}));
+                let failed = wire.read("session.history");
+                wire.send(json!({"jsonrpc":"2.0","id":failed["id"],"error":{"code":-32000,"message":"export fixture failed"}}));
+                wire.hold();
+            });
+            let mut command = home.command();
+            command.current_dir(&directory);
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::resume_tui(command);
+            terminal.until("test / model");
+            terminal.write(b"/export\r");
+            terminal.until("Markdown (.md)");
+            terminal.until("JSON (.json)");
+            terminal.write(b"\x1b");
+            terminal.until("\x1b[?25h");
+            terminal.write(b"/export\r");
+            terminal.until("Markdown (.md)");
+            terminal.until("JSON (.json)");
+            if format == "json" {
+                terminal.write(b"\x1b[B");
+            }
+            terminal.write(b"\r");
+            terminal.until(&format!(
+                "Exported {}: ",
+                if format == "json" { "JSON" } else { "Markdown" }
+            ));
+            let files: Vec<_> = fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(files.len(), 1);
+            assert_eq!(
+                files[0].extension().unwrap(),
+                if format == "json" { "json" } else { "md" }
+            );
+            terminal.write(b"/export\r");
+            terminal.until("JSON (.json)");
+            terminal.write(b"\r");
+            terminal.until("export fixture failed");
+            assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+            home.kill(&terminal);
+            terminal.wait();
+            daemon.join().unwrap();
+
+            let reference = Home::new();
+            let daemon = reference.daemon(move |wire| {
+                wire.hello(&[]);
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":events,"through":8,"nextAfter":8,"done":true}),
+                );
+            });
+            let output = reference
+                .command()
+                .args(["session", "export", "session", "--format", format])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            daemon.join().unwrap();
+            assert_eq!(fs::read(&files[0]).unwrap(), output.stdout);
+        }
+    }
+}
+
+#[test]
+fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["running"] = json!(true);
+            wire.reply(&attach, record);
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            for (sequence, text) in [(9, "delete this"), (10, "steer this")] {
+                let submit = wire.read("session.submit");
+                assert_eq!(submit["params"]["text"], text);
+                wire.reply(&submit, json!({"event":{}}));
+                wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":text,"sequence":sequence,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":text}]},"mode":"queue"}}}));
+            }
+            let delete = wire.read("session.input.withdraw");
+            assert_eq!(delete["params"]["inputId"], "delete this");
+            assert!(delete["params"].get("steer").is_none());
+            wire.reply(&delete, json!({"status":"deleted","sequence":11}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"deleted","sequence":11,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"delete this"}}}));
+            let steer = wire.read("session.input.withdraw");
+            assert_eq!(steer["params"]["inputId"], "steer this");
+            assert_eq!(steer["params"]["steer"], json!({"content":[{"type":"text","text":"steer this"}]}));
+            wire.reply(&steer, json!({"status":"notHeld"}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"applied","sequence":12,"create_at":1,"type":"input","name":"applied","data":{"input_id":"steer this","mode":"queue"}}}));
+            let delete = wire.read("session.input.withdraw");
+            assert_eq!(delete["params"]["inputId"], "steer this");
+            wire.reply(&delete, json!({"status":"notHeld"}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"consumed","sequence":13,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"steer this"}}}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.write(b"delete this\r");
+        terminal.until("Queue (1)");
+        terminal.write(b"steer this\r");
+        terminal.until("Queue (2)");
+        terminal.write(b"/queue\r");
+        terminal.until("awaiting application");
+        terminal.until("\x1b[?2026l");
+        terminal.write(b"x");
+        terminal.until("steer this");
+        terminal.write(b"\r");
+        terminal.until("already left the queue");
+        terminal.until("Incorporating");
+        terminal.write(b"x");
+        terminal.until("No queued messages.");
+        let shown = strip_ansi(&terminal.transcript);
+        assert!(
+            !shown.contains("┃ delete this"),
+            "deleted messages must not enter the transcript: {shown}"
+        );
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn tui_queue_recall_refuses_attachments_and_steering_preserves_all_content() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let content = json!({"content":[
+            {"type":"text","text":"compare attachments"},
+            {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/one.png"}},
+            {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)"}
+        ]});
+        let expected = content.clone();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["running"] = json!(true);
+            wire.reply(&attach, record);
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[{"id":"mixed","sequence":8,"create_at":1,"type":"input","name":"message","data":{"user":content,"mode":"queue"}}],"through":8,"nextAfter":8,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let steer = wire.read("session.input.withdraw");
+            assert_eq!(steer["params"]["inputId"], "mixed");
+            assert_eq!(steer["params"]["steer"], expected);
+            wire.reply(&steer, json!({"status":"deleted","sequence":9}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"deleted","sequence":9,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"mixed"}}}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("Queue (1)");
+        terminal.write(b"\x1b[1;2D");
+        terminal.until("Messages with attachments stay queued");
+        terminal.write(b"/queue\r");
+        terminal.until("awaiting application");
+        terminal.write(b"\r");
+        terminal.until("No queued messages.");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -8272,13 +8508,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.until("first");
     terminal.until("background task finished");
     terminal.write(b"second\r");
-    terminal.until("Queue (1)");
+    terminal.until("Queue (3)");
     assert!(
         !terminal.transcript.contains("Queue (0)"),
         "{}",
         terminal.transcript
     );
-    terminal.until("› second");
+    terminal.until("Held · second");
     terminal.until("working…");
     assert!(
         !terminal.transcript.contains("┃ second"),
@@ -8287,8 +8523,8 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     );
     terminal.write(b"\x13");
     terminal.write(b"third\r");
-    terminal.until("Queue (1)");
-    terminal.until("› third");
+    terminal.until("Queue (4)");
+    terminal.until("Held · third");
     terminal.write(b"\x1b[1;2D");
     terminal.until("third");
     let plain = {
@@ -8409,7 +8645,7 @@ fn tui_escape_withdraws_the_queue_before_the_run_stops() {
     terminal.until("first");
     terminal.until("working…");
     terminal.write(b"second\r");
-    terminal.until("Queue (1)");
+    terminal.until("Queue (2)");
     terminal.write(b"\x1b");
     daemon.join().unwrap();
     home.kill(&terminal);

@@ -261,6 +261,7 @@ pub enum Command {
     },
     /// Produce the `/usage` report.
     Usage,
+    Export(crate::export::Format),
     /// `/compact`: ask the shown line to compact its context.
     Compact,
     /// `/rename`: set the shown Session's manual title, or clear it when

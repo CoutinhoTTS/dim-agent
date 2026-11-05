@@ -26,6 +26,7 @@ use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
 use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::lines_panel::{LinesPanel, short_id};
+use crate::ui::list_panel::{Event as ListEvent, Item, ListPanel};
 use crate::ui::management_panel::ManagementPanel;
 use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::OauthView;
@@ -35,6 +36,7 @@ use crate::ui::prompts::{
     AskUserPrompt, Effect, EffortPrompt, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
 };
 use crate::ui::providers_panel::ProvidersPanel;
+use crate::ui::queue_panel::QueuePanel;
 use crate::ui::render::fullscreen::Document;
 use crate::ui::render::fullscreen::MouseOutcome;
 use crate::ui::render::markdown::MarkdownRenderer;
@@ -1182,6 +1184,8 @@ enum Prompt {
     Tasks(TasksPanel),
     Lines(Box<LinesPanel>),
     Timeline(Box<TimelinePanel>),
+    Queue(QueuePanel),
+    Export(ListPanel),
     Fork(ForkAsk),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
@@ -1557,6 +1561,17 @@ impl App {
     }
 
     fn withdraw(&mut self, id: String, text: String) {
+        if self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .queued
+                .iter()
+                .any(|input| input.id == id && !input.recallable)
+        }) {
+            self.notices.push(
+                "Messages with attachments stay queued; use /queue to steer or delete them".into(),
+            );
+            return;
+        }
         self.recovering.push((id.clone(), text));
         self.host.send(Command::InputControl {
             input_id: id,
@@ -1633,6 +1648,8 @@ impl App {
             | Some(Prompt::Isolation(_))
             | Some(Prompt::Lines(_))
             | Some(Prompt::Timeline(_))
+            | Some(Prompt::Queue(_))
+            | Some(Prompt::Export(_))
             | Some(Prompt::Fork(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
@@ -1795,6 +1812,7 @@ impl App {
                 snapshot
                     .queued
                     .iter()
+                    .filter(|input| input.held)
                     .map(|input| (input.id.clone(), input.text.clone()))
                     .collect()
             })
@@ -1838,6 +1856,13 @@ impl App {
                     }
                 }
                 if let Some(Prompt::Timeline(panel)) = &mut self.prompt {
+                    if panel.current(&snapshot) {
+                        panel.set_rows(&snapshot);
+                    } else {
+                        self.prompt = None;
+                    }
+                }
+                if let Some(Prompt::Queue(panel)) = &mut self.prompt {
                     if panel.current(&snapshot) {
                         panel.set_rows(&snapshot);
                     } else {
@@ -2510,6 +2535,16 @@ impl App {
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Lines(p) => p.handle_key(key),
                 Prompt::Timeline(p) => p.handle_key(key),
+                Prompt::Queue(p) => p.handle_key(key),
+                Prompt::Export(p) => match p.handle_key(key) {
+                    ListEvent::Pick(format) => Effect::Export(if format == "markdown" {
+                        crate::export::Format::Markdown
+                    } else {
+                        crate::export::Format::Json
+                    }),
+                    ListEvent::Close => Effect::Close,
+                    ListEvent::None | ListEvent::Refresh => Effect::None,
+                },
                 Prompt::Fork(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
@@ -3130,6 +3165,13 @@ impl App {
                 });
             }
             Effect::Notice(text) => self.set_notice(text),
+            Effect::InputControl { input_id, action } => {
+                self.host.send(Command::InputControl { input_id, action });
+            }
+            Effect::Export(format) => {
+                self.prompt = None;
+                self.host.send(Command::Export(format));
+            }
             Effect::FocusLine(line) => {
                 self.prompt = None;
                 self.host.send(Command::FocusLine(line));
@@ -4036,6 +4078,26 @@ impl App {
                 self.host.send(Command::Compact);
                 Outcome::Continue
             }
+            "export" => {
+                let mut panel = ListPanel::new(
+                    "Export session",
+                    "Enter export · Esc cancel",
+                    "",
+                    "",
+                    "",
+                    false,
+                )
+                .without_filter();
+                panel.set_items(
+                    Ok(vec![
+                        Item::new("markdown", "Markdown (.md)", ""),
+                        Item::new("json", "JSON (.json)", ""),
+                    ]),
+                    Some("markdown"),
+                );
+                self.open_prompt(Prompt::Export(panel));
+                Outcome::Continue
+            }
             "rename" => {
                 let title = args.trim();
                 let title = if title == "--clear" {
@@ -4101,6 +4163,13 @@ impl App {
                 if let Some(snapshot) = &self.snapshot {
                     let panel = TimelinePanel::new(snapshot);
                     self.open_prompt(Prompt::Timeline(Box::new(panel)));
+                }
+                Outcome::Continue
+            }
+            "queue" => {
+                if let Some(snapshot) = &self.snapshot {
+                    let panel = QueuePanel::new(snapshot);
+                    self.open_prompt(Prompt::Queue(panel));
                 }
                 Outcome::Continue
             }
@@ -4470,7 +4539,11 @@ impl App {
                 .map(|input| {
                     (
                         input.id.clone(),
-                        input.display.as_deref().unwrap_or(&input.text).to_owned(),
+                        format!(
+                            "{} · {}",
+                            if input.held { "Held" } else { "Incorporating" },
+                            input.display.as_deref().unwrap_or(&input.text)
+                        ),
                     )
                 })
                 .collect();
@@ -4694,6 +4767,8 @@ impl App {
                         | Prompt::Upgrade(_)
                         | Prompt::Fork(_)
                         | Prompt::Timeline(_)
+                        | Prompt::Queue(_)
+                        | Prompt::Export(_)
                 )
             );
         if !replaced {
@@ -4718,6 +4793,8 @@ impl App {
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Lines(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Timeline(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Queue(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Export(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width, height)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width, height)),
@@ -4756,6 +4833,8 @@ impl App {
                         Some(Prompt::Timeline(prompt)) => {
                             Some(prompt.render(list_width, budget, p))
                         }
+                        Some(Prompt::Queue(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Export(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Fork(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Models(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Providers(prompt)) => {
@@ -4804,6 +4883,8 @@ impl App {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
             }
             Some(Prompt::Timeline(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Queue(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Export(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Fork(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -5873,8 +5954,9 @@ const QUEUE_ROWS: usize = 5;
 
 /// The queue strip's hint, and its form when messages are not shown. Every
 /// `/name` it can draw is a command in the table.
-const QUEUE_HINT: &str = "shift+← edit last · ctrl+s steer now";
-const QUEUE_HINT_MORE: &str = "+{count} more · shift+← edit last · ctrl+s steer now";
+const QUEUE_HINT: &str = "/queue manage · shift+← edit last · ctrl+s steer now";
+const QUEUE_HINT_MORE: &str =
+    "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now";
 
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
@@ -9604,6 +9686,7 @@ mod tests {
         snapshot.focus = "main".into();
         drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
         drawn.app.composer.clear();
+        let before = sent.borrow().len();
         let _ = drawn
             .app
             .handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
@@ -9611,16 +9694,11 @@ mod tests {
                 Modifiers::SHIFT,
             )));
         assert!(drawn.app.composer.is_empty());
-        assert!(
-            matches!(sent.borrow().last(), Some(Command::InputControl { input_id, action: "withdraw" }) if input_id == "queued-image")
-        );
-        drawn.app.apply(Update::Withdrawn {
-            input_id: "queued-image".into(),
-        });
-        assert_eq!(drawn.app.composer.text(), "look [Image #7]");
-        drawn.key(KeyCode::Enter);
-        assert!(
-            matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == "look [Image #7]")
+        assert_eq!(sent.borrow().len(), before);
+        assert!(drawn.app.notices.last().unwrap().contains("stay queued"));
+        assert_eq!(
+            drawn.app.snapshot.as_ref().unwrap().queued[0].id,
+            "queued-image"
         );
     }
 
@@ -10099,6 +10177,8 @@ mod tests {
                     id: (*id).into(),
                     text: (*text).into(),
                     display: None,
+                    held: true,
+                    recallable: true,
                 })
                 .collect(),
             ..ViewSnapshot::default()

@@ -1372,6 +1372,33 @@ impl Worker {
                 }
             }
             Command::Compact => self.compact().await,
+            Command::Export(format) => {
+                let extension = match format {
+                    crate::export::Format::Markdown => "md",
+                    crate::export::Format::Json => "json",
+                };
+                let directory = match std::env::current_dir() {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        self.report(error.to_string(), true);
+                        return Ok(());
+                    }
+                };
+                let path = directory.join(format!("session-{}.{extension}", uuid::Uuid::new_v4()));
+                match crate::export::write(&mut self.client, &self.session_id, format, Some(&path))
+                    .await
+                {
+                    Ok(()) => self.report(
+                        format!(
+                            "Exported {}: {}",
+                            format.label(),
+                            crate::sanitize::safe(&path.display().to_string())
+                        ),
+                        false,
+                    ),
+                    Err(error) => self.report(error.to_string(), true),
+                }
+            }
             Command::Rename(title) => self.rename(title).await,
             Command::Goal(request) => self.goal(request).await,
             Command::ToggleWeb => {
