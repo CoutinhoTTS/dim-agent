@@ -65,6 +65,34 @@ async fn a_detach_settles_its_subscription_before_the_reply() {
     server.join().await.unwrap();
 }
 
+/// A re-attach that cannot register its listener keeps the previous
+/// subscription: its use stays, and it still delivers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_re_attach_keeps_the_previous_subscription() {
+    let (server, _) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let sid = historical(&mut client).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": sid}))
+            .await,
+    );
+    let attached_uses = server.uses(&sid);
+    server.fail_next_attach();
+    let failed = client
+        .rpc("session.attach", json!({"sessionId": sid}))
+        .await;
+    assert!(failed["error"].is_object(), "{failed}");
+    assert_eq!(server.uses(&sid), attached_uses);
+    server.notify(&sid, notice("after the failed re-attach"));
+    assert_eq!(
+        client.notice("session.notice").await["params"]["data"],
+        "after the failed re-attach"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// A notice emitted while the connection is detached reaches no attachment
 /// of it: the next notice the client reads is the one emitted after the
 /// re-attach.

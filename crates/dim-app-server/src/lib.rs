@@ -269,6 +269,14 @@ impl RunningServer {
             .get::<crate::connection::ConnectionHub>()
             .map_or(0, |hub| hub.live_subscriptions())
     }
+    /// Makes the next attach fail its listener registration. Feature `testing`
+    /// only.
+    #[cfg(feature = "testing")]
+    pub fn fail_next_attach(&self) {
+        if let Some(hub) = self.root.get::<crate::connection::ConnectionHub>() {
+            hub.fail_next_attach();
+        }
+    }
     /// How many uses Session `session_id` has right now. Feature `testing`
     /// only.
     #[cfg(feature = "testing")]

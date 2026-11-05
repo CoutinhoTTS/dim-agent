@@ -1651,6 +1651,9 @@ pub(crate) struct ConnectionHub {
     rpc: RwLock<Option<Arc<RpcService>>>,
     pub web: crate::web_entry::WebEntry,
     pub ui: Arc<crate::ui_host::UiHost>,
+    /// Feature `testing`: fails the next attach's listener registration.
+    #[cfg(feature = "testing")]
+    fail_attach: std::sync::atomic::AtomicBool,
 }
 impl ConnectionHub {
     fn new(
@@ -1669,6 +1672,8 @@ impl ConnectionHub {
             rpc: RwLock::new(None),
             control,
             config,
+            #[cfg(feature = "testing")]
+            fail_attach: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub fn config(&self) -> &ServerConfig {
@@ -1747,6 +1752,15 @@ impl ConnectionHub {
             .filter_map(Weak::upgrade)
             .filter(|conn| conn.is_attached(session))
             .count()
+    }
+    /// Feature `testing`: the next attach fails its listener registration.
+    #[cfg(feature = "testing")]
+    pub(crate) fn fail_next_attach(&self) {
+        self.fail_attach.store(true, Ordering::SeqCst);
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_attach_failure(&self) -> bool {
+        self.fail_attach.swap(false, Ordering::SeqCst)
     }
     /// Subscription tasks the live connections still track. A detach or
     /// finish awaits its attachment, so a settled connection reads its

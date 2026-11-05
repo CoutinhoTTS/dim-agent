@@ -446,18 +446,11 @@ impl Connection {
             .session_record(&host, &session, version)
             .await
             .map_err(RpcError::from)?;
-        // The previous attachment for this Session settles before the new one
-        // exists; the transition lock keeps one retirement per connection in
-        // flight, so a later attach, detach or finish waits for it.
+        // The transition lock keeps one attach, detach or finish in flight per
+        // connection. The new attachment below replaces the previous one before
+        // that one retires, so every event committed after this reply's pin has
+        // a listener: the previous one until the map changes, this one after.
         let _transition = self.transitions.lock().await;
-        let previous = self
-            .attachments
-            .lock()
-            .expect("attachments")
-            .remove(&session_id);
-        if let Some(previous) = previous {
-            previous.retire().await;
-        }
         let generation = self.next_attachment.fetch_add(1, Ordering::Relaxed);
         let cancel = self.closed.child_token();
         let watched = Arc::new(Mutex::new(HashSet::new()));
@@ -479,6 +472,10 @@ impl Connection {
             signals,
             delivery: delivery.clone(),
         });
+        #[cfg(feature = "testing")]
+        if self.hub.take_attach_failure() {
+            return Err(RpcError::closed());
+        }
         let listener = host
             .ctx
             .listen::<SessionBroadcast>()
@@ -514,9 +511,9 @@ impl Connection {
         // be sent under that same map so no notice precedes it.
         let attached_clients =
             self.hub.attached_clients(&session_id) + usize::from(!self.is_attached(&session_id));
-        {
+        let previous = {
             let mut attachments = self.attachments.lock().expect("attachments");
-            attachments.insert(
+            let previous = attachments.insert(
                 session_id.clone(),
                 Attachment {
                     _usage: Some(usage),
@@ -572,6 +569,13 @@ impl Connection {
                 attachments.remove(&session_id);
                 return Err(RpcError::wire(-32603, "Connection closed"));
             }
+            previous
+        };
+        // The previous subscription settles before this attach returns, but
+        // after the new one is in place: its own listeners and tasks cannot
+        // strand an event committed from now on.
+        if let Some(previous) = previous {
+            previous.retire().await;
         }
         self.hub.notify_clients(&session_id);
         crate::approval::replay(&session, |branch_id, request| {
