@@ -278,6 +278,8 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - 一条线要改它区域之外的文件之前，先告诉 `main`。
 - 遇到 `file_modified_since_read` 时，这条线重新读取文件，告诉 `main` 之后再继续。
 
+文件改动只有工具声明的一种事实，即 `fileWritten`：成功的 `edit` 或 `write` 在结果的 `effects` 中声明写入的路径（[工具契约 A.6](../contracts/session-boundary.md#a6-工具效果)）。客户端折叠这些声明得到的集合在构造上就是部分的——它漏掉 `exec`、MCP 工具以及 Dim 之外对文件的改动——所以折叠描述的是工具声明的写入，而不是工作区的改动。没有任何方法承诺完整的单次运行改动集。
+
 WorkspaceTools 不变。
 
 ## 9. 用户
