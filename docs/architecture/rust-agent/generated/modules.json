@@ -18254,6 +18254,7 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "path dim_agent_runtime::TimelineQuery",
@@ -18388,6 +18389,8 @@
       "from": "dim_app_server::agents",
       "to": "dim_app_server::storage::catalog",
       "references": [
+        "path crate::storage::ACTIVITY_KINDS",
+        "path crate::storage::activity",
         "path crate::storage::truncate_preview"
       ]
     },
@@ -25744,6 +25747,8 @@
       "to": "dim_app_server::storage::catalog",
       "references": [
         "mod catalog",
+        "use catalog::ACTIVITY_KINDS",
+        "use catalog::activity",
         "use catalog::initialize_session_catalog",
         "use catalog::truncate_preview"
       ]
@@ -25836,7 +25841,10 @@
       "from": "dim_app_server::storage::catalog",
       "to": "dim_agent_types::events",
       "references": [
+        "path EventKind",
+        "path EventKind::InputMessage",
         "path InputMessageData",
+        "use dim_agent_types::EventKind",
         "use dim_agent_types::InputMessageData"
       ]
     },
@@ -26507,6 +26515,7 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::catalog",
       "references": [
+        "path super::catalog::activity",
         "path super::catalog::create",
         "path super::catalog::initialize_session_catalog",
         "path super::catalog::refresh"

@@ -508,7 +508,7 @@ lookups and parsing behind them. Phase 3 (§15) removes the repetition of whole 
 A paging or projection read returns what an event says without rebuilding the requests stored with `context/prepare`
 and `model/call`: the request in such a record keeps the empty message list and the absent `tools` and `system` that
 its row holds, and no content row it references is loaded, hashed or checked. These readers never look at those requests:
-history paging discards both kinds, `session.summaries` reads only input text and the last event's time, the context
+history paging discards both kinds, `session.summaries` reads only input text and the newest activity event's time, the context
 projection projects input and output facts, and collaboration reads tool calls, results and turn outcomes.
 Collaboration queries an acquired peer Session for only the event kinds it consumes, without selecting model request rows.
 The port keeps one page read, `TimelineStore::read_page`, which rebuilds the requests of the rows it

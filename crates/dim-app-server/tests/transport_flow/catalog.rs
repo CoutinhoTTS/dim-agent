@@ -716,3 +716,129 @@ async fn seeded_workspace_store(workspaces: &[(&str, i64)]) -> Store {
     tx.commit().unwrap();
     store
 }
+
+/// The `updatedAt` row of `id` in one listing method's reply.
+async fn listed_updated_at(client: &mut Client, id: &str, method: &str) -> i64 {
+    let reply = client.rpc(method, json!({})).await;
+    let rows = match &reply["result"] {
+        Value::Array(rows) => rows,
+        Value::Object(_) => reply["result"]["sessions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{method} reply: {reply}")),
+        _ => panic!("{method} reply: {reply}"),
+    };
+    rows.iter()
+        .find(|entry| entry["sessionId"] == id)
+        .unwrap_or_else(|| panic!("{id} is missing from {method}: {reply}"))["updatedAt"]
+        .as_u64()
+        .unwrap() as i64
+}
+
+/// #1099: a Session's activity time follows its own activity. A Session
+/// created and never written to sits at its creation time; a user message
+/// moves the row while its turn still runs, and the completed turn moves it
+/// again; and both listings report the same value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_activity_time_follows_user_activity_not_housekeeping() {
+    use super::deletion::{eventually, turn};
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    // The stored projection and the newest activity event on `main`.
+    let row = || -> i64 {
+        store
+            .connection()
+            .query_row(
+                "SELECT updated_at_ms FROM session_catalog WHERE session_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let activity = || -> i64 {
+        store
+            .connection()
+            .query_row(
+                "SELECT json_extract(body, '$.record.event.create_at') FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id='main' \
+                   AND kind IN ('input/message','turn/end','branch/create','session/forked') \
+                   AND NOT (kind='input/message' AND json_extract(body,'$.record.event.data.user') IS NULL) \
+                 ORDER BY sequence DESC LIMIT 1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    // A Session created and never written to sits at its creation time, in
+    // both listings.
+    let creation_time = row();
+    assert_eq!(
+        listed_updated_at(&mut client, &id, "session.summaries").await,
+        creation_time
+    );
+    assert_eq!(
+        listed_updated_at(&mut client, &id, "session.catalog").await,
+        creation_time
+    );
+
+    // A user message moves the row to its own time while the turn runs; the
+    // value is the same in the projection and both listings. The turn's
+    // `tool:wait` holds it 400 ms, so the row is read between the message's
+    // commit and the turn's end.
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"tool:wait {\"millis\":400}"}),
+            )
+            .await,
+    );
+    eventually("the input message moves the activity row", || {
+        row() > creation_time
+    })
+    .await;
+    let message_time = activity();
+    assert!(message_time > creation_time);
+    assert_eq!(row(), message_time);
+    assert_eq!(
+        listed_updated_at(&mut client, &id, "session.summaries").await,
+        message_time
+    );
+    assert_eq!(
+        listed_updated_at(&mut client, &id, "session.catalog").await,
+        message_time
+    );
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+
+    // The completed turn moves it again.
+    let end_time = activity();
+    assert!(end_time > message_time);
+    assert_eq!(row(), end_time);
+    assert_eq!(
+        listed_updated_at(&mut client, &id, "session.summaries").await,
+        end_time
+    );
+    assert_eq!(
+        listed_updated_at(&mut client, &id, "session.catalog").await,
+        end_time
+    );
+
+    // Another full turn moves it the same way.
+    turn(&mut client, &id, "second turn").await;
+    let second = activity();
+    assert!(second > end_time);
+    assert_eq!(row(), second);
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}

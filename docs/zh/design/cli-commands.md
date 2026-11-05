@@ -1046,7 +1046,9 @@ TITLE 视为缺失，也按同样方式拒绝。
 停下，打印 `This App Server is too old to clean up Sessions safely; nothing was deleted.` 并以 1
 退出。它在每次删除时带的 `requireInactive` 与 `includeClosed` 一同落地，所以拒绝其一的服务器两者
 都拒绝；某次删除在尚未删除任何东西之前回答 `invalid_params` 时，也按同一方式停下。它用两个选择器之一，
-两者都读 `session.summaries` 的 `updatedAt`，即 Session 的最后活跃时间：
+两者都读 `session.summaries` 的 `updatedAt`，即 Session 的活动时间
+（[Session 目录](appserver/session-catalog.md#32-顺序游标与分页)），而不是它最后一个存储事件的时间：
+附着、恢复以及其他家事事件都不移动它，因此只是被附着或恢复过的 Session 保持早先的时间，可能被选中删除：
 
 | 选择器 | 选择范围 |
 | --- | --- |

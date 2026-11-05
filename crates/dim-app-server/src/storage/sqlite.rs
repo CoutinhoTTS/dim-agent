@@ -15,7 +15,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 33;
+pub const FORMAT: u32 = 34;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -54,7 +54,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 33))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34))",
     ),
     (
         "settings_documents",
@@ -212,7 +212,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 19] = [
+const UPGRADES: [(u32, &[&str]); 20] = [
     (
         13,
         &[
@@ -279,6 +279,10 @@ const UPGRADES: [(u32, &[&str]); 19] = [
             "session_worktrees_by_directory",
         ],
     ),
+    // #1099: a Session's activity time is the newest activity event on
+    // `main`, and the step recomputes the derived `session_catalog`
+    // column; the marker only.
+    (33, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -691,6 +695,12 @@ impl SqliteStorage {
                     }
                     if *from == 25 {
                         crate::provider::rewrite_stored_limits(&tx)?;
+                    }
+                    // #1099: only the derived `updated_at_ms` column is
+                    // rewritten, by the same backfill the catalog's own
+                    // upgrade used.
+                    if *from == 33 {
+                        super::catalog::backfill(&tx)?;
                     }
                 }
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
