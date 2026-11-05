@@ -395,7 +395,6 @@ fn the_provider_panel_signs_in_through_each_described_namespace() {
                     "account.grok.login.cancel",
                 ],
             );
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -440,7 +439,7 @@ fn the_provider_panel_signs_in_through_each_described_namespace() {
             command.arg("--fullscreen");
         }
         sized(&mut command, 100, 32);
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         terminal.write(b"/connect\r");
         terminal.until("OpenAI Codex");
@@ -473,7 +472,6 @@ fn a_panel_without_the_sign_in_method_shows_the_unsupported_daemon_error() {
                 "provider.probe",
             ],
         );
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -500,7 +498,7 @@ fn a_panel_without_the_sign_in_method_shows_the_unsupported_daemon_error() {
     let mut command = home.command();
     command.arg("--fullscreen");
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/connect\r");
     terminal.until("OpenAI Codex");

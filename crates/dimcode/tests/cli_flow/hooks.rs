@@ -208,7 +208,6 @@ fn hooks_toggle_conflict_reads_the_area_again() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -240,7 +239,7 @@ fn hooks_toggle_conflict_reads_the_area_again() {
         wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/hooks\r");
@@ -921,7 +920,6 @@ fn tui_hooks_panel_lists_the_sources_and_toggles_the_project() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -956,7 +954,7 @@ fn tui_hooks_panel_lists_the_sources_and_toggles_the_project() {
         wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/hooks\r");
@@ -988,7 +986,6 @@ fn tui_hooks_panel_settles_a_toggle_whose_read_fails() {
         let (shown, wait_shown) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1026,7 +1023,7 @@ fn tui_hooks_panel_settles_a_toggle_whose_read_fails() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/hooks\r");
@@ -1080,7 +1077,6 @@ fn a_missing_source_shows_its_path_and_says_there_is_no_hooks_file() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1102,7 +1098,7 @@ fn a_missing_source_shows_its_path_and_says_there_is_no_hooks_file() {
         wire.reply(&request, missing_catalog());
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/hooks\r");
@@ -1158,7 +1154,6 @@ fn tui_hooks_panel_edits_the_user_document() {
         let (shown, wait_shown) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1193,7 +1188,7 @@ fn tui_hooks_panel_edits_the_user_document() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/hooks\r");
@@ -1218,7 +1213,6 @@ fn tui_hooks_panel_offers_no_edit_without_a_user_document() {
         let (shown, wait_shown) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1244,7 +1238,7 @@ fn tui_hooks_panel_offers_no_edit_without_a_user_document() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/hooks\r");
@@ -1446,7 +1440,6 @@ fn tui_hooks_panel_settles_a_save_whose_read_fails() {
         let (shown, wait_shown) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1498,7 +1491,7 @@ fn tui_hooks_panel_settles_a_save_whose_read_fails() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/hooks\r");
@@ -1547,7 +1540,6 @@ fn tui_hooks_panel_drops_the_draft_when_the_conflict_read_fails() {
         let (shown, wait_shown) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1602,7 +1594,7 @@ fn tui_hooks_panel_drops_the_draft_when_the_conflict_read_fails() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/hooks\r");
@@ -1654,7 +1646,6 @@ fn tui_hooks_panel_keeps_the_users_text_when_the_write_is_refused() {
         let (shown, wait_shown) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1701,7 +1692,7 @@ fn tui_hooks_panel_keeps_the_users_text_when_the_write_is_refused() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/hooks\r");
@@ -1743,7 +1734,6 @@ fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1794,7 +1784,7 @@ fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
         wire.reply(&request, document_catalog("user:2", json!({"hooks": {}})));
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, &[]));
+    let mut terminal = Terminal::resume_tui(edit_command(&home, &script, &[]));
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/hooks\r");
@@ -1827,7 +1817,6 @@ fn tui_hooks_panel_writes_nothing_when_the_editor_exits_non_zero() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1849,7 +1838,7 @@ fn tui_hooks_panel_writes_nothing_when_the_editor_exits_non_zero() {
         wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, &[]));
+    let mut terminal = Terminal::resume_tui(edit_command(&home, &script, &[]));
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/hooks\r");
@@ -1966,7 +1955,6 @@ fn tui_hooks_panel_says_when_the_daemon_cannot_manage_them() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1986,7 +1974,7 @@ fn tui_hooks_panel_says_when_the_daemon_cannot_manage_them() {
         wait_shown.recv_timeout(PATIENCE).unwrap();
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/hooks\r");
