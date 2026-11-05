@@ -94,7 +94,7 @@ fn wakeup_declaration() -> ToolDefinition {
             "additionalProperties": false,
             "properties": {
                 "at": {"type": "string", "description": "The RFC 3339 instant at which the wakeup fires."},
-                "prompt": {"type": "string", "maxLength": MAX_PROMPT_BYTES, "description": "The text delivered to the Session when it fires."}
+                "prompt": {"type": "string", "description": format!("The text delivered to the Session when it fires, at most {MAX_PROMPT_BYTES} bytes of UTF-8.")}
             }
         }),
     );
@@ -236,7 +236,9 @@ fn nonempty(text: &str, field: &str) -> Result<(), RpcError> {
 /// The prompt bound shared by the declaration and both entry points (design
 /// §10.1, §10.2): an oversized prompt is the caller's error, so it answers
 /// `invalid_params` at the wire boundary; the record's own check stays as the
-/// storage-side guard.
+/// storage-side guard. JSON Schema's `maxLength` counts characters, not UTF-8
+/// bytes, so the declaration states the bound in prose and the handler stays
+/// its single authority.
 fn prompt_size(prompt: &str) -> Result<(), String> {
     if prompt.len() > MAX_PROMPT_BYTES {
         return Err(format!("prompt is at most {MAX_PROMPT_BYTES} bytes"));

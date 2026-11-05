@@ -515,7 +515,7 @@ A missing file holds no records. A file that is not valid v1 — malformed JSON,
 
 `at` is an absolute RFC 3339 instant. Fields are camelCase and `deny_unknown_fields`, and an empty string is `invalid_params` like the neighbouring Session methods. Errors: `invalid_params` for a malformed `at`, an empty field, an unknown field or a prompt over 32 KiB; `wakeup_not_found` for a cancel naming no record of the calling Session (another Session's id answers like an unknown one); Rpc's own `session_closed` for a Session id that names no Session; and the method table's `unknown_method`, `service_reloading` or `service_unavailable` while the Scheduler row is absent, reloading or failed. The size bound is checked at the wire boundary, so a caller's oversized prompt is never the stored data's `invalid_data`; the record's own validation stays as the storage-side guard.
 
-The `wakeup` tool takes `{at, prompt}` and defaults the Session and branch to the caller. Its declaration states `maxLength: 32768` on `prompt`, and its handler refuses a longer one with `invalid_params` at the same bound. Its handler refuses non-interactive Sessions and Collaboration members like the `schedule` tool, and a refusal writes nothing.
+The `wakeup` tool takes `{at, prompt}` and defaults the Session and branch to the caller. Its declaration states the bound as at most 32768 bytes of UTF-8 in the `prompt` description, and its handler refuses a larger prompt with `invalid_params`; the handler is the bound's single authority because JSON Schema's `maxLength` counts characters, not bytes. Its handler refuses non-interactive Sessions and Collaboration members like the `schedule` tool, and a refusal writes nothing.
 
 ### 10.3 Firing and the cancel boundary
 

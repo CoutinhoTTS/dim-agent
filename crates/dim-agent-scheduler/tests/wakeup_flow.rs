@@ -1152,7 +1152,7 @@ async fn an_oversized_prompt_is_invalid_params_at_both_entry_points() {
         "{error}"
     );
 
-    // The tool declares `maxLength` and its handler refuses the same bound.
+    // The tool handler refuses the same bound as the method.
     model.push(vec![ToolCall {
         id: "w1".into(),
         name: "wakeup".into(),
@@ -1189,6 +1189,49 @@ async fn an_oversized_prompt_is_invalid_params_at_both_entry_points() {
     let stored = stored_wakeups(home.path());
     assert_eq!(stored.len(), 1, "{stored:?}");
     assert_eq!(stored[0]["prompt"].as_str().unwrap().len(), 32 * 1024);
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_multi_byte_prompt_over_the_byte_bound_is_invalid_params() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &["wakeup"], true).await;
+
+    // The bound is bytes, and only the handler enforces it: the declaration
+    // states it in prose because JSON Schema's `maxLength` counts characters.
+    // 12000 three-byte characters are well under 32768 characters and well
+    // over 32768 bytes.
+    let prompt = "汉".repeat(12_000);
+    assert!(prompt.chars().count() < 32_768 && prompt.len() > 32 * 1024);
+    model.push(vec![ToolCall {
+        id: "w1".into(),
+        name: "wakeup".into(),
+        input: json!({"at": instant_after(30), "prompt": prompt})
+            .as_object()
+            .unwrap()
+            .clone(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "Too long by bytes."}),
+        )
+        .await
+        .unwrap();
+    wait_for("the tool's invalid_params result", || {
+        model.texts().contains("wakeup: invalid_params")
+    })
+    .await;
+    assert!(
+        stored_wakeups(home.path()).is_empty(),
+        "the refused call wrote no record"
+    );
 
     drop(client);
     server.shutdown();
