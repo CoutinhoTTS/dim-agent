@@ -244,7 +244,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `goal_update {status, summary}` | 注册到 `toolRegistry` 的工具（Session），风险 `session` | 模型报告完成或受阻；写入一条变更输入并确认写入 |
 | `session.goal.set/edit/pause/resume/clear` | `sessionMethods`（Session，命名空间 `session.goal`） | 用户变更目标；每个方法写一条变更输入，并以其序号回复。`set` 还接受 `judge`，即 [Pursuit](Pursuit.md) 的评审裁判 |
-| 读取目标 | 分支的事件 | 分支本地事件中最新存活的 `goal:objective` 与 `goal:status` 块就是它的目标文本与状态（§2，A16），也就是模型看到的那些块。客户端从已经收到的分支历史与实时事件中读取；没有查询方法（A8） |
+| 读取目标 | 分支的事件，或 App Server 提供时分支的存活带 key 块（session.keys，[keyed-blocks](../appserver/keyed-blocks.md)） | 分支本地事件中最新存活的 `goal:objective` 与 `goal:status` 块就是它的目标文本与状态（§2，A16），也就是模型看到的那些块。客户端从已经收到的分支历史与实时事件中读取，或从该带 key 投影读取；没有 Goal 查询方法（A8） |
 | `goal` 来源：`maxContinuations` | 业务配置（Settings） | 续跑上限；每次 turn/end 决策使用时读取文档（§1） |
 
 细节：[附录 A](#附录-a-接口细节)。
@@ -522,7 +522,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 | A5 | 计数只在 `set`、`resume` 和操作者输入时重新开始：带 `user` 内容且第一个 raw 块不是来源标记 | 判断 | 其他插件的自动输入会重置上限 |
 | A6 | 失败的轮次暂停目标（`turn_failed`） | 判断（避免因提供方错误进入重试循环） | 失败轮次会继续并消耗上限 |
 | A7 | 暂停不中断正在运行的轮次 | 判断 | 暂停也会调用 `stop` |
-| A8 | 没有状态查询：客户端读取最新存活的目标块，这也是模型看到的内容（2026-10-18 决定：调用方只写，所有者决定；Session 部分不读分支状态） | 决定 E18；决定 §3（无 Goal 模式） | 查询需要 Session 部分读取每个分支各一份的服务，违反 ADR 002 D3 |
+| A8 | 没有 Goal 状态查询：客户端从已经收到的分支历史与实时事件中读取最新存活的目标块（这也是模型看到的内容），App Server 提供时也可从通用带 key 投影 session.keys 读取（2026-10-18 决定：调用方只写，所有者决定；Session 部分不读分支状态） | 决定 E18；决定 §3（无 Goal 模式） | Goal 专属查询需要 Session 部分读取每个分支各一份的服务，违反 ADR 002 D3；session.keys 是核心块数据（session-access A.1/A.2），既不由 Goal 也不由任何 Session 部分提供 |
 | A9 | `goal_update` 风险为 `session`，提供给所有角色 | 判断 | 工具对某些角色隐藏，或在其他类别下准入 |
 | A10 | 目标文本 ≤ 4000 个字符，summary ≤ 2000 | 判断 | 其他限制 |
 | A11 | 分叉 Session 的 `main` 从没有目标开始。分叉在其事务中、复制来的事实之后写 `session/forked`（[fork §6.5](../appserver/session-deletion-and-fork.md#65-打开分叉)）；Goal 从它之后折叠，并据此做起始 `clear` 决策 | 用户决定（2026-10-19）：分叉本身就是 Goal 消费的事实。不在此处写 `branch/start`，因为 Prompt 把根分支的 start 当作新 Session | — |

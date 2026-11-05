@@ -68,6 +68,7 @@ const en = {
   "goal.usage": "Usage: /goal [objective | set objective | edit objective | pause | resume | clear]",
   "composer.command.models": "Choose a model",
   "composer.command.new": "New session",
+  "composer.command.scheduled": "Manage scheduled tasks on the CLI host",
   "composer.commandKeys": "↑↓ select · Enter confirm · Esc close",
   "composer.command.permissions": "Show or change the session permissions",
   "composer.permission.label": "Permissions",

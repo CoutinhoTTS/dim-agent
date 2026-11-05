@@ -1195,6 +1195,318 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
     soon(agent.close()).await.unwrap();
 }
 
+/// A memory store for tests that records every `query`, and can fail reads on
+/// purpose. [`refusing_ranges`](TestStore::refusing_ranges) refuses a restore's
+/// range reads (`read`, `read_page`, `read_segments`), so a test can assert
+/// that a restored line is read by selections alone; an [armed](TestStore::arm)
+/// store fails one line's opening query, so a creation can be made to fail at
+/// that read
+/// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+/// Every other read, like the boundary checks a creation makes of a line,
+/// keeps working, so a refusal lands on the read it was aimed at.
+#[derive(Default)]
+struct TestStore {
+    memory: Arc<MemoryTimelineStore>,
+    queries: Mutex<Vec<(String, Vec<String>)>>,
+    reads: AtomicUsize,
+    armed: Mutex<Option<String>>,
+    refuse_ranges: bool,
+}
+impl TestStore {
+    /// A store over `memory` that refuses every range read.
+    fn refusing_ranges(memory: Arc<MemoryTimelineStore>) -> Self {
+        Self {
+            memory,
+            refuse_ranges: true,
+            ..Self::default()
+        }
+    }
+    /// Fails `query` on `branch` while it selects the kinds a line's opening
+    /// reads.
+    fn arm(&self, branch: &str) {
+        *self.armed.lock().unwrap() = Some(branch.into());
+    }
+    fn disarm(&self) {
+        *self.armed.lock().unwrap() = None;
+    }
+    /// The pages `branch` was read with while selecting exactly `kinds`.
+    fn pages(&self, branch: &str, kinds: &[&str]) -> usize {
+        self.queries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(line, selected)| {
+                line == branch
+                    && selected.len() == kinds.len()
+                    && selected
+                        .iter()
+                        .map(String::as_str)
+                        .eq(kinds.iter().copied())
+            })
+            .count()
+    }
+    fn range_reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+    fn refused<T>(&self) -> Result<T> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Err(AgentError::Storage("a restore read a stored range".into()))
+    }
+}
+impl TimelineStore for TestStore {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> dim_agent_runtime::BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn read_page<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        if self.refuse_ranges {
+            return Box::pin(async move { self.refused() });
+        }
+        self.memory.read_page(key, after, limit, through)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        if self.refuse_ranges {
+            return Box::pin(async move { self.refused() });
+        }
+        self.memory.read_segments(session_id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        snapshot: RecoverySnapshot,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
+        self.memory.latest_snapshot(key, through, interpreter)
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        query: &'a TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<TimelineQueryPage>> {
+        Box::pin(async move {
+            if self.armed.lock().unwrap().as_deref() == Some(key.branch_id.as_str())
+                && query.kinds.as_slice() == ["input/message"]
+            {
+                return Err(AgentError::Storage("injected opening read failure".into()));
+            }
+            self.queries
+                .lock()
+                .unwrap()
+                .push((key.branch_id.clone(), query.kinds.clone()));
+            self.memory.query(key, query, from, through).await
+        })
+    }
+}
+
+/// #1064: a restore resolves a line's own end from one selection page over the
+/// whole line, and reads no stored range. `A` has an end its parent never
+/// recorded (the restore must complete it from `branch/end`); `B` has none and
+/// is long enough that a window grown 32, 256, 2048 … would need four pages
+/// and four round trips to answer the same question.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_reads_a_line_end_in_one_page_and_no_range() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("saved", &SessionConfig::default())
+        .await
+        .unwrap();
+    let root = || rutis::Ctx::root().unwrap();
+    let key = |branch: &str| TimelineKey {
+        session_id: "saved".into(),
+        branch_id: branch.into(),
+    };
+    let source = BranchSource::Host {
+        operation_id: "op:restore".into(),
+    };
+    let main = Timeline::new(root(), key("main"), vec![], store.clone());
+    let create_a = main
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: source.clone(),
+                branch: "A".into(),
+                prompt: "a".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let a = Timeline::new(
+        root(),
+        key("A"),
+        vec![("main".into(), create_a.sequence)],
+        store.clone(),
+    );
+    a.append(
+        EventKind::BranchStart(BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create_a.sequence),
+        })
+        .into(),
+    )
+    .unwrap();
+    a.append(
+        EventKind::InputMessage(InputMessageData::text("work on a", Some(InputMode::Queue))).into(),
+    )
+    .unwrap();
+    let a_end = a
+        .append(
+            EventKind::BranchEnd(BranchEndData {
+                source: source.clone(),
+                ancestor: None,
+            })
+            .into(),
+        )
+        .unwrap();
+    let create_b = main
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: source.clone(),
+                branch: "B".into(),
+                prompt: "b".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let b = Timeline::new(
+        root(),
+        key("B"),
+        vec![("main".into(), create_b.sequence)],
+        store.clone(),
+    );
+    b.append(
+        EventKind::BranchStart(BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create_b.sequence),
+        })
+        .into(),
+    )
+    .unwrap();
+    b.append(
+        EventKind::InputMessage(InputMessageData::text("work on b", Some(InputMode::Queue))).into(),
+    )
+    .unwrap();
+    for index in 0..4_000 {
+        b.append(
+            EventKind::TurnEnd(TurnEndData {
+                turn_id: format!("pad-{index}"),
+                outcome: TurnOutcome::Completed {
+                    reason: "padding".into(),
+                },
+            })
+            .into(),
+        )
+        .unwrap();
+    }
+    for timeline in [&b, &a, &main] {
+        dim_agent_runtime::core::close_timeline(timeline)
+            .await
+            .unwrap();
+    }
+
+    let counting = Arc::new(TestStore::refusing_ranges(store));
+    let builder = builder_with_store(&Arc::new(Probe::default()), counting.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = soon(agent.restore_session("saved".into())).await.unwrap();
+    soon(session.idle("main")).await.unwrap();
+
+    assert_eq!(counting.range_reads(), 0, "a restore reads no stored range");
+    assert_eq!(
+        session.ended_head("A"),
+        Some(a_end.sequence),
+        "the interrupted end is resolved from the line itself"
+    );
+    let results: Vec<BranchEndedData> = chain_events(&session, "main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnded(data) if data.branch == "A" => Some(data.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [BranchEndedData {
+            branch: "A".into(),
+            end_event: a_end.sequence,
+            source: source.clone(),
+            ancestor: None,
+        }]
+    );
+    let pages = counting.pages("B", &["branch/end"]);
+    assert_eq!(
+        pages, 1,
+        "a line with no end costs one page, whatever its length; the restore asked {pages} times"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 struct SettleOnActivation {
     child: String,
     source: BranchSource,
@@ -4830,125 +5142,6 @@ fn opening_blocks(events: &[Arc<AgentEvent>]) -> Vec<(Option<String>, String, bo
         .expect("the line's opening input")
 }
 
-/// A memory store that refuses the read a line's opening makes of the line it
-/// was cut from while armed, so that read can fail: `query` on the armed
-/// line's key with the opening read's kinds
-/// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
-/// Every other read, like the boundary checks a creation makes of the same
-/// line, keeps working, so the refusal lands on that read alone.
-#[derive(Default)]
-struct RefuseQueries {
-    memory: MemoryTimelineStore,
-    armed: Mutex<Option<String>>,
-}
-impl RefuseQueries {
-    fn arm(&self, branch: &str) {
-        *self.armed.lock().unwrap() = Some(branch.into());
-    }
-    fn disarm(&self) {
-        *self.armed.lock().unwrap() = None;
-    }
-}
-impl TimelineStore for RefuseQueries {
-    fn create_session<'a>(
-        &'a self,
-        id: &'a str,
-        config: &'a SessionConfig,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
-        self.memory.create_session(id, config)
-    }
-    fn rollback_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
-        self.memory.rollback_session(id)
-    }
-    fn release_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
-        self.memory.release_session(id)
-    }
-    fn session_config<'a>(
-        &'a self,
-        id: &'a str,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<SessionConfig>>> {
-        self.memory.session_config(id)
-    }
-    fn branches<'a>(
-        &'a self,
-        id: &'a str,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredBranch>>> {
-        self.memory.branches(id)
-    }
-    fn head<'a>(&'a self, key: &'a TimelineKey) -> dim_agent_runtime::BoxFuture<'a, Result<u64>> {
-        self.memory.head(key)
-    }
-    fn append(
-        &self,
-        key: TimelineKey,
-        events: Vec<StoredEvent>,
-        publish: PublishCallback,
-    ) -> Result<()> {
-        self.memory.append(key, events, publish)
-    }
-    fn batch_end<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        sequence: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
-        self.memory.batch_end(key, sequence)
-    }
-    fn read_page<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        self.memory.read_page(key, after, limit, through)
-    }
-    fn read_segments<'a>(
-        &'a self,
-        session_id: &'a str,
-        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
-        self.memory.read_segments(session_id, segments)
-    }
-    fn trace<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        sequence: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<TimelineTrace>>> {
-        self.memory.trace(key, sequence)
-    }
-    fn save_snapshot<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        snapshot: RecoverySnapshot,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
-        self.memory.save_snapshot(key, snapshot)
-    }
-    fn latest_snapshot<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        through: u64,
-        interpreter: &'a str,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
-        self.memory.latest_snapshot(key, through, interpreter)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<TimelineQueryPage>> {
-        Box::pin(async move {
-            if self.armed.lock().unwrap().as_deref() == Some(key.branch_id.as_str())
-                && query.kinds.as_slice() == ["input/message"]
-            {
-                return Err(AgentError::Storage("injected opening read failure".into()));
-            }
-            self.memory.query(key, query, from, through).await
-        })
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_nested_line_is_told_its_own_parent_at_open() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -5118,7 +5311,7 @@ async fn a_nested_line_is_told_its_own_parent_at_open() {
 /// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_nested_line_whose_opening_read_fails_is_a_failed_create() {
-    let store = Arc::new(RefuseQueries::default());
+    let store = Arc::new(TestStore::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .timeline_store(store.clone())

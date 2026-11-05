@@ -790,7 +790,22 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
         heads.insert(branch.to_owned(), idle);
     }
     assert_eq!(stored_heads(&store, &id), heads);
+    // #1099: the activity time is what the turn wrote. Unload writes
+    // nothing, and the restore writes only `branch/resume`, which is
+    // housekeeping, so the row must not move either time.
+    let updated_at = |store: &Store, id: &str| -> i64 {
+        rusqlite::Connection::open(store.database())
+            .unwrap()
+            .query_row(
+                "SELECT updated_at_ms FROM session_catalog WHERE session_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let steady = updated_at(&store, &id);
     unloaded(session).await;
+    assert_eq!(updated_at(&store, &id), steady);
     assert_eq!(stored_heads(&store, &id), heads);
     let listed = client.rpc("session.summaries", json!({})).await;
     assert!(
@@ -802,6 +817,7 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
         "{listed}"
     );
     assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
+    assert_eq!(updated_at(&store, &id), steady);
     for (branch, head) in &heads {
         let at = json!({"sessionId":id,"branchId":branch});
         let idle = sessions.ok("idle", at.clone()).await["sequence"]
