@@ -27,6 +27,164 @@ fn reject(wire: &mut Wire, request: &Value) {
 }
 
 #[test]
+fn home_browsing_and_exit_need_no_session_in_both_tui_modes() {
+    for fullscreen in [false, true] {
+        for leaf in [false, true] {
+            let home = Home::new();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(if leaf { &["ui.leaf.2"] } else { &[] });
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                assert_eq!(
+                    wire.trailing_request(),
+                    None,
+                    "Home must not issue Session or UI attachment RPCs"
+                );
+            });
+            let mut command = command(&home);
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until("Welcome to DIM");
+            terminal.write(b"/permissions\r");
+            terminal.until("Full access");
+            terminal.write(b"\x1b[27u");
+            terminal.write(b"/exit\r");
+            terminal.until("Bye!");
+            assert!(terminal.wait().success());
+            daemon.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn first_text_or_draft_creates_once_with_startup_options_in_both_tui_modes() {
+    for fullscreen in [false, true] {
+        for draft in [false, true] {
+            let home = Home::new();
+            let original = fs::read(home.0.join("config.json")).unwrap();
+            let long = "x".repeat(16 * 1024 + 1);
+            let expected_long = long.clone();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[]);
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                let create = wire.created();
+                assert_eq!(create["params"]["model"], json!({"modelId":"first-model"}));
+                assert_eq!(create["params"]["modelPreferences"], json!({"reasoningEffort":"high"}));
+                assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"read-only"}));
+                assert_eq!(create["params"]["startup"], json!({"connection":{
+                    "baseUrl":"https://gateway.example/prefix","apiFormat":"openai-compatible",
+                    "apiKey":"first-secret"},"autoCompactWindow":128000}));
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+                if draft {
+                    let put = wire.read("attachment.put");
+                    assert_eq!(put["params"], json!({"sessionId":"session","text":expected_long}));
+                    wire.reply(&put, json!({"attachmentId":"first-paste","path":"/files/paste.txt","bytes":16385}));
+                }
+                let submit = wire.read("session.submit");
+                assert_eq!(submit["params"]["sessionId"], "session");
+                assert_eq!(submit["params"]["text"], if draft { "[Pasted text: /files/paste.txt (1 lines)]" } else { "first text" });
+                wire.reply(&submit, json!({"event":{}}));
+                wire.event(9, "text", json!({"turn_id":"first","request_id":"first-model","delta":"first input accepted"}));
+                wire.no_context();
+                let submit = wire.read("session.submit");
+                assert_eq!(submit["params"]["sessionId"], "session");
+                assert_eq!(submit["params"]["text"], "second text");
+                wire.reply(&submit, json!({"event":{}}));
+                wire.event(10, "text", json!({"turn_id":"second","request_id":"second-model","delta":"second input accepted"}));
+                assert_eq!(wire.trailing_request(), None, "subsequent input must reuse the Session");
+            });
+            let mut command = command(&home);
+            command
+                .envs([
+                    ("DIM_BASE_URL", "https://gateway.example/prefix"),
+                    ("DIM_API_FORMAT", "openai-compatible"),
+                    ("DIM_API_KEY", "first-secret"),
+                ])
+                .args([
+                    "--model",
+                    "first-model",
+                    "--effort",
+                    "high",
+                    "--autocompact",
+                    "128k",
+                    "--permission",
+                    "read-only",
+                ]);
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until("Welcome to DIM");
+            if draft {
+                terminal.paste(&long);
+                terminal.until("16385 chars");
+                terminal.write(b"\r");
+            } else {
+                terminal.write(b"first text\r");
+            }
+            terminal.until("first input accepted");
+            terminal.write(b"second text\r");
+            terminal.until("second input accepted");
+            terminal.write(b"/exit\r");
+            terminal.until("Bye!");
+            assert!(terminal.wait().success());
+            daemon.join().unwrap();
+            assert_eq!(fs::read(home.0.join("config.json")).unwrap(), original);
+            assert!(!terminal.transcript.contains("first-secret"));
+        }
+    }
+}
+
+#[test]
+fn a_refused_leaf_start_shows_the_error_restores_the_terminal_and_exits() {
+    for fullscreen in [false, true] {
+        for queued in ["", "second message\r", "/new\rqueued after new\r"] {
+            let home = Home::new();
+            let (opening, opened) = std::sync::mpsc::channel();
+            let (reject, rejected) = std::sync::mpsc::channel();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&["ui.leaf.2"]);
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                wire.created();
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let open = wire.read("ui.open");
+                opening.send(()).unwrap();
+                rejected.recv_timeout(PATIENCE).unwrap();
+                wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{
+                    "code":-32000,"message":"UI startup refused","data":{"appError":"ui_leaf_failed"}}}));
+                assert_eq!(wire.trailing_request(), None, "a failed UI must not execute queued commands");
+            });
+            let mut command = command(&home);
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until("Welcome to DIM");
+            terminal.write(b"first message\r");
+            opened.recv_timeout(PATIENCE).unwrap();
+            terminal.write(queued.as_bytes());
+            terminal.write(b"/permissions\r");
+            terminal.until("Full access");
+            reject.send(()).unwrap();
+            terminal.until("UI startup refused");
+            assert!(!terminal.wait().success());
+            assert_ne!(terminal.local_mode() & libc::ICANON, 0);
+            assert_ne!(terminal.local_mode() & libc::ECHO, 0);
+            assert!(!terminal.transcript.contains("panicked"));
+            daemon.join().unwrap();
+        }
+    }
+}
+
+#[test]
 fn direct_startup_reaches_each_creation_entry_without_persisting_secrets() {
     for format in [
         "anthropic",
@@ -44,6 +202,10 @@ fn direct_startup_reaches_each_creation_entry_without_persisting_secrets() {
             let params = params.clone();
             let daemon = home.daemon(move |wire| {
                 wire.hello(if leaf { &["ui.leaf.2"] } else { &[] });
+                if tui {
+                    let providers = wire.read("account.providers");
+                    wire.reply(&providers, json!([]));
+                }
                 let create = wire.read("session.create");
                 params
                     .send(serde_json::to_vec(&create["params"]).unwrap())
@@ -65,6 +227,16 @@ fn direct_startup_reaches_each_creation_entry_without_persisting_secrets() {
                     "contextWindow":256000,"maxOutputTokens":16000,"autoCompactWindow":128000})
                 );
                 reject(wire, &create);
+                if tui {
+                    let retry = wire.read("session.create");
+                    assert_eq!(
+                        retry["params"], create["params"],
+                        "retry must preserve startup options"
+                    );
+                    wire.send(json!({"jsonrpc":"2.0","id":retry["id"],"error":{
+                        "code":-32000,"message":"startup retry fixture rejection","data":{"appError":"provider_failed"}}}));
+                    assert_eq!(wire.trailing_request(), None, "a rejected creation must not attach or submit");
+                }
             });
             let mut command = command(&home);
             command
@@ -94,10 +266,14 @@ fn direct_startup_reaches_each_creation_entry_without_persisting_secrets() {
                 ]);
             let text = if tui {
                 let mut terminal = Terminal::launch_tui(command);
+                terminal.until("Ask anything...");
+                terminal.write(b"Hello\r");
                 terminal.until("startup fixture rejection");
-                if !leaf {
-                    terminal.signal(libc::SIGKILL);
-                }
+                assert!(terminal.child.try_wait().unwrap().is_none());
+                terminal.write(b"retry\r");
+                terminal.until("startup retry fixture rejection");
+                assert!(terminal.child.try_wait().unwrap().is_none());
+                terminal.signal(libc::SIGKILL);
                 assert!(!terminal.wait().success());
                 terminal.transcript.clone()
             } else {
@@ -170,10 +346,9 @@ fn resume_startup_is_adopted_or_explicitly_rejected_before_input_in_every_client
             if tui {
                 let mut terminal = Terminal::launch_tui(command);
                 terminal.until("Cannot adopt startup configuration");
-                if !leaf {
-                    terminal.signal(libc::SIGKILL);
-                }
-                assert!(!terminal.wait().success());
+                assert_eq!(terminal.wait().code(), Some(1));
+                assert_ne!(terminal.local_mode() & libc::ICANON, 0);
+                assert_ne!(terminal.local_mode() & libc::ECHO, 0);
                 assert!(!terminal.transcript.contains("resume-secret"));
             } else {
                 let output = command.args(["exec", "-p", "Hello"]).output().unwrap();
@@ -270,6 +445,11 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
                     } else { json!([]) };
                     json!({"events":events,"through":8,"nextAfter":8,"done":true})
                 }
+                "session.submit" => {
+                    assert!(!resume, "the resumed fixture starts without submitting input");
+                    assert_eq!(request["params"]["text"], "initial message");
+                    json!({"event":{}})
+                }
                 "session.idle" => json!({"sequence":8}),
                 "account.providers" => json!([]),
                 "provider.catalog" => json!({"catalog":null}),
@@ -293,6 +473,10 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
             ]);
         }
         let mut terminal = Terminal::launch_tui(command);
+        if !resume {
+            terminal.until("Ask anything...");
+            terminal.write(b"initial message\r");
+        }
         terminal.until(if switched {
             "configured-provider / selected-model"
         } else {

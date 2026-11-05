@@ -1223,6 +1223,8 @@ pub enum Update {
     },
     /// The session cannot continue.
     Failed(String),
+    /// Startup failed; show the error and exit nonzero.
+    StartupFailed(String),
     /// The App Server asked this interface to leave (`ui.shutdown`); the
     /// Session goes on without it.
     Shutdown {
