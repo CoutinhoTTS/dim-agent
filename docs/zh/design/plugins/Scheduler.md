@@ -349,7 +349,7 @@ sequenceDiagram
 | `schedule` 声明的 description | Protocol："Manage scheduled jobs across this host, including other workspaces." 说明工具的作用范围；"Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch." 与 "An omitted policy keeps its stored value, whose default can change with the saving origin." 陈述运行时保证。Policy："Inspect the old-to-new authority transition in the result." 是工作方式指引 |
 | `schedule` 结果 | Protocol：首行 `schedule: <code>` 与其消息、`schedule is available only in interactive leader Sessions.`、`schedule: cancelled before handover`，以及两条卸载通知。代码为 `schedule_invalid`、`schedule_not_found`、`schedule_conflict`、`service_unavailable`、`service_reloading` 和 `invalid_data`；模型读取并按之行事 |
 | `wakeup` 声明的 description | Protocol："The wakeup fires one turn on the same Session with the given prompt, preserving its history and branch; it can be listed and cancelled from any client, and an expired or cancelled wakeup is never replayed." 陈述工具行为与重放规则；首句命名动作 |
-| `wakeup` 结果 | Protocol：首行 `wakeup: created` 与错误的首行 `wakeup: <code>`、`wakeup is available only in interactive leader Sessions.`，以及两条卸载通知；记录字段是 protocol 的标识符 |
+| `wakeup` 结果 | Protocol：首行 `wakeup: created` 与错误的首行 `wakeup: <code>`、`wakeup is available only in interactive leader Sessions.`、`wakeup: cancelled before handover`，以及两条卸载通知；记录字段是 protocol 的标识符 |
 | 运行标记 | Protocol：元素 `dim-scheduler`、其 kind `scheduled-run`、`report` 与 `wakeup`、属性 `job` 与 `run`，以及各自开辟的输入。scheduled-run 的正文是任务名，其后的文本是为该任务保存的提示词；wakeup 的正文是 wakeup id，其后的文本是保存该唤醒时用的提示词；report 的正文陈述运行结局、已知时的 Session id，以及运行历史所在 |
 | 运行结果报告的正文 | Protocol：`Scheduled job …, run …: <state> (<detail>).`、已知时的 Session id 与运行可报告的结局词表。Policy：`Inspect schedule.history for this job.` 是工作方式指引，位于正文最后一行；它所写的方名属 protocol |
 
@@ -840,7 +840,7 @@ Scheduler 以原生 Rust 实现，没有 TypeScript 包、Node 进程或回退�
 | sessions | 共享的 host-dispatch 名称，以 JSON 信封调用；其原生请求类型是 App Server 私有实现 |
 | 权限 cap | `dim-agent-types` 中的 `PermissionPolicy::cap` 与 `within`，与 S2 launch 使用同一函数，并按共享样例测试 |
 | 进程存储 | App Server 的类型化 `PluginFileTransactions` 服务；宿主写 `{version: 1, text}` 信封，Scheduler 提供内部 v1 文本，字节与 TypeScript 版本相同 |
-| 定时器 / 跟踪 | 进程部分拥有：定时器、运行任务、恢复与保留在其任务跟踪器中运行，在方法与服务注册后启动。卸载时（`ctx.cancellation_token()`）停止新工作并结束等待，清理在存储 scope 关闭前等待跟踪器；已接纳的 `sessions` 调用先结算。仍活动的运行留在文件中，由下一代恢复。Session 工具返回 §1.3 的卸载结果及 `schedule: cancelled before handover` |
+| 定时器 / 跟踪 | 进程部分拥有：定时器、运行任务、恢复与保留在其任务跟踪器中运行，在方法与服务注册后启动。卸载时（`ctx.cancellation_token()`）停止新工作并结束等待，清理在存储 scope 关闭前等待跟踪器；已接纳的 `sessions` 调用先结算。仍活动的运行留在文件中，由下一代恢复。Session 工具返回 §1.3 的卸载结果及各自的 `schedule: cancelled before handover` 或 `wakeup: cancelled before handover` |
 | policy 文本 | `install_with(builder, SchedulerTexts {description, report_guidance})`；`install` 使用内置文本。含换行的 `report_guidance` 被拒绝 |
 | guide 条目 | Session 部分取得 `GuideEntries`，注册 §5.2 的条目，session 范围，order 110 |
 | 可选行 | `AgentBuilder::optional_plugin`：宿主不等待该行，依赖缺失或运行存储不可读只让 Scheduler 失败（附录 D 第 12 项） |
