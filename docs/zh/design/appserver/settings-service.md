@@ -322,11 +322,14 @@ impl SettingsService {
 - 文件和原生路径与 `BusinessDocument` 共用，按来源名而不是 `D::NAMESPACE` 取键。CAS、gate、
   lease、unsynced 情形和 `publish` 保持不变。
 - `SettingsError` 新增 `UnknownSource`、`UserOnlyField(pointer)`、`InvalidScope`、
-  `Document(message)` 和 `DocumentShape { reason, position }`。写入的文档违反 schema 时为
-  `Document`，带校验器的消息（实例路径，从不带值）。来源整体拒绝一个文档时——不是对象、
-  缺少必需成员、文件不是 JSON——以 `DocumentShape` 拒绝：所有者的静态 `reason`（客户端可以
-  看到），以及文档从字节读入时出错的位置 `position`。`DocumentShape` 的 `Display` 与同一文本
-  作为 `Document` 打印时逐字节相同。`reason()` 报告 `Invalid` 与 `DocumentShape` 的静态消息，
+  `Document(message)` 和 `DocumentShape { reason, position }`。写入的文档违反 schema 或不是
+  对象时为 `Document`，带校验器的消息（实例路径，从不带值）。`DocumentShape` 是 `McpSettings`
+  整体拒绝一个 MCP 文档时使用的形式——不是对象、没有 `mcpServers` 对象、`mcpServers` 不是
+  对象、服务器条目 id 为空、文件不是 JSON：所有者的静态 `reason`（客户端可以看到），以及文档
+  从字节读入时出错的位置 `position`。它的 `Display` 与同一文本作为 `Document` 打印时逐字节
+  相同。其他所有者没有采用它：HooksSettings 以 `Invalid("invalid hook document")` 拒绝 hook
+  文档，默认的 `BusinessDocument` 解码或声明式来源无法解析已持久化的文件时为
+  `Invalid("invalid settings document")`。`reason()` 报告 `Invalid` 与 `DocumentShape` 的静态消息，
   其余变体（包括 `Document`）返回 `None`，因为它们的文本是任意文本。客户端路径把 `Document`
   和 `DocumentShape` 都映射为参数无效。已持久化的文档违反 schema 时仍为 `Invalid`
   （`invalid_document` / `settings_failed`）。
