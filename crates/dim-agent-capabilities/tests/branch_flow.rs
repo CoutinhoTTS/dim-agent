@@ -389,8 +389,10 @@ impl ModelDriver for GateModel {
     ) -> HostFuture<'_, ModelStream> {
         let gate = request
             .messages
-            .last()
+            .iter()
+            .rev()
             .map(|message| said(message))
+            .find(|text| !text.starts_with("<dim-branch-"))
             .and_then(|text| match text.as_str() {
                 "GATE-MAIN" => Some((&self.main_entered, &self.main_release)),
                 "GATE-LINE" => Some((&self.line_entered, &self.line_release)),

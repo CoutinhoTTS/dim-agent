@@ -144,6 +144,11 @@ pub enum Effect {
         row_id: String,
         action: crate::ui::timeline_panel::TimelineAction,
     },
+    InputControl {
+        input_id: String,
+        action: &'static str,
+    },
+    Export(crate::export::Format),
     /// End this line, once the user confirmed it.
     EndLine {
         session_id: String,

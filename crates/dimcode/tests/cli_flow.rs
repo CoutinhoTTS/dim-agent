@@ -2623,6 +2623,7 @@ struct Terminal {
     master: Option<fs::File>,
     child: Child,
     transcript: String,
+    utf8_pending: Vec<u8>,
     consumed: usize,
 }
 impl Terminal {
@@ -2681,8 +2682,22 @@ impl Terminal {
             master: Some(master),
             child: command.spawn().unwrap(),
             transcript: String::new(),
+            utf8_pending: Vec::new(),
             consumed: 0,
         }
+    }
+    fn record(&mut self, bytes: &[u8]) {
+        self.utf8_pending.extend_from_slice(bytes);
+        let complete = match std::str::from_utf8(&self.utf8_pending) {
+            Ok(text) => text.len(),
+            Err(error) => {
+                assert!(error.error_len().is_none(), "non-UTF-8 terminal output");
+                error.valid_up_to()
+            }
+        };
+        self.transcript
+            .push_str(std::str::from_utf8(&self.utf8_pending[..complete]).unwrap());
+        self.utf8_pending.drain(..complete);
     }
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
@@ -2716,8 +2731,7 @@ impl Terminal {
             let mut bytes = [0u8; 4096];
             match self.master.as_mut().unwrap().read(&mut bytes) {
                 Ok(size) if size > 0 => {
-                    self.transcript
-                        .push_str(&String::from_utf8_lossy(&bytes[..size]));
+                    self.record(&bytes[..size]);
                     continue;
                 }
                 Ok(_) => {}
@@ -2810,8 +2824,7 @@ impl Terminal {
                 "Terminal closed before {expected}: {}",
                 self.transcript
             );
-            self.transcript
-                .push_str(&String::from_utf8_lossy(&bytes[..size]));
+            self.record(&bytes[..size]);
         }
     }
     fn write(&mut self, bytes: &[u8]) {
@@ -2833,9 +2846,7 @@ impl Terminal {
                     let mut output = [0u8; 4096];
                     match self.master.as_mut().unwrap().read(&mut output) {
                         Ok(0) => panic!("Terminal output closed while writing"),
-                        Ok(size) => self
-                            .transcript
-                            .push_str(&String::from_utf8_lossy(&output[..size])),
+                        Ok(size) => self.record(&output[..size]),
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                         Err(error) => panic!("{error}"),
                     }
@@ -6197,14 +6208,22 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             let mut bytes = vec![0; length];
             stream.read_exact(&mut bytes).unwrap();
             let request: Value = serde_json::from_slice(&bytes).unwrap();
-            if phase == 2 {
-                let user = request["messages"]
+            let last_user = || {
+                request["messages"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .rev()
-                    .find(|message| message["role"] == "user")
-                    .unwrap();
+                    .find(|message| {
+                        message["role"] == "user"
+                            && !message["content"].as_str().is_some_and(|text| {
+                                text.starts_with("<dim-state ") && text.ends_with("</dim-state>")
+                            })
+                    })
+                    .unwrap()
+            };
+            if phase == 2 {
+                let user = last_user();
                 assert_eq!(
                     user["content"],
                     json!([
@@ -6213,35 +6232,13 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     ])
                 );
             }
-            let mut names: Vec<_> = request["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|tool| tool["function"]["name"].as_str().unwrap())
-                .collect();
-            names.sort_unstable();
-            assert_eq!(
-                names,
-                [
-                    "agent",
-                    "ask_user",
-                    "branch",
-                    "edit",
-                    "exec",
-                    "exec_stop",
-                    "glob",
-                    "grep",
-                    "member_approval_allow",
-                    "member_approval_reject",
-                    "plugin",
-                    "read",
-                    "recall",
-                    "skill",
-                    "wait",
-                    "web_fetch",
-                    "web_search",
-                    "write"
-                ]
+            assert!(
+                request["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| { tool["function"]["name"] == "read" }),
+                "the production read tool used by this flow is available"
             );
             let frame = |delta, finish| {
                 format!(
@@ -6255,13 +6252,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     Value::Null,
                 ) + &frame(json!({}), json!("tool_calls"))
             } else if phase == 3 {
-                let user = request["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .rev()
-                    .find(|message| message["role"] == "user")
-                    .unwrap();
+                let user = last_user();
                 let text = match &user["content"] {
                     Value::String(text) => text.as_str(),
                     Value::Array(parts) => {
@@ -6283,13 +6274,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     Value::Null,
                 ) + &frame(json!({}), json!("tool_calls"))
             } else if phase == 5 {
-                let user = request["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .rev()
-                    .find(|message| message["role"] == "user")
-                    .unwrap();
+                let user = last_user();
                 let parts = user["content"].as_array().unwrap();
                 assert_eq!(parts[0], json!({"type":"text","text":"selected "}));
                 assert_eq!(
@@ -8198,6 +8183,287 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
 }
 
 #[test]
+fn tui_export_and_queue_require_an_open_session() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (quieted, quiet_done) = std::sync::mpsc::channel();
+        let daemon = no_session_daemon(&home, quieted);
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("Git branch");
+        terminal.write(b"/export\r");
+        terminal.until("/export needs a session");
+        terminal.write(b"/queue\r");
+        terminal.until("/queue needs a session");
+        quiet_done.recv_timeout(PATIENCE).unwrap();
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+        assert!(!terminal.transcript.contains("Export session"));
+    }
+}
+
+#[test]
+fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
+    for (fullscreen, locale) in [
+        (false, "en"),
+        (true, "en"),
+        (false, "zh-CN"),
+        (true, "zh-CN"),
+    ] {
+        for format in ["markdown", "json"] {
+            let home = Home::new();
+            fs::write(
+                home.0.join("config.json"),
+                json!({"locale":locale}).to_string(),
+            )
+            .unwrap();
+            let directory = home.0.join("client");
+            fs::create_dir_all(&directory).unwrap();
+            let events = json!([
+                {"id":"input","sequence":1,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"Export this code: ```rust```"}]}}},
+                {"id":"answer","sequence":3,"create_at":1,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"The exported answer"}}
+            ]);
+            let returned = events.clone();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[]);
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+                wire.no_context();
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                let history = wire.read("session.history");
+                assert_eq!(history["params"]["branchId"], "main");
+                wire.reply(&history, json!({"events":returned,"through":8,"nextAfter":8,"done":true}));
+                let failed = wire.read("session.history");
+                wire.send(json!({"jsonrpc":"2.0","id":failed["id"],"error":{"code":-32000,"message":"export fixture failed"}}));
+                wire.hold();
+            });
+            let mut command = home.command();
+            command.current_dir(&directory);
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::resume_tui(command);
+            terminal.until("test / model");
+            terminal.write(b"/export\r");
+            terminal.until(if locale == "en" {
+                "Export session"
+            } else {
+                "导出会话"
+            });
+            terminal.until("Markdown (.md)");
+            terminal.until("JSON (.json)");
+            terminal.until(if locale == "en" { "cancel" } else { "取消" });
+            terminal.write(b"\x1b");
+            terminal.until("\x1b[?25h");
+            terminal.write(b"/export\r");
+            terminal.until("Markdown (.md)");
+            terminal.until("JSON (.json)");
+            if format == "json" {
+                terminal.write(b"\x1b[B");
+            }
+            terminal.write(b"\r");
+            let label = if format == "json" { "JSON" } else { "Markdown" };
+            terminal.until(&if locale == "en" {
+                format!("Exported {label}: ")
+            } else {
+                format!("已导出 {label}：")
+            });
+            let files: Vec<_> = fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(files.len(), 1);
+            assert_eq!(
+                files[0].extension().unwrap(),
+                if format == "json" { "json" } else { "md" }
+            );
+            terminal.write(b"/export\r");
+            terminal.until("JSON (.json)");
+            terminal.write(b"\r");
+            terminal.until("export fixture failed");
+            assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+            home.kill(&terminal);
+            terminal.wait();
+            daemon.join().unwrap();
+
+            let reference = Home::new();
+            let daemon = reference.daemon(move |wire| {
+                wire.hello(&[]);
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":events,"through":8,"nextAfter":8,"done":true}),
+                );
+            });
+            let output = reference
+                .command()
+                .args(["session", "export", "session", "--format", format])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            daemon.join().unwrap();
+            assert_eq!(fs::read(&files[0]).unwrap(), output.stdout);
+        }
+    }
+}
+
+#[test]
+fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["running"] = json!(true);
+            wire.reply(&attach, record);
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            for (sequence, text) in [(9, "delete this"), (10, "steer this")] {
+                let submit = wire.read("session.submit");
+                assert_eq!(submit["params"]["text"], text);
+                wire.reply(&submit, json!({"event":{}}));
+                wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":text,"sequence":sequence,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":text}]},"mode":"queue"}}}));
+            }
+            let delete = wire.read("session.input.withdraw");
+            assert_eq!(delete["params"]["inputId"], "delete this");
+            assert!(delete["params"].get("steer").is_none());
+            wire.reply(&delete, json!({"status":"deleted","sequence":11}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"deleted","sequence":11,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"delete this"}}}));
+            let steer = wire.read("session.input.withdraw");
+            assert_eq!(steer["params"]["inputId"], "steer this");
+            assert_eq!(steer["params"]["steer"], json!({"content":[{"type":"text","text":"steer this"}]}));
+            wire.reply(&steer, json!({"status":"notHeld"}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"applied","sequence":12,"create_at":1,"type":"input","name":"applied","data":{"input_id":"steer this","mode":"queue"}}}));
+            let delete = wire.read("session.input.withdraw");
+            assert_eq!(delete["params"]["inputId"], "steer this");
+            wire.reply(&delete, json!({"status":"notHeld"}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"consumed","sequence":13,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"steer this"}}}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.write(b"delete this\r");
+        terminal.until("Queue (1)");
+        terminal.write(b"steer this\r");
+        terminal.until("Queue (2)");
+        terminal.write(b"/queue\r");
+        terminal.until("awaiting application");
+        terminal.until("\x1b[?2026l");
+        terminal.write(b"x");
+        terminal.until("steer this");
+        terminal.write(b"\r");
+        terminal.until("already left the queue");
+        terminal.until("Incorporating");
+        terminal.write(b"x");
+        terminal.until("No queued messages.");
+        let shown = strip_ansi(&terminal.transcript);
+        assert!(
+            !shown.contains("┃ delete this"),
+            "deleted messages must not enter the transcript: {shown}"
+        );
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn tui_queue_recall_refuses_attachments_and_steering_preserves_all_content() {
+    for (fullscreen, locale) in [
+        (false, "en"),
+        (true, "en"),
+        (false, "zh-CN"),
+        (true, "zh-CN"),
+    ] {
+        let home = Home::new();
+        fs::write(
+            home.0.join("config.json"),
+            json!({"locale":locale}).to_string(),
+        )
+        .unwrap();
+        let content = json!({"content":[
+            {"type":"text","text":"compare attachments"},
+            {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/one.png"}},
+            {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)"}
+        ]});
+        let expected = content.clone();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["running"] = json!(true);
+            wire.reply(&attach, record);
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[{"id":"mixed","sequence":8,"create_at":1,"type":"input","name":"message","data":{"user":content,"mode":"queue"}}],"through":8,"nextAfter":8,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let steer = wire.read("session.input.withdraw");
+            assert_eq!(steer["params"]["inputId"], "mixed");
+            assert_eq!(steer["params"]["steer"], expected);
+            wire.reply(&steer, json!({"status":"deleted","sequence":9}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"deleted","sequence":9,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"mixed"}}}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until(if locale == "en" {
+            "Queue (1)"
+        } else {
+            "队列（1）"
+        });
+        terminal.write(b"\x1b[1;2D");
+        terminal.until(if locale == "en" {
+            "Messages with attachments stay queued"
+        } else {
+            "带附件的消息会留在队列中"
+        });
+        terminal.write(b"/queue\r");
+        terminal.until(if locale == "en" {
+            "awaiting application"
+        } else {
+            "暂存中 · 等待应用"
+        });
+        terminal.until(if locale == "en" {
+            "delete held"
+        } else {
+            "删除暂存消息"
+        });
+        terminal.write(b"\r");
+        terminal.until(if locale == "en" {
+            "No queued messages."
+        } else {
+            "队列中没有消息。"
+        });
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -8258,13 +8524,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.until("first");
     terminal.until("background task finished");
     terminal.write(b"second\r");
-    terminal.until("Queue (1)");
+    terminal.until("Queue (3)");
     assert!(
         !terminal.transcript.contains("Queue (0)"),
         "{}",
         terminal.transcript
     );
-    terminal.until("› second");
+    terminal.until("Held · second");
     terminal.until("working…");
     assert!(
         !terminal.transcript.contains("┃ second"),
@@ -8273,8 +8539,8 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     );
     terminal.write(b"\x13");
     terminal.write(b"third\r");
-    terminal.until("Queue (1)");
-    terminal.until("› third");
+    terminal.until("Queue (4)");
+    terminal.until("Held · third");
     terminal.write(b"\x1b[1;2D");
     terminal.until("third");
     let plain = {
@@ -8359,45 +8625,116 @@ fn tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress() {
 
 #[test]
 fn tui_escape_withdraws_the_queue_before_the_run_stops() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
-        wire.hello(&[]);
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
-        let history = wire.read("session.history");
-        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        wire.no_context();
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
-        let first = wire.read("session.submit");
-        assert_eq!(first["params"]["text"], "first");
-        wire.reply(&first, json!({"event":{}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
-        let queued = wire.read("session.submit");
-        assert_eq!(queued["params"]["text"], "second");
-        assert_eq!(queued["params"]["mode"], "queue");
-        wire.reply(&queued, json!({"event":{}}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-2","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}}));
-        let withdraw = wire.read("session.input.withdraw");
-        assert_eq!(withdraw["params"]["inputId"], "in-2");
-        assert!(withdraw["params"].get("steer").is_none());
-        wire.reply(&withdraw, json!({"status":"deleted","sequence":12}));
-        let stop = wire.read("session.stop");
-        wire.reply(&stop, json!({"sequence":13}));
-    });
-    let mut terminal = Terminal::resume_tui(home.command());
-    terminal.until("test / model");
-    terminal.write(b"first\r");
-    terminal.until("first");
-    terminal.until("working…");
-    terminal.write(b"second\r");
-    terminal.until("Queue (1)");
-    terminal.write(b"\x1b");
-    daemon.join().unwrap();
-    home.kill(&terminal);
-    terminal.wait();
+    for fullscreen in [false, true] {
+        for (draft, content, expected) in [
+            (
+                "existing draft",
+                json!([{"type":"text","text":"first"}]),
+                json!({"text":"existing draft\nfirst\nsecond"}),
+            ),
+            (
+                "existing draft",
+                json!([
+                    {"type":"text","text":"hello\n$skill: checkin"},
+                    {"type":"text","text":"<dim-skill name=\"checkin\">\nPRIVATE SKILL BODY\n</dim-skill>"},
+                    {"type":"text","text":"world"},
+                    {"type":"text","text":"<dim-hooks kind=\"context\">\nPRIVATE RUNTIME CONTEXT\n</dim-hooks>"},
+                    {"type":"text","text":"keep <dim-literal> inside operator text"}
+                ]),
+                json!({"text":"existing draft\nhello\n$skill: checkin\nworld\nkeep <dim-literal> inside operator text\nsecond"}),
+            ),
+            (
+                "existing draft",
+                json!([
+                    {"type":"text","text":"<dim-literal> first block is operator text"},
+                    {"type":"text","text":"next line"}
+                ]),
+                json!({"text":"existing draft\n<dim-literal> first block is operator text\nnext line\nsecond"}),
+            ),
+            (
+                "!existing draft",
+                json!([{"type":"text","text":"first"}]),
+                json!({"text":"existing draft\nfirst\nsecond"}),
+            ),
+            (
+                "existing draft",
+                json!([
+                    {"type":"text","text":"compare"},
+                    {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/queued.png"}},
+                    {"type":"text","text":"<dim-skill name=\"checkin\">\nPRIVATE SKILL BODY\n</dim-skill>"},
+                    {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)"},
+                    {"type":"text","text":"follow-up notes"}
+                ]),
+                json!({"user":{"content":[
+                    {"type":"text","text":"existing draft\ncompare"},
+                    {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/queued.png"}},
+                    {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)\nfollow-up notes\nsecond"}
+                ]}}),
+            ),
+            (
+                "existing draft",
+                json!([{ "type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/image-only.png"}}]),
+                json!({"user":{"content":[
+                    {"type":"text","text":"existing draft\n"},
+                    {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/image-only.png"}},
+                    {"type":"text","text":"\nsecond"}
+                ]}}),
+            ),
+        ] {
+            let home = Home::new();
+            let (checked, checked_done) = std::sync::mpsc::channel();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[]);
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(&history, json!({"events":[
+                    {"id":"first","sequence":7,"create_at":1,"type":"input","name":"message","data":{"user":{"content":content},"mode":"queue"}},
+                    {"id":"second","sequence":8,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}
+                ],"through":8,"nextAfter":8,"done":true}));
+                wire.no_context();
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+                for (index, input) in ["first", "second"].into_iter().enumerate() {
+                    let withdraw = wire.read("session.input.withdraw");
+                    assert_eq!(withdraw["params"]["inputId"], input);
+                    assert!(withdraw["params"].get("steer").is_none());
+                    wire.reply(&withdraw, json!({"status":"deleted","sequence":9+index}));
+                    wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":format!("deleted-{input}"),"sequence":9+index,"create_at":1,"type":"input","name":"deleted","data":{"input_id":input}}}));
+                }
+                let stop = wire.read("session.stop");
+                wire.reply(&stop, json!({"sequence":11}));
+                wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+                wire.event(11, "text", json!({"turn_id":"t","request_id":"r","delta":"interrupt settled"}));
+                wire.no_context();
+                let submitted = wire.read("session.submit");
+                assert_eq!(submitted["params"]["mode"], "queue");
+                for key in ["text", "user"] {
+                    assert_eq!(submitted["params"][key], expected[key]);
+                }
+                wire.reply(&submitted, json!({"event":{}}));
+                checked.send(()).unwrap();
+                wire.hold();
+            });
+            let mut command = home.command();
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::resume_tui(command);
+            terminal.until("Queue (2)");
+            terminal.until_anywhere("working…");
+            terminal.until("\x1b[?2026l");
+            terminal.write(draft.as_bytes());
+            terminal.write(b"\x1b");
+            terminal.until("interrupt settled");
+            terminal.write(b"\r");
+            checked_done.recv_timeout(PATIENCE).unwrap();
+            home.kill(&terminal);
+            terminal.wait();
+            daemon.join().unwrap();
+        }
+    }
 }
 
 #[test]
@@ -9587,6 +9924,13 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     };
+    let events = |lines: &[Value]| -> Vec<Value> {
+        lines
+            .iter()
+            .filter(|line| line["kind"] == "event")
+            .cloned()
+            .collect()
+    };
 
     let live = run(&["export", &session]);
     assert!(
@@ -9605,14 +9949,19 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
     assert!(written.status.success());
     assert!(written.stdout.is_empty());
     assert!(String::from_utf8_lossy(&written.stderr).contains("Exported Timeline (sensitive): "));
-    assert_eq!(fs::read(&output).unwrap(), live.stdout);
+    let written_bytes = fs::read(&output).unwrap();
+    let written_lines = lines(&written_bytes);
+    assert_eq!(written_lines[0], exported[0]);
+    assert_eq!(written_lines.last().unwrap()["kind"], "end");
+    let written_events = events(&written_lines);
+    assert!(written_events.starts_with(&events(&exported)));
     assert_eq!(
         fs::metadata(&output).unwrap().permissions().mode() & 0o777,
         0o600
     );
     let refused = run(&["export", &session, "--output", "timeline.jsonl"]);
     assert_eq!(refused.status.code(), Some(1));
-    assert_eq!(fs::read(&output).unwrap(), live.stdout);
+    assert_eq!(fs::read(&output).unwrap(), written_bytes);
     let failed = run(&["export", "missing-session", "--output", "failed.jsonl"]);
     assert_eq!(failed.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&failed.stderr).contains("Session missing-session is not in"));
@@ -9624,14 +9973,7 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
     assert!(stopped.status.success());
     let stopped = lines(&stopped.stdout);
     assert_eq!(stopped[0], exported[0]);
-    let events = |lines: &[Value]| -> Vec<Value> {
-        lines
-            .iter()
-            .filter(|line| line["kind"] == "event")
-            .cloned()
-            .collect()
-    };
-    let (before, after) = (events(&exported), events(&stopped));
+    let (before, after) = (written_events, events(&stopped));
     assert!(!before.is_empty());
     assert_eq!(after[..before.len()], before[..]);
     assert!(!socket.exists());

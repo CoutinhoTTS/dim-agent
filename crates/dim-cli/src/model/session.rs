@@ -261,6 +261,7 @@ pub enum Command {
     },
     /// Produce the `/usage` report.
     Usage,
+    Export(crate::export::Format),
     /// `/compact`: ask the shown line to compact its context.
     Compact,
     /// `/rename`: set the shown Session's manual title, or clear it when
@@ -1053,9 +1054,11 @@ pub enum RenameReply {
 #[allow(dead_code)]
 pub enum Update {
     /// A queued input the TUI withdrew (`Command::InputControl` with action
-    /// `withdraw`) is deleted: its text goes back into the draft.
-    Withdrawn {
-        input_id: String,
+    /// `withdraw`) is deleted: its complete content goes back into the draft.
+    Withdrawn(dim_agent_types::UserInput),
+    Exported {
+        format: crate::export::Format,
+        path: std::path::PathBuf,
     },
     /// The session's adopted configuration: `provider / model`, and the
     /// reasoning effort it sends when it carries one, label the status line.

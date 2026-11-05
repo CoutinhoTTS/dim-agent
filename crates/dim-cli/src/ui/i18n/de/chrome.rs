@@ -1,5 +1,35 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "Warteschlange",
+        "Export session" => "Sitzung exportieren",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter steuern · x zurückgehaltene Nachricht löschen · Esc schließen"
+        }
+        "No queued messages." => "Keine Nachrichten in der Warteschlange.",
+        "Held · awaiting application" => "Zurückgehalten · wartet auf Anwendung",
+        "Incorporating · awaiting model consumption" => {
+            "Wird eingebunden · wartet auf Verarbeitung durch das Modell"
+        }
+        "Held" => "Zurückgehalten",
+        "Incorporating" => "Wird eingebunden",
+        "Enter export · Esc cancel" => "Enter exportieren · Esc abbrechen",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "Nachrichten mit Anhängen bleiben in der Warteschlange; mit /queue steuern oder löschen"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue verwalten · shift+← letzte bearbeiten · ctrl+s jetzt steuern"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count} weitere · /queue verwalten · shift+← letzte bearbeiten · ctrl+s jetzt steuern"
+        }
+        "steer or delete queued messages" => {
+            "Nachrichten in der Warteschlange steuern oder löschen"
+        }
+        "export this conversation" => "dieses Gespräch exportieren",
+        "That message has already left the queue." => {
+            "Diese Nachricht ist nicht mehr in der Warteschlange."
+        }
+        "Exported {format}: {path}" => "{format} exportiert: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter Ausgabe/Mitglied unterbrechen · x Befehl stoppen · Esc schließen"

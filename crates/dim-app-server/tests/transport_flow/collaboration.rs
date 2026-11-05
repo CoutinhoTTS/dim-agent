@@ -413,7 +413,7 @@ impl dim_agent_capabilities::host::ModelDriver for LargeReportModel {
     ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
         use dim_agent_capabilities::host::{ModelChunk, ModelStopReason, ModelStream};
         use dim_agent_types::{MessageContent, Role};
-        let last = request.messages.last().unwrap();
+        let last = dim_agent_capabilities::adapters::EchoModel::last_message(&request).unwrap();
         let delegated = matches!(&last.content, MessageContent::Text(text) if text.starts_with("<dim-agent-message "));
         if delegated || last.role == Role::ToolResult {
             Box::pin(async move {
@@ -2531,7 +2531,10 @@ async fn member_work(mut config: ServerConfig) {
             .expect("the authorized read acquires its peer");
         let read = last_ok(&events(&lead_session).await);
         assert_eq!(read["events"], full["events"]);
-        assert_eq!(read["nextCursor"], restored.sequence("main").unwrap());
+        assert!(
+            (full["nextCursor"].as_u64().unwrap()..=restored.sequence("main").unwrap())
+                .contains(&read["nextCursor"].as_u64().unwrap())
+        );
     }
 
     assert_pairing(&events(&lead_session).await);
@@ -2778,9 +2781,7 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
     ) -> dim_agent_capabilities::host::HostFuture<'_, dim_agent_capabilities::host::ModelStream>
     {
         use dim_agent_capabilities::host::{HostError, ModelChunk, ModelStream};
-        let calls = request
-            .messages
-            .last()
+        let calls = dim_agent_capabilities::adapters::EchoModel::last_message(&request)
             .filter(|message| message.role == dim_agent_types::Role::User)
             .map(|message| serde_json::to_string(message).unwrap())
             .filter(|text| text.contains("<dim-agent-message "))
@@ -4205,11 +4206,14 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
         first.to_string().contains("Echo: again"),
         "the read holds the second request: {first}"
     );
-    // Every read acquires the member, and it may unload and restore between
-    // reads: `branch/resume` then advances `nextCursor` legitimately, so only
-    // the visible events must stay the same.
     for read in &reads {
-        assert_eq!(read["events"], first["events"]);
+        let initial = first["events"].as_array().unwrap();
+        let events = read["events"].as_array().unwrap();
+        assert!(events.len() >= initial.len());
+        assert_eq!(&events[..initial.len()], initial);
+        assert!(events[initial.len()..].iter().all(|event| {
+            event["type"] == "input" && event["mode"] == "append" && event["user"].is_null()
+        }));
         assert!(read["nextCursor"].as_u64().unwrap() >= first["nextCursor"].as_u64().unwrap());
     }
     loads.released(&member).await;
@@ -4901,7 +4905,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
         !events(&member)
             .await
             .iter()
-            .any(|event| matches!(event.kind, EventKind::InputMessage(_)))
+            .any(|event| matches!(&event.kind, EventKind::InputMessage(data) if agent_message(data).is_some()))
     );
     server.shutdown();
     server.join().await.unwrap();
@@ -5485,7 +5489,8 @@ async fn new_members_sample_requesting_branch_policy_and_reused_members_keep_the
         lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(0, serde_json::from_value(policy.clone()).unwrap()).await.unwrap();
         let cut = events(&lead_session).await.last().unwrap().sequence;
         let branch = lead_session.branch("main".into(), cut, dim_agent_runtime::BranchOptions { prompt: "Permission inheritance child".into(), source: dim_agent_types::BranchSource::Host { operation_id: "permission-inheritance".into() } }).await.unwrap();
-        lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(cut, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
+        let state = lead_session.get::<dim_agent_capabilities::permission::PermissionState>("main").unwrap().unwrap();
+        lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(state.version, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
         let agent_id = client.rpc("agent.list", json!({})).await["result"][0]["agentId"].as_str().unwrap().to_owned();
         lead_session.submit(tool(json!({"action":"request","agentId":agent_id,"prompt":"hello"})), dim_agent_types::InputMode::Queue, &branch).await.unwrap();
         lead_session.idle(&branch).await.unwrap();

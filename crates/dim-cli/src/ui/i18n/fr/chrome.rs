@@ -1,5 +1,31 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "File d’attente",
+        "Export session" => "Exporter la session",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter orienter · x supprimer le message retenu · Esc fermer"
+        }
+        "No queued messages." => "Aucun message en file d’attente.",
+        "Held · awaiting application" => "Retenu · en attente d’application",
+        "Incorporating · awaiting model consumption" => {
+            "Intégration en cours · en attente de traitement par le modèle"
+        }
+        "Held" => "Retenu",
+        "Incorporating" => "Intégration en cours",
+        "Enter export · Esc cancel" => "Enter exporter · Esc annuler",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "Les messages avec pièces jointes restent en file ; utilisez /queue pour orienter ou les supprimer"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue gérer · shift+← modifier le dernier · ctrl+s orienter maintenant"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count} de plus · /queue gérer · shift+← modifier le dernier · ctrl+s orienter maintenant"
+        }
+        "steer or delete queued messages" => "orienter avec les messages en file ou les supprimer",
+        "export this conversation" => "exporter cette conversation",
+        "That message has already left the queue." => "Ce message a déjà quitté la file d’attente.",
+        "Exported {format}: {path}" => "Exporté en {format} : {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter sortie / interrompre membre · x arrêter commande · Esc fermer"

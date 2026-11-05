@@ -134,8 +134,11 @@ mod native_flow {
     use objc2_app_kit::{NSPasteboard, NSPasteboardItem};
     use objc2_foundation::{NSArray, NSData, NSString};
 
+    static PASTEBOARD_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn copied_file_references_submit_images_and_real_file_paths() {
+        let _pasteboard = PASTEBOARD_SERVER.lock().unwrap();
         use crate::model::session::DraftPart;
         use crate::ui::composer::{Composer, Outcome, read_planned};
         use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
@@ -209,6 +212,7 @@ mod native_flow {
 
     #[test]
     fn private_pasteboard_preserves_formats_precedence_pixels_and_rejections() {
+        let _pasteboard = PASTEBOARD_SERVER.lock().unwrap();
         objc2::rc::autoreleasepool(|_| {
             let board = NSPasteboard::pasteboardWithUniqueName();
             board.clearContents();

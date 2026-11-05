@@ -395,7 +395,10 @@ pub async fn chat(
                             .filter(|(_, path)| !path.trim_start().is_empty())
                             .ok_or("Usage: /export <markdown|json> PATH\nPATH is relative to the CLI current directory; ~ is literal.")?;
                         let path = path.trim_start();
-                        export::write(client, &session_id, format.parse()?, Some(std::path::Path::new(path))).await
+                        let format: export::Format = format.parse()?;
+                        export::write(client, &session_id, format, Some(std::path::Path::new(path))).await?;
+                        eprintln!("Exported {}: {}", format.label(), crate::sanitize::safe(path));
+                        Ok::<(), crate::Error>(())
                     };
                     let result = settle(
                         &mut interrupts,
