@@ -78,6 +78,11 @@ pub struct McpSettings {
     dirty: BTreeSet<String>,
     pub extra: BTreeMap<String, Value>,
 }
+/// A document with a server entry whose id is empty: it names no entry a
+/// management call could address, so the whole document is refused.
+pub(crate) const EMPTY_ENTRY_ID: SettingsError =
+    SettingsError::shape("MCP server entry id is empty", None);
+
 impl McpSettings {
     /// Replaces an entry. Only this entry is serialised from its typed value
     /// on the next write.
@@ -148,7 +153,7 @@ impl McpSettings {
     /// any management call could address, so it fails the whole document.
     fn from_entries(entries: Map<String, Value>, extra: BTreeMap<String, Value>) -> Result<Self> {
         if entries.keys().any(|id| id.trim().is_empty()) {
-            return Err(SettingsError::shape("MCP server entry id is empty", None));
+            return Err(EMPTY_ENTRY_ID);
         }
         let mut document = Self {
             extra,
@@ -1305,7 +1310,7 @@ impl BusinessDocument for McpSettings {
             return Err(SettingsError::Invalid("reserved MCP configuration field"));
         }
         if self.mcp_servers.keys().any(|id| id.trim().is_empty()) {
-            return Err(SettingsError::shape("MCP server entry id is empty", None));
+            return Err(EMPTY_ENTRY_ID);
         }
         Ok(())
     }

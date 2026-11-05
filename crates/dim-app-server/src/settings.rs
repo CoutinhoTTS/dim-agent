@@ -86,7 +86,7 @@ impl SettingsError {
     /// A document-shape refusal: `reason` is the owner's static message,
     /// and `position` is where the document broke when it was read from
     /// bytes.
-    pub fn shape(reason: &'static str, position: Option<(usize, usize)>) -> Self {
+    pub const fn shape(reason: &'static str, position: Option<(usize, usize)>) -> Self {
         Self::DocumentShape { reason, position }
     }
     /// The static, credential-safe reason of a refusal (PluginManager A.2):
