@@ -3,6 +3,7 @@ use super::auth::{AuthState, McpAuth, McpAuthError, credential_key, stored_key};
 use super::config::{
     self, BearerAuth, McpSecretEntry, McpServerSettings, McpSettings, RemoteTransport,
 };
+use super::import::{self, ImportResolution};
 use super::{McpChange, McpError, McpService, McpSource};
 use crate::{
     methods::{ManagementMethods, SelectionScope},
@@ -26,7 +27,7 @@ pub enum McpScope {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum MoveScope {
+pub enum WritableScope {
     User,
     Project,
 }
@@ -37,8 +38,8 @@ pub struct MoveMcp {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub cwd: Option<String>,
     pub id: String,
-    pub from: MoveScope,
-    pub to: MoveScope,
+    pub from: WritableScope,
+    pub to: WritableScope,
     pub expected_from_version: String,
     pub expected_to_version: String,
 }
@@ -74,6 +75,37 @@ pub struct SaveMcp {
 impl std::fmt::Debug for SaveMcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SaveMcp").finish_non_exhaustive()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreviewImportMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    cwd: Option<String>,
+    source: WritableScope,
+    document: String,
+}
+impl std::fmt::Debug for PreviewImportMcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreviewImportMcp").finish_non_exhaustive()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplyImportMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    cwd: Option<String>,
+    source: WritableScope,
+    document: String,
+    expected_version: String,
+    #[serde(default)]
+    resolutions: Vec<ImportResolution>,
+}
+impl std::fmt::Debug for ApplyImportMcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApplyImportMcp").finish_non_exhaustive()
     }
 }
 
@@ -467,6 +499,8 @@ pub(crate) fn error(error: McpError) -> RpcError {
         McpError::MovePartial { .. } => "mcp_move_partial",
         McpError::CredentialsAreUserScoped => "mcp_credentials_are_user_scoped",
         McpError::StaleSecretRecord => "mcp_stale_secret_record",
+        McpError::ImportConflict { .. } => "mcp_import_conflict",
+        McpError::ImportUnconfirmed { .. } => "mcp_import_unconfirmed",
         McpError::Closed | McpError::Settings(SettingsError::Closed) => {
             return RpcError::reloading();
         }
@@ -538,6 +572,16 @@ fn writable(source: McpSource) -> Result<SettingsScope, RpcError> {
         .ok_or_else(|| RpcError::invalid("plugin MCP entries change through their plugin"))
 }
 
+/// The source an import writes: the user source or an authorized workspace.
+fn writable_scope(scope: WritableScope, project: Option<usize>) -> Result<SettingsScope, RpcError> {
+    match scope {
+        WritableScope::User => Ok(SettingsScope::User),
+        WritableScope::Project => project
+            .map(SettingsScope::Project)
+            .ok_or_else(|| RpcError::invalid("Project MCP operations require cwd")),
+    }
+}
+
 pub(super) fn provide(
     ctx: &Ctx,
     methods: &ManagementMethods,
@@ -560,6 +604,8 @@ pub(super) fn provide(
             "mcp.remove",
             "mcp.set_enabled",
             "mcp.move",
+            "mcp.import.preview",
+            "mcp.import.apply",
             "mcp.disconnect",
             "mcp.auth.start",
             "mcp.auth.complete",
@@ -567,7 +613,7 @@ pub(super) fn provide(
             "mcp.auth.logout",
         ]
         .into_iter()
-        .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.configuration" | "mcp.inspect" | "mcp.temporary.capabilities"), Interruption::Report))
+        .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.configuration" | "mcp.inspect" | "mcp.temporary.capabilities" | "mcp.import.preview"), Interruption::Report))
         .collect(),
         Arc::new(move |method, value, stopping, _| {
             let directory = directory.clone();
@@ -898,13 +944,13 @@ pub(super) fn provide(
                         }
                         let project = project(&settings, p.cwd, &stopping).await?;
                         let (from, to) = match (p.from, p.to) {
-                            (MoveScope::User, MoveScope::Project) => (
+                            (WritableScope::User, WritableScope::Project) => (
                                 McpSource::User,
                                 McpSource::Project(project.ok_or_else(|| {
                                     RpcError::invalid("Project MCP operations require cwd")
                                 })?),
                             ),
-                            (MoveScope::Project, MoveScope::User) => (
+                            (WritableScope::Project, WritableScope::User) => (
                                 McpSource::Project(project.ok_or_else(|| {
                                     RpcError::invalid("Project MCP operations require cwd")
                                 })?),
@@ -927,6 +973,41 @@ pub(super) fn provide(
                             )
                             .await
                             .map_err(error)?;
+                    }
+                    "mcp.import.preview" => {
+                        let p: PreviewImportMcp = params(value)?;
+                        let source = writable_scope(
+                            p.source,
+                            project(&settings, p.cwd, &stopping).await?,
+                        )?;
+                        let document = import::parse_document(&p.document).map_err(error)?;
+                        return reply(
+                            directory
+                                .preview_import(source, document, &stopping)
+                                .await
+                                .map_err(error)?,
+                        );
+                    }
+                    "mcp.import.apply" => {
+                        let p: ApplyImportMcp = params(value)?;
+                        let source = writable_scope(
+                            p.source,
+                            project(&settings, p.cwd, &stopping).await?,
+                        )?;
+                        let document = import::parse_document(&p.document).map_err(error)?;
+                        let resolutions = import::check_resolutions(&document, &p.resolutions)
+                            .map_err(RpcError::invalid)?;
+                        let revision = directory
+                            .import_entries(
+                                source,
+                                p.expected_version,
+                                document,
+                                resolutions,
+                                &stopping,
+                            )
+                            .await
+                            .map_err(error)?;
+                        return Ok(serde_json::json!({"revision": revision}));
                     }
                     "mcp.disconnect" => {
                         let p: McpTarget = params(value)?;

@@ -1,6 +1,7 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
 mod auth;
 pub mod config;
+mod import;
 pub(crate) mod management;
 mod publication;
 #[cfg(feature = "testing")]
@@ -55,6 +56,10 @@ pub enum McpError {
     CredentialsAreUserScoped,
     #[error("MCP withheld record has no project entry")]
     StaleSecretRecord,
+    #[error("MCP import of {id}: {reason}")]
+    ImportConflict { id: String, reason: String },
+    #[error("MCP import of {id} requires confirming {}", .fields.join(", "))]
+    ImportUnconfirmed { id: String, fields: Vec<String> },
     #[error("MCP server is disabled")]
     Disabled,
     #[error("MCP server Plugin could not be loaded")]
@@ -1078,6 +1083,44 @@ impl McpService {
         Ok(written.revision)
     }
 
+    /// Previews importing one `mcpServers` document into one source. The
+    /// source is read with its revision; nothing is written or executed.
+    pub(crate) async fn preview_import(
+        &self,
+        source: SettingsScope,
+        document: McpSettings,
+        cancel: &CancellationToken,
+    ) -> Result<import::ImportPreview> {
+        self.run(cancel, move |settings, cancel| async move {
+            let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
+            Ok(import::preview(
+                &document,
+                &snapshot.document,
+                matches!(source, SettingsScope::Project(_)),
+                &snapshot.revision,
+            ))
+        })
+        .await
+    }
+
+    /// Imports the entries a selection accepts from one `mcpServers`
+    /// document. The source is read once at `expected`; every accepted entry
+    /// is written into that snapshot and committed with one Settings update,
+    /// so one revision change covers the whole import.
+    pub(crate) async fn import_entries(
+        &self,
+        source: SettingsScope,
+        expected: String,
+        document: McpSettings,
+        resolutions: BTreeMap<String, import::ImportResolution>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        self.run(cancel, move |settings, cancel| async move {
+            write_import(&settings, source, expected, document, resolutions, &cancel).await
+        })
+        .await
+    }
+
     /// Move one entry between the user and project sources. The destination is
     /// written first and the source removed last; a failure after the first
     /// destination write is reported as `MovePartial`, not success.
@@ -1384,6 +1427,55 @@ async fn write(
         captured,
         entry_absent: !present,
     })
+}
+
+/// Writes every entry a resolution accepts with one document revision check
+/// and one Settings update. A request that accepts no entry writes nothing,
+/// so re-importing unchanged entries leaves the source revision as it was.
+async fn write_import(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    expected: String,
+    document: McpSettings,
+    resolutions: BTreeMap<String, import::ImportResolution>,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let snapshot = settings.read::<McpSettings>(source, cancel).await?;
+    if snapshot.revision != expected {
+        return Err(SettingsError::Conflict.into());
+    }
+    let project = matches!(source, SettingsScope::Project(_));
+    let overlays = if project {
+        let workspace = config::workspace(settings, source)?;
+        settings
+            .read::<McpSecrets>(SettingsScope::User, cancel)
+            .await?
+            .document
+            .entries
+            .get(&workspace)
+            .map(|entries| entries.keys().cloned().collect())
+            .unwrap_or_default()
+    } else {
+        BTreeSet::new()
+    };
+    let changes = import::plan(
+        &document,
+        &snapshot.document,
+        project,
+        &overlays,
+        &resolutions,
+    )?;
+    if changes.is_empty() {
+        return Ok(snapshot.revision);
+    }
+    let mut target = snapshot.document;
+    for (id, configuration) in changes {
+        target.insert(id, configuration);
+    }
+    Ok(settings
+        .update(source, &expected, target, cancel)
+        .await?
+        .revision)
 }
 
 fn partial(_error: McpError, into_project: bool) -> McpError {
