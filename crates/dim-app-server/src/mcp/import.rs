@@ -11,8 +11,8 @@
 //! target would serve, which is the declared entry with its record merged.
 
 use super::config::{
-    self, ENTRY_MEMBERS, McpSecretEntry, McpServerSettings, McpSettings, OAUTH_MEMBERS,
-    RemoteTransport,
+    self, ENTRY_MEMBERS, McpEntryError, McpSecretEntry, McpServerSettings, McpSettings,
+    OAUTH_MEMBERS, RemoteTransport,
 };
 use super::{McpError, Result};
 use crate::protocol::optional_non_null;
@@ -21,11 +21,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-/// The largest document a client may send. The reply names only ids and field
-/// names taken from this document: each entry reports at most
-/// `MAX_REPORTED_FIELDS` names in `changes` and in `unsupported`, plus how
-/// many it left out, so a 1,000-entry document stays under the transport
-/// frame's 16 MiB.
+/// The largest document a client may send. Every variable-length part of the
+/// reply — an entry's id, the names in `changes` and `unsupported`, the
+/// unknown top-level names — is a string the document holds, and each is
+/// reported once, so however long a name is the reply carries at most one
+/// document's worth of them. That is what keeps the largest accepted document
+/// under the transport frame's 16 MiB; `MAX_REPORTED_FIELDS` only bounds how
+/// many names one entry lists.
 pub(crate) const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 
 /// The largest number of entries one document may carry.
@@ -142,8 +144,13 @@ pub(crate) struct ImportEntryPreview {
     /// Field names and the kind each holds; never a value.
     pub changes: Vec<ImportField>,
     pub unsupported: Vec<ImportUnsupported>,
-    /// Field names the cap left out of `changes` and `unsupported`.
+    /// Field names the cap left out of `changes` and `unsupported`. `changes`
+    /// names only declared members and `unsupported` only the rest, so the
+    /// lists are disjoint and this counts distinct names.
     pub omitted: usize,
+    /// Why the entry is `invalid` or `conflict`: it names the field and the
+    /// expected kind and never a value or the entry's id, which `id` states
+    /// once.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -217,7 +224,7 @@ fn entry_preview(
         changes: Vec::new(),
         unsupported,
         omitted,
-        error: document.invalid_error(id).map(ToString::to_string),
+        error: document.invalid_error(id).map(error_without_id),
     };
     let Some(entry) = document.get(id) else {
         return preview;
@@ -254,10 +261,24 @@ fn entry_preview(
     // an import writes none.
     let import = comparable(&import, project);
     let existing = existing.as_ref().map(|entry| comparable(entry, project));
+    // `changes` and `unsupported` name disjoint sets, so the two truncation
+    // counts added into `omitted` are distinct names.
     let (changes, omitted_changes) = capped(changed_fields(existing.as_ref(), &import));
     preview.changes = changes;
     preview.omitted += omitted_changes;
     preview
+}
+
+/// The entry's decode error without its id: the preview's `id` member already
+/// names the entry, and the id is one of the document's variable-length
+/// strings, so repeating it here would report it twice.
+fn error_without_id(error: &McpEntryError) -> String {
+    McpEntryError {
+        id: String::new(),
+        field: error.field.clone(),
+        expected: error.expected.clone(),
+    }
+    .to_string()
 }
 
 /// The configuration a target entry would serve: a project entry with its
@@ -418,8 +439,11 @@ fn same_configuration(left: &McpServerSettings, right: &McpServerSettings) -> bo
     left == right
 }
 
-/// Compares the full normalized entry, so an enablement the import would
-/// change is reported even though `status` ignores enablement.
+/// Compares the declared members of the normalized entry, so an enablement the
+/// import would change is reported even though `status` ignores enablement.
+/// Extension members stay out of both sides, so no name is reported twice: the
+/// document's are named by `unsupported`, and the target's are extension data
+/// the import does not compare.
 fn changed_fields(
     before: Option<&McpServerSettings>,
     after: &McpServerSettings,
@@ -428,12 +452,12 @@ fn changed_fields(
     let after = members(after);
     let mut fields = BTreeMap::new();
     for (name, value) in &after {
-        if before.get(name) != Some(value) {
+        if declared(name) && before.get(name) != Some(value) {
             fields.insert(name.clone(), kind(value));
         }
     }
     for (name, value) in &before {
-        if !after.contains_key(name) {
+        if declared(name) && !after.contains_key(name) {
             fields.insert(name.clone(), kind(value));
         }
     }
@@ -441,6 +465,12 @@ fn changed_fields(
         .into_iter()
         .map(|(field, kind)| ImportField { field, kind })
         .collect()
+}
+
+/// Whether a member name belongs to the declared entry, as opposed to an
+/// extension member the decoder keeps unused.
+fn declared(name: &str) -> bool {
+    ENTRY_MEMBERS.contains(&name)
 }
 
 fn members(entry: &McpServerSettings) -> Map<String, Value> {

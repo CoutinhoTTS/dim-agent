@@ -22309,6 +22309,7 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "path ENTRY_MEMBERS",
+        "path McpEntryError",
         "path McpSecretEntry",
         "path McpServerSettings",
         "path McpServerSettings::Remote",
@@ -22321,6 +22322,7 @@
         "path config::merge_secret",
         "use super::config",
         "use super::config::ENTRY_MEMBERS",
+        "use super::config::McpEntryError",
         "use super::config::McpSecretEntry",
         "use super::config::McpServerSettings",
         "use super::config::McpSettings",
@@ -42342,10 +42344,6 @@
     {
       "module": "dim_app_server::mcp::config",
       "path": "S::Ok"
-    },
-    {
-      "module": "dim_app_server::mcp::import",
-      "path": "ToString::to_string"
     },
     {
       "module": "dim_app_server::mcp::management",

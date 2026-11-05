@@ -159,7 +159,8 @@ async fn mcp_import_previews_selects_and_writes_multiple_user_entries() {
     assert_eq!(fields(entry(&preview, "github")), ["args", "enabled"]);
     assert_eq!(
         fields(entry(&preview, "fresh")),
-        ["args", "command", "enabled", "env", "extensionField"]
+        ["args", "command", "enabled", "env"],
+        "an extension member is named by unsupported, not by changes"
     );
     assert_eq!(
         unsupported(entry(&preview, "fresh")),
@@ -764,20 +765,137 @@ async fn mcp_import_bounds_the_field_names_one_entry_reports() {
     assert_ok(&preview);
     let wide = entry(&preview, "wide");
     assert_eq!(wide["status"], "changed");
-    // `changes` compares against the free id and names the entry's own
-    // `command` and `enabled` members too; `unsupported` names only the
+    // `changes` compares against the free id and names only the entry's
+    // declared `command` and `enabled` members; `unsupported` names the
     // members the decoder does not act on.
-    assert_eq!(wide["changes"].as_array().unwrap().len(), MAX);
-    assert_eq!(wide["unsupported"].as_array().unwrap().len(), MAX);
+    assert_eq!(fields(wide), ["command", "enabled"]);
+    assert_eq!(unsupported(wide).len(), MAX);
     assert_eq!(
         wide["omitted"],
-        json!((UNKNOWN + 2 - MAX) + (UNKNOWN - MAX)),
-        "the count matches the names the cap left out"
+        json!(UNKNOWN - MAX),
+        "only the unknown names the cap left out are missing"
     );
-    assert_eq!(wide["changes"][0]["field"], "command");
-    assert_eq!(wide["changes"][1]["field"], "enabled");
     assert_eq!(wide["unsupported"][0]["field"], "unknown00");
     assert_eq!(wide["unsupported"][0]["effect"], "kept-unused");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A document just under the size cap whose entry carries long unknown member
+/// names still produces a reply: each name is reported once, so the reply
+/// stays under the transport frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_answers_a_document_of_long_field_names() {
+    const LONG: usize = 253_000;
+    const UNKNOWN: usize = 33;
+    const MAX: usize = 32;
+    let home = scratch("dm-import-long-names");
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut wide = serde_json::Map::new();
+    wide.insert("command".into(), json!("echo"));
+    for index in 0..UNKNOWN {
+        wide.insert(format!("{index:02}{}", "x".repeat(LONG)), json!(index));
+    }
+    let document = servers_document(json!({"wide": wide}));
+    assert!(
+        document.len() < 8 * 1024 * 1024,
+        "the document is under the size cap: {}",
+        document.len()
+    );
+    assert!(
+        document.len() > 8 * 1024 * 1024 - 2 * LONG,
+        "the document is just under the size cap: {}",
+        document.len()
+    );
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"user","document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    let wide = entry(&preview, "wide");
+    assert_eq!(wide["status"], "changed");
+    assert_eq!(fields(wide), ["command", "enabled"]);
+    assert_eq!(unsupported(wide).len(), MAX);
+    assert_eq!(wide["omitted"], json!(UNKNOWN - MAX));
+    assert!(
+        preview.to_string().len() < 16 * 1024 * 1024,
+        "the reply stays under the transport frame: {}",
+        preview.to_string().len()
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A document just under the size cap whose entries do not decode still
+/// produces a reply: each entry's long id is reported once, in `id`, so the
+/// reply stays under the transport frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_answers_a_document_of_long_ids() {
+    const ID: usize = 8_378;
+    const ENTRIES: usize = 1_000;
+    let home = scratch("dm-import-long-ids");
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut servers = serde_json::Map::new();
+    for index in 0..ENTRIES {
+        // A non-object value does not decode; the key is the entry's id.
+        servers.insert(format!("{index:04}{}", "a".repeat(ID - 4)), json!(index));
+    }
+    let document = json!({"mcpServers": servers}).to_string();
+    assert!(
+        document.len() < 8 * 1024 * 1024,
+        "the document is under the size cap: {}",
+        document.len()
+    );
+    assert!(
+        document.len() > 8 * 1024 * 1024 - 2 * ID,
+        "the document is just under the size cap: {}",
+        document.len()
+    );
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"user","document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    let entries = preview["result"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), ENTRIES);
+    for entry in entries {
+        assert_eq!(entry["status"], "invalid");
+        let id = entry["id"].as_str().unwrap();
+        let error = entry["error"].as_str().unwrap();
+        assert!(
+            !error.contains(id),
+            "the error does not repeat the entry's id: {error}"
+        );
+    }
+    assert!(
+        preview.to_string().len() < 16 * 1024 * 1024,
+        "the reply stays under the transport frame: {}",
+        preview.to_string().len()
+    );
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

@@ -511,9 +511,12 @@ with its withheld record merged (D25). Enablement is not part of the comparison:
 configuration matches is `identical` however it is enabled. A user `identical` entry's `changes`
 is empty except `enabled`, which it names when the entry is enabled, because a replace would write
 `enabled: false`; a project entry's own `enabled` member is never reported, because the import
-writes none. No value from the document or a record appears in the reply (D3). Each entry reports
-at most 32 names in `changes` and 32 in `unsupported`, with `omitted` counting the names the cap
-left out, so a 1,000-entry document stays well under the 16 MiB transport frame.
+writes none. No value from the document or a record appears in the reply (D3), and an entry's
+error names its field and expected kind but not its id, which `id` states. Every name the reply
+carries comes from the document and is reported once: `changes` names declared members and
+`unsupported` the rest, so a document at its 8 MiB cap yields a reply of about one document
+length, well inside the 16 MiB transport frame. Each entry reports at most 32 names in `changes`
+and 32 in `unsupported`, and `omitted` counts the distinct names those caps left out.
 
 ### D23. One compare-and-set covers the accepted selection
 
@@ -995,10 +998,10 @@ An `ImportEntry` is:
 | `id` | string | The document's entry id |
 | `transport` | `"stdio"` \| `"http"` \| `"sse"`, absent when the entry does not decode | The transport the entry would run |
 | `status` | `"identical"` \| `"changed"` \| `"conflict"` \| `"invalid"` | What importing the entry would do |
-| `changes` | `[{field, kind}]` | The field names and the JSON kind each holds (`string`, `number`, `boolean`, `array`, `object`, `null`). Never a value. `conflict` lists the fields that differ from the target entry; `changed` lists every field of the entry the write would add; `identical` is empty except `enabled` on a user entry that is enabled, which a replace would set to `false` |
+| `changes` | `[{field, kind}]` | The declared field names and the JSON kind each holds (`string`, `number`, `boolean`, `array`, `object`, `null`). Extension members stay in `unsupported`, never here. Never a value. `conflict` lists the fields that differ from the target entry; `changed` lists every field of the entry the write would add; `identical` is empty except `enabled` on a user entry that is enabled, which a replace would set to `false` |
 | `unsupported` | `[{field, effect}]` | Members the decoder does not act on, by name. `effect` is `kept-unused` for an entry's or its `oauth` object's extension member, preserved in the document and unused, or `dropped` for an unknown `auth` member, which the decoder discards |
-| `omitted` | number | How many names the 32-name cap left out of `changes` and `unsupported`; the reported lists are then partial |
-| `error` | string, optional | The entry's decode error, with `invalid`, or a project destination whose stored record does not merge into its declared entry, with `conflict`; it names the field and the expected kind and never a value |
+| `omitted` | number | How many distinct names the 32-name caps left out of `changes` and `unsupported`; the reported lists are then partial |
+| `error` | string, optional | The entry's decode error, with `invalid`, or a project destination whose stored record does not merge into its declared entry, with `conflict`; it names the field and the expected kind and never a value, and it does not repeat the entry's id, which `id` states |
 
 `status` compares the entry, normalized for the target scope (D24), with the configuration the
 target source read at `revision` would serve, ignoring `enabled` on both sides because enablement
