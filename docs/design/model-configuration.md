@@ -326,16 +326,20 @@ cross-language exposure remains C4's work, not an assumed F3 prerequisite.
 previous configuration when the profile names no model. The record names the
 profile this branch last adopted, whose prompt the branch runs. A model selection
 or a preference update carries it into the new configuration, so `/model`,
-`/effort` and `/fast` keep it; only another adoption replaces it, and a profile
-without a model keeps it too. An identical adoption still writes nothing and
-reports `unchanged`: the record is part of the settings the comparison covers.
+`/effort` and `/fast` keep it. Only another adoption replaces it, including the
+adoption of a profile that names no model: that adoption records its own id and
+keeps the current model and preferences. An identical adoption still writes
+nothing and reports `unchanged`: the record is part of the settings the
+comparison covers.
 The record is the adopted configuration's own metadata, not a new identity —
 `SessionInfo.agentId` stays the Session's creation agent.
 
-The record can name a profile that has since been removed or closed: the branch
-still runs that profile's prompt, so `session.agent.get` still answers its id. A
-client that does not find the id in `agent.list` shows it as a removed profile,
-not as `SessionInfo.agentId`, whose prompt is not the one that runs.
+The record can name a profile a client cannot resolve through `agent.list`: one
+that has since been removed or closed, or a Team-owned profile, which
+`agent.list` does not list. The branch still runs that profile's prompt, so
+`session.agent.get` still answers its id. A client that does not find the id in
+`agent.list` shows it as a profile it cannot resolve, not as
+`SessionInfo.agentId`, whose prompt is not the one that runs.
 
 `session.agent.get` answers the record from the branch's published `PromptSnapshot`,
 the derived value `session.attach` reads its `model` from, so a child cut after the
