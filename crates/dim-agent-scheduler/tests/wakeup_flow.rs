@@ -609,6 +609,54 @@ async fn a_delivered_wakeup_past_the_grace_is_fired_after_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_lookup_leaves_a_record_past_the_grace_scheduled() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &[], true).await;
+    let created: Value = client
+        .rpc(
+            "session.wakeup.create",
+            json!({"sessionId": session, "branchId": "main", "at": instant_after(120),
+                "prompt": "Delivery unknown."}),
+        )
+        .await
+        .unwrap();
+    let wakeup_id = created["wakeupId"].as_str().unwrap().to_owned();
+
+    // Past the grace, and pointed at a branch that does not exist, so the
+    // pass's lookup answers `branch_missing` — a non-reloading error that
+    // says nothing about whether the prompt was delivered. The lookup is the
+    // real service call; no test double is involved.
+    edit_wakeups(home.path(), |wakeups| {
+        wakeups[0]["at"] = json!(instant_after(-120));
+        wakeups[0]["branch_id"] = json!("no-such-branch");
+    });
+    // Several passes see the failed lookup: the record must stay scheduled
+    // rather than be expired on a guess.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(
+        stored_wakeups(home.path())[0]["state"],
+        json!("scheduled"),
+        "a failed lookup leaves the record for the next pass"
+    );
+
+    // Once the lookup answers — the submission was never accepted — the
+    // record settles expired.
+    edit_wakeups(home.path(), |wakeups| {
+        wakeups[0]["branch_id"] = json!("main");
+    });
+    wait_state(home.path(), &wakeup_id, "expired").await;
+    assert!(wakeup_inputs(&history(&mut client, &session).await).is_empty());
+    assert_eq!(model.count(), 0, "the failed pass never wrote an input");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_record_past_the_grace_with_no_accepted_input_is_expired_once() {
     let home = home();
     let model = Arc::new(Script::default());

@@ -6,7 +6,7 @@
 //! deadline, and never appears in `schedule.list` or in the run history.
 use crate::{
     document::{MAX_PROMPT_BYTES, canonical_instant, format_instant},
-    engine::{GRACE_SECONDS, UNLOADING, escaped, lookup_input, sessions},
+    engine::{GRACE_SECONDS, escaped, lookup_input, sessions},
     methods::Shared,
     runs::SchedulerError,
 };
@@ -284,7 +284,8 @@ impl Wakeups {
     /// within a second of startup): a `scheduled` record whose instant is
     /// within the grace window is fired once, one whose instant is past the
     /// window is `expired` and never replayed — unless the target already
-    /// accepted its submission id, when it is `fired` instead — one whose
+    /// accepted its submission id, when it is `fired` instead, or the lookup
+    /// failed, when it stays `scheduled` for the next pass — one whose
     /// Session or branch is gone is `cancelled`, and a terminal record older
     /// than [`RETENTION_AFTER_TERMINAL`] is removed. A fire is only the input
     /// write through the public `sessions.input`; there is no launch, stop
@@ -386,9 +387,9 @@ impl Wakeups {
         // already in the target's history. The submission id makes the check
         // exact — the same `sessions.lookup` the run path uses after an
         // uncertain write (A.5) — and a found input settles `fired` without
-        // writing anything, so delivery stays exactly-once. A submission the
-        // target never accepted keeps the record on the expiry path; an
-        // unloading owner leaves it to the next generation.
+        // writing anything, so delivery stays exactly-once. Only an answer
+        // that the target never accepted the submission expires the record; a
+        // lookup that fails leaves it scheduled, and the next pass repeats it.
         let mut expired: Vec<String> = Vec::new();
         for wakeup in stale {
             let submission_id = format!("wakeup:{}", wakeup.wakeup_id);
@@ -401,8 +402,10 @@ impl Wakeups {
             .await
             {
                 Ok(Some(_)) => outcomes.push((wakeup.wakeup_id, WakeupState::Fired)),
-                Err(code) if code == UNLOADING => {}
-                _ => expired.push(wakeup.wakeup_id),
+                Ok(None) => expired.push(wakeup.wakeup_id),
+                // A failed lookup says nothing about delivery, so the record
+                // stays scheduled and the next pass repeats the check (§10.4).
+                Err(_) => {}
             }
         }
         if outcomes.is_empty() && expired.is_empty() && prune.is_empty() {
