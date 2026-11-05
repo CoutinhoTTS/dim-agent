@@ -1,18 +1,21 @@
-use dim_agent_capabilities::file_storage::{
-    FileLease, FilePath, FileStorage, FileStorageError, FileStoragePlugin,
+use dim_agent_capabilities::{
+    file_storage::{FileLease, FilePath, FileStorage, FileStorageError, FileStoragePlugin},
+    methods::{Owner as MethodOwner, RpcError},
 };
 use dim_agent_runtime::Names;
 use dim_agent_runtime::wait_active;
 use dim_app_server::{
+    methods::{ManagementMethods, ManagementMethodsPlugin},
     settings::{
         BusinessDocument, ProjectAuthorized, Result, SettingsChanged, SettingsError,
         SettingsPlugin, SettingsScope, SettingsService, SourceDeclaration, Writer,
-        project_authorizations, settings_changes,
+        project_authorizations, settings_changes, without_write_only,
     },
+    settings_methods::SettingsMethodsPlugin,
     storage::SqliteStoragePlugin,
 };
 use rutis::Ctx;
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
 use rutis_bridge::session::{HostDispatch, Value as RpcValue, host_key};
 use rutis_loader::resolve::Build;
 use serde::{Deserialize, Serialize};
@@ -932,6 +935,38 @@ async fn owner_call(dispatch: &Arc<dyn HostDispatch>, method: &str, request: Jso
     }
 }
 
+/// The process parts of the client path (`settings.*`), as assembly mounts
+/// them: the method table and `SettingsMethods` beside Settings.
+fn client_sources(home: &std::path::Path, root: &Ctx) -> Vec<FiberView> {
+    let catalog = dim_app_server::catalog();
+    let build = Build::default();
+    vec![
+        root.plugin(FileStoragePlugin::new(vec![home.to_owned()])),
+        root.plugin(settings_part(0, vec![])),
+        root.plugin(ManagementMethodsPlugin::typed(&catalog).unwrap()),
+        root.plugin(SettingsMethodsPlugin::new(&Names::copy(&catalog, &build)).unwrap()),
+    ]
+}
+
+/// One `settings.*` management call, as the Rpc layer makes it.
+async fn client_call(
+    root: &Ctx,
+    method: &str,
+    params: Json,
+) -> std::result::Result<Json, RpcError> {
+    let table = root.get::<ManagementMethods>().unwrap();
+    let provider = match table.owner(method) {
+        MethodOwner::Active(provider) => provider,
+        _ => panic!("{method} has no active provider"),
+    };
+    provider
+        .accept(method.to_owned(), params, CancellationToken::new(), |_| {})
+        .unwrap()
+        .reply
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn declared_source_owner_and_client_writes_in_both_profiles() {
     for native in [false, true] {
@@ -1196,6 +1231,285 @@ async fn model_log_switch_starts_the_recorder() {
         let file = std::fs::metadata(&recording).unwrap();
         assert_eq!(file.permissions().mode() & 0o777, 0o600);
     }
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// §4.3: with nothing registered, `settings.sources` replies an empty
+/// listing, not an error.
+#[tokio::test]
+async fn client_settings_sources_lists_nothing_when_empty() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let views = client_sources(&home, &root);
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        client_call(&root, "settings.sources", json!({}))
+            .await
+            .unwrap(),
+        json!({
+            "dialect": "https://json-schema.org/draft/2020-12/schema",
+            "sources": [],
+        })
+    );
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// §4.3: a declared source is listed with its schema verbatim (the `default`
+/// members included), its scopes and its registered user-only pointers.
+#[tokio::test]
+async fn client_settings_sources_lists_a_registered_source_verbatim() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let mut views = client_sources(&home, &root);
+    let owner = root.plugin(owner("test.sources-one", |settings, ctx| {
+        settings.register_declared(ctx, declaration("workflow"))
+    }));
+    views.push(owner.clone());
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let expected = declaration("workflow");
+    let reply = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        reply,
+        json!({
+            "dialect": "https://json-schema.org/draft/2020-12/schema",
+            "sources": [{
+                "source": "workflow",
+                "schema": expected.schema,
+                "scopes": ["user", "project"],
+                "userOnly": ["/searchService"],
+                "writeOnly": false,
+            }],
+        })
+    );
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// §4.3: a second declared source shaped like `web` carries its own
+/// `writeOnly` hint, read from its schema.
+#[tokio::test]
+async fn client_settings_sources_carries_the_write_only_hint() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let mut views = client_sources(&home, &root);
+    let owner = root.plugin(owner("test.sources-web", |settings, ctx| {
+        settings.register_declared(ctx, declaration("workflow"))?;
+        settings.register_declared(
+            ctx,
+            SourceDeclaration {
+                source: "web".into(),
+                user_file: "web.json".into(),
+                project_file: None,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "searchService": {
+                            "type": "object",
+                            "properties": {
+                                "apiKey": {"type": "string", "writeOnly": true}
+                            },
+                            "required": ["apiKey"]
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+                user_only: vec![],
+            },
+        )
+    }));
+    views.push(owner.clone());
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let reply = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    let sources = reply["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2, "{reply}");
+    let web = sources.iter().find(|item| item["source"] == "web").unwrap();
+    assert_eq!(web["writeOnly"], true);
+    assert_eq!(web["scopes"], json!(["user"]));
+    assert_eq!(web["userOnly"], json!([]));
+    let workflow = sources
+        .iter()
+        .find(|item| item["source"] == "workflow")
+        .unwrap();
+    assert_eq!(workflow["writeOnly"], false);
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// §4.1: a root-level `writeOnly` counts for the `settings.sources` hint but
+/// hides nothing. The listing says `writeOnly: true` while the redaction the
+/// agent's `plugin config` path applies (§1.2) over the same schema removes
+/// no member and reports an empty `writeOnlySet`.
+#[tokio::test]
+async fn client_settings_sources_root_write_only_hints_without_hiding() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let mut views = client_sources(&home, &root);
+    let owner = root.plugin(owner("test.sources-root-write-only", |settings, ctx| {
+        settings.register_declared(
+            ctx,
+            SourceDeclaration {
+                source: "sealed".into(),
+                user_file: "sealed.json".into(),
+                project_file: None,
+                schema: json!({
+                    "type": "object",
+                    "writeOnly": true,
+                    "properties": {"token": {"type": "string"}},
+                    "additionalProperties": false
+                }),
+                user_only: vec![],
+            },
+        )
+    }));
+    views.push(owner.clone());
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let reply = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    let item = &reply["sources"][0];
+    assert_eq!(item["source"], "sealed", "{reply}");
+    assert_eq!(item["writeOnly"], true, "{reply}");
+    assert_eq!(item["userOnly"], json!([]), "{reply}");
+    let document = json!({"token": "t"});
+    let (shown, set) = without_write_only(&item["schema"], document.clone());
+    assert_eq!(shown, document);
+    assert!(set.is_empty(), "{set:?}");
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// §4.3: a Rust source is never listed, and a declared source leaves the
+/// listing the moment its owner unloads, when `settings.read` answers
+/// `settings_unknown_source` again.
+#[tokio::test]
+async fn client_settings_sources_follows_registration_lifetime() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let mut views = client_sources(&home, &root);
+    let owner = root.plugin(owner("test.sources-lifetime", |settings, ctx| {
+        settings.register::<dim_app_server::mcp::config::McpSettings>(ctx)?;
+        settings.register_declared(ctx, declaration("declared"))
+    }));
+    views.push(owner.clone());
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let reply = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    let sources = reply["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 1, "{reply}");
+    assert_eq!(sources[0]["source"], "declared");
+    let rust = client_call(
+        &root,
+        "settings.read",
+        json!({"source": "mcp", "scope": "user"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(rust.data.unwrap().app_error, "settings_unknown_source");
+    owner.dispose().await.unwrap();
+    assert_eq!(
+        client_call(&root, "settings.sources", json!({}))
+            .await
+            .unwrap(),
+        json!({"dialect": "https://json-schema.org/draft/2020-12/schema", "sources": []})
+    );
+    let unregistered = client_call(
+        &root,
+        "settings.read",
+        json!({"source": "declared", "scope": "user"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        unregistered.data.unwrap().app_error,
+        "settings_unknown_source"
+    );
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// §4.3 wire hygiene: no item carries a file name, an owner or a document,
+/// and `settings.sources` rejects unknown members.
+#[tokio::test]
+async fn client_settings_sources_wire_hygiene() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let mut views = client_sources(&home, &root);
+    let owner = root.plugin(owner("test.sources-hygiene", |settings, ctx| {
+        settings.register_declared(ctx, declaration("example"))
+    }));
+    views.push(owner.clone());
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let reply = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    let item = &reply["sources"][0];
+    for member in ["userFile", "projectFile", "owner", "document"] {
+        assert!(
+            item.get(member).is_none(),
+            "{member} must not be in the listing"
+        );
+    }
+    let rejected = client_call(&root, "settings.sources", json!({"x": 1}))
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code, -32602);
+    assert_eq!(rejected.data.unwrap().app_error, "invalid_params");
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// §4.3: the listing is in source-name order whatever the registration order.
+#[tokio::test]
+async fn client_settings_sources_lists_in_name_order() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let mut views = client_sources(&home, &root);
+    let owner = root.plugin(owner("test.sources-order", |settings, ctx| {
+        for source in ["zeta", "alpha", "echo"] {
+            settings.register_declared(ctx, declaration(source))?;
+        }
+        Ok(())
+    }));
+    views.push(owner.clone());
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let reply = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    let names: Vec<_> = reply["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha", "echo", "zeta"]);
     root.shutdown().await.unwrap();
     fs::remove_dir_all(home).unwrap();
 }

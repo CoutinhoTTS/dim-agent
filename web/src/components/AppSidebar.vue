@@ -29,11 +29,11 @@ const activeCwd = computed(() => activeSessionId.value === undefined ? undefined
 const newSessionTo = computed(() => ({ name: "chat-new" as const, ...(activeCwd.value === undefined ? {} : { query: { cwd: activeCwd.value } }) }))
 
 const query = computed(() => search.value.trim().toLocaleLowerCase())
-/** The filter matches the workspace name or path, or the session preview. */
+/** The filter matches the workspace name or path, or the session title or preview. */
 const visible = computed(() => sessions.workspaces.flatMap((workspace) => {
   if (query.value === "") return [workspace]
   const matched = workspace.name.toLocaleLowerCase().includes(query.value) || workspace.cwd.toLocaleLowerCase().includes(query.value)
-  const matching = matched ? workspace.sessions : workspace.sessions.filter((session) => session.preview?.toLocaleLowerCase().includes(query.value))
+  const matching = matched ? workspace.sessions : workspace.sessions.filter((session) => [session.title, session.preview].some((text) => text?.toLocaleLowerCase().includes(query.value)))
   return matching.length === 0 ? [] : [{ ...workspace, sessions: matching }]
 }))
 </script>

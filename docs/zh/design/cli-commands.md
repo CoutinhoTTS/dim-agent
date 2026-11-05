@@ -834,7 +834,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode session delete SESSION` | 永久删除该 Session 及存储为它保留的一切；不弹出确认。 |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | 列出某个选择器命中的 Session，确认后删除。 |
 | `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
-| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 依次循环当前工作区、提供时的当前仓库与所有工作区。 |
+| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 在本地范围（启动工作区，或 git 回答后的当前仓库）与所有工作区之间切换。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
@@ -954,9 +954,12 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 不是合法 UTF-8 的路径在连接守护进程之前就被拒绝。恢复 Session 并在提示词上运行的对话
 （`--resume ID -p TEXT`，或从标准输入读入的提示词）不指名工作区：它只连接、读历史并提交，
 输入框不会运行，因此在路径不是合法 UTF-8 的目录里照常工作。交互式恢复、新建 Session 与
-TUI 仍然指名工作区。列表只含恰好属于该工作区的已存 Session，
-最新在前，每次打开都从这里开始。`Ctrl+S` 依次循环当前工作区、当前仓库与所有工作区，标题写明
-当前范围。过滤框保留输入框的 `Ctrl+A` 与 `Ctrl+W`，`Tab` 向下移动选择。
+TUI 仍然指名工作区。本地范围包含启动工作区的已存 Session，以及 git 检出中其它 worktree 里同一个
+相对目录的 Session，最新在前，每次打开都从这里开始。`Ctrl+S` 在本地范围与所有工作区之间切换：
+无论 git、worktree 数量或守护进程如何，都只有两个状态，绝不出现第三个。标题写明当前范围：
+git 回答前是 `Sessions · This workspace`，回答后是 `Sessions · This repository`——即使仓库只有
+一个 worktree——另一个状态是 `Sessions · All workspaces`。过滤框保留输入框的 `Ctrl+A` 与
+`Ctrl+W`，`Tab` 向下移动选择。
 
 ```text
 ╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
@@ -989,15 +992,20 @@ TUI 仍然指名工作区。列表只含恰好属于该工作区的已存 Sessio
 ```
 
 - 切换范围像一次新的查询：取消尚未完成的读取、丢掉游标、重新读第一页；查询保留，并在新范围内生效。
-- 当前仓库包含启动工作区，以及它所在 git 仓库每个 worktree 中同一个相对目录；选择面板打开时在后台用
-  `git rev-parse` 与 `git worktree list --porcelain` 读取。第一页不等 git，两次读取共用一个两秒的时限；
-  git 失败或不回答时该范围不出现，也不提示。只有当集合多于一个条目，并且守护进程读取一组工作区
-  （`session.catalog.workspaces`）或经 `session.summaries` 列目录时，才提供这个范围。bare worktree 不加入。
-- 在当前工作区范围之外，每行先写更新于多久之前，再写它所属的工作区，主目录写作 `~`。标签最多占一半
-  宽度，时间在最前，因此被截断的是长路径。
-- 当前工作区范围、没有 Session 且没有查询时，列表显示 `No saved sessions in this workspace. Ctrl+S shows more.`；
-  其余空列表与无匹配文案不变。
-- 没有 `session.catalog` 的守护进程经 `session.summaries` 列目录，客户端用同样的精确匹配把范围应用到收到的行上。
+- 本地范围是启动工作区，以及它所在 git 仓库每个 worktree 中同一个相对目录；选择面板打开时在后台用
+  `git rev-parse` 与 `git worktree list --porcelain` 读取。第一页不等 git，两次读取共用一个两秒的时限。
+  git 成功时该范围名为 `This repository`；当面板正显示本地范围且集合多于一个条目时，标题改变并重新读
+  第一页；单条目集合只改变标题，因为目录的规范化 `cwd` 把这一个工作区当作同一个过滤条件。git 失败或
+  不回答、守护进程既不读一组工作区（`session.catalog.workspaces`）也不经 `session.summaries` 列目录时，
+  本地范围保持名为 `This workspace`，只列启动工作区，也不提示。bare worktree 不加入。
+- 在本地范围中，只有当它包含多于一个工作区时，每行才写明所属工作区，因此单 worktree 仓库不会给每行加
+  一个多余的路径；在所有工作区范围中，每行先写更新于多久之前，再写它所属的工作区，主目录写作 `~`。
+  标签最多占一半宽度，时间在最前，因此被截断的是长路径。
+- 本地范围没有 Session 且没有查询时，只要它恰好只列启动工作区——git 回答前、不在 git 仓库中、以及单
+  worktree 仓库——就显示 `No saved sessions in this workspace. Ctrl+S shows more.`；包含更多 worktree
+  的本地范围、所有工作区范围以及无匹配行都显示 `No saved sessions yet.`。
+- 没有 `session.catalog` 的守护进程经 `session.summaries` 列目录，客户端把范围应用到收到的行上：
+  恰好是启动工作区、属于 git 集合，或不过滤。
 - `dimcode --resume ID` 仍可恢复任何工作区的 Session，清理也在所有工作区范围内选择。
 
 ### 会话标题
@@ -1046,7 +1054,9 @@ TITLE 视为缺失，也按同样方式拒绝。
 停下，打印 `This App Server is too old to clean up Sessions safely; nothing was deleted.` 并以 1
 退出。它在每次删除时带的 `requireInactive` 与 `includeClosed` 一同落地，所以拒绝其一的服务器两者
 都拒绝；某次删除在尚未删除任何东西之前回答 `invalid_params` 时，也按同一方式停下。它用两个选择器之一，
-两者都读 `session.summaries` 的 `updatedAt`，即 Session 的最后活跃时间：
+两者都读 `session.summaries` 的 `updatedAt`，即 Session 的活动时间
+（[Session 目录](appserver/session-catalog.md#32-顺序游标与分页)），而不是它最后一个存储事件的时间：
+附着、恢复以及其他家事事件都不移动它，因此只是被附着或恢复过的 Session 保持早先的时间，可能被选中删除：
 
 | 选择器 | 选择范围 |
 | --- | --- |

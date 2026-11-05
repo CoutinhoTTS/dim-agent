@@ -155,6 +155,23 @@ pub struct HistoryResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_start: Option<u64>,
 }
+/// `session.keys`: the live keyed blocks of one branch segment at `through`,
+/// ascending by the carrying input's sequence and by block order inside one
+/// input (keyed-blocks §2.2).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeysResult {
+    pub through: u64,
+    pub entries: Vec<KeyEntry>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyEntry {
+    pub key: String,
+    pub sequence: u64,
+    pub input_id: String,
+    pub text: String,
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventNotice {

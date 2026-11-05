@@ -2049,6 +2049,7 @@
       "unexpandedMacros": [
         "matches",
         "tokio::select",
+        "tracing::warn",
         "vec"
       ]
     },
@@ -4956,8 +4957,7 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/sessions_panel.rs",
       "unexpandedMacros": [
-        "format",
-        "matches"
+        "format"
       ]
     },
     {
@@ -18260,6 +18260,7 @@
       "references": [
         "path TimelineQuery",
         "path TimelineQueryDirection::Ascending",
+        "path TimelineQueryDirection::Descending",
         "path TimelineQueryOrderBy::Sequence",
         "path TimelineQueryScope::Branch",
         "path dim_agent_runtime::TimelineQuery",
@@ -18394,6 +18395,8 @@
       "from": "dim_app_server::agents",
       "to": "dim_app_server::storage::catalog",
       "references": [
+        "path crate::storage::ACTIVITY_KINDS",
+        "path crate::storage::activity",
         "path crate::storage::truncate_preview"
       ]
     },
@@ -20214,6 +20217,8 @@
       "to": "dim_app_server",
       "references": [
         "path ServerConfig",
+        "path crate::FollowHold",
+        "path crate::FollowHold::default",
         "use crate::ServerConfig"
       ]
     },
@@ -20342,6 +20347,7 @@
         "path Call::History",
         "path Call::Idle",
         "path Call::InputLookup",
+        "path Call::Keys",
         "path Call::McpAppCall",
         "path Call::McpAppWidget",
         "path Call::McpRefresh",
@@ -20815,7 +20821,12 @@
       "to": "dim_agent_types::events",
       "references": [
         "path BranchSource::Host",
+        "path EventKind::BranchStart",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::InputMessage",
+        "path EventKind::SessionForked",
+        "path InputBlock::Raw",
         "path InputMessageData",
         "path InputMessageData::default",
         "path InputMode::Queue",
@@ -20823,6 +20834,7 @@
         "path dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMode"
       ]
     },
@@ -20851,10 +20863,12 @@
         "path InputLookup",
         "path InputLookupResult::Accepted",
         "path InputLookupResult::Unknown",
+        "path Keys",
         "path Reply",
         "path Reply::BranchCreate",
         "path Reply::History",
         "path Reply::InputLookup",
+        "path Reply::Keys",
         "path Reply::Submit",
         "path Reply::empty",
         "path Submit",
@@ -20874,6 +20888,8 @@
       "references": [
         "path wire::CreateResult",
         "path wire::HistoryResult",
+        "path wire::KeyEntry",
+        "path wire::KeysResult",
         "path wire::ProductEvent",
         "path wire::ProductEvent::new",
         "use crate::tree_protocol"
@@ -23728,6 +23744,7 @@
         "path crate::tree_protocol::EventNotice",
         "path crate::tree_protocol::ForwardedNotice",
         "path crate::tree_protocol::HistoryResult",
+        "path crate::tree_protocol::KeysResult",
         "path crate::tree_protocol::ModelProgressNotice",
         "path crate::tree_protocol::StateNotice"
       ]
@@ -25497,6 +25514,14 @@
     },
     {
       "from": "dim_app_server::settings_methods",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings_methods",
       "to": "dim_app_server::settings",
       "references": [
         "path SettingsError",
@@ -25517,11 +25542,15 @@
       "to": "dim_app_server::settings::declared",
       "references": [
         "path Read",
+        "path SourceDeclaration",
         "path Update",
         "path Writer::Client",
+        "path holds_write_only",
         "use crate::settings::Read",
+        "use crate::settings::SourceDeclaration",
         "use crate::settings::Update",
-        "use crate::settings::Writer"
+        "use crate::settings::Writer",
+        "use crate::settings::holds_write_only"
       ]
     },
     {
@@ -25748,6 +25777,8 @@
       "to": "dim_app_server::storage::catalog",
       "references": [
         "mod catalog",
+        "use catalog::ACTIVITY_KINDS",
+        "use catalog::activity",
         "use catalog::initialize_session_catalog",
         "use catalog::truncate_preview"
       ]
@@ -25840,7 +25871,10 @@
       "from": "dim_app_server::storage::catalog",
       "to": "dim_agent_types::events",
       "references": [
+        "path EventKind",
+        "path EventKind::InputMessage",
         "path InputMessageData",
+        "use dim_agent_types::EventKind",
         "use dim_agent_types::InputMessageData"
       ]
     },
@@ -26511,6 +26545,7 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::catalog",
       "references": [
+        "path super::catalog::activity",
         "path super::catalog::create",
         "path super::catalog::initialize_session_catalog",
         "path super::catalog::refresh"
@@ -31149,8 +31184,7 @@
         "path SessionPort",
         "path SessionsScope",
         "path SessionsScope::All",
-        "path SessionsScope::Repository",
-        "path SessionsScope::Workspace",
+        "path SessionsScope::Local",
         "path SubagentModelPolicy",
         "path SuggestionSetting",
         "path SwitchKind",
@@ -35808,8 +35842,7 @@
         "path SessionItem",
         "path SessionsScope",
         "path SessionsScope::All",
-        "path SessionsScope::Repository",
-        "path SessionsScope::Workspace",
+        "path SessionsScope::Local",
         "path stored_title",
         "use crate::model::session::Command",
         "use crate::model::session::SessionItem",
@@ -35894,7 +35927,10 @@
       "from": "dim_cli::ui::sessions_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
-        "path SessionItem"
+        "path Command::ListSessions",
+        "path SessionItem",
+        "path SessionsScope",
+        "path SessionsScope::Local"
       ]
     },
     {
@@ -35928,9 +35964,22 @@
         "path KeyCode::Enter",
         "path KeyCode::Up",
         "path KeyEvent::new",
+        "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::sessions_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path terminal_palette",
+        "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode",
+        "use crate::ui::theme::palette::terminal_palette"
       ]
     },
     {
@@ -37878,6 +37927,7 @@
       "to": "dim_cli::ui",
       "references": [
         "path Env",
+        "path crate::ui::tilde",
         "use crate::ui::Env"
       ]
     },
@@ -38740,6 +38790,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui",
+      "references": [
+        "path crate::ui::tilde"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::composer",
       "references": [
         "path crate::ui::composer::read_planned"
@@ -39455,12 +39512,13 @@
         "path TimelineQueryPredicate",
         "path TimelineQueryScope",
         "path TimelineQueryScope::Branch",
-        "path TimelineQueryScope::Chain",
+        "path rebuild_facts",
         "use dim_agent_runtime::TimelineQuery",
         "use dim_agent_runtime::TimelineQueryDirection",
         "use dim_agent_runtime::TimelineQueryOrderBy",
         "use dim_agent_runtime::TimelineQueryPredicate",
-        "use dim_agent_runtime::TimelineQueryScope"
+        "use dim_agent_runtime::TimelineQueryScope",
+        "use dim_agent_runtime::rebuild_facts"
       ]
     },
     {
@@ -42053,14 +42111,6 @@
     {
       "module": "dim_cli::ui::render::fullscreen",
       "path": "char::len_utf8"
-    },
-    {
-      "module": "dim_cli::ui::sessions_panel::tests",
-      "path": "Appearance::Dark"
-    },
-    {
-      "module": "dim_cli::ui::sessions_panel::tests",
-      "path": "ColorMode::TrueColor"
     },
     {
       "module": "dim_cli::ui::terminal::input",

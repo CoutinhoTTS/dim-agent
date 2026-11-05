@@ -296,7 +296,7 @@ async fn node_settings_clients_and_declaration_boundaries() {
     )
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
-    for method in ["settings.read", "settings.update"] {
+    for method in ["settings.read", "settings.update", "settings.sources"] {
         assert!(client.features.as_array().unwrap().contains(&json!(method)));
     }
     let mut remote = Client::new_version(&server, true, 3).await;
@@ -304,6 +304,10 @@ async fn node_settings_clients_and_declaration_boundaries() {
         remote
             .rpc("settings.read", json!({"source":"example","scope":"user"}))
             .await["error"]["data"]["appError"],
+        "local_transport_required"
+    );
+    assert_eq!(
+        remote.rpc("settings.sources", json!({})).await["error"]["data"]["appError"],
         "local_transport_required"
     );
     let read = registered(&mut client, "example").await;
@@ -403,4 +407,73 @@ async fn node_settings_clients_and_declaration_boundaries() {
         server.join().await.unwrap();
     }
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// §4.3 discovery is local-only by admission: an authenticated Web entry
+/// connection is answered `unknown_method` for `settings.sources`, while the
+/// allowlisted `settings.read` still serves `model-log`. The guarantee is the
+/// absence of `settings.sources` from `WEB_MANAGEMENT_METHODS` and from the
+/// per-source admission of `settings.read`/`settings.update`, so the entry's
+/// `||` branch denies it by decision, not by oversight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_web_entry_is_not_served_settings_sources() {
+    let home = product_home();
+    let assets = super::web_entry::frontend_fixture();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            web_assets: Some(assets.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    let opened = local.rpc("web.open", json!({"port":0})).await["result"].clone();
+    let address = opened["address"].as_str().unwrap().to_owned();
+    let bootstrap = opened["url"]
+        .as_str()
+        .unwrap()
+        .split_once("#bootstrap=")
+        .unwrap()
+        .1
+        .to_owned();
+    let origin = format!("http://{address}");
+    let (status, head, _) = super::web_entry::http(
+        &address,
+        super::web_entry::post(
+            &address,
+            "/api/auth/exchange",
+            &origin,
+            &json!({"token": bootstrap}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let cookie = head
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let mut web = super::web_entry::web_client(&address, &cookie).await;
+    assert_eq!(
+        web.rpc("settings.sources", json!({})).await["error"]["data"]["appError"],
+        "unknown_method"
+    );
+    let read = web
+        .rpc(
+            "settings.read",
+            json!({"source":"model-log","scope":"user"}),
+        )
+        .await;
+    assert_ok(&read);
+    assert_eq!(read["result"]["document"], json!({"enabled": false}));
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&assets);
 }

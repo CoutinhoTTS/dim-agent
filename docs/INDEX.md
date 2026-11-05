@@ -87,6 +87,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Session classification: creation origin and catalog visibility](design/appserver/session-classification.md) (#557)
 - [Session broadcast notices](design/appserver/session-notices.md)（[中文](zh/design/appserver/session-notices.md)）
 - [Bounded latest-turn history window](design/appserver/session-history-window.md) (#712)
+- [Keyed blocks: the session.keys read](design/appserver/keyed-blocks.md) (#958)（[中文](zh/design/appserver/keyed-blocks.md)）
 - [SessionStore title metadata](design/appserver/session-title-metadata.md)（[中文](zh/design/appserver/session-title-metadata.md)）
 - [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (#193)（[中文](zh/design/appserver/restore-shared-read.md)）
 - [Restore validation reuse](design/appserver/restore-validation.md) (#601)

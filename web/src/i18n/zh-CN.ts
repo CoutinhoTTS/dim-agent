@@ -70,6 +70,7 @@ const zhCN: Messages = {
   "goal.usage": "用法：/goal [目标 | set 目标 | edit 目标 | pause | resume | clear]",
   "composer.command.models": "选择模型",
   "composer.command.new": "新建会话",
+  "composer.command.scheduled": "管理 CLI 主机上的定时任务",
   "composer.commandKeys": "↑↓ 选择 · Enter 确认 · Esc 关闭",
   "composer.command.permissions": "查看或修改会话权限",
   "composer.permission.label": "权限",
