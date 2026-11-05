@@ -1962,19 +1962,19 @@ async fn a_hook_sees_its_environment_and_no_plugin_root() {
 async fn member_session_payloads_carry_collaboration_role() {
     let env = Env::new().await;
     let payloads = env.path("payloads");
-    let append = format!(
-        "cat >> '{}'; printf '\\n---\\n' >> '{}'",
-        payloads.display(),
+    std::fs::create_dir_all(&payloads).unwrap();
+    let write = format!(
+        "cat > '{0}/payload.'$$'.tmp' && mv '{0}/payload.'$$'.tmp' '{0}/payload.'$$'.json'",
         payloads.display()
     );
     env.sources.set(document(serde_json::json!({
         "SessionStart": [command(serde_json::json!({
             "type": "command",
-            "command": append.clone(),
+            "command": write.clone(),
         }))],
         "Stop": [command(serde_json::json!({
             "type": "command",
-            "command": append,
+            "command": write,
         }))],
     })));
     let member = env
@@ -1994,42 +1994,36 @@ async fn member_session_payloads_carry_collaboration_role() {
     let leader = env.session().await;
     turn(&member, "go").await;
     turn(&leader, "go").await;
-    // A hook appends its payload and the separator in two writes, so the
-    // fragment still being written does not parse yet: it is left for the
-    // next read.
+    // Each hook writes its own file and renames it into place, so every
+    // `*.json` file the test reads is complete: a parse failure is a real one.
     let read = || -> Vec<serde_json::Value> {
-        let text = std::fs::read_to_string(&payloads).unwrap_or_default();
-        let mut parts = text.split("\n---\n").peekable();
-        let mut entries = Vec::new();
-        while let Some(part) = parts.next() {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<serde_json::Value>(part) {
-                Ok(entry) => entries.push(entry),
-                Err(_) if parts.peek().is_none() => break,
-                Err(error) => panic!("{error}: {part}"),
-            }
-        }
-        entries
+        std::fs::read_dir(&payloads)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                    return None;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                match serde_json::from_str(&text) {
+                    Ok(entry) => Some(entry),
+                    Err(error) => panic!("{}: {error}: {text}", path.display()),
+                }
+            })
+            .collect()
     };
-    // Both Sessions' SessionStart and Stop hooks ran and wrote their payloads.
     for _ in 0..500 {
         let current = read();
-        let member_starts = current
-            .iter()
-            .filter(|entry| {
-                entry["hook_event_name"] == "SessionStart" && entry["session_id"] == member.id()
-            })
-            .count();
-        let leader_stops = current
-            .iter()
-            .filter(|entry| {
-                entry["hook_event_name"] == "Stop" && entry["session_id"] == leader.id()
-            })
-            .count();
-        if member_starts >= 1 && leader_stops >= 1 {
+        let seen = |session: &str, event: &str| {
+            current
+                .iter()
+                .any(|entry| entry["hook_event_name"] == event && entry["session_id"] == session)
+        };
+        if seen(member.id(), "SessionStart")
+            && seen(member.id(), "Stop")
+            && seen(leader.id(), "SessionStart")
+            && seen(leader.id(), "Stop")
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
