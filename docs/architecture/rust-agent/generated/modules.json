@@ -20341,6 +20341,7 @@
         "path Call::History",
         "path Call::Idle",
         "path Call::InputLookup",
+        "path Call::Keys",
         "path Call::McpAppCall",
         "path Call::McpAppWidget",
         "path Call::McpRefresh",
@@ -20814,7 +20815,12 @@
       "to": "dim_agent_types::events",
       "references": [
         "path BranchSource::Host",
+        "path EventKind::BranchStart",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::InputMessage",
+        "path EventKind::SessionForked",
+        "path InputBlock::Raw",
         "path InputMessageData",
         "path InputMessageData::default",
         "path InputMode::Queue",
@@ -20822,6 +20828,7 @@
         "path dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMode"
       ]
     },
@@ -20850,10 +20857,12 @@
         "path InputLookup",
         "path InputLookupResult::Accepted",
         "path InputLookupResult::Unknown",
+        "path Keys",
         "path Reply",
         "path Reply::BranchCreate",
         "path Reply::History",
         "path Reply::InputLookup",
+        "path Reply::Keys",
         "path Reply::Submit",
         "path Reply::empty",
         "path Submit",
@@ -20873,6 +20882,8 @@
       "references": [
         "path wire::CreateResult",
         "path wire::HistoryResult",
+        "path wire::KeyEntry",
+        "path wire::KeysResult",
         "path wire::ProductEvent",
         "path wire::ProductEvent::new",
         "use crate::tree_protocol"
@@ -23727,6 +23738,7 @@
         "path crate::tree_protocol::EventNotice",
         "path crate::tree_protocol::ForwardedNotice",
         "path crate::tree_protocol::HistoryResult",
+        "path crate::tree_protocol::KeysResult",
         "path crate::tree_protocol::ModelProgressNotice",
         "path crate::tree_protocol::StateNotice"
       ]
