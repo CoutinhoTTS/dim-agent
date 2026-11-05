@@ -170,7 +170,7 @@ impl FileReads {
     /// before a later one, so the newest completed one decides whether the
     /// operation survived.
     async fn latest_completed(&self, established: u64) -> Result<Option<String>, HostError> {
-        let mut offset = 0;
+        let mut from_sequence = None;
         loop {
             let reply = self
                 .timeline
@@ -178,7 +178,7 @@ impl FileReads {
                     scope: TimelineQueryScope::Branch,
                     include_publishing: false,
                     from_event: None,
-                    from_sequence: None,
+                    from_sequence,
                     order_by: TimelineQueryOrderBy::Sequence,
                     direction: TimelineQueryDirection::Descending,
                     kinds: vec!["context/compaction".into()],
@@ -187,7 +187,7 @@ impl FileReads {
                     predicate: None,
                     limit: NonZeroU64::new(COMPACTION_PAGE)
                         .expect("a page keeps at least one compaction"),
-                    offset,
+                    offset: 0,
                 })
                 .await
                 .map_err(|error| {
@@ -203,10 +203,13 @@ impl FileReads {
                     return Ok(Some(retain_from.clone()));
                 }
             }
-            if (reply.events.len() as u64) < COMPACTION_PAGE {
+            let Some(last) = reply.events.last().map(|event| event.sequence) else {
+                return Ok(None);
+            };
+            if (reply.events.len() as u64) < COMPACTION_PAGE || last == 0 {
                 return Ok(None);
             }
-            offset += reply.events.len() as u64;
+            from_sequence = Some(last - 1);
         }
     }
 }
