@@ -72,8 +72,16 @@ unchanged.
 
 Each call resolves the named branch through WorkspaceTools' existing
 `TreeCommands`, then asks that branch's BackgroundExec for the active task's
-capture. No Session part retains branch business state. A task id from another
-branch or Session cannot select an output file.
+capture. No Session part retains branch business state.
+
+**Task identity.** Every request resolves `taskId` inside the branch it names:
+`sessionId` admits the Session, `branchId` selects that Session's branch, and
+the task must be one that branch started. The built-in `exec` mints
+`exec-<uuid>` per call, which does not repeat within a Session in practice, but
+no owner guarantees a Session-unique id; the contract key is `(sessionId,
+branchId, taskId)`, and a task id this branch did not start is
+`exec_task_unknown` even when another branch or Session has it. The same key
+holds for `session.exec.stop` and `session.exec.output.page`.
 
 | Condition | Result |
 | --- | --- |
