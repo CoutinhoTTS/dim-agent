@@ -12,10 +12,47 @@ use tokio_util::sync::CancellationToken;
 const RESERVE_RATIO: f64 = 0.10;
 const RESERVE_MIN_TOKENS: f64 = 16_000.;
 const RESERVE_MAX_RATIO: f64 = 0.20;
+/// No reply needs more than this, however much the model declares.
+const OUTPUT_CEILING: u64 = 131_072;
 /// Serialized UTF-8 bytes per estimated token.
 const BYTES_PER_TOKEN: f64 = 4.;
 /// Estimated tokens of one image part.
 const IMAGE_TOKENS: f64 = 1_600.;
+
+/// The adopted output allowance of a model: its declared maximum output,
+/// bounded by [`OUTPUT_CEILING`] and by half the window, so the input budget
+/// `B = context_window − allowance` is at least half the window even when a
+/// source declares an output at or above it (ContextCompaction §5.1). The
+/// declared maximum stays the capability fact it is.
+pub fn output_allowance(context_window: u64, declared_max_output: u64) -> u64 {
+    declared_max_output
+        .min(OUTPUT_CEILING)
+        .min(context_window / 2)
+        .max(1)
+}
+
+/// The configuration a stored adoption yields at a request boundary: the
+/// stored output allowance, repaired to [`output_allowance`] when it is
+/// absent or above the rule. The stored fact is not rewritten, so a Session
+/// adopted before the rule existed stays readable and usable.
+pub fn adopted_config(
+    snapshot: Option<&ModelCapabilitySnapshot>,
+    config: Option<&ModelConfig>,
+) -> Option<ModelConfig> {
+    let Some(capabilities) = snapshot.map(|snapshot| &snapshot.capabilities) else {
+        return config.cloned();
+    };
+    let allowance =
+        output_allowance(capabilities.context_window, capabilities.max_output_tokens) as f64;
+    let mut config = config.cloned().unwrap_or_default();
+    config.max_tokens = Some(
+        config
+            .max_tokens
+            .filter(|stored| *stored > 0.)
+            .map_or(allowance, |stored| stored.min(allowance)),
+    );
+    Some(config)
+}
 
 /// Resolves window facts from the request alone; no service is needed.
 pub struct ProductContextModel;
@@ -35,29 +72,32 @@ impl ResolveContextModel for ProductContextModel {
             snapshot
                 .validate_for(&request.provider_id, &request.model_id)
                 .map_err(|message| HostError::classified(HostErrorKind::InvalidRequest, message))?;
+            let allowance = request
+                .config
+                .as_ref()
+                .and_then(|config| config.max_tokens)
+                .ok_or_else(|| {
+                    HostError::classified(
+                        HostErrorKind::InvalidRequest,
+                        "Model output allowance is not adopted; select the model again",
+                    )
+                })?;
             Ok(window_facts(
                 snapshot.capabilities.context_window,
-                snapshot.capabilities.max_output_tokens,
+                allowance,
                 &request,
             ))
         })
     }
 }
 
-/// Window facts for a model whose limits are declared: `context_window` and
-/// its `max_output_tokens` limit, which the request's own `maxTokens` never
-/// exceeds.
+/// Window facts for a model whose adopted output allowance is `output_tokens`:
+/// its context window and the allowance every request reserves.
 pub fn window_facts(
     context_window: u64,
-    max_output_tokens: u64,
+    output_tokens: f64,
     request: &ModelRequest,
 ) -> Arc<dyn ContextModel> {
-    let limit = max_output_tokens as f64;
-    let output_tokens = request
-        .config
-        .as_ref()
-        .and_then(|config| config.max_tokens)
-        .map_or(limit, |max| max.min(limit));
     Arc::new(WindowFacts {
         context_window: context_window as f64,
         output_tokens,

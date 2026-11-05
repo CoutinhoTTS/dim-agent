@@ -5,13 +5,14 @@ import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpInspection, rea
 import { configuration, patch, type Draft } from "./mcp-form"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
+import { useSessionsStore } from "../../stores/sessions"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
 import { bindSettingsDirty, messageFrom, reloadSettingsOnReconnect } from "./context"
 
 const s = useSettingsText()
 const connection = useConnectionStore()
+const sessions = useSessionsStore()
 const catalog = ref<McpView>()
-const cwd = ref("")
 const loadedCwd = ref("")
 const busy = ref(false)
 const error = ref("")
@@ -69,20 +70,24 @@ async function inspect(server: McpEntry): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
-async function load(): Promise<void> {
+async function load(path = loadedCwd.value): Promise<void> {
   if (busy.value) return
-  if (dirty.value && !window.confirm(s('Discard unsaved MCP configuration?', '放弃未保存的 MCP 配置？'))) return
+  if ((dirty.value || clientSecret.value || callback.value || authorization.value) && !window.confirm(s('Discard unsaved MCP configuration and authentication?', '放弃未保存的 MCP 配置和认证？'))) return
   busy.value = true
   error.value = ""
   try {
     if (!connection.supports("mcp.catalog")) throw new Error(s('MCP management is not available on this server.', '此服务器不支持 MCP 管理。'))
-    const path = cwd.value.trim()
     const next = await connection.client.call("mcp.catalog", path ? { cwd: path } : {}, readMcp)
+    if (authorization.value) {
+      await connection.client.call("mcp.auth.cancel", { attemptId: authorization.value.attemptId }, readAck)
+      authorization.value = undefined
+    }
     loadedCwd.value = path
     catalog.value = next
     draft.value = undefined
     detail.value = undefined
     clientSecret.value = ""
+    callback.value = ""
     testResult.value = undefined
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
@@ -234,7 +239,7 @@ async function move(server: McpEntry): Promise<void> {
   if (busy.value || server.source === "plugin" || !connection.supports("mcp.move")) return
   const from = server.source === "user" ? "user" as const : "project" as const
   const to = from === "user" ? "project" as const : "user" as const
-  if (to === "project" && !loadedCwd.value) { error.value = s('Load a project directory before moving a server into it.', '移入项目前请先加载项目目录。'); return }
+  if (to === "project" && !loadedCwd.value) { error.value = s('Choose a workspace before moving a server into its project configuration.', '移入项目配置前请先选择工作区。'); return }
   if (dirty.value && !window.confirm(s('Discard unsaved MCP configuration?', '放弃未保存的 MCP 配置？'))) return
   const message = to === "project"
     ? s('Move this server to the project? Withheld values stay in your local Dim configuration, the workspace file gets only the public configuration, and the entry starts disabled.', '将此服务器移入项目？隐藏值保留在本地 Dim 配置中，工作区文件只包含公开配置，且条目默认禁用。')
@@ -273,8 +278,13 @@ async function finishAuth(cancel = false): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
-reloadSettingsOnReconnect(connection, load, computed(() => draft.value !== undefined || !!clientSecret.value || !!callback.value || !!authorization.value))
-onMounted(load)
+async function changeScope(event: Event): Promise<void> {
+  const select = event.target as HTMLSelectElement
+  await load(select.value)
+  select.value = loadedCwd.value
+}
+reloadSettingsOnReconnect(connection, () => load(), computed(() => draft.value !== undefined || !!clientSecret.value || !!callback.value || !!authorization.value))
+onMounted(() => load())
 onBeforeUnmount(() => {
   mounted = false
   callback.value = ""
@@ -286,8 +296,8 @@ onBeforeUnmount(() => {
 <template>
   <article class="settings-page">
     <header><h2 data-route-heading tabindex="-1">MCP</h2><p>{{ s('Manage command and remote MCP servers. Project servers stay disabled until you explicitly enable them locally.', '管理命令和远程 MCP 服务器。项目服务器默认禁用，只有您在本地明确启用后才会运行。') }}</p></header>
-    <form class="settings-card settings-form" @submit.prevent="load"><label><span>{{ s('Project directory (optional, absolute path)', '项目目录（可选，绝对路径）') }}</span><input v-model="cwd" class="ui-field" data-size="md" :disabled="busy" /></label><div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load / refresh', '加载 / 刷新') }}</button><button class="ui-button" data-size="md" data-variant="primary" type="button" :disabled="busy || !catalog || !connection.supports('mcp.save')" @click="create">{{ s('Add server', '添加服务器') }}</button></div></form>
-    <GeneralSettingsStatus :busy="busy" :error="error" @reload="load" />
+    <form class="settings-card settings-form" @submit.prevent="load()"><label><span>{{ s('Configuration scope', '配置范围') }}</span><select :value="loadedCwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User configuration', '用户配置') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('Choose a workspace to include its project MCP servers alongside user and plugin servers. This does not change a server\'s working directory.', '选择工作区后，会同时显示该项目、用户和插件提供的 MCP 服务器。这不会更改服务器的运行目录。') }}</p><div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load / refresh', '加载 / 刷新') }}</button><button class="ui-button" data-size="md" data-variant="primary" type="button" :disabled="busy || !catalog || !connection.supports('mcp.save')" @click="create">{{ s('Add server', '添加服务器') }}</button></div></form>
+    <GeneralSettingsStatus :busy="busy" :error="error" @reload="load()" />
     <p v-for="issue in catalog?.errors" :key="issue" class="ui-banner settings-banner" data-tone="warning">{{ issue }}</p>
     <section v-if="invalidEntries.length" class="settings-card">
       <h3>{{ s('Entries that did not decode', '无法解码的条目') }}</h3>

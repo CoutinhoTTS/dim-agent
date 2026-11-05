@@ -531,24 +531,27 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | Method | Value |
 | --- | --- |
 | `context_window` | `snapshot.capabilities.contextWindow`, the catalog value with its existing overrides |
-| `output_tokens` | `request.config.maxTokens` if set, else `snapshot.capabilities.maxOutputTokens`; never above the latter |
+| `output_tokens` | The adopted output allowance: `request.config.maxTokens`, which Provider derives from the declared pair as `max(1, min(declared maxOutputTokens, 131,072, contextWindow / 2))`. A stored value that is absent or above that function is repaired on read at the request boundary; the declared `maxOutputTokens` fact is not rewritten |
 | `threshold_tokens` | `B − reserve`, where `B = context_window − output_tokens` (the input budget) and `reserve = min(max(0.10 × B, 16,000), 0.20 × B)`. The reserve absorbs the estimation error of the next request; it is a provisional heuristic that does not cover every request without a provider baseline ([research §3.3, §6.4](../research/compaction-trigger.md#33-recommendation)) |
 | `count_tokens` | UTF-8 bytes of the serialized system prompt, messages and tool declarations divided by 4; each image part counts a fixed 1,600 tokens. Provisional (#128). Used for deltas over the provider's `prompt_tokens`, the first request, `validate` and the reduction check |
 
 The `--models` profile resolves the same facts from its model file: `AimuxModels` reads the entry
-the request names, by provider and model id, and the request's capability snapshot stays unset, so
-images are sent while the capability is unknown.
+the request names, by provider and model id, derives the allowance from the file's declared pair
+when it loads the entry, and the request's capability snapshot stays unset, so images are sent
+while the capability is unknown.
 
 **Capacity and startup trigger window.** The window facts are the model's catalog values
 with their overrides: `B`, `0.5 × B`, `0.25 × B` and `S` scale with the declared capacity.
-An adopted [startup](../model-startup.md) `auto_compact_window = W` caps only
-`threshold_tokens` at `max(0, W − output_tokens)`: the effective threshold is the
-minimum of that cap and `B − reserve` above. The output allowance remains reserved;
-the smaller trigger window neither reduces actual capacity nor changes chunking,
-retention, regrowth or manual compaction. Provider validates that W is positive and
-does not exceed adopted capacity. Without W, including startup `auto`, the threshold
-is unchanged. Compaction has no constant capacity cap of its own; a different actual
-capacity is declared by Provider or the existing `contextWindow` override.
+The output allowance is Provider's adopted value, not the declared maximum: a reply ceiling
+(131,072 tokens) and half the window bound it, so `B` is at least half the window even when
+a source declares an output at or above it. An adopted [startup](../model-startup.md)
+`auto_compact_window = W` caps only `threshold_tokens` at `max(0, W − output_tokens)`: the
+effective threshold is the minimum of that cap and `B − reserve` above. The output allowance
+remains reserved; the smaller trigger window neither reduces actual capacity nor changes
+chunking, retention, regrowth or manual compaction. Provider validates that W is positive and
+does not exceed adopted capacity. Without W, including startup `auto`, the threshold is
+unchanged. Compaction has no constant capacity cap of its own; a different actual capacity is
+declared by Provider or the existing `contextWindow` override.
 
 ### 5.2 ProductSummaryStrategy
 
@@ -577,9 +580,10 @@ capacity is declared by Provider or the existing `contextWindow` override.
 How the summary is produced:
 
 - **Request.** One summarizer request per chunk. It uses `input.request`'s provider, model,
-  snapshot and config, with `maxTokens = model.output_tokens()`, a fixed summarizer system
-  prompt owned by this module, one user message with the transcript, and no tools. #170 proposes
-  a reasoning setting for this config and a target length in the prompt (§13).
+  snapshot and config, with `maxTokens = model.output_tokens()` (the adopted allowance, §5.1),
+  a fixed summarizer system prompt owned by this module, one user message with the transcript,
+  and no tools. #170 proposes a reasoning setting for this config and a target length in the
+  prompt (§13).
 - **Credentials and failures.** The connection comes from `ProviderConnectionResolver` and is
   used only inside this call. The call runs through `invoke_with_recovery`, ModelProvider's
   failure and credential policy. S4 extracts it; if F1 lands first, F1 does the same extraction.
@@ -1289,7 +1293,7 @@ Internal Rust changes:
 | Half-finished compaction | Never resumed; settled as `cancelled` (§5.8) |
 | Summarizer reasoning (#170) | `off` (§13.2). The evaluation ([research note](../research/summary-eval.md)) passes `off` on the OpenAI-compatible class, with no other arm's `F` more than `δ` above it, so the value is a strategy constant and `compaction.json` is removed. Decided on the class that ran; provisional for OpenAI Responses and Anthropic budget thinking (§13.4 Coverage), evaluated under [#565](https://github.com/arcships/dim/issues/565) |
 | Target summary length (#170) | No instruction (§13.3). Every phase-2 arm passed; the no-instruction arm's cut-offs and failures were no higher than any target arm's, so none is kept. The planning size uses α = 0.5 and β = 0.10 |
-| Window limits | The window facts are the model's catalog values with their overrides; `B`, `0.5 × B`, `0.25 × B` and `S` scale with capacity. Startup may separately cap the automatic trigger window while reserving the existing output allowance (§5.1) |
+| Window limits | The window facts are the model's catalog values with their overrides; `B`, `0.5 × B`, `0.25 × B` and `S` scale with capacity. `output_tokens` is Provider's adopted allowance, derived from the declared pair with a reply ceiling and half the window as its bound, so `B` is at least half the window, and repaired on read for a stored configuration (§5.1). Startup may separately cap the automatic trigger window while reserving that allowance |
 | The `0.5 × B` bound | The tail budget is `min(0.25 × B, 0.5 × B − resident)` with the replacement planned at `replacement_size` (§13.3's `S` at the provisional α = 0.5, β = 0.10); when no kept tail fits, the limit is the cut that replaces everything; a completed result still above the bound is re-planned once at the replacement's actual size before anything is committed, and only that re-plan's outcome is written; the mark is measured from the written result's total, so a result above the bound always carries it (§5.3). The `0.5` share is provisional (#428) |
 | Insufficient space | A descriptive `insufficientSpace` object present exactly when a completed compaction's total exceeds `0.5 × B`, naming the resident parts that cover the excess, largest first, and never the kept tail; no decision reads it (§4.3, §5.3) |
 | Regrowth | Automatic threshold compaction needs `0.25 × B` of entries after the latest compaction attempt's `through`, decided in the context's branch-aware order: `through` maps to the writing branch's last committed event at or before it, so a forked child regrows from its own history; recovery is exempt and runs once per request (§5.6, §5.3) |
@@ -1741,11 +1745,10 @@ order.
 - `earlierSummary`, when present, becomes the checkpoint's `replacement`
   (`[summary_message(text)]`), so the merge path is evaluated.
 - `contextWindow`, when present, narrows the window facts for that case (a smaller window is always
-  legal), so the folding path runs on an affordable history. It also bounds the case's output
-  allowance to a quarter of that window (`config.max_tokens = min(output, contextWindow / 4)`), so
-  the input budget stays positive on a model whose max output is large; each run's JSON records
-  the effective window and the effective output. A case whose input budget would not be positive
-  is refused before any model call.
+  legal), so the folding path runs on an affordable history. It sets the case's output allowance
+  to the product rule for that window (§5.1), so the input budget is at least half the case's
+  window; each run's JSON records the effective window and the effective output. A case whose
+  input budget would not be positive is refused before any model call.
 - Content is public: built from this repository's own code, documents and command output, with
   paths under `/work/dim`. No real user session, no secret, no home path.
 

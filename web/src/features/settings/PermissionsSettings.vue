@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue"
 import { useSettingsText } from "../../i18n/settings-general"
 import { readExecutionSettings, readRevision, readRules, readSandboxBackend, type CommandRule, type ExecutionSettings, type RulesView, type SandboxBackend } from "../../rpc/general-settings"
+import { RpcError } from "../../rpc/client"
 import { useConnectionStore } from "../../stores/connection"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
 import { bindSettingsDirty, messageFrom, reloadSettingsOnReconnect } from "./context"
@@ -18,6 +19,14 @@ const sandbox = ref(false)
 const network = ref(false)
 const sandboxBackend = ref<SandboxBackend>()
 const executionError = ref("")
+const executionConflict = ref(false)
+const isolation = computed({
+  get: () => !sandbox.value ? "off" : network.value ? "network" : "isolated",
+  set(value: string) {
+    sandbox.value = value !== "off"
+    if (value !== "off") network.value = value === "network"
+  },
+})
 const executionDirty = computed(() => execution.value !== undefined && (sandbox.value !== execution.value.sandbox || network.value !== execution.value.network))
 const rulesDirty = computed(() => snapshot.value !== undefined && JSON.stringify(rules.value) !== JSON.stringify(snapshot.value.commandRules))
 const dirty = computed(() => rulesDirty.value || executionDirty.value)
@@ -25,7 +34,7 @@ bindSettingsDirty(dirty)
 
 async function load(): Promise<void> {
   if (busy.value) return
-  if (dirty.value && !window.confirm(s('Discard unsaved command rules?', '放弃未保存的命令规则？'))) return
+  if (dirty.value && !window.confirm(s('Discard unsaved permission and isolation settings?', '放弃未保存的权限和隔离设置？'))) return
   busy.value = true
   error.value = ""
   saved.value = false
@@ -36,14 +45,13 @@ async function load(): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   try {
     executionError.value = ""
-    if (connection.supports("settings.read")) {
-      execution.value = await connection.client.call("settings.read", { source: "execution", scope: "user" }, readExecutionSettings)
-      sandbox.value = execution.value.sandbox
-      network.value = execution.value.network
-    }
-    if (connection.supports("host.execution.backend")) {
-      sandboxBackend.value = await connection.client.call("host.execution.backend", {}, readSandboxBackend)
-    }
+    if (!connection.supports("settings.read")) throw new Error(s('Process isolation settings are not available on this server.', '此服务器不支持进程隔离设置。'))
+    execution.value = await connection.client.call("settings.read", { source: "execution", scope: "user" }, readExecutionSettings)
+    sandbox.value = execution.value.sandbox
+    network.value = execution.value.network
+    executionConflict.value = false
+    if (!connection.supports("host.execution.backend")) throw new Error(s('Sandbox backend status is not available on this server.', '此服务器不支持查询沙盒后端状态。'))
+    sandboxBackend.value = await connection.client.call("host.execution.backend", {}, readSandboxBackend)
   } catch (cause) { executionError.value = messageFrom(cause) }
   busy.value = false
 }
@@ -65,10 +73,15 @@ async function save(): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
-async function saveExecution(): Promise<void> {
-  if (!execution.value || busy.value || !executionDirty.value) return
-  const widens = (execution.value.sandbox && !sandbox.value) || (!execution.value.network && network.value)
-  if (widens && !window.confirm(s('New commands will run with less isolation than now. Running processes keep their boundary.', '新命令将以比现在更少的隔离运行。已运行的进程保留原边界。'))) return
+async function saveExecution(reset = false): Promise<void> {
+  if (!execution.value || busy.value || executionConflict.value || (!reset && !executionDirty.value)) return
+  if (reset) {
+    if (!window.confirm(s('Reset process isolation to Off? New commands will run without sandbox isolation. Running processes keep their boundary.', '将进程隔离恢复为关闭？新命令将不使用沙盒隔离。已运行的进程保留原边界。'))) return
+    sandbox.value = false
+    network.value = false
+  }
+  const widens = execution.value.sandbox && (!sandbox.value || (!execution.value.network && network.value))
+  if (!reset && widens && !window.confirm(s('New commands will run with less isolation than now. Running processes keep their boundary.', '新命令将以比现在更少的隔离运行。已运行的进程保留原边界。'))) return
   busy.value = true
   executionError.value = ""
   try {
@@ -78,7 +91,10 @@ async function saveExecution(): Promise<void> {
     }, readExecutionSettings)
     sandbox.value = execution.value.sandbox
     network.value = execution.value.network
-  } catch (cause) { executionError.value = messageFrom(cause) }
+  } catch (cause) {
+    executionConflict.value = cause instanceof RpcError && cause.appError === "settings_conflict"
+    executionError.value = executionConflict.value ? s('Process isolation settings changed. Reload before saving again; your draft has been preserved.', '进程隔离设置已变更。请重新加载后再保存，当前草稿已保留。') : messageFrom(cause)
+  }
   finally { busy.value = false }
 }
 reloadSettingsOnReconnect(connection, load, dirty)
@@ -91,15 +107,13 @@ onMounted(load)
     <GeneralSettingsStatus :busy="busy" :error="error" :saved="saved && !dirty" @reload="load" />
     <p v-if="executionError" class="ui-banner settings-banner" data-tone="danger" role="alert">{{ executionError }} <button class="ui-button" data-variant="ghost" :disabled="busy" @click="load">{{ s('Reload', '重新加载') }}</button></p>
     <form v-if="execution" class="settings-card settings-form" @submit.prevent="saveExecution()">
-      <h3>{{ s('Execution', '执行') }}</h3>
-      <p>{{ s('Applies to new commands on this execution host. Running processes keep their boundary. A platform without a sandbox backend fails the command instead of running it unsandboxed.', '适用于此执行主机上的新命令。已运行的进程保留原边界。没有沙盒后端的平台会让命令失败，而不是不加隔离地运行。') }}</p>
+      <h3>{{ s('Process isolation', '进程隔离') }}</h3>
+      <p>{{ s('User setting for new commands on this execution host, independent of the session permission preset. Running processes and persistent shells keep their boundary. Without a sandbox backend, sandboxed commands fail rather than run unisolated.', '此执行主机上新命令的用户设置，独立于会话权限预设。已运行的进程和持久 Shell 保留原边界。没有沙盒后端时，需要沙盒的命令会失败，不会降级为无隔离运行。') }}</p>
       <p v-if="sandboxBackend && sandboxBackend.available === false" class="ui-banner settings-banner" data-tone="warning">{{ s('Sandbox is unavailable on this host: ', '此主机上沙盒不可用：') }}{{ sandboxBackend.reason }}</p>
       <fieldset class="settings-form" :disabled="busy || !connection.supports('settings.update')">
-        <label><input v-model="sandbox" type="checkbox" />{{ s('Sandbox — run commands isolated from the host', '沙盒 — 在隔离环境中运行命令') }}</label>
-        <label><input v-model="network" type="checkbox" />{{ s('Network — allow outbound connections while sandboxed', '网络 — 沙盒内允许出站连接') }}</label>
+        <label><span>{{ s('Mode', '模式') }}</span><select v-model="isolation" class="ui-field" data-size="md"><option value="off">{{ s('Off — host files and network', '关闭 — 使用主机文件和网络') }}</option><option value="isolated">{{ s('Sandboxed · No network', '沙盒隔离 · 禁止网络') }}</option><option value="network">{{ s('Sandboxed · Network allowed', '沙盒隔离 · 允许网络') }}</option></select></label>
       </fieldset>
-      <p class="ui-banner settings-banner" data-tone="warning">{{ s('Network applies only while the sandbox is on. With the sandbox off, commands run as the daemon user with this host\'s files and network.', '网络仅在沙盒开启时生效。沙盒关闭时，命令以守护进程用户的身份、使用此主机的文件和网络运行。') }}</p>
-      <div class="settings-actions"><button class="ui-button" data-variant="primary" :disabled="busy || !executionDirty || !connection.supports('settings.update')">{{ s('Save execution settings', '保存执行设置') }}</button></div>
+      <div class="settings-actions"><button class="ui-button" data-variant="secondary" type="button" :disabled="busy || executionConflict || !connection.supports('settings.update')" @click="saveExecution(true)">{{ s('Reset to default', '恢复默认') }}</button><button class="ui-button" data-variant="primary" :disabled="busy || executionConflict || !executionDirty || !connection.supports('settings.update')">{{ s('Save isolation settings', '保存隔离设置') }}</button></div>
     </form>
     <form v-if="snapshot" class="settings-form" @submit.prevent="save">
       <section class="settings-card">

@@ -341,13 +341,13 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | 方法 | 值 |
 | --- | --- |
 | `context_window` | `snapshot.capabilities.contextWindow`，即目录值，含其现有覆盖 |
-| `output_tokens` | 有 `request.config.maxTokens` 时取它，否则取 `snapshot.capabilities.maxOutputTokens`；不超过后者 |
+| `output_tokens` | 采用后的输出额度：`request.config.maxTokens`，由 Provider 按声明的一对上限推导为 `max(1, min(声明的 maxOutputTokens, 131,072, contextWindow / 2))`。存储值缺失或高于该函数时，在请求边界读取时修复；声明值 `maxOutputTokens` 本身不被改写 |
 | `threshold_tokens` | `B − reserve`，其中 `B = context_window − output_tokens`（输入预算），`reserve = min(max(0.10 × B, 16,000), 0.20 × B)`。余量用来吸收下一个请求的估算误差；它是暂定的经验值，不能覆盖每一个没有提供方基线的请求（[研究 §3.3、§6.4](../research/compaction-trigger.md#33-建议)） |
 | `count_tokens` | 序列化后的系统提示、消息和工具声明的 UTF-8 字节数除以 4；每个图片部件按固定 1,600 token 计。暂定（#128）。用于：在提供方的 `prompt_tokens` 之上算增量、第一个请求、`validate`、以及检查压缩是否减少了输入 |
 
-`--models` 配置从模型文件解析同样的窗口事实：`AimuxModels` 按请求的 provider 与 model id 读取对应的模型条目；请求的能力快照保持未设置，所以能力未知时图片照常发出。
+`--models` 配置从模型文件解析同样的窗口事实：`AimuxModels` 按请求的 provider 与 model id 读取对应的模型条目，在加载条目时按文件的声明推导输出额度；请求的能力快照保持未设置，所以能力未知时图片照常发出。
 
-**压缩没有自己的窗口上限。** 窗口事实是模型目录里的值及其覆盖，压缩不施加自己的窗口限制：`B`、阈值、`0.5 × B`、`0.25 × B` 和 `S` 都随声明的窗口缩放。一个模型的有用窗口小于声明的窗口时，应当把它声明得更小——在它的目录条目里（由 Provider 拥有），或者通过用户现有的 `contextWindow` 覆盖。压缩从不靠自己的常量做出这个决定。
+**容量与启动触发窗口。** 窗口事实是模型目录里的值及其覆盖：`B`、`0.5 × B`、`0.25 × B` 和 `S` 都随声明的容量缩放。输出额度是 Provider 采用的值，而不是声明的最大值：回复上限（131,072 token）与窗口的一半共同约束它，所以即使来源声明的输出等于或高于窗口，`B` 也至少是窗口的一半。采用的 [startup](../model-startup.md) `auto_compact_window = W` 只把 `threshold_tokens` 限制在 `max(0, W − output_tokens)`：有效阈值是它与上面的 `B − reserve` 中的较小者。输出额度仍然被预留；更小的触发窗口既不降低实际容量，也不改变分块、保留、再增长或手动压缩。Provider 校验 W 为正且不超过采用值。没有 W（包括 startup `auto`）时阈值不变。压缩没有自己的容量上限；不同的实际容量由 Provider 或现有的 `contextWindow` 覆盖声明。
 
 ### 5.2 ProductSummaryStrategy
 
@@ -359,7 +359,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 
 摘要的产出方式：
 
-- **请求。** 每块一个摘要请求。用 `input.request` 的 provider、model、快照和 config，`maxTokens = model.output_tokens()`，系统提示是本模块拥有的固定摘要提示，一条包含记录文本的 user 消息，不带工具。#170 为这个 config 提出一个推理设置，并在提示中加入目标长度（§13）。
+- **请求。** 每块一个摘要请求。用 `input.request` 的 provider、model、快照和 config，`maxTokens = model.output_tokens()`（即 §5.1 的 adopted allowance），系统提示是本模块拥有的固定摘要提示，一条包含记录文本的 user 消息，不带工具。#170 为这个 config 提出一个推理设置，并在提示中加入目标长度（§13）。
 - **凭据与失败。** 连接来自 `ProviderConnectionResolver`，只在本次调用内使用。调用经 `invoke_with_recovery` 运行，即 ModelProvider 的失败与凭据策略。S4 抽出了它；如果 F1 先合入，由 F1 做同样的抽取。
 - **输出。** 丢弃 thinking 输出。工具停止或空文本算失败。
 - **记录文本。** 按角色标注的文本：工具调用写名称和输入，工具结果写文本，图片写 `[image]`。
@@ -699,7 +699,7 @@ consume pending inputs --> prepare next request
 | 半途的压缩 | 从不续做；结算为 `cancelled`（§5.8） |
 | 摘要器推理（#170） | `off`（§13.2）。评估（[研究笔记](../research/summary-eval.md)）在 OpenAI 兼容类上让 `off` 通过，且没有别的分组的 `F` 比它高出 `δ` 以上，所以该值是策略常量，并移除 `compaction.json`。决定在跑过的类上做出；对 OpenAI Responses 与 Anthropic 预算式思考是暂定的（§13.4“覆盖”），评估由 [#565](https://github.com/arcships/dim/issues/565) 跟踪 |
 | 摘要目标长度（#170） | 不写指令（§13.3）。第二阶段每个分组都通过；不写指令分组的截断与失败不高于任何目标分组，所以都不保留。计划大小用 α = 0.5、β = 0.10 |
-| 窗口上限 | 压缩自身不设：窗口事实是模型目录值及其覆盖，`B`、阈值、`0.5 × B`、`0.25 × B` 和 `S` 随声明的窗口缩放。有用窗口更小时，应在目录（Provider）或通过 `contextWindow` 覆盖把它声明得更小（§5.1） |
+| 窗口上限 | 窗口事实是模型目录值及其覆盖；`B`、`0.5 × B`、`0.25 × B` 和 `S` 随容量缩放。`output_tokens` 是 Provider 采用后的输出额度：由声明的一对上限推导，以回复上限和窗口的一半为界，所以 `B` 至少是窗口的一半；存储的配置在读取时按同一规则修复（§5.1）。Startup 可以单独限制自动触发窗口，同时预留该额度 |
 | `0.5 × B` 上限 | 尾部预算为 `min(0.25 × B, 0.5 × B − resident)`，替换内容按 `replacement_size` 规划（§13.3 的 `S`，暂定 α = 0.5、β = 0.10）；没有尾部放得下时，界限是替换全部的切点；仍在上限之上的已完成结果在提交任何事实之前，按替换内容的实际大小重新规划一次，只写下这一次的结局；标记按写下的结果的总数测量，所以在上限之上的结果总带着它（§5.3）。`0.5` 份额是暂定的（#428） |
 | 空间不足 | 恰好出现在已完成压缩总数超过 `0.5 × B` 时的一个描述性 `insufficientSpace` 对象，按从大到小列出覆盖差额的不可压缩部分，从不是保留的尾部；没有决定读它（§4.3、§5.3） |
 | 再增长 | 自动阈值压缩需要最近一次压缩尝试的 `through` 之后有 `0.25 × B` 的条目，按上下文的分支感知顺序判定：`through` 映射到写下它的分支在它或之前的最后一个已提交事件，所以 fork 出的子分支从自己的历史再增长；预算恢复例外，每个请求运行一次（§5.6、§5.3） |
@@ -886,7 +886,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 - `messages` 使用现有的 `Message` 类型，在运行器边界解析；不新增历史类型。运行器给第 `i` 条消息的来源记为 `m<i>`，唯一的切点是 `retainFrom`（检查它不把工具调用与其结果分开），所以 `retain_limit` 就是这个切点。
 - 有 `earlierSummary` 时，它成为检查点的 `replacement`（`[summary_message(text)]`），从而评估合并路径。
-- 有 `contextWindow` 时，它为该用例收窄窗口事实（更小的窗口总是合法的），使折叠路径能在花费可接受的历史上运行。它同时把该用例的输出额度限制到该窗口的四分之一（`config.max_tokens = min(output, contextWindow / 4)`），使最大输出很大的模型上输入预算仍为正；每次运行的 JSON 记录实际生效的窗口和输出。输入预算不会为正的用例在任何模型调用之前被拒绝。
+- 有 `contextWindow` 时，它为该用例收窄窗口事实（更小的窗口总是合法的），使折叠路径能在花费可接受的历史上运行。它把该用例的输出额度设为该窗口的产品规则（§5.1），使输入预算至少是该用例窗口的一半；每次运行的 JSON 记录实际生效的窗口和输出。输入预算不会为正的用例在任何模型调用之前被拒绝。
 - 内容公开：由本仓库自己的代码、文档和命令输出构成，路径在 `/work/dim` 下。没有真实用户会话、密钥或 home 路径。
 
 **压缩链 (b)。** 用例保留上面的形状，或改用 `steps`：一个由 `{ "messages": [...], "retainFrom": n }` 组成的数组，链正好五步。两种形状互斥；两者都有、都没有、或 `steps` 步数不是五的用例，都在任何模型调用之前拒绝。`earlierSummary` 和 `contextWindow` 仍是用例的成员。一条链是连续五次压缩：

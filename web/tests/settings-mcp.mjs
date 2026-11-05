@@ -9,6 +9,7 @@ registerHooks({
   resolve(specifier, context, next) {
     if (context.parentURL?.endsWith("McpSettings.vue")) {
       if (specifier === "../../stores/connection") return { url: "data:text/javascript,export const useConnectionStore=()=>globalThis.settingsConnection", shortCircuit: true }
+      if (specifier === "../../stores/sessions") return { url: "data:text/javascript,export const useSessionsStore=()=>({workspaces:[{cwd:'/project',name:'Project'}]})", shortCircuit: true }
     }
     if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({locale:{value:'en'}})", shortCircuit: true }
     if (specifier.endsWith(".vue") && !specifier.endsWith("McpSettings.vue")) return { url: "data:text/javascript,export default { props:['busy','error','saved'], emits:['reload'], setup(props){return ()=>props.error||null} }", shortCircuit: true }
@@ -36,7 +37,7 @@ const node = (type, text = "") => ({
   addEventListener() {}, reportValidity: () => true, getRootNode() { return {} },
 })
 const renderer = createRenderer({
-  createElement: node, createText: (text) => node("text", text), createComment: (text) => node("comment", text),
+  createElement: type => node(type), createText: (text) => node("text", text), createComment: (text) => node("comment", text),
   patchProp: (element, key, _, value) => { element.props[key] = value },
   setText: (element, text) => { element.text = text },
   setElementText: (element, text) => { element.text = text; element.children = [] },
@@ -194,4 +195,53 @@ test("an endpoint template is a valid draft and a malformed literal URL is not",
     delete globalThis.settingsConnection
     delete globalThis.window
   }
+})
+
+test("changing MCP scope keeps cancelled or failed drafts and saves only to the loaded workspace", async t => {
+  let fail = false
+  const saves = []
+  globalThis.window = { confirm: () => true }
+  globalThis.settingsConnection = reactive({
+    phase: "connected", supports: () => true,
+    client: { call: async (method, params, read) => {
+      if (method === "mcp.catalog") {
+        if (fail) throw new Error("project unavailable")
+        return read({ ...catalog(undefined), projectRevision: params.cwd ? "project:1" : null })
+      }
+      assert.equal(method, "mcp.save")
+      saves.push(params)
+      return read({})
+    } },
+  })
+  const root = node("root"), app = renderer.createApp(McpSettings)
+  app.mount(root)
+  t.after(() => { app.unmount(); delete globalThis.settingsConnection; delete globalThis.window })
+  await flush()
+  await button(root, "Add server").props.onClick(); await flush()
+  enter(field(root, "Server ID"), "new-server")
+  enter(field(root, "Executable"), "server"); await flush()
+  const scope = field(root, "Configuration scope")
+  globalThis.window.confirm = () => false
+  const cancelled = { value: "/project" }
+  await scope.props.onChange({ target: cancelled }); await flush()
+  assert.equal(cancelled.value, "")
+  assert.ok(button(root, "Save server"))
+  globalThis.window.confirm = () => true
+  fail = true
+  const failed = { value: "/project" }
+  await scope.props.onChange({ target: failed }); await flush()
+  assert.equal(failed.value, "")
+  assert.match(text(root), /project unavailable/)
+  await submit(root); await flush()
+  assert.equal(saves[0].cwd, undefined)
+  fail = false
+  await scope.props.onChange({ target: { value: "/project" } }); await flush()
+  await button(root, "Add server").props.onClick(); await flush()
+  enter(field(root, "Server ID"), "project-server")
+  enter(field(root, "Executable"), "server")
+  enter(field(root, "Source"), "project"); await flush()
+  await submit(root); await flush()
+  assert.equal(saves[1].cwd, "/project")
+  assert.equal(saves[1].source, "project")
+  assert.equal(saves[1].expectedVersion, "project:1")
 })

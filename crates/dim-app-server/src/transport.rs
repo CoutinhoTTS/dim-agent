@@ -729,6 +729,7 @@ async fn run_connection(
                                             "session.delete",
                                             "session.model.progress",
                                             "session.methods",
+                                            "session.branch_create",
                                             "session.branch_end",
                                             "session.create.origin",
                                         ]);
