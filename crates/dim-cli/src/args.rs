@@ -53,9 +53,9 @@ Commands:\n\
   mcp add PATH                     Create an entry from PATH, or from stdin for -\n\
   mcp import PATH [--yes]          Preview a standard mcpServers document; with\n\
                                    --yes, import the entries the flags select:\n\
-                                   --replace ID, --rename OLD=NEW, --only ID\n\
-                                   and --confirm-literals. --source user|project\n\
-                                   picks the writable source (default: user)\n\
+                                   --replace ID, --rename OLD=NEW and --only ID.\n\
+                                   --source user|project picks the writable\n\
+                                   source (default: user)\n\
   mcp edit ID                      Edit an entry's patch in the editor\n\
   mcp set ID PATH                  Write an entry's patch from PATH,\n\
                                    or from stdin for -\n\
@@ -242,8 +242,6 @@ pub struct McpImport {
     pub rename: Vec<(String, String)>,
     /// The only ids the import accepts; every other entry is skipped.
     pub only: Vec<String>,
-    /// Confirm the literal project fields the preview lists.
-    pub confirm_literals: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -608,12 +606,6 @@ impl Options {
                     };
                     import.only.push(value(&mut args)?);
                 }
-                "--confirm-literals" => {
-                    let Action::McpImport(import) = &mut options.action else {
-                        return Err("--confirm-literals requires mcp import".into());
-                    };
-                    import.confirm_literals = true;
-                }
                 "--home" => {
                     options.home = PathBuf::from(value(&mut args)?);
                     options.home_explicit = true;
@@ -859,7 +851,6 @@ impl Options {
                             replace: Vec::new(),
                             rename: Vec::new(),
                             only: Vec::new(),
-                            confirm_literals: false,
                         }),
                         "edit" => Action::ManagementEdit {
                             area: Area::Mcp,
@@ -1269,15 +1260,9 @@ impl Options {
         }
         if let Action::McpImport(import) = &options.action
             && !import.yes
-            && !(import.replace.is_empty()
-                && import.rename.is_empty()
-                && import.only.is_empty()
-                && !import.confirm_literals)
+            && !(import.replace.is_empty() && import.rename.is_empty() && import.only.is_empty())
         {
-            return Err(
-                "--replace, --rename, --only and --confirm-literals require mcp import --yes"
-                    .into(),
-            );
+            return Err("--replace, --rename and --only require mcp import --yes".into());
         }
         if options
             .prompt
@@ -1987,7 +1972,6 @@ mod source_tests {
             "notes=notes2",
             "--only",
             "docs",
-            "--confirm-literals",
         ])
         .unwrap();
         assert_eq!(options.mcp_source.as_deref(), Some("project"));
@@ -1998,7 +1982,6 @@ mod source_tests {
                 assert_eq!(import.replace, ["docs"]);
                 assert_eq!(import.rename, [("notes".to_owned(), "notes2".to_owned())]);
                 assert_eq!(import.only, ["docs"]);
-                assert!(import.confirm_literals);
             }
             other => panic!("expected an import, not {other:?}"),
         }
@@ -2006,7 +1989,6 @@ mod source_tests {
             vec!["mcp", "import", "document.json", "--replace", "docs"],
             vec!["mcp", "import", "document.json", "--rename", "notes=notes2"],
             vec!["mcp", "import", "document.json", "--only", "docs"],
-            vec!["mcp", "import", "document.json", "--confirm-literals"],
             vec!["mcp", "import", "document.json", "--rename", "notes"],
             vec![
                 "mcp",

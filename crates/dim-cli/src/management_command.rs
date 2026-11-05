@@ -234,7 +234,6 @@ pub async fn import(client: &mut Client, options: &Options, import: &McpImport) 
         replace,
         rename,
         only,
-        confirm_literals,
     } = import;
     // Refuse a daemon that cannot serve the preview before the file is
     // opened, as `add` does, and one that cannot apply before `--yes` reads.
@@ -255,8 +254,7 @@ pub async fn import(client: &mut Client, options: &Options, import: &McpImport) 
     if !*yes {
         return Ok(0);
     }
-    let resolutions =
-        import_resolutions(&preview, replace, rename, only, *confirm_literals, source)?;
+    let resolutions = import_resolutions(&preview, replace, rename, only)?;
     let revision = mcp::apply_import(
         client,
         cwd,
@@ -271,17 +269,14 @@ pub async fn import(client: &mut Client, options: &Options, import: &McpImport) 
     Ok(0)
 }
 
-/// The resolutions `--yes` sends: each entry's default by status, the flags
-/// that override it, and the literal confirmations a project import takes. A
-/// flag that names an id the document does not hold is still sent, so the
-/// owner's own refusal names it.
+/// The resolutions `--yes` sends: each entry's default by status and the
+/// flags that override it. A flag that names an id the document does not hold
+/// is still sent, so the owner's own refusal names it.
 fn import_resolutions(
     preview: &mcp::ImportPreview,
     replace: &[String],
     rename: &[(String, String)],
     only: &[String],
-    confirm_literals: bool,
-    source: &str,
 ) -> Result<Vec<mcp::ImportResolution>> {
     use std::collections::{BTreeMap, BTreeSet};
     let replace: BTreeSet<&str> = replace.iter().map(String::as_str).collect();
@@ -310,19 +305,12 @@ fn import_resolutions(
         if new_id.is_some() {
             action = mcp::ImportAction::Rename;
         }
-        let confirm =
-            if confirm_literals && source == "project" && action != mcp::ImportAction::Skip {
-                entry.confirm.clone()
-            } else {
-                Vec::new()
-            };
         resolutions.insert(
             entry.id.clone(),
             mcp::ImportResolution {
                 id: entry.id.clone(),
                 action,
                 new_id,
-                confirm,
             },
         );
     }
@@ -333,7 +321,6 @@ fn import_resolutions(
                 id: id.to_owned(),
                 action: mcp::ImportAction::Replace,
                 new_id: None,
-                confirm: Vec::new(),
             });
     }
     for (old, new) in &renamed {
@@ -343,7 +330,6 @@ fn import_resolutions(
                 id: (*old).to_owned(),
                 action: mcp::ImportAction::Rename,
                 new_id: Some((*new).to_owned()),
-                confirm: Vec::new(),
             });
     }
     for id in only {
@@ -353,30 +339,7 @@ fn import_resolutions(
                 id: id.to_owned(),
                 action: mcp::ImportAction::Skip,
                 new_id: None,
-                confirm: Vec::new(),
             });
-    }
-    // A project apply confirms every literal field the preview listed, or it
-    // stops before the owner is asked to write anything.
-    if source == "project" && !confirm_literals {
-        let needs: Vec<String> = preview
-            .entries
-            .iter()
-            .filter(|entry| {
-                !entry.confirm.is_empty()
-                    && resolutions
-                        .get(&entry.id)
-                        .is_some_and(|resolution| resolution.action != mcp::ImportAction::Skip)
-            })
-            .map(|entry| format!("{:?} ({})", entry.id, entry.confirm.join(", ")))
-            .collect();
-        if !needs.is_empty() {
-            return Err(format!(
-                "The project import needs --confirm-literals for {}; nothing was imported.",
-                needs.join(", ")
-            )
-            .into());
-        }
     }
     Ok(resolutions.into_values().collect())
 }
@@ -391,13 +354,12 @@ fn print_import_preview(preview: &mcp::ImportPreview, source: &str, apply: bool)
         .iter()
         .map(|entry| {
             format!(
-                "{:?}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{:?}\t{}\t{}\t{}\t{}\t{}",
                 entry.id,
                 entry.status.as_str(),
                 entry.transport.as_deref().unwrap_or("—"),
                 import_fields(&entry.changes),
                 import_unsupported(&entry.unsupported),
-                import_names(&entry.confirm),
                 entry
                     .error
                     .as_deref()
@@ -411,12 +373,17 @@ fn print_import_preview(preview: &mcp::ImportPreview, source: &str, apply: bool)
         notes.push(t("The document holds no mcpServers entries.").to_owned());
     } else {
         notes.push(t(
-            "Columns: ID, status, transport, changed fields, unsupported fields, confirm fields, error.\n\
+            "Columns: ID, status, transport, changed fields, unsupported fields, error.\n\
              A changed field names what a write would change and the kind of value it holds; no value is printed.\n\
-             An unsupported field is kept unused or dropped, as shown after the field.\n\
-             A confirm field is a project field whose literal value --confirm-literals must confirm.",
+             An unsupported field is kept unused or dropped, as shown after the field.",
         )
         .to_owned());
+        if source == "project" {
+            notes.push(t(
+                "A project entry is written as its public skeleton: the workspace file gets the command, declared cwd, URL origin and public OAuth fields. Its arguments, environment and header values, bearer token, a URL with userinfo, path, query or fragment, and unknown members go to your user-scope mcp-secrets record, never to the workspace file.",
+            )
+            .to_owned());
+        }
     }
     for entry in &preview.entries {
         if entry.omitted > 0 {

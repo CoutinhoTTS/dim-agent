@@ -210,7 +210,7 @@ export type McpImportUnsupported = { field: string; effect: "kept-unused" | "dro
 export type McpImportEntry = {
   id: string; transport: string | undefined; status: McpImportStatus
   changes: McpImportField[]; unsupported: McpImportUnsupported[]; omitted: number
-  confirm: string[]; error: string | undefined
+  error: string | undefined
 }
 /** The owner's preview of a standard `mcpServers` document: names and kinds,
  * never a value. */
@@ -234,7 +234,6 @@ export function readMcpImportPreview(value: unknown): McpImportPreview {
           return { field: string(field.field), effect: choice(field.effect, ["kept-unused", "dropped"]) }
         }),
         omitted: number(entry.omitted),
-        confirm: array(entry.confirm, string),
         error: optionalString(entry.error),
       }
     }),
@@ -242,7 +241,7 @@ export function readMcpImportPreview(value: unknown): McpImportPreview {
   }
 }
 export type McpImportAction = "import" | "skip" | "replace" | "rename"
-export type McpImportResolution = { id: string; action: McpImportAction; newId?: string; confirm?: string[] }
+export type McpImportResolution = { id: string; action: McpImportAction; newId?: string }
 /** The apply's reply: the source revision the import wrote. */
 export function readMcpImportApplied(value: unknown): string { return string(object(value).revision) }
 

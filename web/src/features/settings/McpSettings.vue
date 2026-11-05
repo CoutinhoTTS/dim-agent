@@ -27,7 +27,7 @@ const callback = ref("")
 const clientSecret = ref("")
 const detail = ref<{ server: McpEntry; inspection: McpInspection }>()
 const testResult = ref<{ id: string; probe: McpProbe }>()
-type ImportEntryState = McpImportEntry & { action: "import" | "skip" | "replace" | "rename"; newId: string; confirmed: boolean }
+type ImportEntryState = McpImportEntry & { action: "import" | "skip" | "replace" | "rename"; newId: string }
 type ImportState = { source: "user" | "project"; document: string; revision: string; entries: ImportEntryState[]; unknownTopLevel: string[] }
 const importPreview = ref<ImportState>()
 const importFile = ref<HTMLInputElement>()
@@ -139,7 +139,6 @@ async function readImportPreview(document: string): Promise<void> {
       ...entry,
       action: entry.status === "changed" || entry.status === "identical" ? "import" : "skip",
       newId: "",
-      confirmed: false,
     })),
   }
   importStale.value = false
@@ -156,17 +155,10 @@ async function previewImportAgain(): Promise<void> {
 function closeImportPreview(): void {
   if (!busy.value) importPreview.value = undefined
 }
-function importConfirmNeeded(entry: ImportEntryState): boolean {
-  return !!importPreview.value && importPreview.value.source === "project"
-    && entry.confirm.length > 0 && entry.action !== "skip"
-}
 const importReady = computed(() => {
   const preview = importPreview.value
   if (!preview || !preview.entries.length) return false
-  return preview.entries.every((entry) => {
-    if (entry.action === "rename" && !entry.newId.trim()) return false
-    return !importConfirmNeeded(entry) || entry.confirmed
-  })
+  return preview.entries.every((entry) => entry.action !== "rename" || !!entry.newId.trim())
 })
 async function applyImport(): Promise<void> {
   const preview = importPreview.value
@@ -179,7 +171,6 @@ async function applyImport(): Promise<void> {
       id: entry.id,
       action: entry.action,
       ...(entry.action === "rename" ? { newId: entry.newId.trim() } : {}),
-      ...(importConfirmNeeded(entry) ? { confirm: entry.confirm } : {}),
     }))
     await connection.client.call("mcp.import.apply", { ...scope(), source: preview.source, document: preview.document, expectedVersion: preview.revision, resolutions }, readMcpImportApplied)
     importPreview.value = undefined
@@ -220,12 +211,6 @@ function importUnknown(): string {
   return names.length
     ? s('Top-level members the import does not carry: ', '导入不会携带的顶层成员：') + names.join(", ") + "."
     : s('Top-level members the import does not carry: none.', '导入不会携带的顶层成员：无。')
-}
-function importConfirmLabel(entry: McpImportEntry): string {
-  return s(
-    `Write this entry's literal ${entry.confirm.join(', ')} values to the workspace file.`,
-    `将此条目的字面值（${entry.confirm.join(', ')}）写入工作区文件。`,
-  )
 }
 function create(): void {
   if (dirty.value && !window.confirm(s('Discard unsaved MCP configuration?', '放弃未保存的 MCP 配置？'))) return
@@ -437,6 +422,7 @@ onBeforeUnmount(() => {
     <section v-if="importPreview" class="settings-card" aria-live="polite">
       <h3>{{ s('Import preview', '导入预览') }} · {{ importPreview.source }} · {{ importPreview.revision }}</h3>
       <p>{{ s('Each entry is matched against the selected source. No value is shown: changed fields are named only. Imported and replaced entries start disabled.', '每个条目会与所选来源比对。此处不显示任何值，只列出变更字段名。导入和替换的条目默认禁用。') }}</p>
+      <p v-if="importPreview.source === 'project'">{{ s('The workspace file receives each entry\'s public skeleton: the command, declared working directory, URL origin and public OAuth fields. Arguments, environment and header values, the bearer token, a URL with userinfo, path, query or fragment, hidden OAuth fields and unknown members go to your user-scope mcp-secrets record, never to the workspace file.', '工作区文件只写入每个条目的公开骨架：命令、声明的运行目录、URL 来源和公开 OAuth 字段。参数、环境变量与请求头的值、Bearer 令牌、带用户信息、路径、查询或片段的 URL、隐藏的 OAuth 字段及未知成员会写入您的用户范围 mcp-secrets 记录，绝不会写入工作区文件。') }}</p>
       <p>{{ importUnknown() }}</p>
       <p v-if="importStale" class="ui-banner settings-banner" data-tone="warning">{{ s('This preview is older than the source.', '此预览早于当前源。') }} <button class="ui-button" data-size="sm" data-variant="secondary" type="button" :disabled="busy" @click="previewImportAgain">{{ s('Preview again', '重新预览') }}</button></p>
       <p v-if="!importPreview.entries.length" role="status">{{ s('The document holds no mcpServers entries.', '文档中没有 mcpServers 条目。') }}</p>
@@ -445,11 +431,9 @@ onBeforeUnmount(() => {
         <p v-if="entry.changes.length">{{ s('Changed fields', '变更字段') }}: {{ importChanged(entry) }}</p>
         <p v-if="entry.unsupported.length">{{ s('Not carried', '不携带') }}: {{ importUnsupported(entry) }}</p>
         <p v-if="entry.omitted">{{ importOmitted(entry) }}</p>
-        <p v-if="entry.confirm.length">{{ s('Literal fields to confirm', '需要确认的字面值字段') }}: {{ entry.confirm.join(', ') }}</p>
         <p v-if="entry.error">{{ entry.error }}</p>
         <label><span>{{ s('Action', '操作') }}</span><select v-model="entry.action" class="ui-field" data-size="md" :disabled="busy" :aria-label="s('Import action', '导入操作')"><option value="import">{{ s('Import', '导入') }}</option><option value="skip">{{ s('Skip', '跳过') }}</option><option value="replace">{{ s('Replace the existing entry', '替换现有条目') }}</option><option value="rename">{{ s('Import under a new id', '以新 ID 导入') }}</option></select></label>
         <label v-if="entry.action === 'rename'"><span>{{ s('New id', '新 ID') }}</span><input v-model="entry.newId" class="ui-field" data-size="md" :disabled="busy" :aria-label="s('New id for this entry', '此条目的新 ID')" required /></label>
-        <label v-if="importConfirmNeeded(entry)" class="checkbox-label"><input v-model="entry.confirmed" type="checkbox" :disabled="busy" />{{ importConfirmLabel(entry) }}</label>
       </div>
       <div class="settings-actions"><button class="ui-button" data-size="md" data-variant="primary" :disabled="busy || !importReady" @click="applyImport">{{ s('Apply import', '应用导入') }}</button><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy" @click="closeImportPreview">{{ s('Close preview', '关闭预览') }}</button></div>
     </section>

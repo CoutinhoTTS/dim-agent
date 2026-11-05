@@ -251,7 +251,7 @@ test("changing MCP scope keeps cancelled or failed drafts and saves only to the 
 function importPreviewReply(entries, revision = "user:1", unknownTopLevel = []) {
   return { revision, entries, unknownTopLevel }
 }
-const importEntry = (overrides) => ({ id: "docs", transport: "stdio", status: "changed", changes: [], unsupported: [], omitted: 0, confirm: [], ...overrides })
+const importEntry = (overrides) => ({ id: "docs", transport: "stdio", status: "changed", changes: [], unsupported: [], omitted: 0, ...overrides })
 function mountImport({ preview, catalogs, apply }) {
   const calls = []
   let served = 0
@@ -377,10 +377,10 @@ test("rename and replace actions are sent as the owner's resolutions", async () 
   } finally { closeImport(app) }
 })
 
-test("a project import needs each literal entry confirmed before applying", async () => {
+test("a project import applies without confirmation and says where withheld values go", async () => {
   const preview = importPreviewReply([
     importEntry({ id: "keeps", status: "identical" }),
-    importEntry({ id: "docs", changes: [{ field: "args", kind: "array" }], confirm: ["args", "env"] }),
+    importEntry({ id: "docs", changes: [{ field: "args", kind: "array" }, { field: "env", kind: "object" }] }),
   ], "project:1")
   const projectCatalog = { ...catalog(undefined), projectRevision: "project:1" }
   const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined), projectCatalog] })
@@ -392,17 +392,15 @@ test("a project import needs each literal entry confirmed before applying", asyn
     const previewCall = calls.find((call) => call.method === "mcp.import.preview")
     assert.equal(previewCall.params.source, "project")
     assert.equal(previewCall.params.cwd, "/project")
-    assert.equal(button(root, "Apply import").props.disabled, true)
-    assert.match(text(root), /Literal fields to confirm: args, env/)
-    assert.match(text(root), /Write this entry's literal args, env values to the workspace file\./)
-    const confirm = all(root).find((element) => element.type === "input" && element.props.type === "checkbox")
-    enter(confirm, true); await flush()
+    assert.match(text(root), /The workspace file receives each entry's public skeleton/)
+    assert.match(text(root), /never to the workspace file\./)
+    assert.equal(all(root).find((element) => element.type === "input" && element.props.type === "checkbox"), undefined)
     assert.equal(button(root, "Apply import").props.disabled, false)
     await button(root, "Apply import").props.onClick(); await flush()
     const applied = calls.find((call) => call.method === "mcp.import.apply")
     assert.deepEqual(applied.params.resolutions, [
       { id: "keeps", action: "import" },
-      { id: "docs", action: "import", confirm: ["args", "env"] },
+      { id: "docs", action: "import" },
     ])
   } finally { closeImport(app) }
 })

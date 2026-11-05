@@ -151,13 +151,13 @@ not the user source.
 - `mcp.import.preview({source, document, cwd?})` decodes a client-supplied standard
   `mcpServers` document and reports each entry's `id`, `transport`, `status` (`identical`,
   `changed`, `conflict` or `invalid`), the changed field names and JSON kinds, the `unsupported`
-  members (`kept-unused` or `dropped`), the project `confirm` fields and the entry's error, plus
-  `unknownTopLevel` and the target `revision`; it writes nothing. `mcp.import.apply` takes the
-  same document, the preview's revision as `expectedVersion` and one resolution per entry
-  (`import`, `skip`, `replace` or `rename` with `newId`), re-validates them against the source
-  and writes every accepted entry with one compare-and-set; an import never enables an entry,
-  and a project import refuses a literal bearer token or a URL with userinfo and requires
-  confirmation of literal `args`, `env`, `headers` and `url` values. The
+  members (`kept-unused` or `dropped`) and the entry's error, plus `unknownTopLevel` and the
+  target `revision`; it writes nothing. `mcp.import.apply` takes the same document, the preview's
+  revision as `expectedVersion` and one resolution per entry (`import`, `skip`, `replace` or
+  `rename` with `newId`), re-validates them against the source and writes every accepted entry
+  with one compare-and-set; an import never enables an entry, and a project import writes each
+  entry as its public skeleton and puts the withheld values in the user-scope `mcp-secrets`
+  record, as a move into project does. The
   [MCP configuration management](../../docs/design/appserver/mcp-management.md#48-import-mcpimportpreview-mcpimportapply)
   contract defines the statuses, the resolutions and the errors.
 - `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.

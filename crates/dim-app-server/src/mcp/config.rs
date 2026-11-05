@@ -1054,22 +1054,6 @@ fn has_reference(value: &str) -> bool {
     !unresolved(value).is_empty()
 }
 
-/// Whether the whole value is one or more `${NAME}`/`${NAME:-default}`
-/// references and nothing else, so it carries no literal text of its own.
-pub(crate) fn reference_only(value: &str) -> bool {
-    let mut rest = value;
-    while !rest.is_empty() {
-        let Some(candidate) = rest.strip_prefix("${") else {
-            return false;
-        };
-        let Some((_, _, used)) = reference(candidate) else {
-            return false;
-        };
-        rest = &candidate[used..];
-    }
-    !value.is_empty()
-}
-
 fn reference_public_url(value: &str) -> String {
     let Some((scheme, rest)) = value.split_once("://") else {
         return before_query_or_fragment(value);

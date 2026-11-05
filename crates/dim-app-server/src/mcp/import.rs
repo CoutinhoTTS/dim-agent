@@ -4,16 +4,22 @@
 //! one entry decoder, previews what each entry would do to the target source,
 //! and plans the entries a selection accepts. A preview writes nothing; the
 //! plan is checked again against the source the write reads.
+//!
+//! A project import writes what a move into project writes (D25): the public
+//! skeleton into `.mcp.json` and the withheld members into the user-scope
+//! `mcp-secrets` record. The preview therefore compares the configuration the
+//! target would serve, which is the declared entry with its record merged.
 
 use super::config::{
-    self, BearerAuth, ENTRY_MEMBERS, McpServerSettings, McpSettings, OAUTH_MEMBERS, RemoteTransport,
+    self, ENTRY_MEMBERS, McpSecretEntry, McpServerSettings, McpSettings, OAUTH_MEMBERS,
+    RemoteTransport,
 };
 use super::{McpError, Result};
 use crate::protocol::optional_non_null;
 use crate::settings::SettingsError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// The largest document a client may send. The reply names only ids and field
 /// names taken from this document: each entry reports at most
@@ -29,10 +35,6 @@ pub(crate) const MAX_ENTRIES: usize = 1_000;
 /// the entry's `omitted` and the client says the list is partial.
 const MAX_REPORTED_FIELDS: usize = 32;
 
-/// The entry fields a project import asks the user to confirm: literal values
-/// that the workspace file would record.
-const CONFIRM_FIELDS: &[&str] = &["args", "env", "headers", "url"];
-
 /// One entry's resolution in an import request.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -41,8 +43,6 @@ pub(crate) struct ImportResolution {
     pub action: ImportAction,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub new_id: Option<String>,
-    #[serde(default)]
-    pub confirm: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -108,15 +108,6 @@ pub(crate) fn check_resolutions(
             }
             _ => {}
         }
-        if let Some(field) = resolution
-            .confirm
-            .iter()
-            .find(|field| !CONFIRM_FIELDS.contains(&field.as_str()))
-        {
-            return Err(format!(
-                "confirm names {field}, which is not a field an import confirms"
-            ));
-        }
         if checked
             .insert(resolution.id.clone(), resolution.clone())
             .is_some()
@@ -153,8 +144,6 @@ pub(crate) struct ImportEntryPreview {
     pub unsupported: Vec<ImportUnsupported>,
     /// Field names the cap left out of `changes` and `unsupported`.
     pub omitted: usize,
-    /// Project scope only: fields whose literal value needs confirmation.
-    pub confirm: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -168,7 +157,7 @@ pub(crate) enum ImportStatus {
     Changed,
     /// The target source holds this id with different content.
     Conflict,
-    /// The entry does not decode, or a project source refuses it.
+    /// The entry does not decode.
     Invalid,
 }
 
@@ -193,10 +182,13 @@ pub(crate) enum UnsupportedEffect {
     Dropped,
 }
 
+/// The overlays are the target workspace's `mcp-secrets` records by id, empty
+/// for a user source.
 pub(crate) fn preview(
     document: &McpSettings,
     target: &McpSettings,
     project: bool,
+    overlays: &BTreeMap<String, McpSecretEntry>,
     revision: &str,
 ) -> ImportPreview {
     ImportPreview {
@@ -204,7 +196,7 @@ pub(crate) fn preview(
         entries: document
             .raw_entries()
             .keys()
-            .map(|id| entry_preview(id, document, target, project))
+            .map(|id| entry_preview(id, document, target, project, overlays))
             .collect(),
         unknown_top_level: document.extra.keys().cloned().collect(),
     }
@@ -215,6 +207,7 @@ fn entry_preview(
     document: &McpSettings,
     target: &McpSettings,
     project: bool,
+    overlays: &BTreeMap<String, McpSecretEntry>,
 ) -> ImportEntryPreview {
     let (unsupported, omitted) = capped(unsupported(document, id));
     let mut preview = ImportEntryPreview {
@@ -224,37 +217,72 @@ fn entry_preview(
         changes: Vec::new(),
         unsupported,
         omitted,
-        confirm: Vec::new(),
         error: document.invalid_error(id).map(ToString::to_string),
     };
     let Some(entry) = document.get(id) else {
         return preview;
     };
     let import = normalize(entry, project);
-    if project && let Some(reason) = refusal(&import) {
-        preview.error = Some(reason);
-        return preview;
-    }
     let existing = target.get(id);
+    let existing = match existing {
+        Some(existing) => match resolved(existing, project, overlays.get(id)) {
+            Ok(existing) => Some(existing),
+            // The stored record does not merge into the declared entry, so
+            // the target's configuration cannot be read; the entry it holds
+            // is not the one the document carries.
+            Err(error) => {
+                preview.status = ImportStatus::Conflict;
+                preview.error = Some(error.to_string());
+                return preview;
+            }
+        },
+        None => None,
+    };
     preview.status = if target.invalid_error(id).is_some() {
         ImportStatus::Conflict
     } else {
-        match existing {
+        match &existing {
             Some(existing) if same_configuration(existing, &import) => ImportStatus::Identical,
             Some(_) => ImportStatus::Conflict,
             None => ImportStatus::Changed,
         }
     };
-    // Enablement is not part of `status`, so an `identical` entry can still
-    // name `enabled`: a replace would write `enabled: false` where the entry
-    // is enabled, while an import of it writes nothing.
-    let (changes, omitted_changes) = capped(changed_fields(existing, &import));
+    // Enablement is not part of `status`. A user entry keeps its own field, so
+    // an `identical` entry can still name `enabled`: a replace would write
+    // `enabled: false` where the entry is enabled, while an import of it
+    // writes nothing. A project entry's member is not compared at all, since
+    // an import writes none.
+    let import = comparable(&import, project);
+    let existing = existing.as_ref().map(|entry| comparable(entry, project));
+    let (changes, omitted_changes) = capped(changed_fields(existing.as_ref(), &import));
     preview.changes = changes;
     preview.omitted += omitted_changes;
-    if preview.status != ImportStatus::Identical && project {
-        preview.confirm = confirm_fields(&import);
-    }
     preview
+}
+
+/// The configuration a target entry would serve: a project entry with its
+/// withheld record merged into it.
+fn resolved(
+    entry: &McpServerSettings,
+    project: bool,
+    overlay: Option<&McpSecretEntry>,
+) -> Result<McpServerSettings> {
+    let mut entry = entry.clone();
+    if project && let Some(overlay) = overlay {
+        config::merge_secret(&mut entry, overlay)?;
+    }
+    Ok(entry)
+}
+
+/// The entry as the comparison sees it. A project entry's own `enabled` member
+/// is neither what it runs with nor what an import writes, so both sides drop
+/// it; a user entry keeps its member.
+fn comparable(entry: &McpServerSettings, project: bool) -> McpServerSettings {
+    let mut entry = entry.clone();
+    if project {
+        set_enabled(&mut entry, None);
+    }
+    entry
 }
 
 /// The reported field names and the count the cap left out. They come from a
@@ -266,14 +294,13 @@ fn capped<T>(mut fields: Vec<T>) -> (Vec<T>, usize) {
 }
 
 /// The entries a request's resolutions accept, by destination id. Every
-/// check runs against the target snapshot read with the revision and the ids
-/// that have a withheld `mcp-secrets` record, before the caller writes
-/// anything.
+/// check runs against the target snapshot read with the revision, before the
+/// caller writes anything.
 pub(crate) fn plan(
     document: &McpSettings,
     target: &McpSettings,
     project: bool,
-    withheld: &BTreeSet<String>,
+    overlays: &BTreeMap<String, McpSecretEntry>,
     resolutions: &BTreeMap<String, ImportResolution>,
 ) -> Result<BTreeMap<String, McpServerSettings>> {
     let mut planned = BTreeMap::new();
@@ -285,14 +312,16 @@ pub(crate) fn plan(
             return Err(import_conflict(id, "the entry does not decode"));
         };
         let import = normalize(entry, project);
-        if project && let Some(reason) = refusal(&import) {
-            return Err(import_conflict(id, &reason));
-        }
         let destination = match resolution.action {
             ImportAction::Skip => unreachable!("a skip resolution continues above"),
             ImportAction::Import => {
                 if let Some(existing) = target.get(id) {
-                    if same_configuration(existing, &import) {
+                    // The destination's configuration is what the entry it
+                    // declares serves, with its withheld record merged; a
+                    // record that does not merge is not that configuration.
+                    let same = resolved(existing, project, overlays.get(id))
+                        .is_ok_and(|existing| same_configuration(&existing, &import));
+                    if same {
                         continue;
                     }
                     return Err(import_conflict(
@@ -306,7 +335,6 @@ pub(crate) fn plan(
                         "the target source holds this id as an entry that does not decode; replace or rename it",
                     ));
                 }
-                refuse_stale_record(id, target, withheld)?;
                 id.clone()
             }
             ImportAction::Replace => {
@@ -315,9 +343,6 @@ pub(crate) fn plan(
                         id,
                         "the target source does not hold this id",
                     ));
-                }
-                if project && withheld.contains(id) {
-                    return Err(McpError::CredentialsAreUserScoped);
                 }
                 id.clone()
             }
@@ -334,22 +359,9 @@ pub(crate) fn plan(
                 {
                     return Err(import_conflict(id, "the new id is already taken"));
                 }
-                refuse_stale_record(new_id, target, withheld)?;
                 new_id.to_owned()
             }
         };
-        if project {
-            let fields = confirm_fields(&import);
-            if fields
-                .iter()
-                .any(|field| !resolution.confirm.contains(field))
-            {
-                return Err(McpError::ImportUnconfirmed {
-                    id: id.clone(),
-                    fields,
-                });
-            }
-        }
         if planned.insert(destination, import).is_some() {
             return Err(import_conflict(id, "two entries would write one id"));
         }
@@ -362,18 +374,6 @@ fn import_conflict(id: &str, reason: &str) -> McpError {
         id: id.to_owned(),
         reason: reason.to_owned(),
     }
-}
-
-/// A withheld `mcp-secrets` record at a destination with no entry in the
-/// source would be merged into the entry the import writes, so an import or a
-/// rename refuses that destination exactly as `mcp.save` refuses the same
-/// state (D17). A destination the source still holds answers the conflict its
-/// own arm checks first.
-fn refuse_stale_record(id: &str, target: &McpSettings, withheld: &BTreeSet<String>) -> Result<()> {
-    if withheld.contains(id) && target.get(id).is_none() {
-        return Err(McpError::StaleSecretRecord);
-    }
-    Ok(())
 }
 
 fn transport(entry: &McpServerSettings) -> &'static str {
@@ -416,63 +416,6 @@ fn same_configuration(left: &McpServerSettings, right: &McpServerSettings) -> bo
     set_enabled(&mut left, None);
     set_enabled(&mut right, None);
     left == right
-}
-
-/// Why a project source refuses an entry outright. A reference is not a
-/// literal value; a URL with userinfo is a credential wherever it lives.
-fn refusal(entry: &McpServerSettings) -> Option<String> {
-    let McpServerSettings::Remote { url, auth, .. } = entry else {
-        return None;
-    };
-    if let Some(BearerAuth::Bearer { token }) = auth
-        && !config::reference_only(token)
-    {
-        return Some(
-            "a project entry cannot carry a literal auth.token; use a reference".to_owned(),
-        );
-    }
-    if url::Url::parse(url)
-        .is_ok_and(|parsed| !parsed.username().is_empty() || parsed.password().is_some())
-    {
-        return Some("a project entry cannot carry a URL with userinfo".to_owned());
-    }
-    None
-}
-
-fn confirm_fields(entry: &McpServerSettings) -> Vec<String> {
-    let mut fields = BTreeSet::new();
-    match entry {
-        McpServerSettings::Stdio { args, env, .. } => {
-            if env.values().any(|value| literal(value)) {
-                fields.insert("env");
-            }
-            if args.iter().any(|value| literal(value)) {
-                fields.insert("args");
-            }
-        }
-        McpServerSettings::Remote { url, headers, .. } => {
-            if headers.values().any(|value| literal(value)) {
-                fields.insert("headers");
-            }
-            if url_query(url) {
-                fields.insert("url");
-            }
-        }
-    }
-    fields.into_iter().map(str::to_owned).collect()
-}
-
-fn literal(value: &str) -> bool {
-    !value.is_empty() && !config::reference_only(value)
-}
-
-fn url_query(url: &str) -> bool {
-    match url::Url::parse(url) {
-        Ok(parsed) => parsed.query().is_some_and(|query| !query.is_empty()),
-        // A reference may hide the scheme, so an unparseable value with a
-        // query separator asks for confirmation too.
-        Err(_) => url.contains('?'),
-    }
 }
 
 /// Compares the full normalized entry, so an enablement the import would

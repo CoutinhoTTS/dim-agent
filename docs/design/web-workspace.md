@@ -524,33 +524,34 @@ workspace's project source when the scope selector names one (`cwd` included).
 The page decodes nothing itself: the owner's preview supplies each entry's id,
 status (`identical`, `changed`, `conflict` or `invalid`), transport, changed
 field names with their JSON kinds, members the decoder keeps unused or drops,
-the project fields whose literal values need confirmation, and the entry's
-error. The owner caps each entry's field-name lists, so the page states how many
-names the cap left out rather than showing a partial list as complete. The page
-shows the unknown top-level members and never renders a value, because the reply
-carries none.
+and the entry's error. The owner caps each entry's field-name lists, so the page
+states how many names the cap left out rather than showing a partial list as
+complete. The page shows the unknown top-level members and never renders a
+value, because the reply carries none. For a project preview it states that the
+workspace file receives each entry's public skeleton, while arguments,
+environment and header values, the bearer token, a URL with userinfo, path,
+query or fragment, hidden OAuth fields and unknown members go to the user-scope
+`mcp-secrets` record, as a move into project does.
 
 Each previewed entry has an action: Import, Skip, Replace the existing entry, or
 Import under a new id with a new-id field. The defaults match the CLI: `changed`
 and `identical` import, `conflict` and `invalid` skip. `--only` restricts the
 default selection, and `--replace` or `--rename` — or this page's explicit
 action — selects the id it names whether or not `--only` lists it; a `conflict`
-or `invalid` entry only comes in through such an action. For a project preview, an
-entry whose confirm list is not empty shows a checkbox naming those fields;
-Apply stays disabled until every such entry is ticked, so a literal `args`,
-`env`, `headers` or URL value never reaches `.mcp.json` without an explicit
-confirmation. Rename also needs a nonempty new id before Apply is enabled.
+or `invalid` entry only comes in through such an action. Rename needs a
+nonempty new id before Apply is enabled.
 
 Apply sends `mcp.import.apply` with the previewed document, its `revision` as
 `expectedVersion`, and one resolution per entry. On success the page drops the
-preview, rereads `mcp.catalog` and states that imported entries start disabled:
-a user entry is written with `enabled: false`, and a project entry has no
-enablement record until the user enables it locally. On `mcp_settings_conflict`
-the page says the source changed, keeps the preview and offers Preview again,
-which re-previews the same document; it never retries the apply. The other owner
-codes (`mcp_import_conflict`, `mcp_import_unconfirmed`,
-`mcp_credentials_are_user_scoped`, `mcp_invalid_config`) are shown as the
-owner's message, and the preview stays open for a different selection.
+preview, rereads `mcp.catalog` and states that imported and replaced entries
+start disabled: a user entry is written with `enabled: false`, and a project
+entry's enablement record is withdrawn before the write. On
+`mcp_settings_conflict` the page says the source changed, keeps the preview and
+offers Preview again, which re-previews the same document; it never retries the
+apply. The owner codes (`mcp_import_conflict`, `mcp_import_partial`,
+`mcp_invalid_config`) are shown as the owner's message, and the preview stays
+open for a different selection; after a partial import a new preview reports the
+written ids as conflicts, which a Replace rewrites together with their records.
 
 #### Diagnostics: the legacy logging controls
 

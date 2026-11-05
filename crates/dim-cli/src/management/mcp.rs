@@ -566,8 +566,6 @@ pub struct ImportResolution {
     pub action: ImportAction,
     /// The id a rename writes under; absent for every other action.
     pub new_id: Option<String>,
-    /// The project fields whose literal values this resolution confirms.
-    pub confirm: Vec<String>,
 }
 
 impl ImportResolution {
@@ -575,9 +573,6 @@ impl ImportResolution {
         let mut value = json!({"id": self.id, "action": self.action.as_str()});
         if let Some(new_id) = &self.new_id {
             value["newId"] = json!(new_id);
-        }
-        if !self.confirm.is_empty() {
-            value["confirm"] = json!(self.confirm);
         }
         value
     }
@@ -615,9 +610,6 @@ pub struct ImportEntryPreview {
     /// `unsupported`.
     #[serde(default)]
     pub omitted: usize,
-    /// Project scope only: fields whose literal value needs confirmation.
-    #[serde(default)]
-    pub confirm: Vec<String>,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -632,7 +624,7 @@ pub enum ImportStatus {
     Changed,
     /// The source holds this id with different content.
     Conflict,
-    /// The entry does not decode, or a project source refuses it.
+    /// The entry does not decode.
     Invalid,
 }
 
@@ -742,11 +734,8 @@ pub fn import_failure(error: crate::Error) -> crate::Error {
             "The MCP source changed since the preview; nothing was imported. Preview again.",
         )
         .into(),
-        Some("mcp_import_unconfirmed") => {
-            t("The project import needs its literal fields confirmed; nothing was imported.").into()
-        }
-        Some("mcp_credentials_are_user_scoped") => t(
-            "That entry's secret values are stored in user scope; move it to user scope before replacing it.",
+        Some("mcp_import_partial") => t(
+            "The project entries were written and their withheld values were not; replace them again to retry.",
         )
         .into(),
         _ => error,

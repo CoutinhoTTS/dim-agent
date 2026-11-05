@@ -500,7 +500,7 @@ pub(crate) fn error(error: McpError) -> RpcError {
         McpError::CredentialsAreUserScoped => "mcp_credentials_are_user_scoped",
         McpError::StaleSecretRecord => "mcp_stale_secret_record",
         McpError::ImportConflict { .. } => "mcp_import_conflict",
-        McpError::ImportUnconfirmed { .. } => "mcp_import_unconfirmed",
+        McpError::ImportPartial => "mcp_import_partial",
         McpError::Closed | McpError::Settings(SettingsError::Closed) => {
             return RpcError::reloading();
         }
@@ -528,6 +528,7 @@ pub(crate) fn error(error: McpError) -> RpcError {
             }
             McpError::CredentialsAreUserScoped => "MCP secret fields are stored in user scope; call mcp.move {id, from: 'project', to: 'user', cwd, expectedFromVersion, expectedToVersion} to edit them".into(),
             McpError::StaleSecretRecord => "MCP withheld record remains for this id without a project entry; call mcp.remove {source: 'project', id, cwd, expectedVersion} to delete it (it answers mcp_unknown_server after cleaning), then save again".into(),
+            McpError::ImportPartial => "MCP import is partial: the source entries were written and their withheld values were not; replace them again to retry".into(),
             other => other.to_string(),
         },
     )

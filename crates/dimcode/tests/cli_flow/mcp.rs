@@ -933,35 +933,34 @@ fn import_preview() -> Value {
         "revision": "user:1",
         "entries": [
             {"id": "keeps", "transport": "stdio", "status": "identical",
-             "changes": [], "unsupported": [], "confirm": []},
+             "changes": [], "unsupported": []},
             {"id": "docs", "transport": "stdio", "status": "changed",
              "changes": [{"field": "args", "kind": "array"},
                          {"field": "enabled", "kind": "boolean"}],
-             "unsupported": [{"field": "x-extra", "effect": "kept-unused"}],
-             "confirm": []},
+             "unsupported": [{"field": "x-extra", "effect": "kept-unused"}]},
             {"id": "taken", "transport": "http", "status": "conflict",
              "changes": [{"field": "url", "kind": "string"}],
-             "unsupported": [], "confirm": []},
+             "unsupported": []},
             {"id": "broken", "status": "invalid", "changes": [],
              "unsupported": [{"field": "auth.audience", "effect": "dropped"}],
-             "confirm": [], "error": "broken: type is stdio, http or sse"},
+             "error": "broken: type is stdio, http or sse"},
         ],
         "unknownTopLevel": ["otherTopLevel"],
     })
 }
 
 /// The owner's preview against the project source, where `docs` carries
-/// literal fields the workspace file would record.
+/// literal fields the workspace file does not record.
 fn import_preview_project() -> Value {
     json!({
         "revision": "project:1",
         "entries": [
             {"id": "keeps", "transport": "stdio", "status": "identical",
-             "changes": [], "unsupported": [], "confirm": []},
+             "changes": [], "unsupported": []},
             {"id": "docs", "transport": "stdio", "status": "changed",
              "changes": [{"field": "args", "kind": "array"},
                          {"field": "env", "kind": "object"}],
-             "unsupported": [], "confirm": ["args", "env"]},
+             "unsupported": []},
         ],
         "unknownTopLevel": [],
     })
@@ -969,14 +968,14 @@ fn import_preview_project() -> Value {
 
 /// The rows [`import_preview`] prints, one per entry in the document's order.
 /// `--yes` prints them too, before the applied rows.
-const IMPORT_PREVIEW_ROWS: &str = "\"keeps\"\tidentical\tstdio\t—\t—\t—\t—\n\
-    \"docs\"\tchanged\tstdio\targs:array, enabled:boolean\tx-extra:kept-unused\t—\t—\n\
-    \"taken\"\tconflict\thttp\turl:string\t—\t—\t—\n\
-    \"broken\"\tinvalid\t—\t—\tauth.audience:dropped\t—\tbroken: type is stdio, http or sse\n";
+const IMPORT_PREVIEW_ROWS: &str = "\"keeps\"\tidentical\tstdio\t—\t—\t—\n\
+    \"docs\"\tchanged\tstdio\targs:array, enabled:boolean\tx-extra:kept-unused\t—\n\
+    \"taken\"\tconflict\thttp\turl:string\t—\t—\n\
+    \"broken\"\tinvalid\t—\t—\tauth.audience:dropped\tbroken: type is stdio, http or sse\n";
 
 /// The rows [`import_preview_project`] prints.
-const IMPORT_PREVIEW_PROJECT_ROWS: &str = "\"keeps\"\tidentical\tstdio\t—\t—\t—\t—\n\
-    \"docs\"\tchanged\tstdio\targs:array, env:object\t—\targs, env\t—\n";
+const IMPORT_PREVIEW_PROJECT_ROWS: &str = "\"keeps\"\tidentical\tstdio\t—\t—\t—\n\
+    \"docs\"\tchanged\tstdio\targs:array, env:object\t—\t—\n";
 
 /// `mcp import` previews through the owner: one row per entry with its
 /// status, changed and unsupported field names and error, then the unknown
@@ -1012,7 +1011,8 @@ fn mcp_import_previews_every_status_without_printing_a_value() {
     assert_eq!(stdout, IMPORT_PREVIEW_ROWS);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("Columns: ID, status, transport, changed fields, unsupported fields, confirm fields, error."),
+        stderr
+            .contains("Columns: ID, status, transport, changed fields, unsupported fields, error."),
         "{stderr}"
     );
     assert!(
@@ -1152,11 +1152,11 @@ fn mcp_import_yes_applies_replace_and_rename() {
     );
 }
 
-/// A project import that needs literal confirmations prints the preview and
-/// then stops before apply, naming the entries and fields;
-/// `--confirm-literals` confirms exactly the fields the preview listed.
+/// A project import takes no confirmation: the preview says the workspace
+/// file receives the public skeleton and the withheld values go to the
+/// user-scope record, and the apply sends the plain resolutions.
 #[test]
-fn mcp_import_project_needs_confirm_literals_before_applying() {
+fn mcp_import_project_sends_withheld_values_to_the_user_record() {
     let home = Home::new();
     let path = home.0.join("mcp.json");
     fs::write(&path, import_document()).unwrap();
@@ -1165,42 +1165,12 @@ fn mcp_import_project_needs_confirm_literals_before_applying() {
         let request = wire.read("mcp.import.preview");
         assert_eq!(request["params"]["source"], "project");
         wire.reply(&request, import_preview_project());
-    });
-    let output = home
-        .command()
-        .args(["mcp", "import"])
-        .arg(&path)
-        .args(["--source", "project", "--yes"])
-        .output()
-        .unwrap();
-    daemon.join().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains(
-            "The project import needs --confirm-literals for \"docs\" (args, env); nothing was imported."
-        ),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        IMPORT_PREVIEW_PROJECT_ROWS,
-        "the refusal follows the preview the user must act on"
-    );
-
-    let home = Home::new();
-    let path = home.0.join("mcp.json");
-    fs::write(&path, import_document()).unwrap();
-    let daemon = home.daemon(move |wire| {
-        hello(wire);
-        let request = wire.read("mcp.import.preview");
-        wire.reply(&request, import_preview_project());
         let request = wire.read("mcp.import.apply");
         assert_eq!(request["params"]["expectedVersion"], "project:1");
         assert_eq!(
             request["params"]["resolutions"],
             json!([
-                {"id": "docs", "action": "import", "confirm": ["args", "env"]},
+                {"id": "docs", "action": "import"},
                 {"id": "keeps", "action": "import"},
             ])
         );
@@ -1210,7 +1180,7 @@ fn mcp_import_project_needs_confirm_literals_before_applying() {
         .command()
         .args(["mcp", "import"])
         .arg(&path)
-        .args(["--source", "project", "--yes", "--confirm-literals"])
+        .args(["--source", "project", "--yes"])
         .output()
         .unwrap();
     daemon.join().unwrap();
@@ -1226,6 +1196,13 @@ fn mcp_import_project_needs_confirm_literals_before_applying() {
             "{IMPORT_PREVIEW_PROJECT_ROWS}\"keeps\"\tunchanged\tkeeps\n\
              \"docs\"\timported\tdocs\n"
         )
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "Its arguments, environment and header values, bearer token, a URL with userinfo, path, query or fragment, and unknown members go to your user-scope mcp-secrets record, never to the workspace file."
+        ),
+        "{stderr}"
     );
 }
 

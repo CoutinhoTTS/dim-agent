@@ -173,7 +173,6 @@ async fn mcp_import_previews_selects_and_writes_multiple_user_entries() {
         unsupported(entry(&preview, "authed")),
         [("auth.rotate", "dropped")]
     );
-    assert_eq!(entry(&preview, "fresh")["confirm"], json!([]));
     assert!(
         !preview.to_string().contains("oauth-secret"),
         "a preview carries field names and kinds, never values: {preview}"
@@ -291,7 +290,7 @@ const QUERY_KEY: &str = "fixture-query-value";
 const PASSWORD_VALUE: &str = "fixture-userinfo-password";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_import_refuses_project_credentials_and_requires_literal_confirmation() {
+async fn mcp_import_writes_project_entries_through_the_withheld_record() {
     let home = scratch("dm-import-project");
     let project = home.join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -315,45 +314,46 @@ async fn mcp_import_refuses_project_credentials_and_requires_literal_confirmatio
     let document = json!({"mcpServers": {
         "plain": {"command":"echo"},
         "envlit": {"command":"echo","env":{"TOKEN":ENV_VALUE}},
+        "envdefault": {"command":"echo","env":{"TOKEN":"${TOKEN:-sk-live}"}},
         "argslit": {"command":"echo","args":[ARG_VALUE]},
         "headerlit": {"type":"http","url":"https://example.test/mcp","headers":{"X-Key":HEADER_VALUE}},
         "querylit": {"type":"http","url":query_url.clone()},
         "refonly": {"type":"http","url":"https://example.test/mcp","headers":{"Authorization":"${AUTH}"}},
         "tokenlit": {"type":"http","url":"https://example.test/mcp","auth":{"type":"bearer","token":BEARER_VALUE}},
+        "tokendefault": {"type":"http","url":"https://example.test/mcp","auth":{"type":"bearer","token":"${TOKEN:-sk-live}"}},
         "userinfo": {"type":"http","url":format!("https://fixture-user:{PASSWORD_VALUE}@example.test/mcp")}
-    }});
+    }})
+    .to_string();
+    let ids = [
+        "plain",
+        "envlit",
+        "envdefault",
+        "argslit",
+        "headerlit",
+        "querylit",
+        "refonly",
+        "tokenlit",
+        "tokendefault",
+        "userinfo",
+    ];
     let preview = client
         .rpc(
             "mcp.import.preview",
-            json!({"source":"project","cwd":project,"document":document.to_string()}),
+            json!({"source":"project","cwd":project,"document":document}),
         )
         .await;
     assert_ok(&preview);
-    for (id, confirm) in [
-        ("plain", json!([])),
-        ("envlit", json!(["env"])),
-        ("argslit", json!(["args"])),
-        ("headerlit", json!(["headers"])),
-        ("querylit", json!(["url"])),
-        ("refonly", json!([])),
-    ] {
+    for id in ids {
         assert_eq!(entry(&preview, id)["status"], "changed", "{id}");
-        assert_eq!(entry(&preview, id)["confirm"], confirm, "{id}");
+        assert!(entry(&preview, id)["error"].is_null(), "{id}");
+        assert!(
+            !entry(&preview, id)
+                .as_object()
+                .unwrap()
+                .contains_key("confirm"),
+            "the project contract takes no per-entry confirmation: {id}"
+        );
     }
-    assert_eq!(entry(&preview, "tokenlit")["status"], "invalid");
-    assert!(
-        entry(&preview, "tokenlit")["error"]
-            .as_str()
-            .unwrap()
-            .contains("auth.token")
-    );
-    assert_eq!(entry(&preview, "userinfo")["status"], "invalid");
-    assert!(
-        entry(&preview, "userinfo")["error"]
-            .as_str()
-            .unwrap()
-            .contains("userinfo")
-    );
     for secret in [
         ENV_VALUE,
         ARG_VALUE,
@@ -361,59 +361,22 @@ async fn mcp_import_refuses_project_credentials_and_requires_literal_confirmatio
         BEARER_VALUE,
         QUERY_KEY,
         PASSWORD_VALUE,
+        "sk-live",
     ] {
         assert!(
             !preview.to_string().contains(secret),
             "a preview carries field names and kinds, never values: {preview}"
         );
     }
-    let revision = preview["result"]["revision"].clone();
-    let unconfirmed = client
-        .rpc(
-            "mcp.import.apply",
-            json!({
-                "source":"project",
-                "cwd":project,
-                "document":document.to_string(),
-                "expectedVersion":revision,
-                "resolutions":[
-                    {"id":"plain","action":"import"},
-                    {"id":"envlit","action":"import"}
-                ]
-            }),
-        )
-        .await;
-    assert_eq!(
-        unconfirmed["error"]["data"]["appError"],
-        "mcp_import_unconfirmed"
-    );
-    assert!(
-        unconfirmed["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("env")
-    );
-    assert_eq!(
-        project_revision(&mut client, &project).await,
-        revision,
-        "an unconfirmed import writes nothing"
-    );
     let applied = client
         .rpc(
             "mcp.import.apply",
             json!({
                 "source":"project",
                 "cwd":project,
-                "document":document.to_string(),
-                "expectedVersion":revision,
-                "resolutions":[
-                    {"id":"plain","action":"import"},
-                    {"id":"envlit","action":"import","confirm":["env"]},
-                    {"id":"argslit","action":"import","confirm":["args"]},
-                    {"id":"headerlit","action":"import","confirm":["headers"]},
-                    {"id":"querylit","action":"import","confirm":["url"]},
-                    {"id":"refonly","action":"import"}
-                ]
+                "document":document,
+                "expectedVersion":preview["result"]["revision"],
+                "resolutions": ids.map(|id| json!({"id":id,"action":"import"}))
             }),
         )
         .await;
@@ -422,164 +385,110 @@ async fn mcp_import_refuses_project_credentials_and_requires_literal_confirmatio
         serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
     let servers = &stored["mcpServers"];
     assert_eq!(servers["broken"], json!({"command":5}));
+    for id in ["plain", "envlit", "envdefault", "argslit"] {
+        assert_eq!(servers[id], json!({"command":"echo"}), "{id}");
+    }
     for id in [
-        "plain",
-        "envlit",
-        "argslit",
         "headerlit",
         "querylit",
         "refonly",
+        "tokenlit",
+        "tokendefault",
+        "userinfo",
     ] {
-        assert!(
-            servers[id].get("enabled").is_none(),
-            "a project import writes no enablement: {id}"
+        assert_eq!(
+            servers[id],
+            json!({"type":"http","url":"https://example.test"}),
+            "{id}"
         );
     }
-    assert_eq!(servers["envlit"]["env"]["TOKEN"].as_str(), Some(ENV_VALUE));
-    assert_eq!(servers["argslit"]["args"][0].as_str(), Some(ARG_VALUE));
-    assert_eq!(
-        servers["headerlit"]["headers"]["X-Key"].as_str(),
-        Some(HEADER_VALUE)
-    );
-    assert_eq!(
-        servers["querylit"]["url"].as_str(),
-        Some(query_url.as_str())
-    );
-    assert_eq!(servers["refonly"]["headers"]["Authorization"], "${AUTH}");
-    assert!(servers.get("tokenlit").is_none());
-    assert!(servers.get("userinfo").is_none());
+    let written = stored.to_string();
+    for secret in [
+        ENV_VALUE,
+        ARG_VALUE,
+        HEADER_VALUE,
+        BEARER_VALUE,
+        QUERY_KEY,
+        PASSWORD_VALUE,
+        "sk-live",
+        "${AUTH}",
+    ] {
+        assert!(
+            !written.contains(secret),
+            "the workspace file never receives {secret}: {stored}"
+        );
+    }
     let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
     assert_ok(&catalog);
-    for id in ["plain", "envlit", "argslit", "headerlit", "querylit"] {
+    for id in ids {
         assert_eq!(catalog_entry(&catalog, id)["enabled"], false, "{id}");
     }
-    let revision = project_revision(&mut client, &project).await;
-    let refused = client
-        .rpc(
-            "mcp.import.apply",
-            json!({
-                "source":"project",
-                "cwd":project,
-                "document":document.to_string(),
-                "expectedVersion":revision,
-                "resolutions":[{"id":"tokenlit","action":"import"}]
-            }),
-        )
-        .await;
-    assert_eq!(refused["error"]["data"]["appError"], "mcp_import_conflict");
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("auth.token")
-    );
-    assert!(!refused.to_string().contains(BEARER_VALUE));
-
-    let user = client.rpc("mcp.catalog", json!({})).await;
-    assert_ok(&client.rpc("mcp.save", json!({"source":"user","id":"moved","expectedVersion":user["result"]["userRevision"],"configuration":{"command":"echo","args":["--secret"],"env":{"TOKEN":"fixture-overlay-value"}}})).await);
-    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
-    assert_ok(&client.rpc("mcp.move", json!({"id":"moved","from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
-    let moved = servers_document(json!({
-        "moved": {"command":"echo","args":["--new"]}
-    }));
+    // The record carries every withheld value, references and literal
+    // defaults included: the source reads back as the document's
+    // configuration with no field left to change.
     let preview = client
         .rpc(
             "mcp.import.preview",
-            json!({"source":"project","cwd":project,"document":moved}),
+            json!({"source":"project","cwd":project,"document":document}),
         )
         .await;
     assert_ok(&preview);
-    assert_eq!(entry(&preview, "moved")["status"], "conflict");
-    assert_eq!(fields(entry(&preview, "moved")), ["args"]);
-    assert_eq!(entry(&preview, "moved")["confirm"], json!(["args"]));
-    let revision = project_revision(&mut client, &project).await;
-    let replaced = client
+    for id in ids {
+        assert_eq!(entry(&preview, id)["status"], "identical", "{id}");
+        assert!(fields(entry(&preview, id)).is_empty(), "{id}");
+    }
+    // An identical entry is replaceable and renamable: the split writes the
+    // same pair, and the destination gets its own record.
+    let revision = preview["result"]["revision"].clone();
+    let rewritten = client
         .rpc(
             "mcp.import.apply",
             json!({
                 "source":"project",
                 "cwd":project,
-                "document":moved,
+                "document":document,
                 "expectedVersion":revision,
-                "resolutions":[{"id":"moved","action":"replace","confirm":["args"]}]
+                "resolutions":[
+                    {"id":"envlit","action":"replace"},
+                    {"id":"tokenlit","action":"rename","newId":"tokenlit-copy"}
+                ]
             }),
         )
         .await;
+    assert_ok(&rewritten);
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
     assert_eq!(
-        replaced["error"]["data"]["appError"],
-        "mcp_credentials_are_user_scoped"
+        stored["mcpServers"]["envlit"],
+        json!({"command":"echo"}),
+        "a replace of an identical entry keeps the values"
     );
-    assert_eq!(project_revision(&mut client, &project).await, revision);
-    let renamed = client
-        .rpc(
-            "mcp.import.apply",
-            json!({
-                "source":"project",
-                "cwd":project,
-                "document":moved,
-                "expectedVersion":revision,
-                "resolutions":[{"id":"moved","action":"rename","newId":"moved-copy","confirm":["args"]}]
-            }),
-        )
-        .await;
-    assert_ok(&renamed);
-    let withheld = client
-        .rpc(
-            "mcp.configuration",
-            json!({"source":"project","id":"moved","cwd":project}),
-        )
-        .await;
-    assert_ok(&withheld);
-    assert_eq!(withheld["result"]["secretsInUserScope"], true);
-    assert_eq!(withheld["result"]["configuration"]["argsCount"], 1);
+    assert_eq!(
+        stored["mcpServers"]["tokenlit-copy"],
+        json!({"type":"http","url":"https://example.test"}),
+        "a rename writes the skeleton under the new id"
+    );
+    assert_eq!(
+        stored["mcpServers"]["tokenlit"],
+        json!({"type":"http","url":"https://example.test"}),
+        "a rename leaves the source entry as it was"
+    );
     let copy = client
         .rpc(
             "mcp.configuration",
-            json!({"source":"project","id":"moved-copy","cwd":project}),
+            json!({"source":"project","id":"tokenlit-copy","cwd":project}),
         )
         .await;
     assert_ok(&copy);
-    assert_eq!(copy["result"]["secretsInUserScope"], false);
-    assert_eq!(copy["result"]["configuration"]["argsCount"], 1);
-    let stored: Value =
-        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
-    assert_eq!(stored["mcpServers"]["broken"], json!({"command":5}));
-    assert_eq!(stored["mcpServers"]["moved-copy"]["args"], json!(["--new"]));
-    assert!(stored["mcpServers"]["moved"].get("args").is_none());
+    assert_eq!(copy["result"]["secretsInUserScope"], true);
+    assert_eq!(copy["result"]["configuration"]["authConfigured"], true);
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
 
-async fn project_revision(client: &mut Client, project: &std::path::Path) -> Value {
-    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
-    assert_ok(&catalog);
-    catalog["result"]["projectRevision"].clone()
-}
-
-/// Saves an entry in user scope and moves it into the project source, where a
-/// literal value becomes a withheld `mcp-secrets` record.
-async fn move_to_project(
-    client: &mut Client,
-    project: &std::path::Path,
-    id: &str,
-    configuration: Value,
-) {
-    let user = client.rpc("mcp.catalog", json!({})).await;
-    assert_ok(
-        &client
-            .rpc(
-                "mcp.save",
-                json!({"source":"user","id":id,"expectedVersion":user["result"]["userRevision"],"configuration":configuration}),
-            )
-            .await,
-    );
-    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
-    assert_ok(&client.rpc("mcp.move", json!({"id":id,"from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_import_refuses_a_destination_that_keeps_a_withheld_record() {
+async fn mcp_import_replaces_a_withheld_record_without_an_entry() {
     let home = scratch("dm-import-withheld");
     let project = home.join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -620,8 +529,7 @@ async fn mcp_import_refuses_a_destination_that_keeps_a_withheld_record() {
     .unwrap();
     let document = servers_document(json!({
         "kept": {"command":"echo"},
-        "plain": {"command":"echo"},
-        "free": {"command":"echo"}
+        "plain": {"command":"echo"}
     }));
     let preview = client
         .rpc(
@@ -630,63 +538,56 @@ async fn mcp_import_refuses_a_destination_that_keeps_a_withheld_record() {
         )
         .await;
     assert_ok(&preview);
-    for id in ["kept", "plain", "free"] {
+    for id in ["kept", "plain"] {
         assert_eq!(entry(&preview, id)["status"], "changed", "{id}");
     }
+    // The import writes the destination's record itself, so a leftover
+    // record neither refuses the import nor merges into it: an entry with no
+    // withheld part removes the record.
     let revision = project_revision(&mut client, &project).await;
-    let imported = client
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":document,
+                    "expectedVersion":revision,
+                    "resolutions":[{"id":"kept","action":"import"}]
+                }),
+            )
+            .await,
+    );
+    let kept = client
         .rpc(
-            "mcp.import.apply",
-            json!({
-                "source":"project",
-                "cwd":project,
-                "document":document,
-                "expectedVersion":revision,
-                "resolutions":[{"id":"kept","action":"import"}]
-            }),
+            "mcp.configuration",
+            json!({"source":"project","id":"kept","cwd":project}),
         )
         .await;
+    assert_ok(&kept);
     assert_eq!(
-        imported["error"]["data"]["appError"],
-        "mcp_stale_secret_record"
+        kept["result"]["secretsInUserScope"], false,
+        "the leftover record was replaced by what the import carried"
     );
-    assert_eq!(
-        project_revision(&mut client, &project).await,
-        revision,
-        "a refused import writes nothing"
+    assert_eq!(kept["result"]["configuration"]["argsCount"], 0);
+    // The stale enablement record of `plain` is withdrawn before the write,
+    // so the entry the import writes starts disabled (D24).
+    let revision = project_revision(&mut client, &project).await;
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":document,
+                    "expectedVersion":revision,
+                    "resolutions":[{"id":"plain","action":"import"}]
+                }),
+            )
+            .await,
     );
-    let renamed = client
-        .rpc(
-            "mcp.import.apply",
-            json!({
-                "source":"project",
-                "cwd":project,
-                "document":document,
-                "expectedVersion":revision,
-                "resolutions":[{"id":"free","action":"rename","newId":"kept"}]
-            }),
-        )
-        .await;
-    assert_eq!(
-        renamed["error"]["data"]["appError"],
-        "mcp_stale_secret_record"
-    );
-    assert_eq!(project_revision(&mut client, &project).await, revision);
-    // A free id with no record imports, and the stale enablement record of the
-    // id it writes is withdrawn, so the entry starts disabled (D24).
-    let applied = client
-        .rpc(
-            "mcp.import.apply",
-            json!({
-                "source":"project",
-                "cwd":project,
-                "document":document,
-                "expectedVersion":revision,
-                "resolutions":[{"id":"plain","action":"import"}]
-            }),
-        )
-        .await;
-    assert_ok(&applied);
     let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
     assert_ok(&catalog);
     assert_eq!(
@@ -694,30 +595,40 @@ async fn mcp_import_refuses_a_destination_that_keeps_a_withheld_record() {
         false,
         "an import never enables anything"
     );
-    let applied = client
-        .rpc(
-            "mcp.import.apply",
-            json!({
-                "source":"project",
-                "cwd":project,
-                "document":document,
-                "expectedVersion":applied["result"]["revision"],
-                "resolutions":[{"id":"free","action":"import"}]
-            }),
-        )
-        .await;
-    assert_ok(&applied);
     let stored: Value =
         serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(stored["mcpServers"]["kept"], json!({"command":"echo"}));
     assert_eq!(stored["mcpServers"]["plain"], json!({"command":"echo"}));
-    assert_eq!(stored["mcpServers"]["free"], json!({"command":"echo"}));
-    assert!(
-        stored["mcpServers"].get("kept").is_none(),
-        "a refused import writes nothing: {stored}"
-    );
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
+}
+
+async fn project_revision(client: &mut Client, project: &std::path::Path) -> Value {
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    catalog["result"]["projectRevision"].clone()
+}
+
+/// Saves an entry in user scope and moves it into the project source, where a
+/// literal value becomes a withheld `mcp-secrets` record.
+async fn move_to_project(
+    client: &mut Client,
+    project: &std::path::Path,
+    id: &str,
+    configuration: Value,
+) {
+    let user = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":id,"expectedVersion":user["result"]["userRevision"],"configuration":configuration}),
+            )
+            .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":id,"from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
 }
 
 /// The reply reports a bounded number of names per list and counts the rest,
