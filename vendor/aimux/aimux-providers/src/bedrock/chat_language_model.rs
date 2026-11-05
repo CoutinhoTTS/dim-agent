@@ -17,7 +17,7 @@ use super::normalize_tool_call_id::normalize_tool_call_id;
 use super::options;
 use super::prepare_tools::{is_strict_schema_compatible, prepare_tools};
 use crate::shared::EndpointConfig;
-use crate::stream::{Controller, Emit, FINISH_ERROR, FINISH_OTHER, StreamContext};
+use crate::stream::{Controller, Emit, FINISH_ERROR, FINISH_OTHER, StreamContext, strict_error};
 use aimux_core::ErrorCause;
 use aimux_core::error::AiMuxError;
 use aimux_core::language_model::{LanguageModel, SupportedUrls};
@@ -273,6 +273,12 @@ struct AmazonBedrockChatStream {
     block_counter: usize,
     /// Tool call state: block_index → (id, name, accumulated_json)
     tool_blocks: HashMap<usize, (String, String, String)>,
+    /// Blocks opened by a `contentBlockStart` or their first delta and not
+    /// yet stopped, checked in strict stream mode.
+    open_blocks: HashSet<usize>,
+    /// A client tool call was emitted, checked against `stopReason` in strict
+    /// stream mode.
+    has_tool_calls: bool,
     final_usage: Usage,
     final_finish_reason: Option<FinishReason>,
     /// Provider metadata accumulated for the Finish chunk from `metadata`
@@ -281,9 +287,6 @@ struct AmazonBedrockChatStream {
     /// `amazon-bedrock-chat-language-model.ts` (`doStream`).
     finish_meta: serde_json::Map<String, serde_json::Value>,
     stop_sequence: Option<String>,
-    /// Whether `Finish` has been emitted, so the body's end cannot emit a
-    /// second one.
-    finished: bool,
 }
 
 impl AmazonBedrockChatStream {
@@ -292,6 +295,7 @@ impl AmazonBedrockChatStream {
             .get("contentBlockIndex")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(self.block_counter as u64) as usize;
+        self.open_blocks.insert(idx);
 
         // Check if this is a tool use block.
         if let Some(start) = payload.get("start") {
@@ -334,23 +338,38 @@ impl AmazonBedrockChatStream {
     }
 
     fn content_block_delta(&mut self, payload: &serde_json::Value, controller: &mut Controller) {
-        // A delta the decoder cannot read must fail the stream: silently
-        // ignoring it completes the block from whatever it accumulated, and
-        // the tool call then runs with input the model never sent.
-        if !readable_delta(payload) {
-            controller.error(AiMuxError::invalid_response_data(
-                "unsupported or unreadable Bedrock content delta",
-            ));
-            return;
-        }
         let idx = payload
             .get("contentBlockIndex")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0) as usize;
 
-        let Some(delta) = payload.get("delta") else {
+        let Some(delta) = payload.get("delta").filter(|delta| !delta.is_null()) else {
             return;
         };
+        self.open_blocks.insert(idx);
+        // #476: a delta needs exactly one known member, as in the AI SDK's
+        // chunk schema; unlike its runtime, the tool block is closed without
+        // a call so that none completes with input the model never sent.
+        if !is_known_delta(delta) {
+            if let Some((id, name, _)) = self.tool_blocks.remove(&idx)
+                && !(self.uses_json_tool && name == "json")
+            {
+                controller.tool_input_end(id);
+            }
+            self.final_finish_reason = Some(FINISH_ERROR);
+            controller.enqueue_error(AiMuxError::invalid_response_data(format!(
+                "unsupported Amazon Bedrock content block delta: {delta}"
+            )));
+            return;
+        }
+        // #475: in strict mode only a `toolUse` start opens a tool block.
+        if self.ctx.strict && delta.get("toolUse").is_some() && !self.tool_blocks.contains_key(&idx)
+        {
+            controller.error(strict_error(format!(
+                "toolUse delta for content block {idx} without a toolUse start"
+            )));
+            return;
+        }
         // Text delta
         if let Some(text) = delta.get("text").and_then(|v| v.as_str())
             && !text.is_empty()
@@ -436,6 +455,12 @@ impl AmazonBedrockChatStream {
             .get("contentBlockIndex")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0) as usize;
+        if !self.open_blocks.remove(&idx) && self.ctx.strict {
+            controller.error(strict_error(format!(
+                "contentBlockStop for content block {idx} that was not opened"
+            )));
+            return;
+        }
 
         if let Some((id, name, acc)) = self.tool_blocks.remove(&idx) {
             if self.uses_json_tool && name == "json" {
@@ -453,6 +478,7 @@ impl AmazonBedrockChatStream {
                 } else {
                     acc
                 };
+                self.has_tool_calls = true;
                 controller.enqueue(StreamPart::ToolCall(RawToolCall {
                     tool_call_id: normalize_tool_call_id(&id, self.model_id.contains("mistral.")),
                     tool_name: name,
@@ -472,8 +498,32 @@ impl AmazonBedrockChatStream {
         }
     }
 
-    fn message_stop(&mut self, payload: &serde_json::Value) {
-        if let Some(reason) = payload.get("stopReason").and_then(|v| v.as_str()) {
+    fn message_stop(&mut self, payload: &serde_json::Value, controller: &mut Controller) {
+        let stop_reason = payload.get("stopReason").and_then(|v| v.as_str());
+        // #475: in strict mode every block is stopped first, and a tool call
+        // needs a `tool_use` stop reason.
+        if self.ctx.strict {
+            let problem = if let Some(idx) = self.open_blocks.iter().min() {
+                Some(format!("messageStop while content block {idx} is open"))
+            } else if self.has_tool_calls && stop_reason != Some("tool_use") {
+                Some(format!(
+                    "messageStop with stopReason `{}` after a tool call, not `tool_use`",
+                    stop_reason.unwrap_or_default()
+                ))
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                controller.error(strict_error(problem));
+                return;
+            }
+        }
+        if let Some(reason) = stop_reason
+            && self
+                .final_finish_reason
+                .as_ref()
+                .is_none_or(|reason| reason.unified != FinishReasonUnified::Error)
+        {
             let mut finish_reason = map_finish_reason(reason);
             if self.is_json_response_from_tool
                 && finish_reason.unified == FinishReasonUnified::ToolCalls
@@ -529,9 +579,9 @@ impl AmazonBedrockChatStream {
             self.finish_meta
                 .insert("serviceTier".to_string(), st.clone());
         }
-        // `metadata` is the last event of a Converse stream, so a
-        // `messageStop` already seen is final; waiting for the body to close
-        // hangs the caller behind keep-alives and proxies.
+        // #477: `metadata` is the last event of a Converse stream, so the turn
+        // finishes here instead of waiting for the body to close, which can
+        // hang behind keep-alives and proxies.
         if self
             .final_finish_reason
             .as_ref()
@@ -542,13 +592,9 @@ impl AmazonBedrockChatStream {
         }
     }
 
-    /// Emit `Finish`: at `metadata` when a `messageStop` came first, or at
-    /// the end of the body. Guarded against emitting a second `Finish`.
+    /// Emit `Finish`, at `metadata` after a `messageStop` or at the end of
+    /// the body.
     fn finish(&mut self, controller: &mut Controller) {
-        if self.finished {
-            return;
-        }
-        self.finished = true;
         // #26: merge the stop sentinel into the metadata payload, then build
         // the Finish provider_metadata under `amazonBedrock` (mirrors the
         // TS `doStream` flush handler).
@@ -656,7 +702,7 @@ impl Transformer for AmazonBedrockChatStream {
             "contentBlockStart" => self.content_block_start(&payload, controller),
             "contentBlockDelta" => self.content_block_delta(&payload, controller),
             "contentBlockStop" => self.content_block_stop(&payload, controller),
-            "messageStop" => self.message_stop(&payload),
+            "messageStop" => self.message_stop(&payload, controller),
             "metadata" => self.metadata(&payload, controller),
             _ => {}
         }
@@ -674,27 +720,26 @@ impl Transformer for AmazonBedrockChatStream {
     }
 }
 
-/// One known member, readable: `text` as a string, `toolUse.input` as a
-/// string, or `reasoningContent` as an object.
-fn readable_delta(payload: &serde_json::Value) -> bool {
-    let Some(delta) = payload
-        .get("delta")
-        .and_then(serde_json::Value::as_object)
-        .filter(|fields| fields.len() == 1)
-    else {
+/// Whether a `contentBlockDelta` delta has exactly one of the AI SDK's
+/// members: a `text` string, a `citation` object, a `toolUse.input` string or
+/// a `reasoningContent` with a `text`, `signature`, `data` or
+/// `redactedContent` string.
+fn is_known_delta(delta: &Value) -> bool {
+    let Some(delta) = delta.as_object() else {
         return false;
     };
-    delta.get("text").is_some_and(serde_json::Value::is_string)
-        || delta
-            .get("toolUse")
-            .and_then(|tool_use| tool_use.get("input"))
-            .is_some_and(serde_json::Value::is_string)
-        || delta
-            .get("reasoningContent")
-            .is_some_and(serde_json::Value::is_object)
-        // A citation carries no stream output of its own and is ignored, as it
-        // was before the check: it is a delta the decoder reads.
-        || delta.get("citation").is_some_and(serde_json::Value::is_object)
+    let text = delta.get("text").map(Value::is_string);
+    let citation = delta.get("citation").map(Value::is_object);
+    let tool_use = delta
+        .get("toolUse")
+        .map(|tool_use| tool_use.get("input").is_some_and(Value::is_string));
+    let reasoning = delta.get("reasoningContent").map(|reasoning| {
+        ["text", "signature", "data", "redactedContent"]
+            .iter()
+            .any(|key| reasoning.get(key).is_some_and(Value::is_string))
+    });
+    let members = [text, citation, tool_use, reasoning];
+    members.iter().flatten().count() == 1 && !members.contains(&Some(false))
 }
 
 /// Attach accumulated encrypted reasoning once at the end of the block.

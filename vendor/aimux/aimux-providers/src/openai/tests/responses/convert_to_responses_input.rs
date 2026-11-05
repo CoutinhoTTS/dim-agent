@@ -598,7 +598,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "text", "text": "I will search for that", "providerOptions": {"openai": {"itemId": "msg_001", "phase": "commentary"}}}]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": false})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"role": "assistant", "id": "msg_001", "content": [{"type": "output_text", "text": "I will search for that"}], "phase": "commentary"}])
+                json!([{"role": "assistant", "content": "I will search for that", "phase": "commentary"}])
             );
         }
 
@@ -609,7 +609,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "text", "text": "The capital of France is Paris.", "providerOptions": {"openai": {"itemId": "msg_002", "phase": "final_answer"}}}]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": false})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"role": "assistant", "id": "msg_002", "content": [{"type": "output_text", "text": "The capital of France is Paris."}], "phase": "final_answer"}])
+                json!([{"role": "assistant", "content": "The capital of France is Paris.", "phase": "final_answer"}])
             );
         }
 
@@ -619,7 +619,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "text", "text": "Hello", "providerOptions": {"openai": {"itemId": "msg_003"}}}]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": false})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"role": "assistant", "id": "msg_003", "content": [{"type": "output_text", "text": "Hello"}]}])
+                json!([{"role": "assistant", "content": "Hello"}])
             );
         }
 
@@ -630,6 +630,18 @@ mod convert_to_openai_responses_input {
             assert_eq!(
                 result.input,
                 json!([{"role": "assistant", "content": "I will search for that information."}, {"type": "function_call", "call_id": "call_123", "name": "search", "arguments": json!({"query": "weather in San Francisco"}).to_string()}])
+            );
+        }
+
+        /// aimux #468: the text parts of one message item, one per content
+        /// part, reference that item once.
+        #[tokio::test]
+        async fn should_reference_a_message_item_once_for_its_text_parts() {
+            let part = |text: &str| json!({"type": "text", "text": text, "providerOptions": {"openai": {"itemId": "msg-1"}}});
+            let result = convert(json!({"prompt": [{"role": "assistant", "content": [part("before"), part("after")]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": true})).await.unwrap();
+            assert_eq!(
+                result.input,
+                json!([{"type": "item_reference", "id": "msg-1"}])
             );
         }
 
@@ -648,7 +660,6 @@ mod convert_to_openai_responses_input {
                     {
                         "arguments": r#"{"query":"weather in San Francisco"}"#,
                         "call_id": "call_123",
-                        "id": "id_456",
                         "name": "search",
                         "type": "function_call",
                     },
@@ -673,7 +684,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "tool-call", "toolCallId": "call_a", "toolName": "search", "input": {"query": "first"}, "providerOptions": {"openai": {"itemId": "fc_a"}}}, {"type": "tool-call", "toolCallId": "call_b", "toolName": "search", "input": {"query": "second"}, "providerOptions": {"openai": {"itemId": "fc_b"}}}]}, {"role": "tool", "content": [{"type": "tool-result", "toolCallId": "call_a", "toolName": "search", "output": {"type": "json", "value": {"results": []}}}, {"type": "tool-result", "toolCallId": "call_b", "toolName": "search", "output": {"type": "json", "value": {"results": ["x"]}}}]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": false})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"type": "function_call", "id": "fc_a", "call_id": "call_a", "name": "search", "arguments": json!({"query": "first"}).to_string()}, {"type": "function_call", "id": "fc_b", "call_id": "call_b", "name": "search", "arguments": json!({"query": "second"}).to_string()}, {"type": "function_call_output", "call_id": "call_a", "output": json!({"results": []}).to_string()}, {"type": "function_call_output", "call_id": "call_b", "output": json!({"results": ["x"]}).to_string()}])
+                json!([{"type": "function_call", "call_id": "call_a", "name": "search", "arguments": json!({"query": "first"}).to_string()}, {"type": "function_call", "call_id": "call_b", "name": "search", "arguments": json!({"query": "second"}).to_string()}, {"type": "function_call_output", "call_id": "call_a", "output": json!({"results": []}).to_string()}, {"type": "function_call_output", "call_id": "call_b", "output": json!({"results": ["x"]}).to_string()}])
             );
         }
 
@@ -683,7 +694,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "tool-call", "toolCallId": "call_a", "toolName": "search", "input": {"query": "first"}, "providerOptions": {"openai": {"itemId": "fc_a"}}}, {"type": "tool-call", "toolCallId": "call_b", "toolName": "search", "input": {"query": "second"}, "providerOptions": {"openai": {"itemId": "fc_b"}}}]}, {"role": "tool", "content": [{"type": "tool-result", "toolCallId": "call_a", "toolName": "search", "output": {"type": "json", "value": {"results": []}}}, {"type": "tool-result", "toolCallId": "call_b", "toolName": "search", "output": {"type": "json", "value": {"results": ["x"]}}}]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": true})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"type": "function_call", "id": "fc_a", "call_id": "call_a", "name": "search", "arguments": json!({"query": "first"}).to_string()}, {"type": "function_call", "id": "fc_b", "call_id": "call_b", "name": "search", "arguments": json!({"query": "second"}).to_string()}, {"type": "function_call_output", "call_id": "call_a", "output": json!({"results": []}).to_string()}, {"type": "function_call_output", "call_id": "call_b", "output": json!({"results": ["x"]}).to_string()}])
+                json!([{"type": "function_call", "call_id": "call_a", "name": "search", "arguments": json!({"query": "first"}).to_string()}, {"type": "function_call", "call_id": "call_b", "name": "search", "arguments": json!({"query": "second"}).to_string()}, {"type": "function_call_output", "call_id": "call_a", "output": json!({"results": []}).to_string()}, {"type": "function_call_output", "call_id": "call_b", "output": json!({"results": ["x"]}).to_string()}])
             );
         }
 
@@ -693,7 +704,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "tool-call", "toolCallId": "call_123", "toolName": "get_weather", "input": {"location": "Tokyo"}, "providerOptions": {"openai": {"itemId": "fc_abc", "namespace": "weather_tools"}}}]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": false})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"type": "function_call", "id": "fc_abc", "call_id": "call_123", "name": "get_weather", "arguments": json!({"location": "Tokyo"}).to_string(), "namespace": "weather_tools"}])
+                json!([{"type": "function_call", "call_id": "call_123", "name": "get_weather", "arguments": json!({"location": "Tokyo"}).to_string(), "namespace": "weather_tools"}])
             );
         }
 
@@ -703,7 +714,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "tool-call", "toolCallId": "call_async", "toolName": "get_weather", "input": {"location": "Berlin"}, "providerOptions": {"openai": {"itemId": "fc_async", "async": true}}}]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": false})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"type": "function_call", "id": "fc_async", "call_id": "call_async", "name": "get_weather", "arguments": json!({"location": "Berlin"}).to_string(), "async": true}])
+                json!([{"type": "function_call", "call_id": "call_async", "name": "get_weather", "arguments": json!({"location": "Berlin"}).to_string(), "async": true}])
             );
         }
 
@@ -2049,7 +2060,6 @@ mod convert_to_openai_responses_input {
                     {
                         "arguments": r#"{"location":"San Francisco"}"#,
                         "call_id": "call_123",
-                        "id": "fc_existing_456",
                         "name": "getWeather",
                         "type": "function_call",
                     },
@@ -2145,13 +2155,7 @@ mod convert_to_openai_responses_input {
                 result.input,
                 json!([
                     {
-                        "content": [
-                            {
-                                "text": "Here is my response.",
-                                "type": "output_text",
-                            },
-                        ],
-                        "id": "msg_001",
+                        "content": "Here is my response.",
                         "role": "assistant",
                     },
                     {
@@ -2399,7 +2403,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "tool-call", "toolCallId": "program_call_1", "toolName": "program", "input": {"code": r#"const value = await tools.get_inventory({ sku: "A" });"#, "fingerprint": "fingerprint_1"}, "providerExecuted": true, "providerOptions": {"openai": {"itemId": "program_item_1"}}}, {"type": "tool-call", "toolCallId": "function_call_1", "toolName": "get_inventory", "input": {"sku": "A"}, "providerOptions": {"openai": {"itemId": "function_item_1", "caller": {"type": "program", "callerId": "program_call_1"}}}}]}, {"role": "tool", "content": [{"type": "tool-result", "toolCallId": "function_call_1", "toolName": "get_inventory", "output": {"type": "json", "value": {"sku": "A", "availableUnits": 42}}, "providerOptions": {"openai": {"caller": {"type": "program", "callerId": "program_call_1"}}}}]}, {"role": "assistant", "content": [{"type": "tool-result", "toolCallId": "program_call_1", "toolName": "program", "output": {"type": "json", "value": {"result": r#"{"availableUnits":42}"#, "status": "completed"}}, "providerOptions": {"openai": {"itemId": "program_output_item_1"}}}]}], "toolNameMapping": {"program": "programmatic_tool_calling"}, "systemMessageMode": "system", "providerOptionsName": "openai", "store": false})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"type": "program", "id": "program_item_1", "call_id": "program_call_1", "code": r#"const value = await tools.get_inventory({ sku: "A" });"#, "fingerprint": "fingerprint_1"}, {"type": "function_call", "id": "function_item_1", "call_id": "function_call_1", "name": "get_inventory", "arguments": r#"{"sku":"A"}"#, "caller": {"type": "program", "caller_id": "program_call_1"}}, {"type": "function_call_output", "call_id": "function_call_1", "output": r#"{"sku":"A","availableUnits":42}"#, "caller": {"type": "program", "caller_id": "program_call_1"}}, {"type": "program_output", "id": "program_output_item_1", "call_id": "program_call_1", "result": r#"{"availableUnits":42}"#, "status": "completed"}])
+                json!([{"type": "program", "id": "program_item_1", "call_id": "program_call_1", "code": r#"const value = await tools.get_inventory({ sku: "A" });"#, "fingerprint": "fingerprint_1"}, {"type": "function_call", "call_id": "function_call_1", "name": "get_inventory", "arguments": r#"{"sku":"A"}"#, "caller": {"type": "program", "caller_id": "program_call_1"}}, {"type": "function_call_output", "call_id": "function_call_1", "output": r#"{"sku":"A","availableUnits":42}"#, "caller": {"type": "program", "caller_id": "program_call_1"}}, {"type": "program_output", "id": "program_output_item_1", "call_id": "program_call_1", "result": r#"{"availableUnits":42}"#, "status": "completed"}])
             );
         }
     }

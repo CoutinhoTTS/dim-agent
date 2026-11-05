@@ -124,10 +124,9 @@ pub(crate) fn convert_responses_input_with_conversation(
                 // message, as `reasoningMessages` upstream).
                 let mut reasoning_items: std::collections::HashMap<String, Option<usize>> =
                     std::collections::HashMap::new();
-                // Text parts of one item become one input item, keyed by the
-                // item id carried in the provider options.
-                let mut text_items: std::collections::HashMap<String, usize> =
-                    std::collections::HashMap::new();
+                // The text parts of one message item reference it once (#468:
+                // each content part streams as its own text part).
+                let mut text_items = std::collections::HashSet::new();
                 for part in content {
                     match part {
                         AssistantPart::Text(TextPart {
@@ -139,40 +138,20 @@ pub(crate) fn convert_responses_input_with_conversation(
                                 continue;
                             }
                             if store && let Some(ref id) = id {
-                                input.push(json!({ "type": "item_reference", "id": id }));
+                                if text_items.insert(id.clone()) {
+                                    input.push(json!({ "type": "item_reference", "id": id }));
+                                }
                                 continue;
                             }
-                            if let Some(ref id) = id {
-                                if let Some(&index) = text_items.get(id) {
-                                    let part = json!({ "type": "output_text", "text": text });
-                                    input[index]["content"]
-                                        .as_array_mut()
-                                        .expect("text item content is an array")
-                                        .push(part);
-                                } else {
-                                    let phase = phase_from_provider_options(ns, provider_options);
-                                    let mut item = json!({
-                                        "role": "assistant",
-                                        "id": id,
-                                        "content": [{ "type": "output_text", "text": text }],
-                                    });
-                                    if let Some(phase) = phase {
-                                        item["phase"] = json!(phase);
-                                    }
-                                    text_items.insert(id.clone(), input.len());
-                                    input.push(item);
-                                }
-                            } else {
-                                let phase = phase_from_provider_options(ns, provider_options);
-                                let mut item = json!({
-                                    "role": "assistant",
-                                    "content": text,
-                                });
-                                if let Some(phase) = phase {
-                                    item["phase"] = json!(phase);
-                                }
-                                input.push(item);
+                            let phase = phase_from_provider_options(ns, provider_options);
+                            let mut item = json!({
+                                "role": "assistant",
+                                "content": text,
+                            });
+                            if let Some(phase) = phase {
+                                item["phase"] = json!(phase);
                             }
+                            input.push(item);
                         }
                         AssistantPart::ToolCall(ToolCallPart {
                             tool_call_id,
@@ -245,9 +224,6 @@ pub(crate) fn convert_responses_input_with_conversation(
                                 "name": tool_name,
                                 "arguments": serialize_arguments(tool_input),
                             });
-                            if let Some(ref id) = id {
-                                item["id"] = json!(id);
-                            }
                             if let Some(ref namespace) = namespace {
                                 item["namespace"] = json!(namespace);
                             }

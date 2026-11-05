@@ -235,6 +235,11 @@ pub(super) fn apply(
             "service_tier"
         };
         fields.insert(key.into(), Value::String(tier.to_owned()));
+        if *kind == ProviderKind::OpenaiChat {
+            // The OpenAI Chat model gates `serviceTier` on the model id; the
+            // catalogue and the account entitlement are the authority here.
+            fields.insert("forceServiceTier".into(), Value::Bool(true));
+        }
     }
     for level in &levels {
         if let Some(thinking) = level.thinking

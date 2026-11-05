@@ -242,9 +242,9 @@ fn convert_message_to_openai(
         }
         LanguageModelMessage::Assistant { content, .. } => {
             let mut text = String::new();
-            let mut reasoning = String::new();
             let mut text_parts = Vec::new();
             let mut has_cache_breakpoint = false;
+            let mut reasoning = String::new();
             let mut tool_calls = Vec::new();
             for part in content {
                 match part {
@@ -254,10 +254,10 @@ fn convert_message_to_openai(
                             get_prompt_cache_breakpoint(&part.provider_options).is_some();
                         text_parts.push(convert_text_part_to_openai(part));
                     }
-                    // A thinking model behind an OpenAI-shaped endpoint requires
-                    // the prior assistant `reasoning_content` on later turns,
-                    // including tool-call turns; the compatible converter writes
-                    // the same field.
+                    // Not in upstream @ai-sdk/openai: replayed as `reasoning_content`
+                    // like the openai-compatible converter, for OpenAI-shaped
+                    // thinking endpoints (DeepSeek, DashScope, ...) that require
+                    // it back. OpenAI itself ignores the field (#491).
                     AssistantPart::Reasoning(part) => reasoning.push_str(&part.text),
                     AssistantPart::ToolCall(part) => {
                         // Upstream `serializeToolCallArguments` (@ai-sdk/openai
