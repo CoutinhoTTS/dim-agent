@@ -811,7 +811,7 @@ pub async fn branch_events<R: std::ops::RangeBounds<u64> + Send>(
 }
 
 fn home() -> PathBuf {
-    let home = std::path::PathBuf::from("/tmp").join(format!("dim-goal-{}", uuid::Uuid::new_v4()));
+    let home = std::env::temp_dir().join(format!("dim-goal-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&home).unwrap();
     #[cfg(unix)]
     {
