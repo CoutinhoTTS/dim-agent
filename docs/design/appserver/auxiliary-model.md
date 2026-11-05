@@ -88,7 +88,7 @@ profile).
   is offered, a tool stop is a provider defect and the call fails with `failed`.
 - `maxOutputTokens` caps the reply; the default and the cap are the model's adopted output
   allowance (Provider's derivation from the declared window and maximum, so the input budget
-  stays positive), not the declared maximum itself.
+  is at least half the window), not the declared maximum itself.
 - Non-streaming: the consumer needs the whole text.
 - Cancellation: the consumer drops the call (or sends the bridge protocol's cancel request).
   The service has no timeout of its own; the budget is the consumer's.

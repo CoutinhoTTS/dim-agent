@@ -169,9 +169,9 @@ fail without adoption; no value is guessed from a model name.
 
 The adopted configuration's output allowance is not a preference: Provider derives
 `maxTokens` from the model's declared pair as `max(1, min(declared maxOutputTokens,
-131,072, contextWindow − min(16,000, contextWindow / 2)))`, so the input budget that
-compaction uses stays positive even when a source declares an output at or above the
-window; the declared maximum stays in the capability snapshot
+131,072, contextWindow / 2))`, so the input budget that compaction uses is at least
+half the window even when a source declares an output at or above it; the declared
+maximum stays in the capability snapshot
 ([ContextCompaction §5.1](plugins/ContextCompaction.md#51-productcontextmodel)).
 A Session that stored another value reads it back through the same rule when a
 request is prepared, and the stored fact is left unchanged.

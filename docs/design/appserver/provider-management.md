@@ -408,16 +408,15 @@ as its base.
 
 The two declared limits are facts, not a request allowance. Provider derives the
 adopted output allowance as `max(1, min(declared maxOutputTokens, 131,072,
-contextWindow − min(16,000, contextWindow / 2)))`
-(`dim-agent-capabilities::context_model::output_allowance`), so a declaration at or
-above the window is accepted and still leaves a positive input budget. Every
-adoption writes that value to the configuration's `maxTokens`: the catalog read,
-static and managed selections, startup overrides and the model-file profile; the
-auxiliary target reads the same value. `capabilities.maxOutputTokens` keeps the
-declared fact. A stored `context/configured` configuration whose `maxTokens` is
-absent or above the rule is repaired when a request is built from it; the stored
-fact is not rewritten, so a Session adopted before this rule resumes and compacts
-normally.
+contextWindow / 2))` (`dim-agent-capabilities::context_model::output_allowance`),
+so a declaration at or above the window is accepted and still leaves at least half
+the window as input budget. Every adoption writes that value to the configuration's
+`maxTokens`: the catalog read, static and managed selections, startup overrides and
+the model-file profile; the auxiliary target reads the same value.
+`capabilities.maxOutputTokens` keeps the declared fact. A stored
+`context/configured` configuration whose `maxTokens` is absent or above the rule is
+repaired when a request is built from it; the stored fact is not rewritten, so a
+Session adopted before this rule resumes and compacts normally.
 
 On the wire, `ProviderModel.capabilities` in `provider.catalog` and
 `models[].model.capabilities` in `provider.management` carry `contextWindow` and
