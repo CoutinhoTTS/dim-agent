@@ -848,6 +848,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             mcp_command::print_report(vec![state.sentence()], state.notes);
             Ok(0)
         }
+        Action::McpImport(import) => {
+            management_command::import(&mut client, &options, import).await
+        }
         Action::Management(request) => {
             management_command::run(&mut client, &options, request).await
         }

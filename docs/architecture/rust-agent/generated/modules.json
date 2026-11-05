@@ -27505,6 +27505,7 @@
         "path Action::ManagementStart",
         "path Action::McpDisconnect",
         "path Action::McpEnable",
+        "path Action::McpImport",
         "path Action::McpList",
         "path Action::McpLogin",
         "path Action::McpLogout",
@@ -27677,6 +27678,7 @@
         "mod management_command",
         "path management_command::add",
         "path management_command::edit",
+        "path management_command::import",
         "path management_command::run",
         "path management_command::set",
         "path management_command::start"
@@ -28019,6 +28021,7 @@
       "from": "dim_cli::args::source_tests",
       "to": "dim_cli::args",
       "references": [
+        "path Action::McpImport",
         "path Action::Migration",
         "path Options::parse"
       ]
@@ -29581,7 +29584,9 @@
       "from": "dim_cli::management_command",
       "to": "dim_cli::args",
       "references": [
+        "path McpImport",
         "path Options",
+        "use crate::args::McpImport",
         "use crate::args::Options"
       ]
     },
@@ -29628,8 +29633,20 @@
         "path mcp::Answer::Detail",
         "path mcp::Answer::Tools",
         "path mcp::Failure::ReadFailed",
+        "path mcp::ImportAction::Import",
+        "path mcp::ImportAction::Rename",
+        "path mcp::ImportAction::Replace",
+        "path mcp::ImportAction::Skip",
+        "path mcp::ImportField",
+        "path mcp::ImportPreview",
+        "path mcp::ImportResolution",
+        "path mcp::ImportStatus::Identical",
+        "path mcp::ImportUnsupported",
+        "path mcp::apply_import",
         "path mcp::apply_named",
         "path mcp::editable",
+        "path mcp::import_failure",
+        "path mcp::preview_import",
         "path mcp::seed",
         "path mcp::target",
         "path mcp::tool_row",
@@ -29770,7 +29787,9 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
-        "use crate::ui::i18n::t"
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
       ]
     },
     {
@@ -42253,6 +42272,10 @@
     {
       "module": "dim_cli::management::mcp",
       "path": "T::deserialize"
+    },
+    {
+      "module": "dim_cli::management_command",
+      "path": "BTreeMap::new"
     },
     {
       "module": "dim_cli::mcp_command",
