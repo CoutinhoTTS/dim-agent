@@ -291,9 +291,10 @@ Rust, in `crates/dim-goal`, one row whose `install` registers its Settings sourc
 | `session.rs` | `GoalSession`: registers the `<dim-goal>` guide entry (A.5.1) with `GuideEntries`, `goal_update` with `ToolRegistry`, and `session.goal` with `SessionMethods`; writes with `TreeCommands::input` | Session part |
 | `branch.rs` | `GoalBranch`: registers with `Dispatcher::consume`, folds what its rebuild reads, decides on live events, and writes owned work; reads `maxContinuations` from the `goal` source. Under [Pursuit](Pursuit.md)'s evaluator judge it also creates the evaluator and takes the evaluator role | Branch part |
 
-The new-branch check (§3.4) reads the inherited prefix with `Timeline::query`: the branch chain,
-`input/message`, newest first, stopping at the first keyed block, and the branch's own events are
-skipped, so the query pages only the inherited prefix. An embedder installs Goal with
+The new-branch check (§3.4) reads the inherited prefix one ancestor at a time, nearest first, with
+`TreeCommands::query` on that ancestor's own line: `input/message`, newest first, each page bounded
+below the one before it, stopping at the first keyed block. The branch's own events are never part
+of the read, so it sees only the inherited prefix. An embedder installs Goal with
 `dim_goal::install(&mut AgentBuilder)`, or `install_with` with candidate policy sentences; the
 `dimcode` product profile does so in its install callback, and the App Server library does not
 depend on this crate.
