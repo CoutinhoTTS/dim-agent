@@ -4757,9 +4757,18 @@ mod tests {
             worktree_workspaces(bare, std::path::Path::new(""), "/repo"),
             ["/repo"]
         );
+        // The launch workspace is the first worktree joined with the relative
+        // directory, so it is built the same way: `Path::join` gives the
+        // platform's separator, and the launch workspace is listed once.
+        let launch = std::path::Path::new("/repo").join("app");
+        let sibling = std::path::Path::new("/repo-fix").join("app");
         assert_eq!(
-            worktree_workspaces(several, std::path::Path::new("app"), "/repo/app"),
-            ["/repo/app", "/repo-fix/app"]
+            worktree_workspaces(
+                several,
+                std::path::Path::new("app"),
+                launch.to_str().unwrap()
+            ),
+            [launch.to_str().unwrap(), sibling.to_str().unwrap()]
         );
     }
 
