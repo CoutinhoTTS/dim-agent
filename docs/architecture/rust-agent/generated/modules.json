@@ -17108,6 +17108,14 @@
     },
     {
       "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_scheduler::document",
+      "references": [
+        "path MAX_PROMPT_BYTES",
+        "use crate::document::MAX_PROMPT_BYTES"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
       "to": "dim_agent_scheduler::methods",
       "references": [
         "path Caller",

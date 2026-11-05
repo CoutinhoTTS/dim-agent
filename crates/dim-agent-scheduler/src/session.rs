@@ -2,6 +2,7 @@
 //! The handler refuses non-interactive Sessions and Collaboration members
 //! before it calls the process service ([design §1.1, A.2, §10](../../../docs/design/plugins/Scheduler.md)).
 use crate::{
+    document::MAX_PROMPT_BYTES,
     methods::{Caller, ScheduleJobs, ToolRequest},
     wakeups::{WakeupRequest, Wakeups},
 };
@@ -93,7 +94,7 @@ fn wakeup_declaration() -> ToolDefinition {
             "additionalProperties": false,
             "properties": {
                 "at": {"type": "string", "description": "The RFC 3339 instant at which the wakeup fires."},
-                "prompt": {"type": "string", "description": "The text delivered to the Session when it fires."}
+                "prompt": {"type": "string", "maxLength": MAX_PROMPT_BYTES, "description": "The text delivered to the Session when it fires."}
             }
         }),
     );
@@ -232,6 +233,17 @@ fn nonempty(text: &str, field: &str) -> Result<(), RpcError> {
     Ok(())
 }
 
+/// The prompt bound shared by the declaration and both entry points (design
+/// §10.1, §10.2): an oversized prompt is the caller's error, so it answers
+/// `invalid_params` at the wire boundary; the record's own check stays as the
+/// storage-side guard.
+fn prompt_size(prompt: &str) -> Result<(), String> {
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return Err(format!("prompt is at most {MAX_PROMPT_BYTES} bytes"));
+    }
+    Ok(())
+}
+
 /// Parses the RFC 3339 `at` instant; the canonical UTC millisecond form is
 /// stored (A.1's timestamp form).
 fn parse_at(at: &str) -> Result<chrono::DateTime<chrono::Utc>, RpcError> {
@@ -262,6 +274,7 @@ fn wakeup_handler(wakeups: Arc<Wakeups>) -> dim_agent_capabilities::methods::Han
                     nonempty(&p.session_id, "sessionId")?;
                     nonempty(&p.branch_id, "branchId")?;
                     nonempty(&p.prompt, "prompt")?;
+                    prompt_size(&p.prompt).map_err(RpcError::invalid)?;
                     let at = parse_at(&p.at)?;
                     let created = wakeups
                         .create(WakeupRequest {
@@ -406,6 +419,11 @@ impl ToolHandler for WakeupTool {
                 return Ok(ToolResult::error(
                     "wakeup: invalid_params\nprompt must not be empty",
                 ));
+            }
+            if let Err(message) = prompt_size(&args.prompt) {
+                return Ok(ToolResult::error(format!(
+                    "wakeup: invalid_params\n{message}"
+                )));
             }
             let at = match chrono::DateTime::parse_from_rfc3339(&args.at) {
                 Ok(instant) => instant.with_timezone(&chrono::Utc),

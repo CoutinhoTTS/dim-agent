@@ -798,6 +798,73 @@ async fn scope_and_param_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_oversized_prompt_is_invalid_params_at_both_entry_points() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &["wakeup"], true).await;
+    let oversized = "x".repeat(32 * 1024 + 1);
+
+    // The method answers the caller's error, not `invalid_data`.
+    let error = client
+        .rpc(
+            "session.wakeup.create",
+            json!({"sessionId": session, "branchId": "main", "at": instant_after(30),
+                "prompt": oversized}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        dim_client::app_error(&error),
+        Some("invalid_params"),
+        "{error}"
+    );
+
+    // The tool declares `maxLength` and its handler refuses the same bound.
+    model.push(vec![ToolCall {
+        id: "w1".into(),
+        name: "wakeup".into(),
+        input: json!({"at": instant_after(30), "prompt": oversized})
+            .as_object()
+            .unwrap()
+            .clone(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "Too long."}),
+        )
+        .await
+        .unwrap();
+    wait_for("the tool's invalid_params result", || {
+        model.texts().contains("wakeup: invalid_params")
+    })
+    .await;
+    assert!(
+        stored_wakeups(home.path()).is_empty(),
+        "neither refused call wrote a record"
+    );
+
+    // Exactly 32 KiB is accepted: the bound is a maximum, not a prefix.
+    client
+        .rpc(
+            "session.wakeup.create",
+            json!({"sessionId": session, "branchId": "main", "at": instant_after(120),
+                "prompt": "x".repeat(32 * 1024)}),
+        )
+        .await
+        .unwrap();
+    let stored = stored_wakeups(home.path());
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0]["prompt"].as_str().unwrap().len(), 32 * 1024);
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_tool_schedules_a_wakeup_for_the_caller_and_refuses_elsewhere() {
     let home = home();
     let model = Arc::new(Script::default());
