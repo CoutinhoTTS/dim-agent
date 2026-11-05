@@ -13,7 +13,7 @@ fn offer(wire: &mut Wire, turn: &str, text: &str) {
     );
 }
 
-/// The startup a terminal keeps: a created and attached Session holding
+/// The startup a terminal keeps: a resumed and attached Session holding
 /// `history`, and the reads the interface makes after attaching.
 fn opened(wire: &mut Wire, features: &[&str], history: Vec<Value>) {
     opened_with_methods(wire, features, history, true);
@@ -25,7 +25,6 @@ fn opened_with_methods(wire: &mut Wire, features: &[&str], history: Vec<Value>, 
     let mut features = features.to_vec();
     features.push("session.methods");
     wire.hello(&features);
-    wire.created();
     let attach = wire.read("session.attach");
     wire.reply(&attach, attach_record(&attach));
     // The interface reads the method table once per Session, before
@@ -108,7 +107,7 @@ fn a_completed_turn_asks_for_the_next_message_and_draws_the_offer() {
         if fullscreen {
             sized(&mut command, 100, 32);
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("run the tests");
         terminal.write(b"/exit\r");
         terminal.until("Bye!");
@@ -128,7 +127,7 @@ fn a_daemon_that_does_not_list_the_method_is_never_asked() {
         settled.send(()).unwrap();
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     settle.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"/exit\r");
@@ -150,7 +149,7 @@ fn a_draft_keeps_the_interface_from_asking() {
         settled.send(()).unwrap();
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"a draft");
     terminal.until("a draft");
@@ -190,7 +189,7 @@ fn a_pending_question_keeps_the_interface_from_asking() {
         wire.reply(&decline, json!({}));
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("Which database should the service use?");
     arm.send(()).unwrap();
     settle.recv_timeout(PATIENCE).unwrap();
@@ -226,7 +225,7 @@ fn an_active_goal_keeps_the_interface_from_asking() {
         settled.send(()).unwrap();
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("◎ goal active");
     arm.send(()).unwrap();
     settle.recv_timeout(PATIENCE).unwrap();
@@ -253,7 +252,7 @@ fn right_takes_the_offer_into_the_draft_without_sending() {
         wire.reply(&submit, json!({"event":{}}));
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("run the tests");
     terminal.raw(b"\x1b[C");
     settle.recv_timeout(PATIENCE).unwrap();
@@ -276,7 +275,7 @@ fn tab_takes_the_offer_in_scrollback() {
         responds(wire, "turn-1", "accept");
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("run the tests");
     terminal.raw(b"\t");
     terminal.raw(b"\x03");
@@ -303,7 +302,7 @@ fn tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer() {
     let mut command = home.command();
     command.arg("--fullscreen");
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("run the tests");
     terminal.raw(b"\t");
     settle.recv_timeout(PATIENCE).unwrap();
@@ -329,7 +328,7 @@ fn enter_on_an_empty_composer_leaves_the_offer() {
         responds(wire, "turn-1", "accept");
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("run the tests");
     terminal.raw(b"\r");
     settle.recv_timeout(PATIENCE).unwrap();
@@ -357,7 +356,7 @@ fn escape_and_an_edit_withdraw_the_offer() {
         wire.reply(&submit, json!({"event":{}}));
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("run the tests");
     terminal.raw(b"\x1b");
     terminal.until("check the logs");
@@ -383,7 +382,7 @@ fn a_narrow_terminal_truncates_the_offer() {
     let mut command = home.command();
     command.arg("--scrollback");
     sized(&mut command, 30, 24);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("run the tests and co…");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
@@ -409,7 +408,7 @@ fn the_pause_is_announced_once_per_session() {
         settled.send(()).unwrap();
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("Suggestions are paused in this session");
     settle.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"/exit\r");
@@ -443,7 +442,7 @@ fn settings_shows_no_suggestion_row_without_the_methods() {
     let mut command = home.command();
     command.arg("--scrollback");
     sized(&mut command, 100, 40);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/settings\r");
     arm.send(()).unwrap();
@@ -491,7 +490,7 @@ fn settings_toggles_the_switch_through_the_daemon() {
     let mut command = home.command();
     command.arg("--scrollback");
     sized(&mut command, 100, 40);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/settings\r");
     // The row shows the value the daemon reported; pressing before it is

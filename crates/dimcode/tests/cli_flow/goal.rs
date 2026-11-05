@@ -445,7 +445,6 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.methods"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let table = wire.read("session.methods");
@@ -497,7 +496,7 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
     let mut command = home.command();
     command.arg("--scrollback");
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("⏵⏵ Workspace write");
     terminal.until("test / model");
 
@@ -539,7 +538,6 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.methods"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let table = wire.read("session.methods");
@@ -606,7 +604,7 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
     });
     let mut command = home.command();
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
 
     terminal.write(b"/goal Ship it\r");
@@ -641,7 +639,6 @@ fn tui_goal_reads_the_line_before_it_picks_set_or_edit() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.methods"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let table = wire.read("session.methods");
@@ -692,7 +689,7 @@ fn tui_goal_reads_the_line_before_it_picks_set_or_edit() {
     });
     let mut command = home.command();
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
 
     terminal.write(b"/lines\r");
@@ -723,7 +720,6 @@ fn tui_goal_reports_a_failed_read_and_sends_nothing() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.methods"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let table = wire.read("session.methods");
@@ -759,7 +755,7 @@ fn tui_goal_reports_a_failed_read_and_sends_nothing() {
     });
     let mut command = home.command();
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
 
     terminal.write(b"/lines\r");
@@ -793,7 +789,6 @@ fn tui_goal_during_the_initial_history_read_opens_no_second_pager() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.methods"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let table = wire.read("session.methods");
@@ -840,7 +835,7 @@ fn tui_goal_during_the_initial_history_read_opens_no_second_pager() {
     });
     let mut command = home.command();
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
 
     terminal.write(b"/goal New objective\r");

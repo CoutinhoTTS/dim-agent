@@ -26,15 +26,6 @@ use crate::ui::{
 pub struct Connection(Mutex<Option<Client>>);
 
 impl Connection {
-    /// Whether the connected daemon advertises `method` in `hello`.
-    pub fn offers(&self, method: &str) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .is_some_and(|client| client.supports(&[method]))
-    }
-
     pub fn take(&self) -> Option<Client> {
         self.0
             .lock()
@@ -77,10 +68,12 @@ impl Plugin for DaemonLink {
 /// connection) and the render thread (`ui::tui::run`). How the interface
 /// ended goes to the composition root through `leave`.
 pub struct Tui {
+    pub root: Ctx,
     pub env: ui::Env,
     pub options: Options,
     /// Taken by the load; the render thread sends the result once.
     pub leave: Mutex<Option<oneshot::Sender<Leave>>>,
+    pub leaf_end: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 impl Plugin for Tui {
@@ -107,7 +100,21 @@ impl Plugin for Tui {
                 rutis::Error::from(ErrorKind::PluginFailed("Tui was loaded twice".into()))
             })?;
         let language = ui::i18n::interface_locale(&self.options.home).code();
-        let host = SessionHost::start(self.options.clone(), client, language);
+        let leaf_end = self
+            .leaf_end
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed("Tui was loaded twice".into()))
+            })?;
+        let host = SessionHost::start(
+            self.options.clone(),
+            client,
+            language,
+            self.root.clone(),
+            leaf_end,
+        );
         let env = self.env.clone();
         let render = std::thread::Builder::new()
             .name("dim-tui".into())
