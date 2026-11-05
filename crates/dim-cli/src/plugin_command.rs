@@ -111,7 +111,55 @@ pub async fn run(client: &mut Client, method: &str, params: Value) -> Result<i32
     } else {
         println!("{}", summary(method, &result));
     }
+    if method == "plugin.install" {
+        report_unrunnable_hooks(client, &result).await?;
+    }
     Ok(0)
+}
+
+/// After a successful `plugin.install`, reads `hooks.catalog` and prints
+/// the installed plugin's hook handlers whose state is not `ok` — the
+/// events and handler kinds Dim does not run — with one line pointing to
+/// `Hooks.md` Appendix G. A daemon without the `hooks.catalog` method, or
+/// a profile without Hooks, reports nothing.
+async fn report_unrunnable_hooks(client: &mut Client, result: &Value) -> Result<()> {
+    let Some(id) = result["id"].as_str() else {
+        return Ok(());
+    };
+    let request = client.send("hooks.catalog", json!({})).await?;
+    let catalog = loop {
+        break match client.next().await? {
+            Message::Response {
+                id: received,
+                result,
+            } if received == request => match result {
+                Ok(catalog) => catalog,
+                Err(_) => return Ok(()),
+            },
+            _ => continue,
+        };
+    };
+    let source = format!("plugin:{id}");
+    let mut lines = Vec::new();
+    for entry in catalog["hooks"].as_array().into_iter().flatten() {
+        if entry["source"].as_str() == Some(source.as_str())
+            && entry["state"].as_str() != Some("ok")
+        {
+            lines.push(format!(
+                "  {} {}",
+                text(&entry["event"]),
+                text(&entry["state"])
+            ));
+        }
+    }
+    if !lines.is_empty() {
+        println!("Hook handlers that will not run:");
+        for line in lines {
+            println!("{line}");
+        }
+        println!("See Hooks.md Appendix G for the events Dim runs and the differences.");
+    }
+    Ok(())
 }
 
 fn text(value: &Value) -> String {

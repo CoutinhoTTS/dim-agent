@@ -612,6 +612,7 @@ Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `writ
 | 项目信任 | Codex：哈希绑定信任与 `/hooks` 审查；Claude：交互会话的工作区信任对话框列出文件夹的设置将会启用的 Hook，`claude -p` 与 SDK 运行从不显示它 | 在用户启用工作区之前停用；没有哈希；之后的编辑生效（ADR 003 D4） |
 | `disableAllHooks` | Claude：最高优先级的文件胜出；项目的 `false` 覆盖用户的 `true` | 只有用户文档 |
 | 处理器类型与字段 | `command`、`http`、`mcp_tool`、`prompt`、`agent`；`args`、`if` | 只有 `command`；`args`/`if` 处理器不运行 |
+| 安装报告 | 安装插件时对它的处理器保持沉默 | `dimcode plugin install` 打印所装插件中 state 不是 `ok` 的处理器——不运行的 Dim 事件（G.1）和不支持的处理器种类——读取现有的 `hooks.catalog`，并附一行指向本附录 |
 | 超时 | Claude：600 秒（`UserPromptSubmit` 为 30 秒）；Codex：600 秒 | 同 Claude |
 | stdin | `transcript_path`；`permission_mode`（`default`、`plan`、`acceptEdits`、`bypassPermissions` 等）；`tool_name` 用各产品的名称 | `transcript_path` 由 `dimcode export` 读取 Session 取代（A.3）；`permission_mode` 为 `read-only`、`workspace-write` 或 `full-access`；`tool_name` 与 `tool_input` 是 Dim 的（G.2），所以 MCP 工具的 `tool_name` 是它的 Dim 名称，不是 `mcp__<server>__<tool>` |
 | 环境 | `CLAUDE_PROJECT_DIR`、`CLAUDE_PLUGIN_ROOT` | `DIM_PROJECT_DIR`、`DIMCODE_HOME`；请替换粘贴命令中的 `$CLAUDE_PROJECT_DIR`。Dim 不设置 `CLAUDE_PLUGIN_ROOT` 与 `GROK_PLUGIN_ROOT`，引用它们的粘贴命令无法解析；插件以 `$DIM_PLUGIN_ROOT` 提供 Dim 形式 |
