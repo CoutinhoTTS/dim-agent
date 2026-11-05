@@ -16,7 +16,7 @@ use dim_agent_capabilities::prompt_suggestion;
 use dim_agent_capabilities::timeline_tree::BranchToolConfig;
 use dim_agent_capabilities::workspace_tools::WorkspaceToolsConfig;
 use dim_agent_runtime::testing::branch_events;
-use dim_agent_types::{EventKind, MessageContent, MessagePart, ModelRequest, Role};
+use dim_agent_types::{EventKind, Message, MessageContent, MessagePart, ModelRequest, Role};
 use std::sync::Mutex;
 
 #[derive(Clone)]
@@ -770,27 +770,26 @@ async fn a_suggestion_reuses_the_turn_request_and_changes_nothing() {
             })
             .expect("another model call")
     };
-    assert!(
-        !last.messages.iter().any(|message| {
-            matches!(&message.content, MessageContent::Text(text) if text == &instruction)
-        }),
-        "the suggestion never entered history"
-    );
-    let next_inputs = last.messages[prefix + 1..]
-        .iter()
-        .filter(|message| {
-            !matches!(&message.content, MessageContent::Text(text)
-                if message.role == Role::User
-                    && text.starts_with("<dim-state ")
-                    && text.ends_with("</dim-state>"))
-        })
-        .count();
-    assert_eq!(next_inputs, 1, "only the new input follows the assistant");
-    assert_eq!(last_text(&last).as_deref(), Some("and the next one"));
+    let conversation = |request: &ModelRequest| {
+        request
+            .messages
+            .iter()
+            .filter(|message| {
+                !matches!(&message.content, MessageContent::Text(text)
+                    if message.role == Role::User
+                        && text.starts_with("<dim-state ")
+                        && text.ends_with("</dim-state>"))
+            })
+            .map(serialized)
+            .collect::<Vec<_>>()
+    };
+    let mut expected = conversation(&call.request);
+    expected.push(serialized(&suggestion.messages[prefix]));
+    expected.push(serialized(Message::text(Role::User, "and the next one")));
     assert_eq!(
-        serialized(&last.messages[prefix]),
-        serialized(&suggestion.messages[prefix]),
-        "the completed assistant message is history's own"
+        conversation(&last),
+        expected,
+        "only the completed assistant and new input enter the conversation"
     );
     fixture.end().await;
 }
@@ -1229,6 +1228,24 @@ async fn an_invalid_reply_clears_invalid() {
     let fixture = serve_fixture(Reply::Text(String::new())).await;
     let (mut client, id) = create(&fixture, true).await;
     submit(&mut client, &id, "add a test").await;
+    let mut request = fixture
+        .model
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .expect("the turn reached the model")
+        .as_ref()
+        .clone();
+    request.messages.push(Arc::new(Message::text(
+        Role::User,
+        "<dim-state source=\"fixture\">state</dim-state>",
+    )));
+    assert_eq!(
+        prompt_suggestion::last_user_text(&request).as_deref(),
+        Some("add a test"),
+        "a trailing runtime snapshot never replaces the operator input"
+    );
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
 
