@@ -74,7 +74,8 @@ impl DynPlugin for GoalPlugin {
                         "additionalProperties":false,
                         "properties":{
                             "maxContinuations":{
-                                "type":"integer","minimum":1,"maximum":1000,"default":20
+                                "type":"integer","minimum":1,"maximum":1000,
+                                "description":"Maximum automatic continuation turns after one turn end. Omit for no limit."
                             }
                         }
                     }),

@@ -460,7 +460,8 @@ pub enum Decision {
 }
 
 /// The decision for the latest `turn/end` (A.4), over the fold as consumed.
-pub fn decide_turn_end(fold: &Fold, limit: u64) -> Option<Decision> {
+/// `limit` is the document's explicit `maxContinuations`; `None` is no limit.
+pub fn decide_turn_end(fold: &Fold, limit: Option<u64>) -> Option<Decision> {
     let end = fold.turn_end?;
     if fold.is_decided(end.sequence) || !fold.running() {
         return None;
@@ -478,7 +479,7 @@ pub fn decide_turn_end(fold: &Fold, limit: u64) -> Option<Decision> {
     if end.status != TurnStatus::Completed || fold.turn_open() || fold.pending_driving() {
         return None;
     }
-    if fold.count() as u64 >= limit {
+    if limit.is_some_and(|limit| fold.count() as u64 >= limit) {
         return Some(Decision::Pause { reason: "limit" });
     }
     Some(Decision::Continuation {
@@ -541,11 +542,11 @@ pub fn decide_conclusion(
 }
 
 /// Goal's continuation for a `continue` conclusion: C1, C5 and C6.
-pub fn decide_evaluated_continuation(fold: &Fold, limit: u64) -> Option<Decision> {
+pub fn decide_evaluated_continuation(fold: &Fold, limit: Option<u64>) -> Option<Decision> {
     if !fold.running() || fold.pending_driving() {
         return None;
     }
-    if fold.count() as u64 >= limit {
+    if limit.is_some_and(|limit| fold.count() as u64 >= limit) {
         return Some(Decision::Pause { reason: "limit" });
     }
     Some(Decision::Continuation {

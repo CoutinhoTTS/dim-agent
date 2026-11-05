@@ -278,23 +278,27 @@ pub fn report(branch: &str, status: &str, summary: &str) -> InputMessageData {
     )
 }
 
-/// Goal's own writes, each marked with the sequence that decided it.
+/// Goal's own writes, each marked with the sequence that decided it. `limit`
+/// is the explicit `maxContinuations`; the marker omits it when there is none.
 pub fn continuation(
     branch: &str,
     count: usize,
-    limit: u64,
+    limit: Option<u64>,
     after: u64,
     texts: &GoalTexts,
 ) -> InputMessageData {
+    let mut attrs = vec![
+        ("kind", "continuation".to_owned()),
+        ("count", count.to_string()),
+    ];
+    if let Some(limit) = limit {
+        attrs.push(("limit", limit.to_string()));
+    }
+    attrs.push(("after", after.to_string()));
+    attrs.push(("branch", branch.to_owned()));
     input(
         vec![Block::new(
-            vec![
-                ("kind", "continuation".to_owned()),
-                ("count", count.to_string()),
-                ("limit", limit.to_string()),
-                ("after", after.to_string()),
-                ("branch", branch.to_owned()),
-            ],
+            attrs,
             vec![branch_text(&texts.continuation, branch)],
         )],
         InputMode::Queue,
@@ -424,20 +428,23 @@ pub fn evaluated(branch: &str, op: &str, evaluation: &str, text: &str) -> InputM
 pub fn evaluated_continuation(
     branch: &str,
     count: usize,
-    limit: u64,
+    limit: Option<u64>,
     after: u64,
     evaluation: &str,
 ) -> InputMessageData {
+    let mut attrs = vec![
+        ("kind", "continuation".to_owned()),
+        ("count", count.to_string()),
+    ];
+    if let Some(limit) = limit {
+        attrs.push(("limit", limit.to_string()));
+    }
+    attrs.push(("after", after.to_string()));
+    attrs.push(("evaluation", evaluation.to_owned()));
+    attrs.push(("branch", branch.to_owned()));
     input(
         vec![Block::new(
-            vec![
-                ("kind", "continuation".to_owned()),
-                ("count", count.to_string()),
-                ("limit", limit.to_string()),
-                ("after", after.to_string()),
-                ("evaluation", evaluation.to_owned()),
-                ("branch", branch.to_owned()),
-            ],
+            attrs,
             vec![format!(
                 "An evaluator checked your report that the goal for branch {branch} is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status \"completed\" again."
             )],

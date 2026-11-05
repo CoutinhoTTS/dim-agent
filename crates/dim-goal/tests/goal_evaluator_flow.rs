@@ -32,21 +32,24 @@ async fn next_create(env: &Env, branch: &str, seen: usize) -> BranchCreateData {
 /// evaluator Goal creates for it. The evaluator clears the inherited goal on
 /// its own line, as every new line does; its parts are mounted on return.
 async fn completion_requested(env: &Env) -> (u64, BranchCreateData) {
-    completion_requested_with(env, 20).await
+    completion_requested_with(env, None).await
 }
 
 /// [`completion_requested`] under the Settings limit `limit`.
-async fn completion_requested_with(env: &Env, limit: u64) -> (u64, BranchCreateData) {
+async fn completion_requested_with(env: &Env, limit: Option<u64>) -> (u64, BranchCreateData) {
     env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
         .await
         .expect("set writes");
     let set = env.wait_for("main", r#"op="set""#).await;
     let end = env.turn("main", &[&set]);
+    let limit = limit
+        .map(|limit| format!(r#" limit="{limit}""#))
+        .unwrap_or_default();
     let continuation = env
         .wait_for(
             "main",
             &format!(
-                r#"kind="continuation" count="1" limit="{limit}" after="{}""#,
+                r#"kind="continuation" count="1"{limit} after="{}""#,
                 end.sequence
             ),
         )
@@ -129,7 +132,7 @@ async fn pursuit_1_the_judge_is_recorded_kept_by_edit_and_a_completion_is_a_requ
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, end.sequence)
     );
 
     // The completion is a request: the goal stays active and an evaluator
@@ -157,13 +160,13 @@ async fn pursuit_1_the_judge_is_recorded_kept_by_edit_and_a_completion_is_a_requ
     let next = env
         .wait_for(
             "main",
-            &format!(
-                r#"kind="continuation" count="2" limit="20" after="{}""#,
-                end2.sequence
-            ),
+            &format!(r#"kind="continuation" count="2" after="{}""#, end2.sequence),
         )
         .await;
-    assert_eq!(next.text, texts::continuation("main", 2, 20, end2.sequence));
+    assert_eq!(
+        next.text,
+        texts::continuation("main", 2, None, end2.sequence)
+    );
     assert_eq!(env.creates("main").await.len(), 1);
 
     // clear returns to the model judge.
@@ -258,13 +261,12 @@ async fn pursuit_2_7_10_a_conclusion_decides_once_from_its_own_evaluator() {
         "continue",
         "CONTINUE:\n- two tests fail: <output>\n- the changelog",
     );
-    let needle = format!(
-        r#"kind="continuation" count="2" limit="20" after="{evaluation}" evaluation="{evaluation}""#
-    );
+    let needle =
+        format!(r#"kind="continuation" count="2" after="{evaluation}" evaluation="{evaluation}""#);
     let continuation = env.wait_for("main", &needle).await;
     assert_eq!(
         continuation.text,
-        texts::evaluated_continuation("main", 2, 20, evaluation, evaluation)
+        texts::evaluated_continuation("main", 2, None, evaluation, evaluation)
     );
     env.close().await;
 
@@ -723,19 +725,18 @@ async fn pursuit_2_a_continue_conclusion_writes_one_continuation_or_pauses_at_th
         "continue",
         "CONTINUE:\n- two tests fail: <output>",
     );
-    let needle = format!(
-        r#"kind="continuation" count="2" limit="20" after="{evaluation}" evaluation="{evaluation}""#
-    );
+    let needle =
+        format!(r#"kind="continuation" count="2" after="{evaluation}" evaluation="{evaluation}""#);
     let continuation = env.wait_for("main", &needle).await;
     assert_eq!(
         continuation.text,
-        texts::evaluated_continuation("main", 2, 20, evaluation, evaluation)
+        texts::evaluated_continuation("main", 2, None, evaluation, evaluation)
     );
     env.close().await;
 
     let env = Env::start().await;
     env.set_limit(1);
-    let (evaluation, create) = completion_requested_with(&env, 1).await;
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
     write_conclusion(
         &env,
         &create.branch,

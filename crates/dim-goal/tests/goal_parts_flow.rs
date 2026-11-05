@@ -25,7 +25,7 @@ async fn goal_reads_current_settings_and_stops_decisions_on_read_failure() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 1, end.sequence)
+        texts::continuation("main", 1, Some(1), end.sequence)
     );
     assert_eq!(
         env.writes("main").await.len(),
@@ -143,7 +143,7 @@ async fn a_completed_turn_drives_the_continuation_and_the_limit_pauses_it() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 1, end.sequence)
+        texts::continuation("main", 1, Some(1), end.sequence)
     );
     let end = env.turn("main", &[&continuation]);
     let pause = env.wait_for("main", r#"reason="limit""#).await;
@@ -161,13 +161,93 @@ async fn a_completed_turn_drives_the_continuation_and_the_limit_pauses_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_absent_limit_continues_past_twenty_turns() {
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let mut continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    for count in 1..21 {
+        assert!(
+            !continuation.marker.contains("limit="),
+            "an absent limit writes no limit: {continuation:#?}"
+        );
+        let end = env.tool_turn("main", &[&continuation]);
+        continuation = env
+            .wait_for(
+                "main",
+                &format!(
+                    r#"kind="continuation" count="{}" after="{}""#,
+                    count + 1,
+                    end.sequence
+                ),
+            )
+            .await;
+    }
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes.len(),
+        22,
+        "the set and 21 continuations: {writes:#?}"
+    );
+    assert!(
+        writes
+            .iter()
+            .all(|block| !block.marker.contains(r#"op="pause""#)),
+        "an absent limit never pauses: {writes:#?}"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_limit_pauses_after_the_fifth_continuation_turn() {
+    let env = Env::start().await;
+    env.set_limit(5);
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let mut continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    for count in 1..5 {
+        let end = env.tool_turn("main", &[&continuation]);
+        continuation = env
+            .wait_for(
+                "main",
+                &format!(
+                    r#"kind="continuation" count="{}" limit="5" after="{}""#,
+                    count + 1,
+                    end.sequence
+                ),
+            )
+            .await;
+    }
+    let end = env.tool_turn("main", &[&continuation]);
+    let pause = env.wait_for("main", r#"reason="limit""#).await;
+    assert_eq!(
+        pause.text,
+        texts::automatic_pause(
+            "main",
+            "limit",
+            "the automatic continuation limit was reached",
+            end.sequence
+        )
+    );
+    assert_eq!(
+        env.settled("main").await.len(),
+        7,
+        "the set, five continuations and the pause"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_reopens_the_goal_and_the_count_restarts() {
     let env = Env::start().await;
     env.set_limit(2);
     let set = env.set("ship it").await;
     let end = env.turn("main", &[&set]);
     let first = env.wait_for("main", r#"kind="continuation""#).await;
-    assert_eq!(first.text, texts::continuation("main", 1, 2, end.sequence));
+    assert_eq!(
+        first.text,
+        texts::continuation("main", 1, Some(2), end.sequence)
+    );
 
     env.tool("main", json!({"status": "completed", "summary": "done"}))
         .await;
@@ -195,7 +275,7 @@ async fn set_reopens_the_goal_and_the_count_restarts() {
         .await;
     assert_eq!(
         again.text,
-        texts::continuation("main", 1, 2, end.sequence),
+        texts::continuation("main", 1, Some(2), end.sequence),
         "resume restarts the count"
     );
     env.close().await;

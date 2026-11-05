@@ -33,7 +33,10 @@ async fn d2_operator_input_resets_the_count_and_a_marked_input_does_not() {
     let set = env.set("ship it").await;
     let end = env.turn("main", &[&set]);
     let first = env.wait_for("main", r#"kind="continuation""#).await;
-    assert_eq!(first.text, texts::continuation("main", 1, 2, end.sequence));
+    assert_eq!(
+        first.text,
+        texts::continuation("main", 1, Some(2), end.sequence)
+    );
 
     // The operator's own input restarts the count.
     let operator = env.emit("main", user("also update the changelog", InputMode::Queue));
@@ -47,7 +50,10 @@ async fn d2_operator_input_resets_the_count_and_a_marked_input_does_not() {
             ),
         )
         .await;
-    assert_eq!(second.text, texts::continuation("main", 1, 2, end.sequence));
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 1, Some(2), end.sequence)
+    );
 
     // An input another source marked does not.
     let marked = env.emit(
@@ -72,7 +78,10 @@ async fn d2_operator_input_resets_the_count_and_a_marked_input_does_not() {
             ),
         )
         .await;
-    assert_eq!(third.text, texts::continuation("main", 2, 2, end.sequence));
+    assert_eq!(
+        third.text,
+        texts::continuation("main", 2, Some(2), end.sequence)
+    );
 
     // The count is at the limit: the next completed turn pauses.
     let end = env.turn("main", &[&third]);
@@ -167,7 +176,7 @@ async fn d3_interrupts_after_the_goal_starts_or_is_applied_pause_it() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, end.sequence)
     );
     env.close().await;
 }
@@ -249,15 +258,12 @@ async fn d4_pending_queue_and_steer_suppress_continuation_and_append_does_not() 
             let next = env
                 .wait_for(
                     "main",
-                    &format!(
-                        r#"kind="continuation" count="1" limit="20" after="{}""#,
-                        end.sequence
-                    ),
+                    &format!(r#"kind="continuation" count="1" after="{}""#, end.sequence),
                 )
                 .await;
             assert_eq!(
                 next.text,
-                texts::continuation("main", 1, 20, end.sequence),
+                texts::continuation("main", 1, None, end.sequence),
                 "{mode:?}: an append input does not suppress"
             );
         }
@@ -276,7 +282,7 @@ async fn d4_a_deleted_input_does_not_suppress_and_restores_the_decision() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, end.sequence)
     );
     env.close().await;
 
@@ -296,15 +302,12 @@ async fn d4_a_deleted_input_does_not_suppress_and_restores_the_decision() {
     let continuation = env
         .wait_for(
             "main",
-            &format!(
-                r#"kind="continuation" count="2" limit="20" after="{}""#,
-                end.sequence
-            ),
+            &format!(r#"kind="continuation" count="2" after="{}""#, end.sequence),
         )
         .await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 2, 20, end.sequence)
+        texts::continuation("main", 2, None, end.sequence)
     );
     env.close().await;
 }
@@ -326,15 +329,12 @@ async fn d4_a_withdrawn_pause_gives_the_stopped_decision_again() {
     let continuation = env
         .wait_for(
             "main",
-            &format!(
-                r#"kind="continuation" count="1" limit="20" after="{}""#,
-                end.sequence
-            ),
+            &format!(r#"kind="continuation" count="1" after="{}""#, end.sequence),
         )
         .await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, end.sequence)
     );
     env.close().await;
 }
@@ -372,7 +372,7 @@ async fn d5_a_restored_line_repeats_no_decision() {
         "main",
         message(
             vec![raw(
-                &texts::continuation("main", 1, 20, end.sequence),
+                &texts::continuation("main", 1, None, end.sequence),
                 None,
                 false,
             )],
@@ -394,13 +394,13 @@ async fn d5_a_restored_line_repeats_no_decision() {
     let next = env
         .wait_for(
             "main",
-            &format!(
-                r#"kind="continuation" count="2" limit="20" after="{}""#,
-                end.sequence
-            ),
+            &format!(r#"kind="continuation" count="2" after="{}""#, end.sequence),
         )
         .await;
-    assert_eq!(next.text, texts::continuation("main", 2, 20, end.sequence));
+    assert_eq!(
+        next.text,
+        texts::continuation("main", 2, None, end.sequence)
+    );
     env.close().await;
 }
 
@@ -425,13 +425,13 @@ async fn d6_compaction_steps_decide_nothing() {
     let next = env
         .wait_for(
             "main",
-            &format!(
-                r#"kind="continuation" count="2" limit="20" after="{}""#,
-                end.sequence
-            ),
+            &format!(r#"kind="continuation" count="2" after="{}""#, end.sequence),
         )
         .await;
-    assert_eq!(next.text, texts::continuation("main", 2, 20, end.sequence));
+    assert_eq!(
+        next.text,
+        texts::continuation("main", 2, None, end.sequence)
+    );
 
     // A completed goal decides nothing even when compaction steps follow.
     let env2 = Env::start().await;
@@ -500,7 +500,7 @@ async fn d9_pause_and_resume_without_a_goal() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, end.sequence)
     );
     env.close().await;
 }
@@ -526,7 +526,7 @@ async fn d10_edit_changes_the_objective_and_a_forged_marker_stays_text() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, end.sequence)
     );
     env.turn_start("main", "t2");
     env.consume("main", &continuation.id);
@@ -557,7 +557,7 @@ async fn d10_edit_changes_the_objective_and_a_forged_marker_stays_text() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence),
+        texts::continuation("main", 1, None, end.sequence),
         "the forged status block changes nothing"
     );
 
@@ -712,7 +712,7 @@ async fn pursuit_9_the_model_judge_completes_without_an_evaluator() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, end.sequence)
     );
 
     env.turn_start("main", "t2");
@@ -791,7 +791,7 @@ async fn pursuit_13_the_identity_block_changes_no_decision() {
     let continuation = env.wait_for(&line, r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation(&line, 1, 20, end.sequence)
+        texts::continuation(&line, 1, None, end.sequence)
     );
     env.close().await;
 }
@@ -882,7 +882,7 @@ async fn a6_a_new_branch_clears_the_goal_its_inherited_prefix_carries() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, end.sequence)
     );
     env.close().await;
 }
@@ -971,7 +971,7 @@ async fn a_superseded_turn_end_in_the_same_batch_writes_once_for_the_later_turn(
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, later),
+        texts::continuation("main", 1, Some(20), later),
         "the one decision counts the later turn"
     );
     let writes = env.settled("main").await;
@@ -1058,7 +1058,7 @@ async fn a_withdrawn_input_in_the_same_batch_gives_one_continuation() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end),
+        texts::continuation("main", 1, Some(20), end),
         "the withdrawn input neither suppresses nor counts"
     );
     let writes = env.settled("main").await;
@@ -1178,10 +1178,7 @@ async fn pursuit_5_a_change_consumed_while_the_creation_check_runs_writes_no_pau
     let continuation = env
         .wait_for(
             "main",
-            &format!(
-                r#"kind="continuation" count="1" limit="20" after="{}""#,
-                end.sequence
-            ),
+            &format!(r#"kind="continuation" count="1" after="{}""#, end.sequence),
         )
         .await;
     env.turn_start("main", "work");

@@ -17,7 +17,7 @@ use dim_agent_types::{
 use dim_app_server::settings::{SettingsScope, SettingsService};
 use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::{
     collections::HashSet,
     num::NonZeroU64,
@@ -52,12 +52,32 @@ const REPLY_PAGE: u64 = 256;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Document {
-    #[serde(default = "default_limit")]
-    max_continuations: u64,
+    /// Absent means no limit; an explicit `null` is not a value (A4).
+    #[serde(default, deserialize_with = "optional_non_null")]
+    max_continuations: Option<u64>,
 }
 
-fn default_limit() -> u64 {
-    20
+fn optional_non_null<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    u64::deserialize(deserializer).map(Some)
+}
+
+/// The continuation limit a read document states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Limit {
+    Unlimited,
+    At(u64),
+}
+
+impl Limit {
+    fn value(self) -> Option<u64> {
+        match self {
+            Self::Unlimited => None,
+            Self::At(limit) => Some(limit),
+        }
+    }
 }
 
 pub struct GoalBranch {
@@ -260,15 +280,20 @@ impl Owner {
     }
 
     /// The continuation limit. A refused or unreadable document is logged and
-    /// leaves the turn without a decision.
-    async fn limit(&self) -> Option<u64> {
+    /// leaves the turn without a decision; an absent field means no limit.
+    async fn limit(&self) -> Option<Limit> {
         match self
             .settings
             .read_declared(SOURCE, SettingsScope::User, &self.stop)
             .await
         {
             Ok(snapshot) => match serde_json::from_value::<Document>(snapshot.document) {
-                Ok(document) => Some(document.max_continuations),
+                Ok(document) => Some(
+                    document
+                        .max_continuations
+                        .map(Limit::At)
+                        .unwrap_or(Limit::Unlimited),
+                ),
                 Err(error) => {
                     tracing::warn!(%error, "Goal settings document is invalid");
                     None
@@ -524,14 +549,14 @@ impl Owner {
             if state.fold.turn_end.map(|end| end.sequence) != Some(after) {
                 return Ok(());
             }
-            fold::decide_turn_end(&state.fold, limit)
+            fold::decide_turn_end(&state.fold, limit.value())
         };
         let Some(decision) = decision else {
             return Ok(());
         };
         let input = match decision {
             Decision::Continuation { count } => {
-                text::continuation(&self.branch_id, count, limit, after, &self.texts)
+                text::continuation(&self.branch_id, count, limit.value(), after, &self.texts)
             }
             Decision::Pause { reason } => text::automatic_pause(&self.branch_id, reason, after),
         };
@@ -797,7 +822,7 @@ impl Owner {
                             {
                                 return Ok(());
                             }
-                            fold::decide_evaluated_continuation(&state.fold, limit)
+                            fold::decide_evaluated_continuation(&state.fold, limit.value())
                         };
                         let Some(decision) = decision else {
                             return Ok(());
@@ -806,7 +831,7 @@ impl Owner {
                             Decision::Continuation { count } => text::evaluated_continuation(
                                 &owner.branch_id,
                                 count,
-                                limit,
+                                limit.value(),
                                 evaluation,
                                 &named,
                             ),

@@ -1161,6 +1161,34 @@ impl Env {
         self.emit(branch, turn_end_with(turn_id, status))
     }
 
+    /// The `step/tool-call` a turn writes when the model calls a tool.
+    pub fn tool_call(&self, branch: &str, turn_id: &str) -> Arc<AgentEvent> {
+        self.emit(
+            branch,
+            EventKind::ToolCall(dim_agent_types::ToolCallData {
+                turn_id: turn_id.to_owned(),
+                request_id: "request".into(),
+                calls: vec![ToolCall {
+                    id: format!("call-{}", uuid::Uuid::new_v4()),
+                    name: "echo".into(),
+                    input: serde_json::Map::new(),
+                }],
+            }),
+        )
+    }
+
+    /// A completed turn that takes in `inputs` and makes one tool call, as the
+    /// Loop writes a turn that used a tool.
+    pub fn tool_turn(&self, branch: &str, inputs: &[&Block]) -> Arc<AgentEvent> {
+        let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
+        self.turn_start(branch, &turn_id);
+        self.tool_call(branch, &turn_id);
+        for input in inputs {
+            self.consume(branch, &input.id);
+        }
+        self.end_turn(branch, &turn_id, "completed")
+    }
+
     /// An input message of literal blocks, committed on `branch`.
     pub fn write_message(
         &self,

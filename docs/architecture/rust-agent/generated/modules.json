@@ -42559,6 +42559,10 @@
       "path": "Wire::deserialize"
     },
     {
+      "module": "dim_goal::branch",
+      "path": "D::Error"
+    },
+    {
       "module": "dim_migration::accounts",
       "path": "char::is_control"
     },

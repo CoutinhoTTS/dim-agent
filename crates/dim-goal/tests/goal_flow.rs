@@ -25,9 +25,12 @@ fn set_blocks(objective: &str) -> (String, String) {
     )
 }
 
-fn continuation_text(count: usize, limit: u64, after: u64) -> String {
+fn continuation_text(count: usize, limit: Option<u64>, after: u64) -> String {
+    let limit = limit
+        .map(|limit| format!(" limit=\"{limit}\""))
+        .unwrap_or_default();
     format!(
-        "<dim-goal kind=\"continuation\" count=\"{count}\" limit=\"{limit}\" after=\"{after}\" branch=\"main\">\n\
+        "<dim-goal kind=\"continuation\" count=\"{count}\"{limit} after=\"{after}\" branch=\"main\">\n\
          Continue working toward the active goal for branch main. If it is completed or blocked, call goal_update. If you are on another line of this Session, the goal belongs to branch main: do not call goal_update for it.\n\
          </dim-goal>"
     )
@@ -87,7 +90,7 @@ async fn a_completed_turn_drives_the_continuation_and_the_limit_pauses_it() {
     let continuation = fixture.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        continuation_text(1, 1, ends[0]),
+        continuation_text(1, Some(1), ends[0]),
         "the continuation counts the turn that drove it"
     );
     assert_eq!(continuation.mode, InputMode::Queue);
