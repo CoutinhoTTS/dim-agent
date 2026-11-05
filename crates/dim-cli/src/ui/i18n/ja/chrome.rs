@@ -555,6 +555,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "固定された入力",
         "digest" => "ダイジェスト",
         "summary" => "要約",
+        "The first message was not sent; your new draft was kept." => {
+            "最初のメッセージは送信されませんでした。新しい下書きは保持されています。"
+        }
         _ => return None,
     })
 }

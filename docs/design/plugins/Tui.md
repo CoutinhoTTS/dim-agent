@@ -57,7 +57,7 @@ Nothing in the client tree is Timeline state. The daemon owns every Session fact
 ```text
 client process                                      daemon process
 ──────────────                                      ──────────────
-parse args; stdin is a terminal; action Chat/Tui
+parse args; stdin is a terminal; action Chat/Tui (Tui may carry -p TEXT)
 Ctx::root()  ── client tree
 root.plugin(DaemonLink{options})
   apply:
@@ -115,6 +115,17 @@ this attachment, not a separate user command. A daemon without `ui.leaf.2`
 keeps the direct TUI. Both paths defer ordinary Session creation until the
 first message; startup overrides are retained in this invocation until then.
 Closing Home without sending a message leaves no Session in the catalog.
+
+`dimcode tui -p TEXT` carries the first message: the client reads it once
+from the parsed options, together with the images already read and scaled at
+the CLI boundary, and hands it to the interface as one value on its
+environment. The interface submits it once, after the first frame, through its
+own composer, so it takes the same path as a typed message (an exact command
+runs, unmatched `/` text is input, `!`/`!!` is shell mode, the queue/steer
+rule applies) in both terminal modes. A message no Session can take stays in
+the composer as an unsent draft rather than being discarded, unless a new
+draft already holds the composer: that newer draft is kept and the loss of
+the first message is reported. The interface does not exit for that case.
 
 ### 3.2 `/web` from the TUI: daemon-owned switch
 

@@ -1286,7 +1286,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 
 | Entry | Behavior |
 | --- | --- |
-| `dimcode tui` | Open the existing interactive scrollback client. |
+| `dimcode tui [-p TEXT] [--image PATH ...]` | Open the existing interactive scrollback client; `-p` sends TEXT as its first message ([starting with a first message](#starting-with-a-first-message)). |
 | `dimcode acp [--agent ID]` | Serve ACP over stdin/stdout through the client-host [AcpGateway](plugins/AcpGateway.md); lifecycle and unsupported features follow its contract. |
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | Run text and/or local images and exit; read redirected stdin when `-p` is absent. |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | Continue the named persisted Session with text and/or images. |
@@ -1373,11 +1373,41 @@ executable is an error. A path that does not exist, a program that exits
 before serving, or one that does not start serving in time is reported with the
 same requirement, unless it left a [startup note](#daemon-startup-failure).
 Existing login/account/logout, models, MCP and daemon commands remain
-available. Existing `--prompt`, piped stdin and `--resume` calls retain their
-behavior; `exec resume` also accepts the same existing global options.
-Supplying the Session twice or the prompt twice is an argument error. `--json`
-serves `exec` and `migration`, and `tui` requires a terminal. Help/version and
-argument errors do not start the daemon.
+available. Existing piped stdin and `--resume` calls retain their behavior, and
+`--prompt` keeps its one-shot meaning for `exec` and the bare chat; `tui -p`
+sends the first message
+([starting with a first message](#starting-with-a-first-message)).
+`exec resume` also accepts the same existing global options. Supplying the Session twice or the prompt twice is an
+argument error. `--json` serves `exec` and `migration`, and `tui` requires a
+terminal. Help/version and argument errors do not start the daemon.
+
+### Starting with a first message
+
+`dimcode tui -p TEXT` opens the interactive terminal UI and sends `TEXT` as its
+first message. The command decides the lifetime: `exec -p` and the bare chat's
+`-p` still run one prompt and exit. `--resume SESSION_ID -p TEXT` attaches to
+that Session and sends the message there. `--image PATH` is accepted with `tui`
+only together with `-p`; the images are read and scaled at the CLI boundary like
+`exec`'s and attached to the first message in argument order (text first). Without
+`-p` the flag keeps its `--image requires exec or tui -p` refusal. `--json` stays refused
+for `tui`, and `--no-tui` keeps the one-shot line-client behavior.
+
+The message is submitted once, after the first frame is drawn, through the same
+composer a typed message uses, in both terminal UI modes: the text becomes the
+draft and the images its tokens, then the composer's submit applies the command
+palette rules (an exact `/name` or alias runs that command, and unmatched `/`
+text is ordinary input), `!`/`!!` shell mode, the line draft, and the
+queue/steer rule. Nothing re-parses the command line after startup.
+
+A message no Session can take — no model, not signed in, or a Session that fails
+to start — leaves the text and its image tokens in the composer as an unsent
+draft beside the Home/sign-in hint or the startup error, instead of being
+discarded. If the user has started another draft in the meantime, that newer
+draft is kept and the interface reports that the first message was not sent
+instead of restoring it. The interface does not exit for that case. Without
+`-p` the existing startup rule stands: a resumed Session that cannot start
+shows the error and exits nonzero, and Home remains available after a failed
+creation.
 
 ### Daemon startup failure
 

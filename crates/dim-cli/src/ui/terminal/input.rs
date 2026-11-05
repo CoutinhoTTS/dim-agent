@@ -69,6 +69,9 @@ pub enum InputEvent {
     Mouse(MouseEvent),
     /// The terminal answering a clipboard read (OSC 5522).
     Clipboard(crate::clipboard::terminal::Reply),
+    /// The invocation's first message is due. The loop delivers it once the
+    /// first frame is drawn; the App submits it like a typed message.
+    Submit,
 }
 
 /// What the mouse did. Only the left button selects; other buttons are

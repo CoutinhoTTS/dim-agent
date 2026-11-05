@@ -515,6 +515,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "釘住的輸入",
         "digest" => "清單",
         "summary" => "摘要",
+        "The first message was not sent; your new draft was kept." => {
+            "首條訊息未傳送；已保留你的新草稿。"
+        }
         _ => return None,
     })
 }
