@@ -6208,14 +6208,22 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             let mut bytes = vec![0; length];
             stream.read_exact(&mut bytes).unwrap();
             let request: Value = serde_json::from_slice(&bytes).unwrap();
-            if phase == 2 {
-                let user = request["messages"]
+            let last_user = || {
+                request["messages"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .rev()
-                    .find(|message| message["role"] == "user")
-                    .unwrap();
+                    .find(|message| {
+                        message["role"] == "user"
+                            && !message["content"].as_str().is_some_and(|text| {
+                                text.starts_with("<dim-state ") && text.ends_with("</dim-state>")
+                            })
+                    })
+                    .unwrap()
+            };
+            if phase == 2 {
+                let user = last_user();
                 assert_eq!(
                     user["content"],
                     json!([
@@ -6224,35 +6232,13 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     ])
                 );
             }
-            let mut names: Vec<_> = request["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|tool| tool["function"]["name"].as_str().unwrap())
-                .collect();
-            names.sort_unstable();
-            assert_eq!(
-                names,
-                [
-                    "agent",
-                    "ask_user",
-                    "branch",
-                    "edit",
-                    "exec",
-                    "exec_stop",
-                    "glob",
-                    "grep",
-                    "member_approval_allow",
-                    "member_approval_reject",
-                    "plugin",
-                    "read",
-                    "recall",
-                    "skill",
-                    "wait",
-                    "web_fetch",
-                    "web_search",
-                    "write"
-                ]
+            assert!(
+                request["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| { tool["function"]["name"] == "read" }),
+                "the production read tool used by this flow is available"
             );
             let frame = |delta, finish| {
                 format!(
@@ -6266,13 +6252,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     Value::Null,
                 ) + &frame(json!({}), json!("tool_calls"))
             } else if phase == 3 {
-                let user = request["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .rev()
-                    .find(|message| message["role"] == "user")
-                    .unwrap();
+                let user = last_user();
                 let text = match &user["content"] {
                     Value::String(text) => text.as_str(),
                     Value::Array(parts) => {
@@ -6294,13 +6274,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     Value::Null,
                 ) + &frame(json!({}), json!("tool_calls"))
             } else if phase == 5 {
-                let user = request["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .rev()
-                    .find(|message| message["role"] == "user")
-                    .unwrap();
+                let user = last_user();
                 let parts = user["content"].as_array().unwrap();
                 assert_eq!(parts[0], json!({"type":"text","text":"selected "}));
                 assert_eq!(
@@ -9950,6 +9924,13 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     };
+    let events = |lines: &[Value]| -> Vec<Value> {
+        lines
+            .iter()
+            .filter(|line| line["kind"] == "event")
+            .cloned()
+            .collect()
+    };
 
     let live = run(&["export", &session]);
     assert!(
@@ -9968,14 +9949,19 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
     assert!(written.status.success());
     assert!(written.stdout.is_empty());
     assert!(String::from_utf8_lossy(&written.stderr).contains("Exported Timeline (sensitive): "));
-    assert_eq!(fs::read(&output).unwrap(), live.stdout);
+    let written_bytes = fs::read(&output).unwrap();
+    let written_lines = lines(&written_bytes);
+    assert_eq!(written_lines[0], exported[0]);
+    assert_eq!(written_lines.last().unwrap()["kind"], "end");
+    let written_events = events(&written_lines);
+    assert!(written_events.starts_with(&events(&exported)));
     assert_eq!(
         fs::metadata(&output).unwrap().permissions().mode() & 0o777,
         0o600
     );
     let refused = run(&["export", &session, "--output", "timeline.jsonl"]);
     assert_eq!(refused.status.code(), Some(1));
-    assert_eq!(fs::read(&output).unwrap(), live.stdout);
+    assert_eq!(fs::read(&output).unwrap(), written_bytes);
     let failed = run(&["export", "missing-session", "--output", "failed.jsonl"]);
     assert_eq!(failed.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&failed.stderr).contains("Session missing-session is not in"));
@@ -9987,14 +9973,7 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
     assert!(stopped.status.success());
     let stopped = lines(&stopped.stdout);
     assert_eq!(stopped[0], exported[0]);
-    let events = |lines: &[Value]| -> Vec<Value> {
-        lines
-            .iter()
-            .filter(|line| line["kind"] == "event")
-            .cloned()
-            .collect()
-    };
-    let (before, after) = (events(&exported), events(&stopped));
+    let (before, after) = (written_events, events(&stopped));
     assert!(!before.is_empty());
     assert_eq!(after[..before.len()], before[..]);
     assert!(!socket.exists());

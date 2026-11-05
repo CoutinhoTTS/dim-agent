@@ -18,9 +18,11 @@ async fn both_transports_encode_the_v1_branch_create_boundary_live() {
             .unwrap();
         session.idle("main").await.unwrap();
         session.stop("main", "control cursor".into()).await.unwrap();
-        let high = session.sequence("main").unwrap();
         let initial = live.rpc("session.attach", json!({"sessionId":id})).await;
         assert_eq!(initial["result"]["sessionId"], id);
+        let live_after = session.sequence("main").unwrap();
+        session.idle("main").await.unwrap();
+        let high = session.sequence("main").unwrap();
         let child = session
             .branch(
                 "main".into(),
@@ -50,10 +52,13 @@ async fn both_transports_encode_the_v1_branch_create_boundary_live() {
             .filter(|event| event.sequence <= create.sequence)
             .cloned()
             .collect();
-        let notices = receive_events_through(&mut live, create.sequence).await;
-        assert_eq!(notices, v1_events(&through_create, high));
-        assert!(notices[0]["data"].get("at").is_none());
-        assert_eq!(notices[0]["sequence"], create.sequence);
+        let notices = receive_events_through(&mut live, live_after, create.sequence).await;
+        assert_eq!(notices, v1_events(&through_create, live_after));
+        let boundary = notices
+            .iter()
+            .find(|notice| notice["sequence"] == create.sequence)
+            .expect("the live stream includes the branch creation");
+        assert!(boundary["data"].get("at").is_none());
         let local = branch_events(&session, &child, ..).await.unwrap();
         assert!(
             matches!(&local[0].kind, EventKind::BranchStart(data) if data.create_event == Some(create.sequence))
