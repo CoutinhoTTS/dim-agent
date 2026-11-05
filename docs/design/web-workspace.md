@@ -364,8 +364,8 @@ optional account feature must not prevent identity or usage from loading.
 | Modality | Operation defaults for image generation, editing, enhancement and understanding from `modality.capabilities`, written with `modality.configure` and its snapshot revision; understanding's Session consumer is a requirement on Agent/Prompt |
 | MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal and user↔project scope migration; secret fields stay omitted from edits and a move never writes them into `.mcp.json` |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
-| Skills | List, enable/disable, source installation, update and confirmed removal |
-| Permissions | Default execution/network settings and user-scope command-rule management (exact/prefix allow/deny; project scope, patterns and per-rule ask are rejected, [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds)), with confirmation for privilege increases. The Execution card reads `host.execution.backend` and shows the owner's sandbox-backend reason when the host has none; the browser never infers the platform |
+| Skills | Manage already installed skills: search, inspect details, enable/disable and reload discovery; choose user scope or an existing workspace without entering filesystem paths. Source installation and plugin-package controls are not part of this page |
+| Permissions | Process isolation and user-scope command-rule management (exact/prefix allow/deny; project scope, patterns and per-rule ask are rejected, [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds)), with confirmation for privilege increases. The isolation card follows [the CLI isolation choices](cli-commands.md#process-isolation-settings), reads `host.execution.backend` and shows the owner's reason when the host has none; the browser never infers the platform |
 | Scheduled tasks | List, create/edit, pause/resume, run now, recent runs and confirmed deletion through the [Scheduler management contract](plugins/Scheduler.md#a3-management-methods); no raw Settings document access |
 | Archived sessions | Search, restore/open and confirmed permanent deletion |
 | Diagnostics | Safe version, protocol, connection and metadata with refresh, the model-request recording switch, and the start-up rule for process logs instead of a log-mode control ([logging controls](#diagnostics-the-legacy-logging-controls)) |
@@ -373,6 +373,61 @@ optional account feature must not prevent identity or usage from loading.
 Use the current owner's semantics when old terminology no longer describes the
 system, and document the mapping. Reuse existing Settings, MCP, PluginManager,
 Skills and Session owners rather than adding parallel browser-only state.
+
+#### Settings scope
+
+Scope selectors offer the user configuration and known Session workspaces, with
+the host path identifying each workspace. They do not ask for browser-local paths.
+Agent's scope applies only to the default model for new Sessions; collaboration
+policy and the command shell remain user-wide. MCP's workspace adds that project's
+servers to the catalog, not a working-directory override for any server. Skills'
+workspace includes project discovery. Saved sessions instead has an all-workspace
+filter; it never changes configuration. Switching configuration scope confirms
+discarding unsaved edits, and a cancelled or failed load keeps the previous scope.
+
+Process isolation is one choice: Off, Sandboxed without network, or Sandboxed
+with network. Off preserves the stored, inactive network flag; confirmed reset
+writes the owner's defaults (both flags off). Writes use the revision actually
+displayed; a conflict preserves the draft and requires an explicit reload rather
+than automatically retrying. Unsupported server methods are errors, not inferred
+defaults. The setting affects new host commands, not existing processes or
+persistent shells, and does not change a Session's permission preset.
+
+#### Skills and questions interaction
+
+The Skills page reads `skills.catalog`, changes individual skills through
+`skills.set_enabled`, and rescans through `skills.refresh` before reading the
+catalog again. Scope selection uses the existing Session workspace directory;
+without a workspace it shows user skills. A row shows its name, description and
+enabled or shadowed state. Paths and declared tools are collapsed details, not
+editable directory settings. Search and scope survive a reload; discovery issues,
+failed writes and empty or unmatched lists remain distinguishable. Installation
+APIs stay with the Skills owner; package installation and activation stay on Plugins.
+
+A waiting `ask_user` call shows one question at a time, with question steps,
+Previous/Next controls and a final review for multi-question calls. Changing steps
+preserves selections and custom text. Single and multiple choices both require an
+explicit Next action; Enter in the answer field advances rather than submitting
+an incomplete call. Only the final Send answers action submits the entire call
+through `session.question.respond`. Decline still declines the whole call. Rejected
+answers preserve the draft; successful answers stay disabled until their result
+settles. Long content scrolls inside the current question, keeping navigation
+visible. The same prompt serves main and child lines.
+
+```text
+ Skills                         [Reload skills]
+ [User skills / workspace]      [Search skills]
+ name                 Enabled       [Disable]
+ description
+ > Details
+
+ Dim has a question              Awaiting answer
+ [1. Database] [2. Features] [Review]
+ Which database?
+ ( ) SQLite   ( ) PostgreSQL
+ [Type your own answer]
+ [Decline]                  [Previous] [Next]
+```
 
 #### Scheduled tasks interaction
 
@@ -679,7 +734,6 @@ defaults, archive flags or copied credentials cannot substitute for owner behavi
 | --- | --- | --- |
 | [Modality](plugins/Modality.md) | Model capability declarations do not select or execute image generation, editing, enhancement or understanding tasks | Typed per-operation defaults with owner-computed options, effective automatic resolution and actionable reasons; `modality.capabilities`/`modality.configure` consumed by task dispatch; save persists before success; exactly those two methods admitted on the Web entry. Understanding's Session consumer is the Agent/Prompt requirement in Modality §9.4. |
 | [Session catalog](appserver/session-catalog.md) | A saved Session is not necessarily archived; reopening it cannot represent restore | Durable archive classification with search, restore and confirmed deletion; commit classification before publishing the new catalog view |
-| Skills | Plugin packages do not cover manifest-free skill repositories or selective installation | Owner-managed repository preview, selected installation and loose-skill update/removal, with explicit overwrite confirmation and catalog publication after persistence |
 | MCP | User and project sources have independent revisions, and safe projections deliberately hide credentials | `mcp.move` reads the complete entry internally, checks both source revisions, keeps withheld values in the user-scope `mcp-secrets` overlay instead of `.mcp.json`, starts a project destination disabled, and reports a partial move as an error recovered by direction (remove destination and retry, or remove source); exactly `mcp.move` is admitted for the control. |
 
 Legacy permission patterns and tracing behavior do not override the current

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue"
+import { RefreshCw } from "lucide-vue-next"
 import { useSettingsText } from "../../i18n/settings-general"
 import { readModalitySnapshot, type ModalityOperation, type ModalitySnapshot } from "../../rpc/general-settings"
 import type { ModelId } from "../../rpc/protocol"
@@ -104,6 +105,7 @@ onMounted(load)
 <template>
   <article class="settings-page">
     <header><h2 data-route-heading tabindex="-1">{{ s('Modality', '多模态') }}</h2><p>{{ s('Choose the default model for each image operation. Clearing a default restores automatic resolution; an unavailable default is never replaced by another model.', '为每个图像操作选择默认模型。清除默认值即恢复自动解析；不可用的默认值不会被其他模型替代。') }}</p></header>
+    <button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy" @click="load"><RefreshCw :size="14" aria-hidden="true" />{{ s('Reload models', '重新加载模型') }}</button>
     <GeneralSettingsStatus :busy="busy" :error="error" :saved="saved && !dirty" @reload="load" />
     <form v-if="snapshot" class="settings-form" @submit.prevent="save">
       <section v-for="row in rows" :key="row.operation" class="settings-card">
@@ -111,7 +113,7 @@ onMounted(load)
         <p v-if="row.reasons.length" class="ui-banner settings-banner" data-tone="warning">{{ reasons(row) }}</p>
         <label>
           <span>{{ s('Default model', '默认模型') }}</span>
-          <select :value="drafts[row.key!] ?? ''" class="ui-field" data-size="md" :disabled="busy || conflict || !connection.supports('modality.configure')" @change="choose(row.key!, $event)">
+          <select :value="drafts[row.key!] ?? ''" class="ui-field" data-size="md" :aria-label="`${title(row.operation)}: ${s('Default model', '默认模型')}`" :disabled="busy || conflict || !connection.supports('modality.configure')" @change="choose(row.key!, $event)">
             <option value="">{{ s('Automatic', '自动') }}</option>
             <option v-for="option in row.options" :key="keyOf(option)" :value="keyOf(option)" :disabled="!option.available">{{ label(option) }}{{ option.available ? '' : ` (${s('unavailable', '不可用')})` }}</option>
           </select>

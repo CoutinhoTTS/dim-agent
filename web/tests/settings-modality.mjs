@@ -30,7 +30,7 @@ const { default: ModalitySettings } = await import("../src/features/settings/Mod
 const { RpcError } = await import("../src/rpc/client.ts")
 const node = (type, text = "") => ({ type, text, children: [], props: {}, parent: undefined })
 const renderer = createRenderer({
-  createElement: node, createText: (text) => node("text", text), createComment: (text) => node("comment", text),
+  createElement: (type) => node(type), createText: (text) => node("text", text), createComment: (text) => node("comment", text),
   patchProp: (element, key, _, value) => { element.props[key] = value },
   setText: (element, text) => { element.text = text },
   setElementText: (element, text) => { element.text = text; element.children = [] },
@@ -150,4 +150,37 @@ test("a conflicting configure keeps the draft and asks for a reload", async () =
     assert.equal(selects(root)[1].props.disabled, true, "a conflict disables further picks until reload")
     assert.equal(save(root).props.disabled, true)
   } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsModels }
+})
+
+test("selecting and clearing defaults survive reload, while cancelling reload retains a dirty draft", async () => {
+  let current = snapshot("native:user/modality:1", [operation("generate", "modality.image.generate", { effective: effective("beta"), options: [option("alpha"), option("beta")] })])
+  const writes = []
+  const { root, app } = mount(async (method, params, read) => {
+    if (method === "modality.capabilities") return read(current)
+    assert.equal(method, "modality.configure")
+    writes.push(params)
+    current = snapshot(`native:user/modality:${writes.length + 1}`, [operation("generate", "modality.image.generate", { default: params.model ? option(params.model.modelId) : null, effective: effective(params.model?.modelId ?? "beta", params.model ? "default" : "automatic"), options: [option("alpha"), option("beta")] })])
+    return read(current)
+  })
+  const reload = () => all(root).find(el => el.type === "button" && text(el) === "Reload models")
+  try {
+    await flush()
+    selects(root)[0].props.onChange({ target: { value: JSON.stringify([PROVIDER, "alpha"]) } }); await flush()
+    globalThis.window = { confirm: () => false }
+    await reload().props.onClick(); await flush()
+    assert.equal(selects(root)[0].props.value, JSON.stringify([PROVIDER, "alpha"]))
+    submit(root).props.onSubmit({ preventDefault() {} }); await flush()
+    await reload().props.onClick(); await flush()
+    assert.equal(selects(root)[0].props.value, JSON.stringify([PROVIDER, "alpha"]))
+    assert.match(text(root), /Currently effective: Fixture \/ Alpha \(configured\)/)
+    selects(root)[0].props.onChange({ target: { value: "" } }); await flush()
+    submit(root).props.onSubmit({ preventDefault() {} }); await flush()
+    await reload().props.onClick(); await flush()
+    assert.equal(selects(root)[0].props.value, "")
+    assert.match(text(root), /Currently effective: Fixture \/ Beta \(automatic\)/)
+    assert.deepEqual(writes, [
+      { expectedRevision: "native:user/modality:1", category: "image", operation: "generate", model: { providerId: PROVIDER, modelId: "alpha" } },
+      { expectedRevision: "native:user/modality:2", category: "image", operation: "generate", model: null },
+    ])
+  } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsModels; delete globalThis.window }
 })
