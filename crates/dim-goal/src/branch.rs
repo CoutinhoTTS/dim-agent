@@ -624,14 +624,9 @@ impl Owner {
             return Ok(());
         };
         let input = match decision {
-            Decision::Continuation { count, idle } => text::continuation(
-                &self.branch_id,
-                count,
-                limit,
-                idle,
-                after,
-                &self.texts,
-            ),
+            Decision::Continuation { count, idle } => {
+                text::continuation(&self.branch_id, count, limit, idle, after, &self.texts)
+            }
             Decision::Pause { reason } => text::automatic_pause(&self.branch_id, reason, after),
         };
         self.tree.input(self.branch_id.clone(), input).await?;
@@ -890,34 +885,18 @@ impl Owner {
                         if owner.stopped() {
                             return Ok(());
                         }
-                        let (end, open, progress) = {
-                            let (end, open) = {
-                                let state = owner.state.lock().unwrap();
-                                if fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                                    != Some(ConclusionAction::Continue)
-                                {
-                                    return Ok(());
-                                }
-                                (state.fold.turn_end.clone(), state.fold.open_tasks())
-                            };
-                            let Some(end) = end else {
-                                return Ok(());
-                            };
-                            let progress = if open || !end.continuation_driven {
-                                None
-                            } else if owner
-                                .turn_had_tool_call(end.turn_start, &end.turn_id)
-                                .await?
+                        let end = {
+                            let state = owner.state.lock().unwrap();
+                            if fold::decide_conclusion(&state.fold, sequence, &conclusion)
+                                != Some(ConclusionAction::Continue)
                             {
-                                Some(fold::Progress::ToolCall)
-                            } else {
-                                Some(fold::Progress::NoToolCall)
-                            };
-                            (end, open, progress)
+                                return Ok(());
+                            }
+                            state.fold.turn_end.clone()
                         };
-                        if owner.stopped() || open {
+                        let Some(end) = end else {
                             return Ok(());
-                        }
+                        };
                         let decision = {
                             let state = owner.state.lock().unwrap();
                             if fold::decide_conclusion(&state.fold, sequence, &conclusion)
@@ -927,11 +906,7 @@ impl Owner {
                             {
                                 return Ok(());
                             }
-                            fold::decide_evaluated_continuation(
-                                &state.fold,
-                                limit,
-                                progress,
-                            )
+                            fold::decide_evaluated_continuation(&state.fold, limit)
                         };
                         let Some(decision) = decision else {
                             return Ok(());

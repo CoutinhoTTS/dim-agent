@@ -55,7 +55,7 @@
 | --- | --- | --- |
 | `turn/end` N | Goal 的 C1–C4 满足（目标 active、未中断、回合 `completed`、是最新的且未决定），裁判为 `evaluator`，且该回合包含干活模型的 `completed` 块 | 取代 Goal 的续跑决定：`treeCommands.create(B, N, {prompt, source: {kind: "host", operation_id: "goal:evaluate:N"}}, cancelled)`。Goal 的 `decided` 把该 `branch/create` 算作 `N` 的决定（§3），所以重载不会再次创建 |
 | `goal:evaluate:N` 的 `branch/create-failed`，或在 `N` 的任何 `branch/create` 提交之前 `create` 抛出 | `N` 仍是当前评审 | 暂停（`evaluation_failed`），与 Goal 的暂停一样标记 `after="N"`；两者中先写出暂停的一个使 `N` 对另一个而言已被取代。已提交的创建会记录自己的结果（子分支或 `branch/create-failed`），由那个事实决定；因任务被取消而抛出时不写任何东西 |
-| 评审 `N` 的结论输入 | 是 `N` 的第一份结论，来自 `goal:evaluate:N` 的 `branch/create` 所记录的分支，且 `N` 仍是当前评审：`N` 之后没有带 key 的目标块（`set`、`edit`、`clear`、`pause`、`resume`、Goal 自己的暂停，或干活模型新的 `completed`） | `done`：评审者判定的 `completed`。`blocked`：评审者判定的 `blocked`。`continue`：Goal 的续跑决定（[Goal A.4](Goal.md#a4-续跑决策) 的 C1、C5、C6 和 C7；只有设置了 `maxContinuations` 时 C6 才生效；以及后台等待），然后写使用 Pursuit 文本的续跑，或暂停（`limit` 或 `no_progress`）；与任何回合结束时一样，有待处理的驱动输入就不续跑（C5），有后台任务仍开放时也不决策。`failed`：暂停（`evaluation_failed`） |
+| 评审 `N` 的结论输入 | 是 `N` 的第一份结论，来自 `goal:evaluate:N` 的 `branch/create` 所记录的分支，且 `N` 仍是当前评审：`N` 之后没有带 key 的目标块（`set`、`edit`、`clear`、`pause`、`resume`、Goal 自己的暂停，或干活模型新的 `completed`） | `done`：评审者判定的 `completed`。`blocked`：评审者判定的 `blocked`。`continue`：Goal 的续跑决定（[Goal A.4](Goal.md#a4-续跑决策) 的 C1、C5 和 C6；只有设置了 `maxContinuations` 时 C6 才生效；以及后台等待），然后写使用 Pursuit 文本的续跑，或暂停（`limit`）；与任何回合结束时一样，有待处理的驱动输入就不续跑（C5），有后台任务仍开放时也不决策。`failed`：暂停（`evaluation_failed`） |
 
 同一 `N` 的后续结论、来自其他分支的结论，以及已被取代的 `N` 的结论，都不做任何决定。`N` 是否仍是当前评审，是 Goal 自己按序号的折叠：工作分支上之后的任何目标变更都是更新的决定，迟到的 `DONE` 不会覆盖它。其他一切都是 Goal 的：评审者工作期间，工作分支的表现和任何 active 目标一样（用户输入、中断、暂停和续跑都按 Goal 的规则）。
 
@@ -85,7 +85,7 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 | 结论 | B，无 key | Append | `<dim-goal kind="report" result="done\|continue\|blocked\|failed" evaluation="N" evaluator="E" branch="B">` / `Evaluator report:` / `<结论，或 "the evaluator's turn did not complete">` |
 | `done` | B，`goal:status` | Append | `<dim-goal kind="goal" op="completed" by="evaluator" evaluation="N" branch="B">` / `Result:` / `<result>` / 空行 / `An evaluator verified that the goal for branch B is completed. Do not continue working toward it on your own.` |
 | `blocked` | B，`goal:status` | Append | `op="blocked" by="evaluator"`；`Blocker:` / `<what is needed>` / 空行 / `An evaluator found that the goal for branch B cannot proceed without the user. Do not continue working toward it on your own.` |
-| `continue` | B，Goal 续跑 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" evaluation="N" idle="k" branch="B">` / `An evaluator checked your report that the goal for branch B is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status "completed" again.`；只有当 Goal 的文档设置了上限时才写 `limit`；`idle` 承载 Goal 的 C7 停滞数 |
+| `continue` | B，Goal 续跑 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" evaluation="N" idle="k" branch="B">` / `An evaluator checked your report that the goal for branch B is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status "completed" again.`；只有当 Goal 的文档设置了上限时才写 `limit`；`idle` 为 `0`：评审路径不推进 Goal 的 C7 停滞数 |
 | `failed` | B，`goal:status` | Append | Goal 的暂停文本，原因短语 "the evaluator could not check the result" |
 
 评审裁判下，干活模型的 `completed` 块是请求，不改变折叠中的状态（目标运行时为 `active`）；在结局或变更取代它之前，它一直是最新的状态块。这是 Goal 折叠规则唯一的例外，记录在 Goal A16 中：重放出的状态块读作 `completed`，目标却是 active。结论输入与 Goal 自己的写入一样，没有 key，也没有 `user` 内容，所以不改变状态，不是操作者输入，也不重置计数（Goal A5）。它只有一个块，即报告本身：Goal 从第一个块读取写入的标记（[Goal A.5](Goal.md#a5-模型可见文本)），所以报告若不在其输入的第一个块中，不产生任何决定。
@@ -125,7 +125,7 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 干活的模型和评审者都用假模型，放在 `crates/dim-goal/tests` 的流程测试中：
 
 1. 评审裁判：续跑是 Goal 的。干活的模型报告 `completed`；状态保持 `active`；该回合结束时在 `N` 处创建一个带 `goal:evaluate:N` 的评审分支，不写续跑。`DONE` 得到评审者判定的 `completed`。
-2. 带两行清单的 `CONTINUE` 得到结论和一次续跑（在 `max(A, last_operator)` 之后的续跑上 `count` + 1；干活模型的请求和结论都不移动 `A`，也不重置计数，C5 与任何回合结束时一样适用）；`BLOCKED` 得到 `blocked`；达到显式设置的 `maxContinuations` 时 `CONTINUE` 得到暂停（`limit`）；没有 `step/tool-call` 的续跑回合会推进 Goal 的 C7 停滞数，达到 3 的 `CONTINUE` 写暂停（`no_progress`）而不是评审续跑。结论到达时仍有后台任务开放则不写续跑；任务的唤醒或其 cancelled 结束会决定干活分支的 turn/end（Goal A.4）。
+2. 带两行清单的 `CONTINUE` 得到结论和一次续跑（在 `max(A, last_operator)` 之后的续跑上 `count` + 1；干活模型的请求和结论都不移动 `A`，也不重置计数，C5 与任何回合结束时一样适用）；`BLOCKED` 得到 `blocked`；达到显式设置的 `maxContinuations` 时 `CONTINUE` 得到暂停（`limit`）；评审续跑不读进度、不推进 Goal 的 C7 停滞数，因为评审者已经看着干活分支的完整回合做了判断。结论到达时仍有后台任务开放则不写续跑；任务的唤醒或其 cancelled 结束会决定干活分支的 turn/end（Goal A.4）。
 3. 干活模型的 `blocked`、上限暂停、用户中断和用户暂停都不创建评审分支。
 4. 没有结论的评审回复在评审分支上得到一次追问，之后的结论生效；如果第二次回复仍没有结论，截断到 4000 字符的整个回复作为 `continue` 写回（受 `maxContinuations` 约束的一次续跑），不再追问，重载后也一样。
 5. 评审回合失败或取消、`branch/create-failed`，以及在任何 `branch/create` 之前抛出的 `create`，得到一次暂停（`evaluation_failed`）。

@@ -645,17 +645,21 @@ pub fn decide_conclusion(
     })
 }
 
-/// Goal's continuation for a `continue` conclusion: C1, C5, C6, C7 and the
-/// background wait.
-pub fn decide_evaluated_continuation(
-    fold: &Fold,
-    limit: Option<u64>,
-    progress: Option<Progress>,
-) -> Option<Decision> {
+/// Goal's continuation for a `continue` conclusion: C1, C5, C6 and the
+/// background wait. C7 measures the branch's own continuations; the evaluator
+/// judged this turn with the whole of it in front of it, so the evaluated
+/// path does not read progress and states `idle="0"` (Pursuit §5).
+pub fn decide_evaluated_continuation(fold: &Fold, limit: Option<u64>) -> Option<Decision> {
     if !fold.running() || fold.pending_driving() || fold.open_tasks() {
         return None;
     }
-    decide_continuation(fold, limit, fold.turn_end.as_ref(), progress)
+    if limit.is_some_and(|limit| fold.count() as u64 >= limit) {
+        return Some(Decision::Pause { reason: "limit" });
+    }
+    Some(Decision::Continuation {
+        count: fold.count() + 1,
+        idle: 0,
+    })
 }
 
 #[cfg(test)]

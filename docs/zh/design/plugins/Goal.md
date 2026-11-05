@@ -92,7 +92,7 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事�
 | `inherited_live` | 尚无本地目标块，且 `B` 的 `branch/start` 之前的前缀中有存活的 `goal:objective` 或 `goal:status` 块（§3.4） |
 | `last_operator` | 最新的操作者输入：带 `user` 内容且未被来源标记的 `input/message`（A5） |
 | `count` | 序号大于 `max(A, last_operator)` 的 Goal 续跑输入（标记 `kind="continuation"`，无 key） |
-| `idle` | `max(A, last_operator)` 之后最新续跑标记的 `idle` 属性：在该续跑所跟随的回合结束前，连续由续跑驱动且没有 `step/tool-call` 的回合数；没有这种续跑或属性缺失时为零（C7）。结束回合自身的工具调用答案在决策时查询，不进入折叠 |
+| `idle` | `max(A, last_operator)` 之后最新续跑标记的 `idle` 属性：在该续跑所跟随的回合结束前，连续由续跑驱动且没有 `step/tool-call` 的回合数；没有这种续跑或属性缺失时为零（C7）。结束回合自身的工具调用答案在决策时查询，不进入折叠。评审续跑写零：它不推进 C7（Pursuit §5） |
 | `decided` | 对每个 `turn/end` 序号 `N`，是否存在标有 `after="N"` 的 Goal 写入（续跑或自动暂停），或在 [Pursuit](Pursuit.md) 的评审裁判下 `goal:evaluate:N` 的 `branch/create`；对 `B` 位于 `S` 的 `branch/start`，是否存在标有 `after="S"` 的起始 `clear` |
 | `judge` | 最新的存活本地 `goal:objective` 块（`set`）的 `judge` 属性；`edit` 保留它，`clear` 退役它；缺省为 `model`（[Pursuit](Pursuit.md) §3） |
 | `request` | 评审裁判下，`goal_update` 写入的 `op="completed"` 且不带 `by="evaluator"` 的 `goal:status` 块：一次完成请求，不改变 `status` 与 `A`（A16） |
@@ -361,7 +361,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | C7 | 结束回合不是由 Goal 自己的续跑驱动，或它调用了工具，或包含它的连续停滞数低于 `NO_PROGRESS_TURNS`（3） | 写暂停（`no_progress`）并停止 |
 | — | 全部成立 | 写入续跑（Queue），计数为 `count + 1`，并带 `idle` |
 
-C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两者在 `turn/start` 与 `turn/end` 时保存），以及折叠结果中的 `idle`（§2）。turn/end 任务在决策时查询一次分支的 `step/tool-call`：以结束回合的 `turn_id` 为谓词、limit 为 1，从该回合的 `turn/start` 开始；`step/tool-call` 不是 Goal 消费的种类，重建也不读它（A.6、#1113）。只有当续跑驱动了结束回合时才查询；由其他驱动输入开启的回合不读即从零开始。后台任务开放期间决策被推迟，这次读取也一并跳过；被推迟的决策执行时再读取。
+C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两者在 `turn/start` 与 `turn/end` 时保存），以及折叠结果中的 `idle`（§2）。turn/end 任务在决策时查询一次分支的 `step/tool-call`：以结束回合的 `turn_id` 为谓词、limit 为 1，从该回合的 `turn/start` 开始；`step/tool-call` 不是 Goal 消费的种类，重建也不读它（A.6、#1113）。只有当续跑驱动了结束回合时才查询；由其他驱动输入开启的回合不读即从零开始。后台任务开放期间决策被推迟，这次读取也一并跳过；被推迟的决策执行时再读取。C7 只属于分支自己的续跑决策：`continue` 结论不读进度，其评审续跑写 `idle="0"`，因为评审者已经看着完整回合做了判断——生产环境中该回合带有触发请求的 `goal_update` 调用，工具调用读数永远不会触发（Pursuit §5）。
 
 下一条续跑的 `idle` 在结束回合由 Goal 续跑驱动且没有工具调用时为 `idle + 1`，否则为零（结束回合不是续跑驱动，或它调用了工具）。因此即使续跑驱动了回合，一次工具调用也会重置停滞数。停滞数读取自 `max(A, last_operator)` 之后最新的续跑，所以 `set`、`resume` 或操作者输入会丢弃它之前的回合；若一个回合同时消费了操作者输入和续跑，且由续跑驱动、未调用工具，它仍计一次。`NO_PROGRESS_TURNS` 是常量，不是设置项。
 
@@ -530,7 +530,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 10. `edit`（只改变 `goal:objective`）、`clear`（两个退役的 key 都不重放）、目标文本或 summary 中伪造的 `</dim-goal>` 被转义；分支最新存活的块在每次写入的 `sequence` 处反映每种状态。
 11. 设置 → `completed` → `resume`：目标重新打开（`active`，计数重新开始），resume 输入驱动一轮，其正常结束写入续跑；resume 之后压缩，上下文中最新的 `goal:status` 块是 resume 块，目标为 `active`。
 12. 设置 → `completed` → `blocked`：当前状态为 `blocked` 及第二个 summary；每次状态变更之后压缩，上下文中最新的 `goal:status` 块就是当前状态。
-13. 没有默认上限：未设置 `maxContinuations` 的目标会越过任何固定计数继续；连续三个由续跑驱动且没有 `step/tool-call` 的回合会使其暂停（`no_progress`），期间的工具调用或操作者输入会重置停滞数，续跑的 `idle` 在重载后重建它。`CONTINUE` 结论遵循同一规则，达到停滞时写暂停而不是评审续跑。
+13. 没有默认上限：未设置 `maxContinuations` 的目标会越过任何固定计数继续；连续三个由续跑驱动且没有 `step/tool-call` 的回合会使其暂停（`no_progress`），期间的工具调用或操作者输入会重置停滞数，续跑的 `idle` 在重载后重建它。`continue` 结论由评审者判断：它的续跑遵循 C6 与后台等待，不遵循 C7。
 14. `turn/end` 时有后台任务开放会推迟决策；非 cancelled 结束的唤醒驱动一轮并由其结束决策；cancelled 结束关闭最后一个开放任务时执行被推迟的决策，且只执行一次，重载后亦然。其他任务的 `exec/ended`，或已决策结束的 `exec/ended`，不写入。
 
 ## 附录 E. 假设

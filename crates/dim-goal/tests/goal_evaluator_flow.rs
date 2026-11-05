@@ -266,7 +266,7 @@ async fn pursuit_2_7_10_a_conclusion_decides_once_from_its_own_evaluator() {
     let continuation = env.wait_for("main", &needle).await;
     assert_eq!(
         continuation.text,
-        texts::evaluated_continuation("main", 2, None, 1, evaluation, evaluation)
+        texts::evaluated_continuation("main", 2, None, 0, evaluation, evaluation)
     );
     env.close().await;
 
@@ -730,7 +730,7 @@ async fn pursuit_2_a_continue_conclusion_writes_one_continuation_or_pauses_at_th
     let continuation = env.wait_for("main", &needle).await;
     assert_eq!(
         continuation.text,
-        texts::evaluated_continuation("main", 2, None, 1, evaluation, evaluation)
+        texts::evaluated_continuation("main", 2, None, 0, evaluation, evaluation)
     );
     env.close().await;
 
@@ -753,66 +753,6 @@ async fn pursuit_2_a_continue_conclusion_writes_one_continuation_or_pauses_at_th
             "the automatic continuation limit was reached",
             evaluation
         )
-    );
-    env.close().await;
-}
-
-#[tokio::test]
-async fn pursuit_7_a_stalled_continued_turn_pauses_no_progress_instead_of_continuing() {
-    let env = Env::start().await;
-    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
-        .await
-        .expect("set writes");
-    let set = env.wait_for("main", r#"op="set""#).await;
-    // A continuation carrying a stalled streak of two, and a continued turn
-    // that requests completion without a tool call: the CONTINUE conclusion
-    // would be the third no-progress continued turn.
-    let marker = format!(
-        "<dim-goal kind=\"continuation\" count=\"1\" idle=\"2\" after=\"{}\" branch=\"main\">\nContinue working toward the active goal for branch main. If it is completed or blocked, call goal_update. If you are on another line of this Session, the goal belongs to branch main: do not call goal_update for it.\n</dim-goal>",
-        set.sequence
-    );
-    let stalled = env.write_message("main", vec![raw(&marker, None, false)], InputMode::Queue);
-    env.turn_start("main", "work");
-    env.consume("main", &set.id);
-    env.consume("main", &stalled.id);
-    env.tool(
-        "main",
-        json!({"status": "completed", "summary": "all tests pass"}),
-    )
-    .await;
-    let end = env.end_turn("main", "work", "completed");
-    let create = next_create(&env, "main", 0).await;
-    write_conclusion(
-        &env,
-        &create.branch,
-        end.sequence,
-        "continue",
-        "CONTINUE:\n- still missing",
-    );
-    let pause = env.wait_for("main", r#"reason="no_progress""#).await;
-    assert_eq!(
-        pause.text,
-        texts::automatic_pause(
-            "main",
-            "no_progress",
-            "the goal made no tool call in its last 3 continued turns",
-            end.sequence
-        )
-    );
-    let writes = env.settled("main").await;
-    assert_eq!(
-        writes
-            .iter()
-            .filter(|block| block.marker.contains(r#"kind="continuation""#))
-            .count(),
-        1,
-        "no evaluated continuation follows the pause: {writes:#?}"
-    );
-    assert!(
-        writes
-            .iter()
-            .all(|block| !block.marker.contains(r#"reason="limit""#)),
-        "{writes:#?}"
     );
     env.close().await;
 }
