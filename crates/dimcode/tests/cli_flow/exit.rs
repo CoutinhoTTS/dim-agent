@@ -11,7 +11,6 @@ fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_p
     let daemon = home.daemon(|wire| {
         // No `ui.leaf.2`: the client runs the interface itself.
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -27,7 +26,7 @@ fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_p
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     assert_eq!(
         terminal.local_mode() & (libc::ICANON | libc::ECHO),
@@ -56,7 +55,6 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -72,7 +70,7 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     assert_eq!(
         terminal.local_mode() & (libc::ICANON | libc::ECHO),

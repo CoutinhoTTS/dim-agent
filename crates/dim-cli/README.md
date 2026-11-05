@@ -359,6 +359,8 @@ integer capacities; output cannot exceed context. Empty or invalid startup
 inputs fail before Session creation. Overrides pass through `session.create` or,
 on resume, `session.model.update` before the first input. They do not write
 Provider records, defaults, daemon environment or secret configuration files.
+Interactive startup waits at Home without creating a Session; the first message
+uses these overrides. Exiting Home without sending leaves no saved Session.
 When launching a daemon for a parsed startup override, the CLI removes these
 startup `DIM_*` variables from that child environment; the running client keeps
 its parsed Session options and unrelated environment variables are unchanged.

@@ -154,7 +154,13 @@ impl SessionHost {
     /// Runs the session on `client`, the connection the composition root
     /// took from the client tree, composing management text in `language`,
     /// the interface's language code.
-    pub fn start(options: Options, client: Client, language: &'static str) -> Self {
+    pub fn start(
+        options: Options,
+        client: Client,
+        language: &'static str,
+        ctx: rutis::Ctx,
+        leaf_end: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
         let (commands, command_rx) = unbounded_channel();
         let (update_tx, updates) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -171,7 +177,7 @@ impl SessionHost {
                         return;
                     }
                 };
-                runtime.block_on(run(options, client, command_rx, update_tx));
+                runtime.block_on(run(options, client, command_rx, update_tx, ctx, leaf_end));
             })
             .expect("spawn session thread");
         Self {
@@ -228,6 +234,9 @@ struct Worker {
     options: Options,
     client: Client,
     updates: mpsc::Sender<Update>,
+    ctx: rutis::Ctx,
+    leaf_end: Option<tokio::sync::oneshot::Sender<()>>,
+    ui_identity: Option<crate::leaf::Opened>,
     session_id: String,
     /// The Session's stored title, when it has a real one, and the newest
     /// `titleRevision` this client has: the attach record's or a later
@@ -379,6 +388,8 @@ async fn run(
     client: Client,
     mut commands: UnboundedReceiver<Command>,
     updates: mpsc::Sender<Update>,
+    ctx: rutis::Ctx,
+    leaf_end: tokio::sync::oneshot::Sender<()>,
 ) {
     if update::enabled() {
         let offers = updates.clone();
@@ -393,6 +404,9 @@ async fn run(
         options,
         client,
         updates: updates.clone(),
+        ctx,
+        leaf_end: Some(leaf_end),
+        ui_identity: None,
         session_id: String::new(),
         session_title: None,
         title_revision: 0,
@@ -443,11 +457,13 @@ async fn run(
         ..Default::default()
     })));
     if let Err(error) = worker.open().await {
-        if worker.options.resume.is_some() || worker.options.startup.is_some() {
-            let _ = updates.send(Update::Failed(error.to_string()));
-            return;
-        }
-        let _ = updates.send(Update::Notice(no_session(&error)));
+        let failure = if worker.client.offers("ui.leaf.2") {
+            Update::StartupFailed
+        } else {
+            Update::Failed
+        };
+        let _ = updates.send(failure(error.to_string()));
+        return;
     }
     loop {
         if let Err(error) = worker.poll_member().await {
@@ -700,55 +716,34 @@ impl Worker {
         }
     }
 
-    /// Creates or resumes the session the process was started for.
+    /// Resumes the requested Session; an ordinary startup stays at Home.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
-            if self.options.ui_identity.is_none() {
-                adopt_startup(&mut self.client, &self.options, &id).await?;
-            }
-            let kind = if self.options.created_session {
-                SwitchKind::New
-            } else {
-                SwitchKind::Resumed
-            };
-            return self.attach(id, kind).await;
+            adopt_startup(&mut self.client, &self.options, &id).await?;
+            return self.attach(id, SwitchKind::Resumed).await;
         }
-        let attached_session = self.invalidate_projection();
-        let params = session_create_from_options(&mut self.client, &self.options).await?;
-        let preferences = params.get("modelPreferences").cloned();
-        let created: Created = match self.client.typed("session.create", params).await {
-            Ok(created) => created,
-            Err(error) => {
-                return Err(crate::model_adoption_error(
-                    &mut self.client,
-                    self.options
-                        .provider
-                        .as_deref()
-                        .zip(self.options.model.as_deref()),
-                    error,
-                    preferences
-                        .as_ref()
-                        .filter(|_| self.options.effort.is_none()),
-                )
-                .await);
-            }
-        };
-        self.enter(
-            created.session_id,
-            Some(created.model),
-            SwitchKind::New,
-            attached_session,
-        )
-        .await
+        Ok(())
     }
 
-    /// Creates the Session the first message from home starts, on the model
-    /// the status line shows.
+    /// Creates Home's first Session using the launch settings or the model
+    /// selected or inherited there.
     async fn start_session(&mut self) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        let mut params = session_create_params(&self.options);
-        let mut preferences = None;
-        let mut target = None;
+        let initial = self.model.is_none() && self.model_session.is_none();
+        let mut params = if initial {
+            session_create_from_options(&mut self.client, &self.options).await?
+        } else {
+            session_create_params(&self.options)
+        };
+        let mut preferences = params.get("modelPreferences").cloned();
+        let mut target = if initial {
+            self.options
+                .provider
+                .clone()
+                .zip(self.options.model.clone())
+        } else {
+            None
+        };
         let result = async {
             if let Some(source) = &self.model_session
                 && self.client.offers("session.create.modelFromSession")
@@ -786,7 +781,9 @@ impl Worker {
                     &mut self.client,
                     target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
                     error,
-                    preferences.as_ref(),
+                    preferences
+                        .as_ref()
+                        .filter(|_| !initial || self.options.effort.is_none()),
                 )
                 .await),
             }
@@ -859,7 +856,7 @@ impl Worker {
         self.send(Update::SuggestionMethods(offered));
         self.suggestion_throttle_noted = false;
         self.session_cwd = attached.cwd;
-        self.register_ui().await;
+        self.register_ui().await?;
         self.mcp_required.clear();
         self.model = Some(configuration.clone());
         self.discover_branch("main");
@@ -1070,6 +1067,10 @@ impl Worker {
             && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
             && let Err(error) = self.start_session().await
         {
+            if !self.session_id.is_empty() {
+                self.send(Update::StartupFailed(error.to_string()));
+                return Ok(());
+            }
             self.send(Update::Notice(
                 if self.options.startup.is_some() || self.model_session.is_some() {
                     error.to_string()
@@ -2172,20 +2173,37 @@ impl Worker {
         }
     }
 
-    /// Registers this interface on the Session with the daemon's UI registry
-    /// (Tui design §3.6), when the daemon keeps one; a failure to register
-    /// is a notice, since the Session works without it.
-    async fn register_ui(&mut self) {
+    /// Opens this process's leaf on its first Session, then registers its
+    /// interface. Older daemons use the connection registration.
+    async fn register_ui(&mut self) -> crate::Result<()> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Attached {
             ui_id: String,
         }
+        if self.ui_identity.is_none() && self.client.offers("ui.leaf.2") {
+            let leaf = crate::leaf::Leaf::bind(&self.options)?;
+            let params = json!({
+                "sessionId": self.session_id,
+                "kind": "tui",
+                "peer": leaf.peer,
+                "address": leaf.address,
+            });
+            let node = self.ctx.plugin(leaf.node(self.leaf_end.take().unwrap()));
+            (&node).await.map_err(crate::plugin_error)?;
+            match self.client.typed("ui.open", params).await {
+                Ok(opened) => self.ui_identity = Some(opened),
+                Err(error) => {
+                    node.dispose().await?;
+                    return Err(error);
+                }
+            }
+        }
         if !self.client.offers("ui.attach") {
-            return;
+            return Ok(());
         }
         let mut params = json!({"sessionId": self.session_id, "kind": "tui"});
-        if let Some(identity) = &self.options.ui_identity {
+        if let Some(identity) = &self.ui_identity {
             params["uiId"] = json!(identity.ui_id);
             params["token"] = json!(identity.token);
         }
@@ -2195,6 +2213,7 @@ impl Worker {
                 "Interface registration failed: {error}"
             ))),
         }
+        Ok(())
     }
 
     /// Put the browser on this Session's chat while keeping the bootstrap

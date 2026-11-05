@@ -6,7 +6,6 @@ fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue
     let (ready, readiness) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -46,7 +45,7 @@ fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue
         })));
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     readiness.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"/lines\r");
@@ -115,7 +114,7 @@ fn native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader
         "full-access",
     ]);
     let mut terminal = Terminal::launch_tui(command);
-    terminal.until("fixture / fixture-model");
+    terminal.until("Ask anything...");
     let stream = UnixStream::connect(socket).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -128,8 +127,6 @@ fn native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader
     );
     let agents = rpc(&mut stream, "agent.list", json!({}));
     let holder = agents[0]["agentId"].as_str().unwrap().to_owned();
-    let sessions = rpc(&mut stream, "session.summaries", json!({}));
-    let leader = sessions[0]["sessionId"].as_str().unwrap().to_owned();
     let model = thread::spawn(move || {
         for phase in 0..4 {
             let deadline = Instant::now() + Duration::from_secs(15);
@@ -213,6 +210,8 @@ fn native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader
     });
     terminal.write(b"delegate-native-task\r");
     terminal.until("native delegation settled for this turn");
+    let sessions = rpc(&mut stream, "session.summaries", json!({}));
+    let leader = sessions[0]["sessionId"].as_str().unwrap().to_owned();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !home.0.join("foreground-started").exists() {
         assert!(
@@ -415,7 +414,6 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
             if !resume_on_launch {
-                wire.created();
                 let attach = wire.read("session.attach");
                 wire.reply(&attach, attach_record(&attach));
                 let history = wire.read("session.history");
@@ -477,6 +475,8 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
         let mut command = home.command();
         if resume_on_launch {
             command.args(["--resume", "paged"]);
+        } else {
+            command.args(["--resume", "session"]);
         }
         let mut terminal = Terminal::launch_tui(command);
         if !resume_on_launch {
@@ -502,7 +502,11 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
         assert!(screen.contains("paged-message-051"));
         assert!(!screen.contains("paged-message-050"));
         assert!(!screen.contains("paged-message-001"));
-        assert!(!terminal.transcript.contains("· 0 messages"));
+        assert!(
+            !terminal.transcript.contains("resumed paged · 0 messages"),
+            "resume_on_launch={resume_on_launch}: {}",
+            terminal.transcript
+        );
         // A `/timeline` jump to the first message draws the earlier history.
         terminal.write(b"\r/timeline\r");
         terminal.until("#150");
@@ -621,7 +625,6 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
     let (ready, readiness) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
@@ -710,7 +713,7 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
             "obsolete retry or stop: {line}"
         );
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"/tasks\r");
@@ -755,7 +758,6 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
     let (ready, readiness) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -797,7 +799,7 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
         ready.send(()).unwrap();
         assert_eq!(wire.trailing_request(), None, "unexpected extra stop or destructive request");
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/tasks\r");
     terminal.until("child running command");
@@ -834,7 +836,6 @@ fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads(
     let (proceed, control) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
@@ -868,7 +869,7 @@ fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads(
         ready.send(()).unwrap();
         assert_eq!(wire.trailing_request(), None, "late discovery extended the stop batch");
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/tasks\r");
     terminal.until("captured command");
@@ -892,7 +893,6 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
     let (proceed, control) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
@@ -920,7 +920,7 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
             "stale control reached the server: {line}"
         );
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/usage\r");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -940,7 +940,6 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
     let (proceed, control) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
@@ -980,7 +979,7 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
             "admitted batch targeted new work: {line}"
         );
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/tasks\r");
     terminal.until("old child command");
@@ -1000,7 +999,6 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1024,7 +1022,7 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
         wire.reply(&providers, json!([]));
         assert_eq!(wire.trailing_request(), None, "finished details must not send live reads or stops");
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     let size = libc::winsize {
         ws_row: 18,
@@ -1063,6 +1061,8 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
         let created = wire.created();
         assert_eq!(created["params"]["permissionPolicy"], json!({"preset":"full-access"}));
         let attach = wire.read("session.attach");
@@ -1070,11 +1070,12 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[delegation("leader-member",1,"Inspect member code"),delivery("leader-delivery",2,"leader-member")],"through":2,"nextAfter":2,"done":true}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "start leader");
+        wire.reply(&submit, json!({"event":{}}));
         wire.no_context();
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"member"}));
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
         wire.reply(&attach, attach_record(&attach));
         let first = wire.read("session.history");
         assert_eq!(first["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
@@ -1108,6 +1109,8 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
     let mut launch = home.command();
     launch.args(["--permission", "full-access"]);
     let mut terminal = Terminal::launch_tui(launch);
+    terminal.until("Ask anything...");
+    terminal.write(b"start leader\r");
     terminal.until("test / model");
     terminal.write(b"kept leader draft\x0ftasks\r");
     terminal.until("Inspect member code");
@@ -1168,7 +1171,6 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
         let (proceed, control) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1209,7 +1211,7 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             wire.reply(&detach, json!({}));
             assert_eq!(wire.trailing_request(), None, "unexpected observation after cleanup");
         });
-        let mut terminal = Terminal::launch_tui(home.command());
+        let mut terminal = Terminal::resume_tui(home.command());
         terminal.until("test / model");
         terminal.write(b"/tasks\r");
         terminal.until("old member detail");
@@ -1238,7 +1240,6 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
         let (proceed, control) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1294,7 +1295,7 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             wire.event(4,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader continued after member detail"}));
             assert_eq!(wire.trailing_request(), None, "unexpected automatic reopen or member mutation");
         });
-        let mut terminal = Terminal::launch_tui(home.command());
+        let mut terminal = Terminal::resume_tui(home.command());
         terminal.until("test / model");
         terminal.write(b"/tasks\r");
         terminal.until("member detail");
@@ -1331,7 +1332,6 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1363,7 +1363,7 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
         wire.event(5,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader input after observation cleanup"}));
         assert_eq!(wire.trailing_request(), None, "unexpected member action or reopen");
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/tasks\r");
     terminal.until("member approval detail");
@@ -1568,7 +1568,6 @@ fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner()
     let (repeat_sent, repeat) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["workflow.status", "workflow.stop"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1613,7 +1612,7 @@ fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner()
         wire.reply(&stop, stopped);
         wire.quiet(Duration::from_millis(1500));
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1 in background");
     terminal.write(b"/tasks\r");
     terminal.until("nightly-check");
@@ -1649,7 +1648,6 @@ fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_ot
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["workflow.status", "workflow.stop"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1705,7 +1703,7 @@ fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_ot
         wire.send(json!({"jsonrpc":"2.0","id":discovery["id"],"error":{"code":-32000,"message":"store busy","data":{"appError":"service_unavailable"}}}));
         wire.quiet(Duration::from_millis(1500));
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("2 in background");
     terminal.write(b"/tasks\r");
     terminal.until("Workflow: last observed; refresh failed");
@@ -1830,7 +1828,6 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
     let (opened, wait_opened) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1884,7 +1881,7 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
     });
     let mut command = home.command();
     command.arg("--fullscreen");
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("Agent: Code Reviewer");
     terminal.until("member-provider / member-model-2");
     assert!(
@@ -1913,7 +1910,6 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1939,7 +1935,7 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
     });
     let mut command = home.command();
     command.arg("--fullscreen");
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("No model observed");
     terminal.until("(observation unavailable)");
     assert!(terminal.transcript.contains("restored result text"));
@@ -1960,7 +1956,6 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     .unwrap();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1995,7 +1990,7 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     });
     let mut command = home.command();
     command.arg("--fullscreen");
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("Agent: unlisted-agent");
     daemon.join().unwrap();
     assert!(terminal.transcript.contains("agent_not_found"));
@@ -2011,7 +2006,6 @@ fn tui_member_cards_name_a_native_agent_the_hello_does_not_announce() {
     let (named, wait_named) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -2042,7 +2036,7 @@ fn tui_member_cards_name_a_native_agent_the_hello_does_not_announce() {
     });
     let mut command = home.command();
     command.arg("--fullscreen");
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("Agent: Code Reviewer");
     named.send(()).unwrap();
     daemon.join().unwrap();
@@ -2058,7 +2052,6 @@ fn tui_member_cards_keep_the_id_when_the_shared_agent_list_read_fails() {
     let (drawn, wait_drawn) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -2109,7 +2102,7 @@ fn tui_member_cards_keep_the_id_when_the_shared_agent_list_read_fails() {
     });
     let mut command = home.command();
     command.arg("--fullscreen");
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("Agent: reviewer");
     terminal.until("Second review");
     terminal.until("agent result: second review is complete");
@@ -2133,9 +2126,8 @@ fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
     .unwrap();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         let mut events = Vec::new();
         events.extend(refused_request(
@@ -2210,7 +2202,7 @@ fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
     });
     let mut command = home.command();
     command.arg("--fullscreen");
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     let size = libc::winsize {
         ws_row: 60,
         ws_col: 120,
@@ -2258,7 +2250,6 @@ fn tui_new_creates_the_session_on_the_first_message() {
     let (ready, readiness) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.create.modelFromSession"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
@@ -2307,7 +2298,7 @@ fn tui_new_creates_the_session_on_the_first_message() {
             }
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     readiness.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"/new\r");

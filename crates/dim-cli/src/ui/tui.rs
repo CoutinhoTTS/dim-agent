@@ -306,8 +306,10 @@ fn run_terminal(
             title.forget();
             dirty = true;
         }
-        if app.shutdown.is_some() && !dirty {
-            break 0;
+        if let Some(code) = app.exit_code
+            && !dirty
+        {
+            break code;
         }
         if app.revealing() {
             dirty = true;
@@ -841,9 +843,7 @@ struct App {
     /// The adopted model and its reasoning effort, once the session exists.
     label: Option<ModelLabel>,
     failure: Option<String>,
-    /// The App Server asked this interface to leave: one more frame shows
-    /// why, then the interface exits and the Session carries on.
-    shutdown: Option<String>,
+    exit_code: Option<i32>,
     failure_committed: bool,
     planner: StreamPlanner,
     commits: CommitState,
@@ -1232,7 +1232,7 @@ impl App {
             snapshot: None,
             label: None,
             failure: None,
-            shutdown: None,
+            exit_code: None,
             failure_committed: false,
             planner: StreamPlanner::new(),
             commits: CommitState::default(),
@@ -2396,12 +2396,16 @@ impl App {
                 self.failure = Some(message);
                 self.run_started = None;
             }
+            Update::StartupFailed(message) => {
+                self.failure = Some(message);
+                self.exit_code = Some(1);
+            }
             Update::Shutdown { reason } => {
                 self.notices.push(tf(
                     "The App Server closed this interface: {reason}",
                     &[("reason", &reason)],
                 ));
-                self.shutdown = Some(reason);
+                self.exit_code = Some(0);
             }
         }
     }

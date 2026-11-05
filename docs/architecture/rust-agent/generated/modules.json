@@ -27298,11 +27298,7 @@
       "from": "dim_cli",
       "to": "dim_cli::leaf",
       "references": [
-        "mod leaf",
-        "path leaf",
-        "path leaf::Leaf::bind",
-        "path leaf::LeafTui::new",
-        "path leaf::Opened"
+        "mod leaf"
       ]
     },
     {
@@ -27398,8 +27394,7 @@
       "references": [
         "mod permission",
         "path permission::creation_policy",
-        "path permission::parse_preset",
-        "path permission::select"
+        "path permission::parse_preset"
       ]
     },
     {
@@ -27484,7 +27479,6 @@
         "mod session_host",
         "path session_host::LimitTarget::Missing",
         "path session_host::LimitTarget::Model",
-        "path session_host::adopt_startup",
         "path session_host::clear_saved_model_preferences",
         "path session_host::declare_model_limits",
         "path session_host::saved_model_preferences"
@@ -27565,7 +27559,6 @@
       "to": "dim_cli::wire",
       "references": [
         "mod wire",
-        "path wire::Created",
         "path wire::ProviderCatalog",
         "path wire::ProviderCatalogSnapshot"
       ]
@@ -27574,8 +27567,7 @@
       "from": "dim_cli",
       "to": "dim_client",
       "references": [
-        "path client::Client",
-        "path client::app_error"
+        "path client::Client"
       ]
     },
     {
@@ -28386,42 +28378,7 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "path UiIdentity",
-        "use crate::args::Options",
-        "use crate::args::UiIdentity"
-      ]
-    },
-    {
-      "from": "dim_cli::leaf",
-      "to": "dim_cli::plugins",
-      "references": [
-        "path DaemonLink",
-        "path Tui",
-        "use crate::plugins::DaemonLink",
-        "use crate::plugins::Tui"
-      ]
-    },
-    {
-      "from": "dim_cli::leaf",
-      "to": "dim_cli::ui",
-      "references": [
-        "path ui::Env",
-        "use crate::ui"
-      ]
-    },
-    {
-      "from": "dim_cli::leaf",
-      "to": "dim_cli::ui::config",
-      "references": [
-        "path ui::config::saved_fullscreen"
-      ]
-    },
-    {
-      "from": "dim_cli::leaf",
-      "to": "dim_cli::ui::tui",
-      "references": [
-        "path Leave",
-        "use crate::ui::tui::Leave"
+        "use crate::args::Options"
       ]
     },
     {
@@ -30913,6 +30870,7 @@
         "path crate::Result",
         "path crate::limits_undeclared",
         "path crate::model_adoption_error",
+        "path crate::plugin_error",
         "path session_create_from_options",
         "path session_create_params",
         "use crate::session_create_from_options",
@@ -30965,6 +30923,14 @@
         "path crate::goal::call",
         "path crate::goal::objective",
         "path crate::goal::report"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::leaf",
+      "references": [
+        "path crate::leaf::Leaf::bind",
+        "path crate::leaf::Opened"
       ]
     },
     {
@@ -31184,6 +31150,7 @@
         "path Update::Shutdown",
         "path Update::Skills",
         "path Update::Snapshot",
+        "path Update::StartupFailed",
         "path Update::SuggestionCleared",
         "path Update::SuggestionMethods",
         "path Update::SuggestionOffer",
@@ -37779,6 +37746,7 @@
         "path Update::Shutdown",
         "path Update::Skills",
         "path Update::Snapshot",
+        "path Update::StartupFailed",
         "path Update::SuggestionCleared",
         "path Update::SuggestionMethods",
         "path Update::SuggestionOffer",
