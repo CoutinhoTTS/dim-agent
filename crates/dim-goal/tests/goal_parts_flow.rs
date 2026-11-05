@@ -442,6 +442,183 @@ async fn a_reload_keeps_the_streak_and_decides_the_turn_end_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_background_task_defers_the_turn_end_until_its_end() {
+    // A completed background end does not wake in this harness; its wake is a
+    // separate input whose turn end decides.
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+    env.turn_start("main", "bg");
+    env.tool_call("main", "bg");
+    env.consume("main", &first.id);
+    env.exec_started("main", "bg", "task-1");
+    env.end_turn("main", "bg", "completed");
+    assert_eq!(
+        env.settled("main").await.len(),
+        2,
+        "an open task defers the turn end"
+    );
+    env.exec_ended("main", "task-1", "completed");
+    assert_eq!(
+        env.settled("main").await.len(),
+        2,
+        "a completed end waits for its wake"
+    );
+
+    let wake = env.write_message(
+        "main",
+        vec![raw(
+            "<dim-notification task=\"task-1\">\nbackground task finished\n</dim-notification>",
+            None,
+            false,
+        )],
+        InputMode::Queue,
+    );
+    let end = env.turn_ids("main", &[&wake.id]);
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 2, None, 0, end.sequence)
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_background_end_takes_the_deferred_decision_once() {
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+    env.turn_start("main", "bg");
+    env.tool_call("main", "bg");
+    env.consume("main", &first.id);
+    env.exec_started("main", "bg", "task-1");
+    let end = env.end_turn("main", "bg", "completed");
+    assert_eq!(env.settled("main").await.len(), 2);
+
+    env.exec_ended("main", "task-1", "cancelled");
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 2, None, 0, end.sequence)
+    );
+    assert_eq!(
+        env.settled("main").await.len(),
+        3,
+        "the deferred decision runs exactly once"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reload_with_an_open_background_task_defers_the_end_once() {
+    let env = Env::start().await;
+    let mut seed = env.seed_new("load-open-task").await;
+    let (objective, status) = texts::set_blocks("main", "ship it");
+    let set = seed.append(
+        "main",
+        message(
+            vec![
+                raw(&objective, Some("goal:objective"), false),
+                raw(&status, Some("goal:status"), false),
+            ],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        EventKind::TurnStart(dim_agent_types::TurnStartData {
+            turn_id: "t1".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    let end = seed.append("main", turn_end_with("t1", "completed"));
+    let first = seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::continuation("main", 1, None, 0, end.sequence),
+                None,
+                false,
+            )],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        EventKind::TurnStart(dim_agent_types::TurnStartData {
+            turn_id: "t2".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: first.id.clone(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::ToolCall(dim_agent_types::ToolCallData {
+            turn_id: "t2".into(),
+            request_id: "r".into(),
+            calls: vec![dim_agent_types::ToolCall {
+                id: "c".into(),
+                name: "exec".into(),
+                input: serde_json::Map::new(),
+            }],
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::ExecStarted(dim_agent_types::ExecStartedData {
+            turn_id: "t2".into(),
+            request_id: "r".into(),
+            call_id: "c".into(),
+            task_id: "task-1".into(),
+            description: "background work".into(),
+            output_path: "/dev/null".into(),
+        }),
+    );
+    let end = seed.append("main", turn_end_with("t2", "completed"));
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-open-task").await;
+    assert_eq!(
+        env.settled("main").await.len(),
+        2,
+        "the open task defers the end"
+    );
+    env.exec_ended("main", "task-1", "cancelled");
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 2, None, 0, end.sequence)
+    );
+    assert_eq!(
+        env.settled("main").await.len(),
+        3,
+        "the restored open task is decided once"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_reopens_the_goal_and_the_count_restarts() {
     let env = Env::start().await;
     env.set_limit(2);

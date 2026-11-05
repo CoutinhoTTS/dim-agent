@@ -12,7 +12,8 @@ use dim_agent_runtime::{
     TimelineQueryPredicate, TimelineQueryScope, rebuild_facts,
 };
 use dim_agent_types::{
-    AgentEvent, BranchSource, EventKind, InputBlock, InterruptScope, TurnEndData, TurnOutcome,
+    AgentEvent, BranchSource, EventKind, ExecStatus, InputBlock, InterruptScope, TurnEndData,
+    TurnOutcome,
 };
 use dim_app_server::settings::{SettingsScope, SettingsService};
 use rutis::Ctx;
@@ -41,6 +42,8 @@ const KEYS: &[&str] = &[
     "turn/start",
     "turn/end",
     "stop/interrupt",
+    "exec/started",
+    "exec/ended",
 ];
 
 /// Inherited `input/message` facts one page of the new-branch check keeps.
@@ -223,6 +226,9 @@ struct State {
     role: Option<Role>,
     /// The decision keys whose work is running: each runs once at a time.
     in_flight: HashSet<String>,
+    /// The keys asked for while their work was running: a turn-end decision
+    /// runs again when that work finishes.
+    retry: HashSet<String>,
 }
 
 struct Owner {
@@ -263,8 +269,12 @@ impl Owner {
         if self.stopped() {
             return;
         }
-        if !self.state.lock().unwrap().in_flight.insert(key.clone()) {
-            return;
+        {
+            let mut state = self.state.lock().unwrap();
+            if !state.in_flight.insert(key.clone()) {
+                state.retry.insert(key);
+                return;
+            }
         }
         let owner = self.clone();
         let phase = self.phase.clone();
@@ -275,7 +285,17 @@ impl Owner {
             {
                 tracing::warn!(key = %key, %error, "Goal write failed");
             }
-            owner.state.lock().unwrap().in_flight.remove(&key);
+            let retry = {
+                let mut state = owner.state.lock().unwrap();
+                state.in_flight.remove(&key);
+                state.retry.remove(&key)
+            };
+            // A turn-end request that arrived while its decision ran gets that
+            // decision again over the fold as it stands now; C4 and `decided`
+            // deduplicate it.
+            if retry && key.starts_with("turn:") {
+                owner.decide_end();
+            }
         });
     }
 
@@ -380,7 +400,28 @@ impl Owner {
                 self.settle();
             }
             EventKind::InputDeleted(_) => self.decide_end(),
+            // A cancelled background end does not wake (BackgroundExec's
+            // `wakes`); when it closes the last open task of an idle branch,
+            // the turn end it deferred decides now. Other statuses are
+            // followed by their wake input, whose turn end decides.
+            EventKind::ExecEnded(data) if data.status == ExecStatus::Cancelled => {
+                self.background_settled()
+            }
             _ => {}
+        }
+    }
+
+    /// Takes the turn-end decision a cancelled background end released, once
+    /// the branch is idle and no task is open (A.4). The cancelled status is
+    /// read from the fact, so this cannot race a `completed` end's wake.
+    fn background_settled(self: &Arc<Self>) {
+        let decide = {
+            let state = self.state.lock().unwrap();
+            let fold = &state.fold;
+            fold.running() && !fold.open_tasks() && !fold.turn_open() && !fold.pending_driving()
+        };
+        if decide {
+            self.decide_end();
         }
     }
 
@@ -564,19 +605,20 @@ impl Owner {
         }
         // C7's answer comes from the ending turn, read at decision time and
         // only when a continuation drove it; `step/tool-call` is not a fold
-        // kind (A.6, #1113).
+        // kind (A.6, #1113). An open background task defers the decision, so
+        // it needs no answer now.
         let progress = {
-            let end = {
+            let (end, open) = {
                 let state = self.state.lock().unwrap();
                 if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
                     return Ok(());
                 }
-                state.fold.turn_end.clone()
+                (state.fold.turn_end.clone(), state.fold.open_tasks())
             };
             let Some(end) = end else {
                 return Ok(());
             };
-            if !end.continuation_driven {
+            if open || !end.continuation_driven {
                 None
             } else if self
                 .turn_had_tool_call(end.turn_start, &end.turn_id)
@@ -867,34 +909,32 @@ impl Owner {
                         if owner.stopped() {
                             return Ok(());
                         }
-                        let (end, progress) = {
-                            let end = {
+                        let (end, open, progress) = {
+                            let (end, open) = {
                                 let state = owner.state.lock().unwrap();
                                 if fold::decide_conclusion(&state.fold, sequence, &conclusion)
                                     != Some(ConclusionAction::Continue)
                                 {
                                     return Ok(());
                                 }
-                                state.fold.turn_end.clone()
+                                (state.fold.turn_end.clone(), state.fold.open_tasks())
                             };
                             let Some(end) = end else {
                                 return Ok(());
                             };
-                            let progress = if end.continuation_driven {
-                                if owner
-                                    .turn_had_tool_call(end.turn_start, &end.turn_id)
-                                    .await?
-                                {
-                                    Some(fold::Progress::ToolCall)
-                                } else {
-                                    Some(fold::Progress::NoToolCall)
-                                }
-                            } else {
+                            let progress = if open || !end.continuation_driven {
                                 None
+                            } else if owner
+                                .turn_had_tool_call(end.turn_start, &end.turn_id)
+                                .await?
+                            {
+                                Some(fold::Progress::ToolCall)
+                            } else {
+                                Some(fold::Progress::NoToolCall)
                             };
-                            (end, progress)
+                            (end, open, progress)
                         };
-                        if owner.stopped() {
+                        if owner.stopped() || open {
                             return Ok(());
                         }
                         let decision = {

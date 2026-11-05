@@ -42,7 +42,7 @@ flowchart LR
 | `GoalSession` | Session | `TreeCommands`、`ToolRegistry`、`SessionMethods`、`GuideEntries`（Session 导出） | 把 `goal_update` 注册到 `ToolRegistry`，把 `session.goal` 注册到 `SessionMethods`；经 `TreeCommands::input` 按分支 id 写变更输入 |
 | `GoalBranch` | 分支 | `Dispatcher`、`Timeline`、`TimelineIdentity`、`BranchLifecycle`（分支导出）、`SessionLifecycle`（Session 导出，用于加载时核对）、`TreeCommands`、用于其来源 `goal` 的进程服务 `SettingsService`（S8b） | 不提供服务；拥有折叠结果、续跑决策和 Goal 自己的写入 |
 
-Session 部分在 apply 中把工具注册到 `ToolRegistry`，把方法命名空间 `session.goal` 注册到 `SessionMethods`。分支部分不提供服务；它作为分支定义注册，因此每个分支都有一份副本（C5）。安装了 Goal 的装配的每个 Session 都运行 Goal 的 Session 部分，因此该部分激活后，每个这样的 Session 都有 `session.goal`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。`maxContinuations` 是 Goal 的 Settings 来源 `goal` 中文档的可选字段，属于业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4）。Goal 只通过 S8b 的进程服务 `settings` 读取它（[Settings 服务](../appserver/settings-service.md)）：每次使用时调用 `SettingsService::read_declared`，经其公开的 Rust 绑定。Goal 的行在其 `apply` 中按 S8b §3.1 登记该来源：`source: "goal"`，一个用户文件，没有项目文件（只有用户作用域），没有 user-only 字段，JSON Schema 中 `maxContinuations` 为整数，`minimum: 1`、`maximum: 1000`，没有默认值（A4）。字段缺失表示没有上限；`null` 不是合法值。Settings 在写入和读取持久化文件时校验，因此 Goal 按交付的样子使用文档；变更是数据更新，从不重载。Dispatcher 回调登记自有任务后即返回，不等待 Settings。分支发布后，每个 turn/end 任务使用时调用 `settings.read {source: "goal", scope: "user"}`，再在写入前复核其决定轮次及当前已消费的折叠结果（A.6）。不缓存上限，也不监听 `settings.changed`。在该读取前已提交的变更无须重载即生效，包括文件后端 Settings 用户文档的直接编辑。来源不可读时停止该次决策，不产生自动输入，也不使用回退上限（附录 C）。中断暂停与继承目标的起始 clear 不需要读取上限。Goal 的工具都不写它；客户端经 `settings.read`/`settings.update` 写入它。Goal 只读取 `branch/start`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end` 和 `stop/interrupt` 的公开数据契约，并在 turn/end 决策时读取结束回合的一页有界 `step/tool-call`（A.4 C7）；从不读取其他插件的状态。
+Session 部分在 apply 中把工具注册到 `ToolRegistry`，把方法命名空间 `session.goal` 注册到 `SessionMethods`。分支部分不提供服务；它作为分支定义注册，因此每个分支都有一份副本（C5）。安装了 Goal 的装配的每个 Session 都运行 Goal 的 Session 部分，因此该部分激活后，每个这样的 Session 都有 `session.goal`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。`maxContinuations` 是 Goal 的 Settings 来源 `goal` 中文档的可选字段，属于业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4）。Goal 只通过 S8b 的进程服务 `settings` 读取它（[Settings 服务](../appserver/settings-service.md)）：每次使用时调用 `SettingsService::read_declared`，经其公开的 Rust 绑定。Goal 的行在其 `apply` 中按 S8b §3.1 登记该来源：`source: "goal"`，一个用户文件，没有项目文件（只有用户作用域），没有 user-only 字段，JSON Schema 中 `maxContinuations` 为整数，`minimum: 1`、`maximum: 1000`，没有默认值（A4）。字段缺失表示没有上限；`null` 不是合法值。Settings 在写入和读取持久化文件时校验，因此 Goal 按交付的样子使用文档；变更是数据更新，从不重载。Dispatcher 回调登记自有任务后即返回，不等待 Settings。分支发布后，每个 turn/end 任务使用时调用 `settings.read {source: "goal", scope: "user"}`，再在写入前复核其决定轮次及当前已消费的折叠结果（A.6）。不缓存上限，也不监听 `settings.changed`。在该读取前已提交的变更无须重载即生效，包括文件后端 Settings 用户文档的直接编辑。来源不可读时停止该次决策，不产生自动输入，也不使用回退上限（附录 C）。中断暂停与继承目标的起始 clear 不需要读取上限。Goal 的工具都不写它；客户端经 `settings.read`/`settings.update` 写入它。Goal 只读取 `branch/start`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end`、`stop/interrupt`、`exec/started` 和 `exec/ended` 的公开数据契约，并在 turn/end 决策时读取结束回合的一页有界 `step/tool-call`（A.4 C7）；从不读取其他插件的状态。
 
 ## 2. 数据与状态
 
@@ -53,7 +53,7 @@ flowchart TB
     CI["Goal 自己的 input/message：续跑（无 key）或自动暂停（goal:status）"]
     OI["操作者 input/message（用户内容，无来源标记）"]
     IC["input/consumed、input/deleted"]
-    TE["branch/start、turn/start、turn/end、stop/interrupt"]
+    TE["branch/start、turn/start、turn/end、stop/interrupt、exec/started、exec/ended"]
   end
   CFG["Settings 来源 goal：maxContinuations"]
   VIEW["折叠结果：加载时建立，每次 Dispatcher 投递时推进"]:::new
@@ -100,6 +100,7 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事�
 | `conclusion` | 第一个本地输入，其第一个块的标记是一份有效报告（[Pursuit](Pursuit.md) §5）：`kind="report"`、`result` 为四种结果之一、`evaluation` 为十进制序号，且 `evaluator` 等于 `evaluation` 的 `branch/create` 所记录的分支。缺少任一项的报告不是结论 |
 | `pending_driving` | 有效模式为 Queue 或 Steer、且既无 `input/consumed` 也无 `input/deleted` 的本地 `input/message`（session access §2 待处理规则）。Goal 不解读 InputQueue 的指令 `input/withdraw`；只有 InputQueue 的结果 `input/deleted` 才移除输入 |
 | `turn_open` | 最新 `turn/end` 之后存在 `turn/start` |
+| `open_tasks` | 本分支以 `exec/started` 启动、尚未被匹配的 `exec/ended` 关闭的后台任务，按 `task_id` 记录（A.4） |
 
 仅运行时：折叠结果，以及在途的写入任务集合，按做出决定的事件序号为键。Dispatcher 处理器推进折叠结果、做决定、需要时登记写入任务，然后返回；它从不等待。没有 worker，没有与调用共享的锁，也不等待某个序号。两者都由加载折叠重建；新一代从不继承在途任务（旧一代的任务随其卸载结束）。
 
@@ -347,6 +348,8 @@ ToolRegistry 即提供它（[Session 边界 A.5](../contracts/session-boundary.m
 
 Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的折叠结果：
 
+**后台前置条件。** 若 `open_tasks` 非空，该 turn/end 不做任何决策——既不再续跑也不暂停——并保持未决。后台任务的非 cancelled `exec/ended` 之后会跟着它的唤醒输入（BackgroundExec 的 `<dim-notification>`），该输入驱动下一轮，其结束照常决策。`cancelled` 的 `exec/ended` 不唤醒；当它关闭最后一个开放任务且分支空闲、没有待处理驱动输入时，Goal 此时执行被推迟的 turn/end 决策。该路径只读取事实中的 cancelled 状态，因此不会与唤醒竞争；决定轮次的 `decided` 标记会去重。折叠按 `task_id` 在 `exec/started` 与 `exec/ended` 上跟踪开放任务，重建会恢复该集合。
+
 | # | 条件 | 若为假 |
 | --- | --- | --- |
 | C1 | 目标存在（本地 `goal:objective` 块存活）、`status = active` | 停止 |
@@ -415,10 +418,12 @@ C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两�
 
 ### A.6 Timeline 机制
 
+Goal 消费 `branch/start`、`session/forked`、`branch/create`、`branch/create-failed`、`branch/ended`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end`、`stop/interrupt`、`exec/started` 和 `exec/ended`（`branch.rs` 的 `KEYS`）；`step/tool-call` 只在决策时查询，不消费（A.4 C7）。
+
 | 步骤 | 路径 |
 | --- | --- |
 | 加载 | 在 Dispatcher 上注册（`"Goal"`，`consume`），折叠重放的直到截点 `S` 的本地事件。在同一次重放中、任何实时事件之前：若最新的 `turn/end` 不是 `decided` 且目标为 active，执行其决策一次，包括 C7 的一次有界 `step/tool-call` 读取；若 `branch/start` 已消费、未 `decided` 且 `inherited_live`，执行起始 `clear` 决策一次 |
-| 消费 | 对 `S` 之后的每个实时事件，Dispatcher 处理器推进折叠结果，并对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 决策（A.4）；需要时登记写入任务，不等待即返回。turn/end 任务在写入前读取 Settings，并在续跑驱动了结束回合时读取其一次有界的 `step/tool-call` 进度页（C7，见复核） |
+| 消费 | 对 `S` 之后的每个实时事件，Dispatcher 处理器推进折叠结果，并对 `branch/start`、`turn/end`、`stop/interrupt`、`input/deleted` 与 cancelled 的 `exec/ended` 决策（A.4）；需要时登记写入任务，不等待即返回。turn/end 任务在写入前读取 Settings，并在续跑驱动了结束回合时读取其一次有界的 `step/tool-call` 进度页（C7，见复核） |
 | 写入 | 来源为 `goal` 的 `input/message`，`submissionId: "goal:<uuid>"`，带标记和模式，经分支的公开输入入口 `Branch::input` 写入，由它在边界校验并追加 `input/message`（[interrupt](../../../architecture/rust-agent/interrupt.md)）。Session 部分的调用以同样方式写入，从不查询折叠结果 |
 | 消费路径 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed`。Goal 从不写 Steer |
 | 复核 | turn/end 任务读取 Settings，并在续跑驱动了结束回合时读取其进度，然后基于相同决定轮次的已消费状态复核（[time-bus](../../../architecture/rust-agent/time-bus.md) §4）；之后的事实在序号上先于写入，由 InputQueue、Loop 和折叠结果处理 |
@@ -484,6 +489,10 @@ C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两�
 | 停滞数达到 3 | 连续第三个由续跑驱动且没有 `step/tool-call` 的回合 | 暂停（`no_progress`），不再续跑 | Goal |
 | 续跑回合之间的操作者输入 | 操作者输入 < `turn/end` | 它之前的回合不计入停滞数；该回合若也由续跑驱动则计一次 | Goal |
 | 停滞期间重载 | 续跑 < 重载 < 下一个 `turn/end` | 续跑的 `idle` 重建停滞数；未决的结束决策一次 | Goal |
+| `turn/end` 时有后台任务开放 | `exec/started` < `turn/end` N < `exec/ended` | N 不决策；任务的结束与唤醒驱动下一轮 | Goal |
+| 非 cancelled 的后台结束 | `exec/ended` < 唤醒输入 | 唤醒输入驱动一轮，其结束照常决策，N 被取代 | BackgroundExec；Goal |
+| cancelled 的后台结束关闭最后一个开放任务且分支空闲 | `exec/ended {cancelled}` < 没有驱动输入 | 此时执行被推迟的 turn/end 决策，且只执行一次 | Goal |
+| 带开放任务重载 | `exec/started` < 重载 < `exec/ended` | 重建恢复开放集合；在 cancelled 结束或唤醒回合结束之前，该结束不决策 | Goal |
 | 达到显式上限 | count = limit | 暂停（`limit`） | Goal |
 | 没有设置上限 | — | 目标 active 期间每个完成的回合都续跑；只有完成、用户操作或停滞规则使其停止（A4、C7） | Goal |
 | 资源节点离线 | 节点上的调用失败 | Goal 不使用节点服务：输入照常提交，轮次照常运行；工作区工具调用以 `node_unavailable` 作为工具错误失败；不重载，也不进入 Pending（[overview §6.3](../overview.md)） | Goal；WorkspaceTools |
@@ -522,6 +531,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 11. 设置 → `completed` → `resume`：目标重新打开（`active`，计数重新开始），resume 输入驱动一轮，其正常结束写入续跑；resume 之后压缩，上下文中最新的 `goal:status` 块是 resume 块，目标为 `active`。
 12. 设置 → `completed` → `blocked`：当前状态为 `blocked` 及第二个 summary；每次状态变更之后压缩，上下文中最新的 `goal:status` 块就是当前状态。
 13. 没有默认上限：未设置 `maxContinuations` 的目标会越过任何固定计数继续；连续三个由续跑驱动且没有 `step/tool-call` 的回合会使其暂停（`no_progress`），期间的工具调用或操作者输入会重置停滞数，续跑的 `idle` 在重载后重建它。`CONTINUE` 结论遵循同一规则，达到停滞时写暂停而不是评审续跑。
+14. `turn/end` 时有后台任务开放会推迟决策；非 cancelled 结束的唤醒驱动一轮并由其结束决策；cancelled 结束关闭最后一个开放任务时执行被推迟的决策，且只执行一次，重载后亦然。其他任务的 `exec/ended`，或已决策结束的 `exec/ended`，不写入。
 
 ## 附录 E. 假设
 
@@ -543,6 +553,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 | A14 | 变更在其 `input/message` 序号处生效，被 InputQueue 删除时从折叠中移除 | 判断：轮次中写入的暂停必须在 Append 被应用之前就阻止该轮的续跑 | 变更改为在 `input/applied` 处生效，轮次中写入的暂停将无法阻止该轮的续跑 |
 | A15 | 第二次 `goal_update`，或没有 active 目标时的 `goal_update`，返回写入确认而不是错误，其块成为当前状态（A16；在 [Pursuit](Pursuit.md) 的评审裁判下，干活模型的 `completed` 是请求） | 决定 G1（行为变化；去掉调用方的判断，以此回应 PR 评审"Goal 调用要看到之前已提交的写入"） | 工具需要读取并等待折叠结果，重新引入调用方判断 |
 | A16 | 折叠规则：每个 key 最新的存活本地块就是当前目标文本与状态，只有本地 `goal:objective` 块存活时目标才存在。例外在 [Pursuit](Pursuit.md)（已实现）的评审裁判下生效：在该评审裁判下，干活模型的 `completed` 块（不带 `by="evaluator"`）是请求，不改变状态；状态仍由最新的其他 `goal:status` 块给出（目标运行时为 `active`），直到评审者的结局或变更取代它，所以重放出的最新块可能读作 `completed`，目标却是 active | 用户决定（回应 PR 评审"Keep replayed Goal status consistent with the fold"）；Pursuit 例外是针对该设计的维护者决定（2026-10-22） | 压缩后重放的状态可能与折叠结果不一致 |
+| A17 | 后台任务的启动是其回合中的一个 `step/tool-call`；有任务开放时目标会等待：该 turn/end 不决策，直到非 cancelled 结束的唤醒驱动下一轮，或 cancelled 结束关闭最后一个开放任务 | 判断：运行中的后台进程是持续的工作，不是已完成的回合 | 目标可能在它启动的任务仍在运行时暂停或续跑 |
 
 ## 附录 F. 待对齐问题
 

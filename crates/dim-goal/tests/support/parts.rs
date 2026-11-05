@@ -1177,6 +1177,39 @@ impl Env {
         )
     }
 
+    /// The `exec/started` a background tool writes for `task_id`.
+    pub fn exec_started(&self, branch: &str, turn_id: &str, task_id: &str) -> Arc<AgentEvent> {
+        self.emit(
+            branch,
+            EventKind::ExecStarted(dim_agent_types::ExecStartedData {
+                turn_id: turn_id.to_owned(),
+                request_id: "request".into(),
+                call_id: format!("call-{task_id}"),
+                task_id: task_id.to_owned(),
+                description: "background work".into(),
+                output_path: "/dev/null".into(),
+            }),
+        )
+    }
+
+    /// The `exec/ended` that closes `task_id` with `status`.
+    pub fn exec_ended(&self, branch: &str, task_id: &str, status: &str) -> Arc<AgentEvent> {
+        let status = match status {
+            "completed" => dim_agent_types::ExecStatus::Completed,
+            "failed" => dim_agent_types::ExecStatus::Failed,
+            "cancelled" => dim_agent_types::ExecStatus::Cancelled,
+            other => panic!("unknown exec status {other}"),
+        };
+        self.emit(
+            branch,
+            EventKind::ExecEnded(dim_agent_types::ExecEndedData {
+                task_id: task_id.to_owned(),
+                status,
+                result: ToolResult::default(),
+            }),
+        )
+    }
+
     /// A completed turn that takes in `inputs` and makes one tool call, as the
     /// Loop writes a turn that used a tool.
     pub fn tool_turn(&self, branch: &str, inputs: &[&Block]) -> Arc<AgentEvent> {

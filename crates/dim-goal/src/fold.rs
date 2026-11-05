@@ -249,6 +249,8 @@ pub struct Fold {
     pub failed: HashSet<String>,
     /// Turn ends in this branch's local events.
     pub turn_ends: usize,
+    /// Background tasks this branch started and has not ended, by `task_id`.
+    open_tasks: HashSet<String>,
     interrupts: Vec<u64>,
     continuations: Vec<Continuation>,
     /// The ids of the continuation inputs, which drive turns (C7).
@@ -350,6 +352,12 @@ impl Fold {
             }
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn => {
                 self.interrupts.push(sequence);
+            }
+            EventKind::ExecStarted(data) => {
+                self.open_tasks.insert(data.task_id.clone());
+            }
+            EventKind::ExecEnded(data) => {
+                self.open_tasks.remove(&data.task_id);
             }
             _ => {}
         }
@@ -479,6 +487,10 @@ impl Fold {
     pub fn pending_driving(&self) -> bool {
         self.driving.keys().any(|id| !self.deleted.contains(id))
     }
+    /// Whether a background task this branch started is still open (A.4).
+    pub fn open_tasks(&self) -> bool {
+        !self.open_tasks.is_empty()
+    }
     pub fn turn_open(&self) -> bool {
         self.turn_start > self.turn_end.as_ref().map_or(0, |end| end.sequence)
     }
@@ -558,6 +570,11 @@ pub fn decide_turn_end(
     if fold.is_decided(end.sequence) || !fold.running() {
         return None;
     }
+    // A turn end with a background task still open decides nothing: its wake
+    // drives the next turn, or its cancelled end takes this decision later.
+    if fold.open_tasks() {
+        return None;
+    }
     if fold.interrupted() {
         return Some(Decision::Pause {
             reason: "interrupted",
@@ -628,13 +645,14 @@ pub fn decide_conclusion(
     })
 }
 
-/// Goal's continuation for a `continue` conclusion: C1, C5, C6 and C7.
+/// Goal's continuation for a `continue` conclusion: C1, C5, C6, C7 and the
+/// background wait.
 pub fn decide_evaluated_continuation(
     fold: &Fold,
     limit: Option<u64>,
     progress: Option<Progress>,
 ) -> Option<Decision> {
-    if !fold.running() || fold.pending_driving() {
+    if !fold.running() || fold.pending_driving() || fold.open_tasks() {
         return None;
     }
     decide_continuation(fold, limit, fold.turn_end.as_ref(), progress)
