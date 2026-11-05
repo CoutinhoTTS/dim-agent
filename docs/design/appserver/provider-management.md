@@ -564,7 +564,11 @@ is not in `disabledModelIds`. That reason already covers every exclusion: a mode
 with `ModelStatus::Unavailable`, a model that declares no `text` modality, a
 non-chat model on a driver other than `new-api-router`, a disabled Provider
 record, a model with no route, a signed-out account, a missing static credential,
-and an undeclared limit (`limits_undeclared`). The read adds no second predicate.
+and an undeclared limit (`limits_undeclared`). The read adds no second predicate:
+it reads the one selection already applies. The modality read is that same rule
+minus the three requirements above, and both catalog builders derive an entry's
+conversational and modality reasons from one classification of the entry, so a
+new exclusion reason states its class once and the two reads cannot drift apart.
 A model appears only if `select`, `configuration`, `apply_preferences`, the
 per-request check and `auxiliaryModel` accept it at the same read. Execution
 remains authoritative: a later write can make a model unselectable, and the
@@ -602,10 +606,13 @@ read returns no per-provider error list. A caller that needs a provider's
 diagnostic uses `provider.list` or `provider.management`.
 
 **Consumers.** Modality computes each operation's options and its automatic
-default from this read: it intersects these IDs with the operations its collected
-adapters declare and reports "no adapter for the configured model" when the
-configured model is absent. It does not call `provider.catalog` and keeps no
-availability predicate of its own. The reply carries IDs and capabilities only,
+default from these reads: the candidates of an adapter-served category are the
+models `selectableForModality` returns, kept when a collected adapter serves them
+for the operation, so a media model execution rejects stays an option where an
+adapter serves it; for an operation no adapter serves, the candidates are the
+models whose entry declares that operation id. It reports "no adapter for the
+configured model" when the configured model is absent. It does not call
+`provider.catalog` and keeps no availability predicate of its own. The reply carries IDs and capabilities only,
 not a display name: a client that renders an option joins the ID with the model
 list of `provider.catalog` or `provider.management`, and Modality copies no name.
 Provider gains no per-consumer key, setting or filter: the read has no input, so a
@@ -623,7 +630,9 @@ non-chat rules. The read adds no state, cache, notification, crate or module.
 **Rust binding.** The port is defined in `crates/dim-agent-capabilities/src/host.rs`
 beside `ModelSelectionHost`. Provider provides it in `ProviderPlugin::apply`, and
 the configured model profile (`dim-agent-aimux`) provides it from the entries of
-its model file, so both deployments answer the same read. The App Server catalog
+its model file, so both deployments answer the same reads; that profile declares
+no modality operation, so its `selectableForModality` read answers none
+([aimux](../../../crates/dim-agent-aimux/README.md)). The App Server catalog
 registers it as the Rust-only name `selectableModelsHost`
 (no cross-language binding before
 [#4](https://github.com/arcships/dim/issues/4)):
@@ -634,12 +643,17 @@ pub trait SelectableModels: Send + Sync + 'static {
         &self,
         cancel: CancellationToken,
     ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>>;
+    fn selectable_for_modality(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<ModalityModelSnapshot>>;
 }
 pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
 ```
 
-The owner implementation is `ProviderService::selectable_models`; `ProductResolver`
-delegates to it. A consumer that needs the read declares
+The owner implementations are `ProviderService::selectable_models` and
+`ProviderService::selectable_modality_models`; `ProductResolver` delegates to
+both. A consumer that needs the read declares
 `Keyed<SelectableModelsHost>` in its `Deps` and gates on it (Modality). A consumer
 that must load without Provider reads the name when it is provided and gates
 nothing (Collaboration's `models` action); it takes a snapshot at load, so a
