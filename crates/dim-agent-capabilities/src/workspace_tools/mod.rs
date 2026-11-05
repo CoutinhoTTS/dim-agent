@@ -34,6 +34,14 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// Host tools this capability provides.
 pub const TOOL_NAMES: [&str; 7] = ["read", "write", "edit", "glob", "grep", "exec", "exec_stop"];
 const OUTPUT_METHOD: &str = "session.exec.output";
+/// `session.exec.output.page`: the tail's sibling, reading the task's
+/// registered output file by byte cursor.
+const PAGE_OUTPUT_METHOD: &str = "session.exec.output.page";
+/// Default page and largest page `session.exec.output.page` serves; a
+/// caller's `limit` clamps to the latter, following `session.files.search`'s
+/// own clamp.
+const OUTPUT_PAGE_BYTES: u64 = 1024 * 1024;
+const OUTPUT_PAGE_BYTES_MAX: u64 = 4 * 1024 * 1024;
 /// The `session.files` namespace: the files an `@` mention offers.
 const FILES_NAMESPACE: &str = "session.files";
 const SEARCH_METHOD: &str = "session.files.search";
@@ -346,10 +354,62 @@ impl DynPlugin for WorkspaceToolsPlugin {
             methods.register(
                 ctx,
                 OUTPUT_METHOD,
-                vec![MethodDecl::new(OUTPUT_METHOD, false, Interruption::Report)],
-                Arc::new(move |_, value, _, _| {
+                vec![
+                    MethodDecl::new(OUTPUT_METHOD, false, Interruption::Report),
+                    MethodDecl::new(PAGE_OUTPUT_METHOD, false, Interruption::Report),
+                ],
+                Arc::new(move |method, value, _, _| {
                     let tree = tree.clone();
                     Box::pin(async move {
+                        if method == PAGE_OUTPUT_METHOD {
+                            #[derive(serde::Deserialize)]
+                            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                            struct PageParams {
+                                session_id: String,
+                                branch_id: String,
+                                task_id: String,
+                                cursor: Option<u64>,
+                                limit: Option<u64>,
+                            }
+                            let PageParams {
+                                session_id,
+                                branch_id,
+                                task_id,
+                                cursor,
+                                limit,
+                            } = params(value)?;
+                            if session_id.is_empty() || branch_id.is_empty() || task_id.is_empty() {
+                                return Err(RpcError::invalid(
+                                    "sessionId, branchId and taskId must not be empty",
+                                ));
+                            }
+                            let limit = match limit {
+                                Some(0) => {
+                                    return Err(RpcError::invalid("limit must be at least 1"))
+                                }
+                                Some(limit) => limit.clamp(1, OUTPUT_PAGE_BYTES_MAX),
+                                None => OUTPUT_PAGE_BYTES,
+                            };
+                            let page = tree
+                                .get(&branch_id)?
+                                .service::<background::BackgroundExec>()?
+                                .output_page(&task_id, cursor.unwrap_or(0), limit as usize)
+                                .await
+                                .map_err(|error| match error {
+                                    background::OutputPageError::Unknown => RpcError::app(
+                                        -32000,
+                                        "exec_task_unknown",
+                                        "No such task is known on this branch",
+                                    ),
+                                    background::OutputPageError::Unavailable => RpcError::app(
+                                        -32000,
+                                        "exec_output_unavailable",
+                                        "The task's output file is no longer available; it was removed or its Session was deleted",
+                                    ),
+                                    background::OutputPageError::Closed => RpcError::reloading(),
+                                })?;
+                            return reply(page);
+                        }
                         #[derive(serde::Deserialize)]
                         #[serde(rename_all = "camelCase", deny_unknown_fields)]
                         struct Params {
