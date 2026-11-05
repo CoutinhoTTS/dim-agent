@@ -825,7 +825,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 
 | 入口 | 行为 |
 | --- | --- |
-| `dimcode tui` | 打开现有的交互式滚动回显客户端。 |
+| `dimcode tui [-p TEXT] [--image PATH ...]` | 打开现有的交互式滚动回显客户端；`-p` 把 TEXT 作为首条消息发送（[带首条消息启动](#带首条消息启动)）。 |
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | 运行文本和/或本地图片后退出；没有 `-p` 时读取重定向的 stdin。 |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | 用文本和/或图片继续指定的已持久化 Session。 |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
@@ -903,9 +903,29 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 指向独立的 `dim-app-server` 二进制，CLI 按它自己的名字直接运行；默认则运行本可执行文件的
 `app-server` 子命令，因此指向本可执行文件是参数错误。指向不存在的路径、程序在开始服务前
 退出，或未及时开始服务时，也按同一要求报错，除非它留下了[启动说明](#守护进程启动失败)。现有的
-login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `--prompt`、管道 stdin 和
-`--resume` 调用行为不变；`exec resume` 也接受同样的全局选项。重复给出 Session 或提示词是参数错误。
-`--json` 是 `exec` 的选项，`tui` 需要终端。help/version 与参数错误不会启动守护进程。
+login/account/logout、models、MCP 和 daemon 命令仍然可用。管道 stdin 与
+`--resume` 调用行为不变，`--prompt` 在 `exec` 与裸 chat 上仍是一次性提示词；`tui -p`
+发送首条消息（[带首条消息启动](#带首条消息启动)）。`exec resume` 也接受同样的全局选项。
+重复给出 Session 或提示词是参数错误。`--json` 是 `exec` 的选项，`tui` 需要终端。
+help/version 与参数错误不会启动守护进程。
+
+### 带首条消息启动
+
+`dimcode tui -p TEXT` 打开交互式终端 UI，并把 TEXT 作为首条消息发送；生命周期由命令决定，
+`exec -p` 与裸 chat 的 `-p` 仍然运行一次后退出。`--resume SESSION_ID -p TEXT` 先附加到该
+Session，再把消息发送到那里。`--image PATH` 只有在与 `-p` 同时给出时才被 `tui` 接受；图片
+在 CLI 边界按 `exec` 的规则读取和缩放，并按参数顺序附到首条消息上（文本在前）。没有 `-p`
+时该选项保持 `--image requires exec` 的拒绝。`--json` 对 `tui` 仍然拒绝，`--no-tui` 保持
+一次性行客户端行为。
+
+消息只提交一次：第一帧画出之后，走用户键入消息所用的同一个 composer，两种终端模式一致。
+文本成为草稿、图片成为它的 token，然后 composer 的提交套用命令面板规则（精确的 `/name`
+或别名会运行该命令，未匹配的 `/` 文本是普通输入）、`!`/`!!` shell 模式、行草稿以及
+queue/steer 规则；启动之后不再有任何一层重新解析命令行。
+
+没有 Session 能接收这条消息时——没有模型、未登录，或 Session 启动失败——文本和它的
+图片 token 作为未发送的草稿留在 composer 里，旁边是现有的 Home/登录提示，而不是被丢弃；
+这种情况界面不会退出。
 
 ### 守护进程启动失败
 

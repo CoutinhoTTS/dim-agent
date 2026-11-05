@@ -57,7 +57,7 @@ Nothing in the client tree is Timeline state. The daemon owns every Session fact
 ```text
 client process                                      daemon process
 ──────────────                                      ──────────────
-parse args; stdin is a terminal; action Chat/Tui
+parse args; stdin is a terminal; action Chat/Tui (Tui may carry -p TEXT)
 Ctx::root()  ── client tree
 root.plugin(DaemonLink{options})
   apply:
@@ -110,6 +110,15 @@ and returns the TUI's exit code. `ui.open` is an internal daemon RPC used by
 this startup, not a separate user command. A daemon without `ui.leaf.2`
 keeps the direct TUI. Before a model is configured, initial setup uses that
 existing direct TUI (§3.6).
+
+`dimcode tui -p TEXT` carries the first message: the client reads it once
+from the parsed options, together with the images already read and scaled at
+the CLI boundary, and hands it to the interface as one value on its
+environment. The interface submits it once, after the first frame, through its
+own composer, so it takes the same path as a typed message (an exact command
+runs, unmatched `/` text is input, `!`/`!!` is shell mode, the queue/steer
+rule applies) in both terminal modes. A message no Session can take stays in
+the composer as an unsent draft rather than being discarded.
 
 ### 3.2 `/web` from the TUI: daemon-owned switch
 
