@@ -142,13 +142,16 @@ live output. The handle is released after the supervisor's terminal append attem
 settles, including on write failure; do not release it between process settlement
 and that append. The read must not extend the existing resource cleanup lifetime.
 The tail read uses the capture's existing synchronization, with no new lock or
-second output buffer. The page read takes no capture lock on purpose: it opens
-the registered file itself and reads from the cursor, so a running command's
-pump is never blocked by a page. That is safe because the file is append-only —
-a page only reads bytes at or past its cursor — and a task is registered only
-after its file exists (`ensure_file` runs before `exec/started`), so a known
-task's `exec/started` always names its own file; a concurrent write can only
-extend the file past the cursor, and a file removed later answers
+second output buffer. The page's byte read takes no capture lock: it opens the
+registered file itself and reads from the cursor, so it never waits on the
+pump's write. A running task's page does take that same lock once per call, the
+one the tail read already uses, only to copy the capture's `truncated` flag —
+held for the copy, never across the file read — so a page can hold the pump up
+only for that copy. That is safe because the file is append-only — a page only
+reads bytes at or past its cursor — and a task is registered only after its
+file exists (`ensure_file` runs before `exec/started`), so a known task's
+`exec/started` always names its own file; a concurrent write can only extend
+the file past the cursor, and a file removed later answers
 `exec_output_unavailable`. Release the task-table guard before awaiting either
 read.
 
