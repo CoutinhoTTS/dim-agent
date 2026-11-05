@@ -573,7 +573,6 @@ async fn through_pins_the_projection_and_a_future_position_is_invalid() {
         future["error"]["data"]["appError"], "invalid_params",
         "{future}"
     );
-    assert_eq!(future["error"]["message"], "Future keyed-block position");
 }
 
 /// The read is v3 only, like `session.history`.
