@@ -548,12 +548,13 @@ Apply sends `mcp.import.apply` with the previewed document, its `revision` as
 preview, rereads `mcp.catalog` and states that imported and replaced entries
 start disabled: a user entry is written with `enabled: false`, and a project
 entry's enablement record is withdrawn before the write. On
-`mcp_settings_conflict` the page says the source changed, keeps the preview and
-offers Preview again, which re-previews the same document; it never retries the
-apply. The owner codes (`mcp_import_conflict`, `mcp_import_partial`,
-`mcp_invalid_config`) are shown as the owner's message, and the preview stays
-open for a different selection; after a partial import a new preview reports the
-written ids as conflicts, which a Replace rewrites together with their records.
+`mcp_settings_conflict` the page says the source changed, that no entry was imported and that an
+entry the import would have replaced may now be disabled; it keeps the preview and offers Preview
+again, which re-previews the same document; it never retries the apply. The owner codes
+(`mcp_import_conflict`, `mcp_import_partial`, `mcp_invalid_config`) are shown as the owner's
+message, and the preview stays open for a different selection; after a partial import a new
+preview reports the written ids as conflicts, which a Replace rewrites together with their
+records.
 
 #### Diagnostics: the legacy logging controls
 

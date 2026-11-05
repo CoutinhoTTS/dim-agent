@@ -179,7 +179,7 @@ async function applyImport(): Promise<void> {
   } catch (cause) {
     if (cause instanceof RpcError && cause.appError === "mcp_settings_conflict") {
       importStale.value = true
-      error.value = s('The MCP source changed since this preview. Preview again before applying.', '自本次预览后 MCP 源已更改。请重新预览后再应用。')
+      error.value = s('The MCP source changed since this preview; no entry was imported, and an entry it would have replaced may now be disabled. Preview again before applying.', '自本次预览后 MCP 源已更改；未导入任何条目，它原本会替换的条目现在可能已禁用。请重新预览后再应用。')
     } else error.value = messageFrom(cause)
   } finally { busy.value = false }
 }

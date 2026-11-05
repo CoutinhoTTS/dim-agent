@@ -431,7 +431,7 @@ test("a stale source shows preview again and re-reads the same document", async 
   try {
     await chooseImportFile(root, document)
     await button(root, "Apply import").props.onClick(); await flush()
-    assert.match(text(root), /The MCP source changed since this preview\. Preview again before applying\./)
+    assert.match(text(root), /The MCP source changed since this preview; no entry was imported, and an entry it would have replaced may now be disabled\. Preview again before applying\./)
     assert.ok(button(root, "Preview again"))
     await button(root, "Preview again").props.onClick(); await flush()
     const previews = calls.filter((call) => call.method === "mcp.import.preview")
