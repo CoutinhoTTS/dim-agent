@@ -804,6 +804,7 @@ mod do_generate {
 
         assert_eq!(
             result_json(&result)["usage"],
+            // #478: unreported counts stay unknown (the AI SDK fills 0).
             json!({
                 "inputTokens": {
                     "noCache": 20,
@@ -2602,6 +2603,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 18,
                             "total": 18
                         },
@@ -2726,6 +2728,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 18,
                             "total": 18
                         },
@@ -2807,6 +2810,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 18,
                             "total": 18
                         },
@@ -2915,6 +2919,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 18,
                             "total": 18
                         },
@@ -3007,6 +3012,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 18,
                             "total": 18
                         },
@@ -3323,6 +3329,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 18,
                             "total": 18
                         },
@@ -3443,6 +3450,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 226,
                             "total": 226
                         },
@@ -3515,6 +3523,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 18,
                             "total": 18
                         },
@@ -3596,6 +3605,7 @@ mod do_stream {
                     "type": "finish",
                     "usage": {
                         "inputTokens": {
+                            // #478: unreported counts stay unknown (the AI SDK fills 0).
                             "noCache": 18,
                             "total": 18
                         },
@@ -4876,7 +4886,7 @@ mod upstream_e2e {
         assert_eq!(finish_reason.unified, FinishReasonUnified::Stop);
         assert_eq!(usage.input_tokens.total, Some(18));
         assert_eq!(usage.input_tokens.no_cache, Some(18));
-        // The provider reported no cache details, so the count stays unknown.
+        // #478: unreported counts stay unknown (the AI SDK fills 0).
         assert_eq!(usage.input_tokens.cache_read, None);
         assert_eq!(usage.output_tokens.total, Some(439));
         assert_eq!(usage.output_tokens.text, Some(439));

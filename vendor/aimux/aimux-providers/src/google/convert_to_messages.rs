@@ -174,7 +174,7 @@ fn convert_file_part(file: &FilePart) -> Value {
 
 /// Convert assistant-role content parts into Google `model`-role parts.
 ///
-/// - `Text` → `{ text }` (skipped when empty, matching the TS SDK).
+/// - `Text` → `{ text }` (skipped when empty and unsigned).
 /// - `ToolCall` → `{ functionCall: { id?, name, args } }`.
 fn convert_assistant_parts(content: &[AssistantPart], namespace: Namespace) -> Vec<Value> {
     let mut parts = Vec::new();
@@ -188,7 +188,8 @@ fn convert_assistant_parts(content: &[AssistantPart], namespace: Namespace) -> V
                     .read_part(provider_options.as_ref())
                     .and_then(|g| g.get("thoughtSignature"))
                     .and_then(|v| v.as_str());
-                // An empty part that carries a signature is kept.
+                // An empty part that carries a signature is replayed, as the
+                // stream keeps it; upstream skips every empty part (#467).
                 if !text.is_empty() || signature.is_some() {
                     let mut p = json!({ "text": text });
                     // Echo thoughtSignature from provider_options if present

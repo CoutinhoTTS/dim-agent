@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "aimux-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "aimux-provider-utils"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "aimux-core",
  "aimux-stream",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "aimux-providers"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "aimux-core",
  "aimux-provider-utils",
@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "aimux-stream"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytes",
  "futures",

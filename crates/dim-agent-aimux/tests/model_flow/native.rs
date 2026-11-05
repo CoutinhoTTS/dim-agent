@@ -961,13 +961,9 @@ async fn xai_responses_content_parts_keep_their_blocks() {
         .collect();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["id"], "msg_1");
-    assert_eq!(
-        messages[0]["content"],
-        json!([
-            {"type": "output_text", "text": "before"},
-            {"type": "output_text", "text": "after"},
-        ])
-    );
+    // xAI replays one message item's adjacent text parts as one item with
+    // their joined text; the stream above still yields separate blocks.
+    assert_eq!(messages[0]["content"], json!("beforeafter"));
     root.shutdown().await.unwrap();
 }
 

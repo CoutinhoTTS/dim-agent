@@ -912,9 +912,6 @@ mod older_factory {
         assert_eq!(seen.len(), 1);
         fixture.assert_request(&seen[0]);
 
-        // The stream finishes at the first chunk that carries `finishReason`
-        // (`PATCHES.md` #469); the recording's second chunk, which carries the
-        // rest of the text and the usage counts, is not read.
         let text: String = parts
             .iter()
             .filter_map(|part| match part {
@@ -922,7 +919,7 @@ mod older_factory {
                 _ => None,
             })
             .collect();
-        assert_eq!(text, "Hello");
+        assert_eq!(text, "Hello world");
         let recorded = &fixture.json["result"];
         let finish = parts.iter().find_map(|part| match part {
             StreamPart::Finish {
@@ -938,11 +935,22 @@ mod older_factory {
             unified_finish(recorded["finishReason"].as_str().unwrap())
         );
         assert_eq!(reason.raw.as_deref(), Some("STOP"));
-        assert_eq!(usage.input_tokens.total, None);
-        assert_eq!(usage.output_tokens.total, None);
+        assert_eq!(
+            usage.input_tokens.total,
+            recorded["usage"]["inputTokens"].as_u64().map(|v| v as _)
+        );
+        assert_eq!(
+            usage.output_tokens.total,
+            recorded["usage"]["outputTokens"].as_u64().map(|v| v as _)
+        );
         assert_eq!(
             metadata.as_ref().unwrap()["google"]["usageMetadata"],
-            Value::Null
+            recorded["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|part| part["type"] == "finish-step")
+                .unwrap()["providerMetadata"]["google"]["usageMetadata"]
         );
     }
 
