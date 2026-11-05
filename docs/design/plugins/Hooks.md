@@ -321,6 +321,12 @@ AcpGateway's own design reports a Hooks `input_blocked` rejection from `session.
 | — | `PreCompact`/`PostCompact`, `SessionEnd` and `SubagentStart`/`SubagentStop` stay unsupported, for the reasons in G.1 |
 | — | The native CLI gets `dimcode hooks list`, `dimcode hooks enable\|disable`, `dimcode hooks edit` and `dimcode hooks set PATH` ([CLI commands](../cli-commands.md#commands)) |
 
+#### 2026-11-06
+
+| # | Decision |
+| --- | --- |
+| — | The common payload carries `collaboration_role` (`leader` or `member`), taken from `SessionConfig.collaboration_role`. In Dim a subagent is a Collaboration member, so subagent identity goes into the member's own lifecycle — its `SessionStart` and `Stop` payloads — and not into new `SubagentStart`/`SubagentStop` events (G.1) |
+
 ### 10.2 Accepted owner changes
 
 | Item | Owner | Issue |
@@ -381,7 +387,7 @@ Plugin documents are kept in the Settings source `hooks-plugins`, one `{dir, hoo
 
 | Channel | Content |
 | --- | --- |
-| stdin | One UTF-8 JSON object, then EOF. Common: `hook_event_name`, `session_id`, `cwd`, `permission_mode` (Dim preset: `read-only`, `workspace-write`, `full-access`), `turn_id` when turn-scoped, plus Dim fields `branch_id`, `dim_source` (`user`, `project` or `plugin:<id>`). No `transcript_path` |
+| stdin | One UTF-8 JSON object, then EOF. Common: `hook_event_name`, `session_id`, `cwd`, `permission_mode` (Dim preset: `read-only`, `workspace-write`, `full-access`), `turn_id` when turn-scoped, plus Dim fields `branch_id`, `dim_source` (`user`, `project` or `plugin:<id>`) and `collaboration_role` (`leader` for a client Session, `member` for a Collaboration member Session). No `transcript_path` |
 | Environment | HostPlatform's base environment plus `DIM_PROJECT_DIR`, `DIM_HOOK_EVENT`, `DIM_SESSION_ID` and `DIMCODE_HOME`; `DIM_PLUGIN_ROOT` for plugin sources only |
 | Exit 0 | stdout empty, one JSON object (A.4), or plain text — anything that is not one JSON object, other JSON values included — which is context for `SessionStart` and `UserPromptSubmit` and otherwise ignored |
 | Exit 2 | Blocking result for the event (A.4); stderr (first 2 KiB) is the reason |
@@ -585,7 +591,7 @@ Dim does not read Claude or Codex files and has no import command. To migrate, c
 | `Stop` | `Stop` | `Stop` → Queue follow-up | Bounded (A8) |
 | `SessionStart` | `SessionStart` | `SessionStart` → keyed Append | `startup` only |
 | `Notification` | — | `Notification` on `approval/request` | `permission_prompt` only |
-| `PreCompact`, `PostCompact`, `SessionEnd`, `Subagent*`, others | `PreCompact`, `PostCompact`, `SessionEnd`, `Interrupt`, `Subagent*` | Unsupported | Listed `unsupported` in the catalog. `PreCompact`/`PostCompact`: blocking would need a compaction-admission port in ContextCompaction; an observation-only form needs no owner change and can be added later. Compaction removes nothing from the Timeline, and `Stop` runs after every completed turn, so archiving loses nothing. `SessionEnd`: Session close is lifecycle, including idle unload, and work must settle before services are removed (AGENTS rule 8); a command at close would delay close. `SubagentStart`/`SubagentStop`: a Collaboration member is its own Session, which gets its own `SessionStart` and `Stop` |
+| `PreCompact`, `PostCompact`, `SessionEnd`, `Subagent*`, others | `PreCompact`, `PostCompact`, `SessionEnd`, `Interrupt`, `Subagent*` | Unsupported | Listed `unsupported` in the catalog. `PreCompact`/`PostCompact`: blocking would need a compaction-admission port in ContextCompaction; an observation-only form needs no owner change and can be added later. Compaction removes nothing from the Timeline, and `Stop` runs after every completed turn, so archiving loses nothing. `SessionEnd`: Session close is lifecycle, including idle unload, and work must settle before services are removed (AGENTS rule 8); a command at close would delay close. `SubagentStart`/`SubagentStop`: a Collaboration member is its own Session, which gets its own `SessionStart` and `Stop`, with `collaboration_role: "member"` on their stdin (A.3) |
 
 ### G.2 Tool names
 

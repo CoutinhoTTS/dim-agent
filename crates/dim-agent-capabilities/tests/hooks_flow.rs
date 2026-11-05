@@ -1952,6 +1952,92 @@ async fn a_hook_sees_its_environment_and_no_plugin_root() {
     assert_eq!(payload["permission_mode"], "full-access");
     assert_eq!(payload["branch_id"], "main");
     assert_eq!(payload["session_id"], session.id());
+    assert_eq!(payload["collaboration_role"], "leader");
+    env.close().await;
+}
+
+/// A.3: the common payload names the Session's collaboration role, so a hook
+/// can tell a member Session from a client Session (#1183).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_session_payloads_carry_collaboration_role() {
+    let env = Env::new().await;
+    let payloads = env.path("payloads");
+    let append = format!(
+        "cat >> '{}'; printf '\\n---\\n' >> '{}'",
+        payloads.display(),
+        payloads.display()
+    );
+    env.sources.set(document(serde_json::json!({
+        "SessionStart": [command(serde_json::json!({
+            "type": "command",
+            "command": append.clone(),
+        }))],
+        "Stop": [command(serde_json::json!({
+            "type": "command",
+            "command": append,
+        }))],
+    })));
+    let member = env
+        .agent
+        .create_session(SessionConfig {
+            cwd: env.dir.join("work").to_string_lossy().into_owned(),
+            tools: Some(env.mounted.clone()),
+            permission_policy: PermissionPolicy {
+                preset: PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            collaboration_role: CollaborationRole::Member,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let leader = env.session().await;
+    turn(&member, "go").await;
+    turn(&leader, "go").await;
+    let read = || -> Vec<serde_json::Value> {
+        let text = std::fs::read_to_string(&payloads).unwrap_or_default();
+        text.split("\n---\n")
+            .filter_map(|part| {
+                let part = part.trim();
+                if part.is_empty() {
+                    return None;
+                }
+                Some(serde_json::from_str::<serde_json::Value>(part).unwrap())
+            })
+            .collect()
+    };
+    // Both Sessions' SessionStart and Stop hooks ran and wrote their payloads.
+    for _ in 0..500 {
+        let current = read();
+        let member_starts = current
+            .iter()
+            .filter(|entry| {
+                entry["hook_event_name"] == "SessionStart" && entry["session_id"] == member.id()
+            })
+            .count();
+        let leader_stops = current
+            .iter()
+            .filter(|entry| {
+                entry["hook_event_name"] == "Stop" && entry["session_id"] == leader.id()
+            })
+            .count();
+        if member_starts >= 1 && leader_stops >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let entries = read();
+    let field = |session: &str, event: &str| -> Vec<String> {
+        entries
+            .iter()
+            .filter(|entry| entry["hook_event_name"] == event && entry["session_id"] == session)
+            .map(|entry| entry["collaboration_role"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(field(member.id(), "SessionStart"), ["member"]);
+    assert_eq!(field(member.id(), "Stop"), ["member"]);
+    assert_eq!(field(leader.id(), "SessionStart"), ["leader"]);
+    assert_eq!(field(leader.id(), "Stop"), ["leader"]);
     env.close().await;
 }
 

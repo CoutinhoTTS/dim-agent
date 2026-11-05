@@ -321,6 +321,12 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 | — | `PreCompact`/`PostCompact`、`SessionEnd` 与 `SubagentStart`/`SubagentStop` 仍不支持，原因见 G.1 |
 | — | 原生 CLI 新增 `dimcode hooks list`、`dimcode hooks enable\|disable`、`dimcode hooks edit` 与 `dimcode hooks set PATH`（[CLI 命令](../cli-commands.md#命令)） |
 
+#### 2026-11-06
+
+| # | 决定 |
+| --- | --- |
+| — | 公共负载携带 `collaboration_role`（`leader` 或 `member`），取自 `SessionConfig.collaboration_role`。在 Dim 中子代理就是 Collaboration 成员，所以子代理身份放进成员自己的生命周期——它的 `SessionStart` 与 `Stop` 负载——而不是放进新的 `SubagentStart`/`SubagentStop` 事件（G.1） |
+
 ### 10.2 已接受的所有者改动
 
 | 事项 | 所有者 | Issue |
@@ -381,7 +387,7 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 
 | 通道 | 内容 |
 | --- | --- |
-| stdin | 一个 UTF-8 JSON 对象，然后 EOF。公共字段：`hook_event_name`、`session_id`、`cwd`、`permission_mode`（Dim 预设：`read-only`、`workspace-write`、`full-access`）、turn 范围内时的 `turn_id`，以及 Dim 字段 `branch_id`、`dim_source`（`user`、`project` 或 `plugin:<id>`）。没有 `transcript_path` |
+| stdin | 一个 UTF-8 JSON 对象，然后 EOF。公共字段：`hook_event_name`、`session_id`、`cwd`、`permission_mode`（Dim 预设：`read-only`、`workspace-write`、`full-access`）、turn 范围内时的 `turn_id`，以及 Dim 字段 `branch_id`、`dim_source`（`user`、`project` 或 `plugin:<id>`）、`collaboration_role`（客户端 Session 为 `leader`，Collaboration 成员 Session 为 `member`）。没有 `transcript_path` |
 | 环境 | HostPlatform 的基础环境，加 `DIM_PROJECT_DIR`、`DIM_HOOK_EVENT`、`DIM_SESSION_ID` 与 `DIMCODE_HOME`；仅插件来源加 `DIM_PLUGIN_ROOT` |
 | 退出 0 | stdout 为空、一个 JSON 对象（A.4），或纯文本——凡不是单个 JSON 对象的值，包括其他 JSON 值——对 `SessionStart` 与 `UserPromptSubmit` 为上下文，其他事件忽略 |
 | 退出 2 | 该事件的阻止结果（A.4）；stderr（前 2 KiB）为原因 |
@@ -586,7 +592,7 @@ Dim 不读取 Claude 或 Codex 的文件，也没有导入命令。迁移时复�
 | `Stop` | `Stop` | `Stop` → Queue 续跑 | 有上限（A8） |
 | `SessionStart` | `SessionStart` | `SessionStart` → 带键 Append | 只有 `startup` |
 | `Notification` | — | `approval/request` 上的 `Notification` | 只有 `permission_prompt` |
-| `PreCompact`、`PostCompact`、`SessionEnd`、`Subagent*`、其他 | `PreCompact`、`PostCompact`、`SessionEnd`、`Interrupt`、`Subagent*` | 不支持 | 在目录中列为 `unsupported`。`PreCompact`/`PostCompact`：阻止需要 ContextCompaction 中的压缩准入端口；只观察的形式不需要所有者改动，以后可以加。压缩不从 Timeline 移除任何东西，而 `Stop` 在每轮完成后运行，所以归档不会丢失内容。`SessionEnd`：Session 关闭是生命周期，包括空闲卸载，工作必须在服务移除前结算（AGENTS 规则 8）；关闭时运行命令会拖延关闭。`SubagentStart`/`SubagentStop`：Collaboration 成员是它自己的 Session，有自己的 `SessionStart` 与 `Stop` |
+| `PreCompact`、`PostCompact`、`SessionEnd`、`Subagent*`、其他 | `PreCompact`、`PostCompact`、`SessionEnd`、`Interrupt`、`Subagent*` | 不支持 | 在目录中列为 `unsupported`。`PreCompact`/`PostCompact`：阻止需要 ContextCompaction 中的压缩准入端口；只观察的形式不需要所有者改动，以后可以加。压缩不从 Timeline 移除任何东西，而 `Stop` 在每轮完成后运行，所以归档不会丢失内容。`SessionEnd`：Session 关闭是生命周期，包括空闲卸载，工作必须在服务移除前结算（AGENTS 规则 8）；关闭时运行命令会拖延关闭。`SubagentStart`/`SubagentStop`：Collaboration 成员是它自己的 Session，有自己的 `SessionStart` 与 `Stop`，其 stdin 带 `collaboration_role: "member"`（A.3） |
 
 ### G.2 工具名
 
