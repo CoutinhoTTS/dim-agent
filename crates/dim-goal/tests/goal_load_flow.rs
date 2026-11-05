@@ -387,7 +387,7 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
         "turn/end",
         "stop/interrupt",
     ];
-    let env = Env::start_recorded().await;
+    let env = Env::start_refusing().await;
     let mut seed = env.seed_new("load-kinds").await;
     let (objective, status) = texts::set_blocks("main", "ship it");
     let set = seed.append(
@@ -504,7 +504,7 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
 /// opened (A11).
 #[tokio::test]
 async fn e2_an_inherited_check_reads_its_ancestor_page_by_page() {
-    let env = Env::start_recorded().await;
+    let env = Env::start_refusing().await;
     let mut seed = env.seed_new("load-inherited").await;
     // More than three pages of inputs and no goal block anywhere: the check
     // walks the whole prefix and finds nothing.

@@ -548,14 +548,9 @@ impl Env {
         Self::start_inner(None, None).await
     }
 
-    /// [`Self::start`] on a store that can refuse one branch's queries.
+    /// [`Self::start`] on a store that records every read Goal issues and can
+    /// refuse one branch's queries; nothing is refused unless a case arms it.
     pub async fn start_refusing() -> Self {
-        Self::start_inner(Some(Arc::new(RefusingStore::default())), None).await
-    }
-
-    /// [`Self::start`] on a store that records every read Goal issues; nothing
-    /// is refused unless a case arms it.
-    pub async fn start_recorded() -> Self {
         Self::start_inner(Some(Arc::new(RefusingStore::default())), None).await
     }
 
