@@ -321,10 +321,15 @@ impl SettingsService {
   不写入此来源。
 - 文件和原生路径与 `BusinessDocument` 共用，按来源名而不是 `D::NAMESPACE` 取键。CAS、gate、
   lease、unsynced 情形和 `publish` 保持不变。
-- `SettingsError` 新增 `UnknownSource`、`UserOnlyField(pointer)`、`InvalidScope` 和
-  `Document(message)`。写入的文档违反 schema 或不是对象时为 `Document`，带校验器的
-  消息（实例路径，从不带值）；客户端路径把它映射为参数无效。已持久化的文档违反 schema 时仍为
-  `Invalid`（`invalid_document` / `settings_failed`）。
+- `SettingsError` 新增 `UnknownSource`、`UserOnlyField(pointer)`、`InvalidScope`、
+  `Document(message)` 和 `DocumentShape { reason, position }`。写入的文档违反 schema 时为
+  `Document`，带校验器的消息（实例路径，从不带值）。来源整体拒绝一个文档时——不是对象、
+  缺少必需成员、文件不是 JSON——以 `DocumentShape` 拒绝：所有者的静态 `reason`（客户端可以
+  看到），以及文档从字节读入时出错的位置 `position`。`DocumentShape` 的 `Display` 与同一文本
+  作为 `Document` 打印时逐字节相同。`reason()` 报告 `Invalid` 与 `DocumentShape` 的静态消息，
+  其余变体（包括 `Document`）返回 `None`，因为它们的文本是任意文本。客户端路径把 `Document`
+  和 `DocumentShape` 都映射为参数无效。已持久化的文档违反 schema 时仍为 `Invalid`
+  （`invalid_document` / `settings_failed`）。
 - `settings` 服务是 `host_key("settings")` 下的 `HostDispatch`，装配把 `settings`
   登记到 `ServiceCatalog`，与现在的 `pluginFiles` 相同。回复使用 `sessions` 的
   信封：`{ok: true, value}` 或 `{ok: false, error: {code, message}}`。
@@ -518,8 +523,10 @@ TypeScript 行）：
   ADR 004 D4 的边界）。这是唯一新增的插件行；§2 图中的 `managementMethods settings` 位于这一部分。
   §9 中 ADR 002 D2 的回答对它同样成立，与 PermissionRules 一样：它是 Settings 数据的客户端路径，
   不是接线模块。
-- `SettingsError` 除两个指定变体外还有 `InvalidScope` 和 `Document(message)`，使客户端路径能区分
-  参数无效与已持久化文档的失败。
+- `SettingsError` 除两个指定变体外还有 `InvalidScope`、`Document(message)` 和
+  `DocumentShape { reason, position }`，使客户端路径能区分参数无效与已持久化文档的失败；
+  `reason()` 报告 `Invalid` 与 `DocumentShape` 背后的静态消息，`DocumentShape` 的 `Display`
+  仍是 `Document` 打印的逐字节文本。
 - 服务回复的信封与 `sessions` 相同。
 
 §11 验收中由 Rust 流程测试覆盖的部分，所有者经 `settings` 服务的 `HostDispatch` 调用：第 1–5 条和第 9 条在
