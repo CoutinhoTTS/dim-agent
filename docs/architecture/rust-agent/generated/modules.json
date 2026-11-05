@@ -17281,10 +17281,12 @@
         "path GRACE_SECONDS",
         "path lookup_input",
         "path sessions",
+        "path target_gone",
         "use crate::engine::GRACE_SECONDS",
         "use crate::engine::escaped",
         "use crate::engine::lookup_input",
-        "use crate::engine::sessions"
+        "use crate::engine::sessions",
+        "use crate::engine::target_gone"
       ]
     },
     {

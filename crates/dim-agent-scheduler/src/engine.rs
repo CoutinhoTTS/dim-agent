@@ -37,6 +37,14 @@ fn is_reloading(code: &str) -> bool {
     code.ends_with("reloading")
 }
 
+/// The codes that say the target can never accept the input: its Session or
+/// branch is gone. The fire path and the stale lookup both settle the record
+/// `cancelled` on these and never retry them (design §10.3, §10.4); any other
+/// failure says nothing about the target.
+pub(crate) fn target_gone(code: &str) -> bool {
+    matches!(code, "session_closed" | "branch_missing" | "branch_ended")
+}
+
 fn is_launched(run: &Run) -> bool {
     run.session_origin == Some(SessionOrigin::Launch)
 }

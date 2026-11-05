@@ -155,10 +155,11 @@ async fn wait_for(description: &str, mut check: impl FnMut() -> bool) {
 }
 
 /// An interactive leader Session (unless `interactive` is false) mounting
-/// exactly `tools`.
+/// exactly `tools`, in the project at `cwd`. A restore authorizes the project
+/// again, so a test can make it unavailable to a later lookup.
 async fn create_session(
     client: &mut Client,
-    home: &Path,
+    cwd: &Path,
     tools: &[&str],
     interactive: bool,
 ) -> String {
@@ -166,7 +167,7 @@ async fn create_session(
         .rpc(
             "session.create",
             json!({
-                "cwd": home,
+                "cwd": cwd,
                 "tools": tools,
                 "interactive": interactive,
                 "permissionPolicy": {"preset": "full-access", "allowedTools": [], "disallowedTools": []}
@@ -611,10 +612,12 @@ async fn a_delivered_wakeup_past_the_grace_is_fired_after_a_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_lookup_leaves_a_record_past_the_grace_scheduled() {
     let home = home();
+    let project = home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
     let model = Arc::new(Script::default());
     let server = start(home.path(), model.clone()).await;
     let mut client = connect(&server).await;
-    let session = create_session(&mut client, home.path(), &[], true).await;
+    let session = create_session(&mut client, &project, &[], true).await;
     let created: Value = client
         .rpc(
             "session.wakeup.create",
@@ -624,15 +627,22 @@ async fn a_failed_lookup_leaves_a_record_past_the_grace_scheduled() {
         .await
         .unwrap();
     let wakeup_id = created["wakeupId"].as_str().unwrap().to_owned();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
 
-    // Past the grace, and pointed at a branch that does not exist, so the
-    // pass's lookup answers `branch_missing` — a non-reloading error that
-    // says nothing about whether the prompt was delivered. The lookup is the
-    // real service call; no test double is involved.
+    // A transient failure, not a definite answer: the restart leaves the
+    // target unloaded and its project directory gone, so the pass's lookup
+    // restores the Session, project authorization fails, and the answer is
+    // `failed`. The lookup is the real service call; no test double is
+    // involved.
+    std::fs::remove_dir_all(&project).unwrap();
     edit_wakeups(home.path(), |wakeups| {
         wakeups[0]["at"] = json!(instant_after(-120));
-        wakeups[0]["branch_id"] = json!("no-such-branch");
     });
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
     // Several passes see the failed lookup: the record must stay scheduled
     // rather than be expired on a guess.
     tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -641,15 +651,73 @@ async fn a_failed_lookup_leaves_a_record_past_the_grace_scheduled() {
         json!("scheduled"),
         "a failed lookup leaves the record for the next pass"
     );
+    // The restore really fails: the same acquire the pass's `sessions.lookup`
+    // performs cannot bring the Session back while the project is gone.
+    assert!(
+        client
+            .rpc(
+                "session.history",
+                json!({"sessionId": session, "branchId": "main", "after": 0, "limit": 256}),
+            )
+            .await
+            .is_err(),
+        "the project authorization refuses the restore"
+    );
 
-    // Once the lookup answers — the submission was never accepted — the
-    // record settles expired.
-    edit_wakeups(home.path(), |wakeups| {
-        wakeups[0]["branch_id"] = json!("main");
-    });
+    // The project returns, the lookup answers — the submission was never
+    // accepted — and the record settles expired.
+    std::fs::create_dir_all(&project).unwrap();
     wait_state(home.path(), &wakeup_id, "expired").await;
     assert!(wakeup_inputs(&history(&mut client, &session).await).is_empty());
     assert_eq!(model.count(), 0, "the failed pass never wrote an input");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_record_whose_target_is_gone_settles_cancelled_and_is_pruned() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &[], true).await;
+    let created: Value = client
+        .rpc(
+            "session.wakeup.create",
+            json!({"sessionId": session, "branchId": "main", "at": instant_after(120),
+                "prompt": "Nobody to wake."}),
+        )
+        .await
+        .unwrap();
+    let wakeup_id = created["wakeupId"].as_str().unwrap().to_owned();
+    client
+        .rpc("session.delete", json!({"sessionId": session}))
+        .await
+        .unwrap();
+
+    // The target is gone for good and the record is past the grace, so the
+    // pass's lookup answers `session_closed`: a definite answer, settled
+    // `cancelled` instead of repeating a lookup that can never succeed.
+    edit_wakeups(home.path(), |wakeups| {
+        wakeups[0]["at"] = json!(instant_after(-120));
+    });
+    wait_state(home.path(), &wakeup_id, "cancelled").await;
+    assert_eq!(model.count(), 0, "a gone target starts no turn");
+
+    // Cancelled is terminal like fired or expired: the seven-day retention
+    // removes it by its settle time.
+    edit_wakeups(home.path(), |wakeups| {
+        wakeups[0]["settled_at"] = json!(
+            (chrono::Utc::now() - chrono::Duration::days(8))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
+    });
+    wait_for("the cancelled record to be pruned", || {
+        stored_wakeups(home.path()).is_empty()
+    })
+    .await;
 
     drop(client);
     server.shutdown();

@@ -6,7 +6,7 @@
 //! deadline, and never appears in `schedule.list` or in the run history.
 use crate::{
     document::{MAX_PROMPT_BYTES, canonical_instant, format_instant},
-    engine::{GRACE_SECONDS, escaped, lookup_input, sessions},
+    engine::{GRACE_SECONDS, escaped, lookup_input, sessions, target_gone},
     methods::Shared,
     runs::SchedulerError,
 };
@@ -285,12 +285,12 @@ impl Wakeups {
     /// within the grace window is fired once, one whose instant is past the
     /// window is `expired` and never replayed — unless the target already
     /// accepted its submission id, when it is `fired` instead, or the lookup
-    /// failed, when it stays `scheduled` for the next pass — one whose
-    /// Session or branch is gone is `cancelled`, and a terminal record older
-    /// than [`RETENTION_AFTER_TERMINAL`] is removed. A fire is only the input
-    /// write through the public `sessions.input`; there is no launch, stop
-    /// or withdraw (§10). The pass reads the file once, takes one clock
-    /// reading, and writes at most once.
+    /// answered nothing definite, when it stays `scheduled` for the next pass
+    /// — one whose Session or branch is gone is `cancelled`, and a terminal
+    /// record older than [`RETENTION_AFTER_TERMINAL`] is removed. A fire is
+    /// only the input write through the public `sessions.input`; there is no
+    /// launch, stop or withdraw (§10). The pass reads the file once, takes one
+    /// clock reading, and writes at most once.
     ///
     /// The whole pass holds `shared.wakeups` — the snapshot read, every
     /// input write and the settle batch — so a cancel and a pass are one
@@ -366,12 +366,7 @@ impl Wakeups {
                     #[cfg(test)]
                     crate::wakeup_pass::pause(&wakeup_id).await;
                 }
-                Ok(Err(code))
-                    if matches!(
-                        code.as_str(),
-                        "session_closed" | "branch_missing" | "branch_ended"
-                    ) =>
-                {
+                Ok(Err(code)) if target_gone(&code) => {
                     outcomes.push((wakeup.wakeup_id, WakeupState::Cancelled))
                 }
                 // `reloading`, transport failures and any other code leave the
@@ -388,8 +383,10 @@ impl Wakeups {
         // exact — the same `sessions.lookup` the run path uses after an
         // uncertain write (A.5) — and a found input settles `fired` without
         // writing anything, so delivery stays exactly-once. Only an answer
-        // that the target never accepted the submission expires the record; a
-        // lookup that fails leaves it scheduled, and the next pass repeats it.
+        // that the target never accepted the submission expires the record,
+        // and one that the target is gone settles it `cancelled`; a lookup
+        // that answers neither leaves it scheduled, and the next pass repeats
+        // it.
         let mut expired: Vec<String> = Vec::new();
         for wakeup in stale {
             let submission_id = format!("wakeup:{}", wakeup.wakeup_id);
@@ -403,7 +400,14 @@ impl Wakeups {
             {
                 Ok(Some(_)) => outcomes.push((wakeup.wakeup_id, WakeupState::Fired)),
                 Ok(None) => expired.push(wakeup.wakeup_id),
-                // A failed lookup says nothing about delivery, so the record
+                // A target that is gone can never accept the submission, so
+                // the answer is definite: settle the record `cancelled` as the
+                // fire path does instead of repeating a lookup that cannot
+                // succeed (§10.4).
+                Err(code) if target_gone(&code) => {
+                    outcomes.push((wakeup.wakeup_id, WakeupState::Cancelled))
+                }
+                // Any other failure says nothing about delivery, so the record
                 // stays scheduled and the next pass repeats the check (§10.4).
                 Err(_) => {}
             }
