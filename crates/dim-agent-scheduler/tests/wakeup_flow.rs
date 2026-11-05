@@ -210,6 +210,24 @@ fn wakeup_inputs(events: &[Value]) -> Vec<&Value> {
         .collect()
 }
 
+/// Polls until the session's `main` branch has recorded a finished turn.
+async fn wait_turn_end(client: &mut Client, session_id: &str) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let ended = history(client, session_id)
+                .await
+                .iter()
+                .any(|event| event["type"] == "turn" && event["name"] == "end");
+            if ended {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the turn ends");
+}
+
 /// The stored wakeup records, as the file holds them.
 fn stored_wakeups(home: &Path) -> Vec<Value> {
     let path = home.join("scheduler/wakeups.json");
@@ -518,7 +536,66 @@ async fn a_restart_expires_a_window_past_the_grace_and_never_replays() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_record_at_the_grace_boundary_is_expired_once() {
+async fn a_delivered_wakeup_past_the_grace_is_fired_after_a_restart() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &[], true).await;
+    let created: Value = client
+        .rpc(
+            "session.wakeup.create",
+            json!({"sessionId": session, "branchId": "main", "at": instant_after(2),
+                "prompt": "Delivered before the crash."}),
+        )
+        .await
+        .unwrap();
+    let wakeup_id = created["wakeupId"].as_str().unwrap().to_owned();
+    wait_state(home.path(), &wakeup_id, "fired").await;
+    wait_turn_end(&mut client, &session).await;
+    let events = history(&mut client, &session).await;
+    assert_eq!(wakeup_inputs(&events).len(), 1, "{events:?}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // The crash the settle write did not survive: the input was published but
+    // the record is still `scheduled`, and the restart happens long after the
+    // instant left the grace. The submission id the input carries is the only
+    // evidence that the prompt was delivered, so the pass must look it up
+    // before it expires the record.
+    edit_wakeups(home.path(), |wakeups| {
+        let record = wakeups[0].as_object_mut().unwrap();
+        record.insert("state".into(), json!("scheduled"));
+        record.remove("settled_at");
+        record.insert("at".into(), json!(instant_after(-120)));
+    });
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    wait_state(home.path(), &wakeup_id, "fired").await;
+
+    // Exactly once: the found submission settles the record without writing
+    // a second input or starting a second turn.
+    let events = history(&mut client, &session).await;
+    assert_eq!(wakeup_inputs(&events).len(), 1, "{events:?}");
+    assert_eq!(
+        stored_wakeups(home.path())[0]["state"],
+        json!("fired"),
+        "a delivered record is not expired"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(model.count(), 0, "the settle writes no input");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_past_the_grace_with_no_accepted_input_is_expired_once() {
     let home = home();
     let model = Arc::new(Script::default());
     let server = start(home.path(), model.clone()).await;
@@ -534,8 +611,10 @@ async fn a_record_at_the_grace_boundary_is_expired_once() {
         .unwrap();
     let wakeup_id = created["wakeupId"].as_str().unwrap().to_owned();
 
-    // Exactly `now - grace` (the pass's own clock reading is later, so the
-    // record lands on the stale side of the one boundary per pass).
+    // Exactly `now - grace`: the pass's own clock reading is later, so the
+    // record is past the grace when the pass classifies it. No input was ever
+    // accepted for it, so the expiry holds even though the pass looks the
+    // submission id up first.
     let at = (chrono::Utc::now() - chrono::Duration::seconds(60))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     edit_wakeups(home.path(), |wakeups| {

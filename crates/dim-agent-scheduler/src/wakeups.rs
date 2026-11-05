@@ -6,7 +6,7 @@
 //! deadline, and never appears in `schedule.list` or in the run history.
 use crate::{
     document::{MAX_PROMPT_BYTES, canonical_instant, format_instant},
-    engine::{GRACE_SECONDS, escaped, sessions},
+    engine::{GRACE_SECONDS, UNLOADING, escaped, lookup_input, sessions},
     methods::Shared,
     runs::SchedulerError,
 };
@@ -283,8 +283,9 @@ impl Wakeups {
     /// One pass of the timer (and of the restart, whose first pass runs
     /// within a second of startup): a `scheduled` record whose instant is
     /// within the grace window is fired once, one whose instant is past the
-    /// window is `expired` and never replayed, one whose Session is gone is
-    /// `cancelled`, and a terminal record older than
+    /// window is `expired` and never replayed — unless the target already
+    /// accepted its submission id, when it is `fired` instead — one whose
+    /// Session is gone is `cancelled`, and a terminal record older than
     /// [`RETENTION_AFTER_TERMINAL`] is removed. A fire is only the input
     /// write through the public `sessions.input`; there is no launch, stop
     /// or withdraw (§10). The pass reads the file once, takes one clock
@@ -311,13 +312,13 @@ impl Wakeups {
             })
             .cloned()
             .collect();
-        let stale: Vec<String> = snapshot
+        let stale: Vec<Wakeup> = snapshot
             .iter()
             .filter(|wakeup| wakeup.state == WakeupState::Scheduled)
             .filter(|wakeup| {
                 canonical_instant(&wakeup.at).is_some_and(|at| at <= now && now - at >= grace)
             })
-            .map(|wakeup| wakeup.wakeup_id.clone())
+            .cloned()
             .collect();
         let retention_cut = now - RETENTION_AFTER_TERMINAL;
         let prune: Vec<String> = snapshot
@@ -369,7 +370,32 @@ impl Wakeups {
                 _ => {}
             }
         }
-        if outcomes.is_empty() && stale.is_empty() && prune.is_empty() {
+        // A record past the grace may still have been delivered: the pass
+        // publishes the input before it settles the record, so a process that
+        // stops between the two leaves a `scheduled` record whose prompt is
+        // already in the target's history. The submission id makes the check
+        // exact — the same `sessions.lookup` the run path uses after an
+        // uncertain write (A.5) — and a found input settles `fired` without
+        // writing anything, so delivery stays exactly-once. A submission the
+        // target never accepted keeps the record on the expiry path; an
+        // unloading owner leaves it to the next generation.
+        let mut expired: Vec<String> = Vec::new();
+        for wakeup in stale {
+            let submission_id = format!("wakeup:{}", wakeup.wakeup_id);
+            match lookup_input(
+                &self.shared,
+                &wakeup.session_id,
+                &wakeup.branch_id,
+                &submission_id,
+            )
+            .await
+            {
+                Ok(Some(_)) => outcomes.push((wakeup.wakeup_id, WakeupState::Fired)),
+                Err(code) if code == UNLOADING => {}
+                _ => expired.push(wakeup.wakeup_id),
+            }
+        }
+        if outcomes.is_empty() && expired.is_empty() && prune.is_empty() {
             return Ok(());
         }
         update(&self.shared.files, move |wakeups| {
@@ -388,7 +414,7 @@ impl Wakeups {
                 record.settled_at = Some(stamp(now));
                 changed = true;
             }
-            for wakeup_id in &stale {
+            for wakeup_id in &expired {
                 let Some(record) = wakeups
                     .iter_mut()
                     .find(|wakeup| wakeup.wakeup_id == *wakeup_id)

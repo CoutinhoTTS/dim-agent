@@ -17279,9 +17279,13 @@
       "to": "dim_agent_scheduler::engine",
       "references": [
         "path GRACE_SECONDS",
+        "path UNLOADING",
+        "path lookup_input",
         "path sessions",
         "use crate::engine::GRACE_SECONDS",
+        "use crate::engine::UNLOADING",
         "use crate::engine::escaped",
+        "use crate::engine::lookup_input",
         "use crate::engine::sessions"
       ]
     },
