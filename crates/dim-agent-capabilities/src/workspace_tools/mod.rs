@@ -399,7 +399,7 @@ impl DynPlugin for WorkspaceToolsPlugin {
                                     background::OutputPageError::Unknown => RpcError::app(
                                         -32000,
                                         "exec_task_unknown",
-                                        "No live output is available for this task",
+                                        "No such task is known on this branch",
                                     ),
                                     background::OutputPageError::Unavailable => RpcError::app(
                                         -32000,

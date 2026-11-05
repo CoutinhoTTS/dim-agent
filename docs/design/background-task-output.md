@@ -124,7 +124,9 @@ size at the 64 MiB cap only for a task whose owner restarted (no flag exists
 there). The method opens the path the branch's own `exec/started` fact
 registers — never a client-supplied path — so a task id from another branch or
 Session cannot select a file; a task whose file was cleaned answers
-`exec_output_unavailable`, distinct from the tail's `exec_task_unknown`. The
+`exec_output_unavailable`, distinct from the tail's `exec_task_unknown`, and an
+unknown task answers `exec_task_unknown` saying no such task is known on the
+branch, since an ended task's file is still readable there. The
 `session.exec.output` tail keeps its preview rule and its
 `exec_task_unknown` once the live capture is cleared. The full-file browsing
 this method provides was left open by §1; it does not settle a daemon-hosted
