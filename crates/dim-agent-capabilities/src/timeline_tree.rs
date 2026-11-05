@@ -1087,35 +1087,33 @@ impl TimelineTree {
             session_id: self.session_id.clone(),
             branch_id: branch.into(),
         };
-        let mut window = LINE_PAGE;
-        loop {
-            let from = head.saturating_sub(window.saturating_sub(1)).max(1);
-            let query = TimelineQuery {
-                scope: dim_agent_runtime::TimelineQueryScope::Branch,
-                include_publishing: false,
-                from_event: None,
-                from_sequence: Some(from),
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: vec!["branch/end".into()],
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: NonZeroU64::new(window).expect("non-zero query window"),
-                offset: 0,
-            };
-            let records = self.store.query(&key, &query, from, head).await?.events;
-            if let Some(found) = records.into_iter().find_map(|event| match event.kind {
+        // A line holds at most one `branch/end` (the write path refuses a
+        // second on an ended line), so one page over the whole line is enough.
+        // The bound is the caller's `1..=head`; the query carries no anchor.
+        let query = TimelineQuery {
+            scope: dim_agent_runtime::TimelineQueryScope::Branch,
+            include_publishing: false,
+            from_event: None,
+            from_sequence: None,
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Descending,
+            kinds: vec!["branch/end".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::MIN,
+            offset: 0,
+        };
+        Ok(self
+            .store
+            .query(&key, &query, 1, head)
+            .await?
+            .events
+            .into_iter()
+            .find_map(|event| match event.kind {
                 EventKind::BranchEnd(ref data) => Some((event.sequence, data.clone())),
                 _ => None,
-            }) {
-                return Ok(Some(found));
-            }
-            if from == 1 {
-                return Ok(None);
-            }
-            window = window.saturating_mul(8);
-        }
+            }))
     }
     async fn creation_source(
         &self,
