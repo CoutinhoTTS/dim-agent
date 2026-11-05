@@ -331,6 +331,7 @@ impl BackgroundExec {
                 end = whole;
             }
         }
+        // The writer appends only valid UTF-8, and the loop above ends the slice on a boundary.
         let text =
             sanitize(std::str::from_utf8(&buffer[..end]).expect("the page ends on a boundary"));
         // A read that reached the page budget found at least `limit` bytes,
