@@ -17,7 +17,7 @@ Settings 为不是用 Rust 写的插件提供业务来源。这类插件在启�
 仅限用户的字段（§3.1）。随后 Settings 在 JSON 文档上提供三样东西：
 
 - 进程服务 `settings`，供所有者使用：`register`、`read`、`update`（按 revision 做 CAS）和 `projects`；
-- 客户端管理方法 `settings.read`、`settings.update` 和 `settings.sources`；
+- 客户端管理方法 `settings.read`、`settings.update`、`settings.sources` 和 `settings.projects`；
 - 与 S8a 相同的 rutis 事件 `settings.changed` 和 `settings.project_authorized`。它们的载荷改为
   可序列化。没有 `subscribe(source)`。
 
@@ -90,7 +90,7 @@ Settings 不赋予任何字段特殊含义，只有一个例外：schema 带 JSO
  |   在 settings/projects 上发出 settings.project_authorized               |
  +------^-------------------------------^----------------------------------+
         | register/read/update/projects | settings.read / settings.update
-        |                               | settings.sources
+        |                               | settings.sources / settings.projects
         |                               |
   TypeScript 所有者（rutis 运行时行）   Rpc  <--  本地客户端
 ```
@@ -217,6 +217,7 @@ Settings 在内存中保存已登记的来源（声明已编译），各自保�
 | `settings.read` | `{source, scope}` | `{revision, document}` | 参数无效（作用域错误）、`settings_unknown_source`、`settings_failed` |
 | `settings.update` | `{source, scope, expectedRevision, document}` | `{revision, document}` | 参数无效（作用域错误、违反 schema）、`settings_unknown_source`、`settings_conflict`、`settings_unsynced`、`settings_failed` |
 | `settings.sources` | `{}` | `{dialect, sources: [...]}`（`Sources`，§4.1） | 参数无效 |
+| `settings.projects` | `{}` | `{projects: [{root, cwd}]}`：当前已授权的项目根，与服务 `projects` 的回答相同（§4.2） | 参数无效 |
 
 - 只服务已登记的声明来源。Rust 来源（例如 `mcp`）返回 `settings_unknown_source`，仍由其所有者的方法
   修改。
@@ -234,6 +235,13 @@ Settings 在内存中保存已登记的来源（声明已编译），各自保�
   方法，不属于 schema 驱动的表面；`settings.sources` 只列声明的来源，因此从不列出它。
 - `settings.sources` 从不提供给已配对设备（§4.3 开头），也不在 Web 入口的允许清单里，因此
   Web 入口回答 `unknown_method`（§11 第 7–8 条）：发现与命名空间的其余部分一样只限本地。
+- `settings.projects` 是客户端在传 `{project: root}` 之前需要的读取：它回答与服务 `projects`
+  （§4.2）相同的 `{projects: [{root, cwd}]}`，按 cwd 顺序；同样不提供给已配对设备，也不在 Web
+  入口的允许清单里（`unknown_method`）。**`root` 是进程内的编号**（§4.1）：它只在守护进程本次
+  运行期间有效，不是持久身份；客户端在重连到重启后的守护进程时重新读 `settings.projects`，
+  从不保存 root。进程运行期间列表只增不减——同一 cwd 再次授权不新增条目、也不发事件（§4.4）
+  ——因此没有事件或推送承载它，客户端在打开项目作用域表单时读取。本进程未授权的
+  `{project: root}` 是参数无效，与没有项目作用域的来源得到相同的回答。
 
 ### 4.4 事件
 
@@ -492,6 +500,10 @@ TypeScript 行）：
 9. 什么都没登记时 `settings.sources` 回复 `{dialect, sources: []}`；已登记的声明来源列出其 schema
    原样、作用域、仅限用户的指针和 `writeOnly` 提示；从不列 Rust 来源；声明来源的所有者一卸载，
    它的条目就消失，同时 `settings.read` 重新回答 `settings_unknown_source`。
+10. 什么都没授权时 `settings.projects` 回复 `{projects: []}`；`session.create` 授权某个根后，
+    列表出现该根及其规范 cwd，且该根可用于 `settings.read` 的 `{project: root}`；同一 cwd 第二次
+    授权不新增条目；本进程从未授权的根是参数无效；客户端经 `hooks.catalog` 为一个没有 Session
+    的 cwd 授权的根同样被列出。守护进程在同一 home 上重启后，列表重新为空。
 
 ## 12. 实现状态
 

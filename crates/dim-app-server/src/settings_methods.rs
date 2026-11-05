@@ -18,7 +18,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::Serialize;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 /// The JSON Schema dialect of every declared source's `schema`: the one
 /// `Declared::compile` validates with (`settings/declared.rs`).
@@ -55,6 +55,28 @@ struct SourceListing {
     /// `writeOnly` under `items`, `$defs` or `anyOf`.
     write_only: bool,
 }
+
+/// The `settings.projects` reply (§4.3): the project roots this process has
+/// authorized, in cwd order. It is the same list the owner-facing `projects`
+/// service answers (§4.2); only the transport differs.
+#[derive(Serialize)]
+struct ProjectsReply {
+    /// One item per authorized root. The map only grows for the life of the
+    /// process, so the list only grows too.
+    projects: Vec<ProjectListing>,
+}
+
+/// One authorized project root as a client reads it. A separate wire type, so
+/// a field added to the authorization event cannot leak into the reply.
+#[derive(Serialize)]
+struct ProjectListing {
+    /// The number Settings assigned in this process, taken verbatim as
+    /// `{project: root}` (§4.1). It is not a durable identity.
+    root: usize,
+    /// The canonical working directory the root stands for.
+    cwd: PathBuf,
+}
+
 impl From<SourceDeclaration> for SourceListing {
     fn from(declaration: SourceDeclaration) -> Self {
         let write_only = holds_write_only(&declaration.schema);
@@ -120,6 +142,7 @@ impl DynPlugin for SettingsMethodsPlugin {
                     MethodDecl::new("settings.read", false, Interruption::Report),
                     MethodDecl::new("settings.update", true, Interruption::Report),
                     MethodDecl::new("settings.sources", false, Interruption::Report),
+                    MethodDecl::new("settings.projects", false, Interruption::Report),
                 ],
                 Arc::new(move |method, value, stopping, _| {
                     let service = service.clone();
@@ -158,6 +181,16 @@ impl DynPlugin for SettingsMethodsPlugin {
                                         .declarations()
                                         .into_iter()
                                         .map(SourceListing::from)
+                                        .collect(),
+                                })
+                            }
+                            "settings.projects" => {
+                                let _: Empty = params(value)?;
+                                reply(ProjectsReply {
+                                    projects: service
+                                        .project_sources()
+                                        .into_iter()
+                                        .map(|(root, cwd)| ProjectListing { root, cwd })
                                         .collect(),
                                 })
                             }
