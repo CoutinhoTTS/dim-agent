@@ -115,14 +115,27 @@ pub struct TimelineInfo {
     pub source: Option<dim_agent_types::BranchSource>,
 }
 
-/// One line's directory record: its identity, its head and its end.
+/// Whether a line takes input, is finishing a committed end, or has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchDirectoryState {
+    /// The line takes input, and its head is live.
+    Open,
+    /// The line's `branch/end` is committed while the turn that wrote it still
+    /// runs: input is refused, and its head is still live.
+    Ending,
+    /// The line has ended: its head and its end event are fixed.
+    Ended,
+}
+
+/// One line's directory record: its identity, its state, its head and its end.
 #[derive(Debug, Clone)]
 pub struct BranchDirectoryEntry {
     pub info: TimelineInfo,
-    /// The published head while open, the fixed head once ended.
+    /// The published head while open or ending, the fixed head once ended.
     pub head: u64,
-    pub ended: bool,
-    /// The line's `branch/end` sequence, when the directory recorded it.
+    pub state: BranchDirectoryState,
+    /// The sequence of the line's own `branch/end`: committed while ending,
+    /// recorded once ended.
     pub end_event: Option<u64>,
 }
 
@@ -157,10 +170,11 @@ pub trait TimelineTreeControl: Send + Sync + 'static {
     fn get(&self, id: &str) -> Option<Branch>;
     /// Ends the line `id` with `source`; only the target is checked.
     fn end(&self, id: String, source: dim_agent_types::BranchSource) -> BoxFuture<'_, Result<()>>;
-    /// The fixed head of an ended line, `None` for an open or unknown one.
+    /// The fixed head of an ended line, `None` for an open, ending or unknown
+    /// one.
     fn ended_head(&self, id: &str) -> Option<u64>;
     fn list(&self) -> Vec<TimelineInfo>;
-    /// The complete branch directory: open and ended lines.
+    /// The complete branch directory: open, ending and ended lines.
     fn directory(&self) -> Vec<BranchDirectoryEntry>;
     fn close(&self) -> BoxFuture<'_, Result<()>>;
 }

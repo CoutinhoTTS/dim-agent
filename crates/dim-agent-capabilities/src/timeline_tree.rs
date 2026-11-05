@@ -4,11 +4,11 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
-    AgentError, Branch, BranchDirectoryEntry, BranchLifecycle, BranchOptions, Dispatcher, Names,
-    Result, SessionIdentity, StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory,
-    TimelineIdentity, TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply, TimelineQueryScope,
-    TimelineStore, TimelineTreeControl, rebuild_facts,
+    AgentError, Branch, BranchDirectoryEntry, BranchDirectoryState, BranchLifecycle, BranchOptions,
+    Dispatcher, Names, Result, SessionIdentity, StoredBranch, StoredEvent, Timeline,
+    TimelineContext, TimelineFactory, TimelineIdentity, TimelineInfo, TimelineKey, TimelineQuery,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply,
+    TimelineQueryScope, TimelineStore, TimelineTreeControl, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -1153,7 +1153,8 @@ impl TimelineTree {
                 _ => None,
             }))
     }
-    /// The stored head of an ended line, `None` for an open or unknown one.
+    /// The stored head of an ended line, `None` for an open, ending or unknown
+    /// one.
     fn ended_head(&self, id: &str) -> Option<u64> {
         self.state
             .lock()
@@ -1898,28 +1899,41 @@ impl TimelineTreeControl for TimelineTree {
             .collect()
     }
     fn directory(&self) -> Vec<BranchDirectoryEntry> {
-        let state = self.state.lock().unwrap();
-        let mut entries: Vec<BranchDirectoryEntry> = state
-            .nodes
-            .values()
-            .filter(|node| matches!(&*node.ready.borrow(), Some(Ok(_))))
-            .map(|node| BranchDirectoryEntry {
-                info: node.info.clone(),
-                head: node
-                    .context
-                    .as_ref()
-                    .map_or(0, |context| context.timeline().sequence()),
-                ended: false,
-                end_event: None,
-            })
-            .collect();
-        for ended in state.ended.values() {
-            entries.push(BranchDirectoryEntry {
-                info: ended.info.clone(),
-                head: ended.head,
-                ended: true,
-                end_event: ended.end_event,
-            });
+        // Collect the records under the lock, then resolve heads through
+        // `head()`, which takes the lock itself.
+        let mut entries: Vec<BranchDirectoryEntry> = {
+            let state = self.state.lock().unwrap();
+            let mut entries: Vec<BranchDirectoryEntry> = state
+                .nodes
+                .values()
+                .filter(|node| matches!(&*node.ready.borrow(), Some(Ok(_))))
+                .map(|node| {
+                    let pending = state.pending.get(&node.info.id);
+                    BranchDirectoryEntry {
+                        info: node.info.clone(),
+                        head: 0,
+                        state: match pending {
+                            Some(_) => BranchDirectoryState::Ending,
+                            None => BranchDirectoryState::Open,
+                        },
+                        end_event: pending.map(|pending| pending.sequence),
+                    }
+                })
+                .collect();
+            for ended in state.ended.values() {
+                entries.push(BranchDirectoryEntry {
+                    info: ended.info.clone(),
+                    head: ended.head,
+                    state: BranchDirectoryState::Ended,
+                    end_event: ended.end_event,
+                });
+            }
+            entries
+        };
+        for entry in &mut entries {
+            if entry.state != BranchDirectoryState::Ended {
+                entry.head = self.head(&entry.info.id).unwrap_or(0);
+            }
         }
         entries.sort_by(|a, b| {
             let order = |id: &str| id != "main";

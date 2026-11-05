@@ -17,7 +17,7 @@ Use the existing Session attachment and history, not a server task registry:
 | `session.history {sessionId,branchId,after,limit,through?}` | Branch-local, fixed-watermark history; read through the existing authorization and dispatch boundary |
 | `branch/create`, `branch/start`, `branch/create-failed` | Discover branch identities and creation outcomes from their owner's facts |
 | `session.state {sessionId,branchId,...}` | Discover published branches through the attachment's initial state watches and subsequent updates |
-| `session.branches {sessionId}` | The complete line directory, open and ended, with each line's state and head ([timeline branches §14](timeline-branches.md#14-clients)) |
+| `session.branches {sessionId}` | The complete line directory — open, ending or ended — with each line's state and head ([timeline branches §14](timeline-branches.md#14-clients)) |
 | `session.event {sessionId,branchId,event}` | Live facts, with a separate sequence cursor for each branch |
 | `exec/started`, `exec/ended` | Command identity, description and actual terminal result |
 | `collaboration/request`, `collaboration/delivered`, `collaboration/result` | Delegation identity, actual member Session and outcome |

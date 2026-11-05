@@ -560,8 +560,8 @@ impl Session {
     pub fn branches(&self) -> Vec<TimelineInfo> {
         self.0.tree.list()
     }
-    /// The complete branch directory: open and ended lines. `main` comes
-    /// first, then the rest in branch identity order.
+    /// The complete branch directory: open, ending and ended lines. `main`
+    /// comes first, then the rest in branch identity order.
     pub fn directory(&self) -> Vec<BranchDirectoryEntry> {
         self.0.tree.directory()
     }

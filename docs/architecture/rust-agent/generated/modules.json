@@ -13491,10 +13491,14 @@
       "to": "dim_agent_runtime::contracts",
       "references": [
         "path BranchDirectoryEntry",
+        "path BranchDirectoryState::Ended",
+        "path BranchDirectoryState::Ending",
+        "path BranchDirectoryState::Open",
         "path BranchOptions",
         "path TimelineInfo",
         "path TimelineTreeControl",
         "use dim_agent_runtime::BranchDirectoryEntry",
+        "use dim_agent_runtime::BranchDirectoryState",
         "use dim_agent_runtime::BranchOptions",
         "use dim_agent_runtime::TimelineInfo",
         "use dim_agent_runtime::TimelineTreeControl"
@@ -21100,7 +21104,11 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::contracts",
       "references": [
+        "path BranchDirectoryState::Ended",
+        "path BranchDirectoryState::Ending",
+        "path BranchDirectoryState::Open",
         "path BranchOptions",
+        "use dim_agent_runtime::BranchDirectoryState",
         "use dim_agent_runtime::BranchOptions"
       ]
     },
