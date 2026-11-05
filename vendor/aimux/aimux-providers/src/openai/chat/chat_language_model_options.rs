@@ -117,17 +117,18 @@ pub(crate) fn parse_chat_options(options: &JsonObject) -> Result<JsonObject, AiM
             "reasoningEffort" => {
                 one_of(&["none", "minimal", "low", "medium", "high", "xhigh", "max"])
             }
-            // Any tier string: the catalogue and the account entitlement name
-            // the tiers this product offers, and the server decides what one
-            // means, so a tier the tag does not list is still sent.
+            // Any tier string: the product catalogue and the remote account
+            // entitlement name the tiers a deployment offers, and the server
+            // decides what one means, so a tier the tag does not list is
+            // still sent.
             "serviceTier" => value.is_string(),
             "textVerbosity" => one_of(&["low", "medium", "high"]),
             "promptCacheRetention" => one_of(&["in_memory", "24h"]),
             "systemMessageMode" => one_of(&["system", "developer", "remove"]),
             "user" | "promptCacheKey" | "safetyIdentifier" => value.is_string(),
-            "parallelToolCalls" | "store" | "strictJsonSchema" | "forceReasoning" => {
-                value.is_boolean()
-            }
+            // `forceServiceTier` is an aimux extension (#462).
+            "parallelToolCalls" | "store" | "strictJsonSchema" | "forceReasoning"
+            | "forceServiceTier" => value.is_boolean(),
             "promptCacheOptions" => {
                 return Some(value.as_object().ok_or(()).and_then(|object| {
                     parse_option_fields(object, NAMESPACE, |key, value| {

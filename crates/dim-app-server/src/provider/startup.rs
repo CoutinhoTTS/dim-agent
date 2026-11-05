@@ -187,7 +187,7 @@ impl ProviderService {
             .into_iter()
             .flatten()
         {
-            if value == 0 || value > MAX_MODEL_TOKENS {
+            if !limit_valid(value) {
                 return Err(failure("Model limits must be positive safe JSON integers"));
             }
         }
@@ -284,7 +284,10 @@ impl ProviderService {
             let base = previous
                 .and_then(|model| model.config.clone())
                 .unwrap_or_else(|| ModelConfig {
-                    max_tokens: Some(snapshot.capabilities.max_output_tokens as f64),
+                    max_tokens: Some(output_allowance(
+                        snapshot.capabilities.context_window,
+                        snapshot.capabilities.max_output_tokens,
+                    ) as f64),
                     ..Default::default()
                 });
             let base = preferences::catalog_defaults(&base, &snapshot, source.api_format);
@@ -398,16 +401,12 @@ impl ProviderService {
         }
         if let Some(limit) = input.max_output_tokens {
             snapshot.capabilities.max_output_tokens = limit;
-            let config = model.config.get_or_insert_default();
-            config.max_tokens = Some(
-                config
-                    .max_tokens
-                    .map_or(limit as f64, |budget| budget.min(limit as f64)),
-            );
         }
-        if snapshot.capabilities.max_output_tokens > snapshot.capabilities.context_window {
-            return Err(failure("Output capacity cannot exceed context capacity"));
-        }
+        let allowance = output_allowance(
+            snapshot.capabilities.context_window,
+            snapshot.capabilities.max_output_tokens,
+        );
+        model.config.get_or_insert_default().max_tokens = Some(allowance as f64);
         let metadata = model.metadata.get_or_insert_default();
         let startup = metadata.startup.get_or_insert_default();
         match input.auto_compact_window {

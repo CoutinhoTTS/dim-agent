@@ -367,7 +367,10 @@ pub(crate) fn configured_request(
             capability_snapshot: data.settings.capability_snapshot.clone(),
             tools: data.settings.tools.clone(),
             system: data.system.clone(),
-            config: data.settings.config.clone(),
+            config: crate::context_model::adopted_config(
+                data.settings.capability_snapshot.as_ref(),
+                data.settings.config.as_ref(),
+            ),
             metadata: data.settings.metadata.clone(),
         }
         .request(context.messages(history)),

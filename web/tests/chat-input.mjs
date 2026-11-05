@@ -42,7 +42,7 @@ const { readNotification } = await import("../src/rpc/read.ts")
 const { RpcError } = await import("../src/rpc/client.ts")
 const node = (type, text = "") => ({
   type, text, children: [], props: {}, parent: undefined, style: {}, value: "", scrollHeight: 40,
-  addEventListener() {}, focus() {}, getRootNode() { return {} },
+  addEventListener() {}, focus() {}, scrollTo() {}, getRootNode() { return {} },
   setSelectionRange(start) { this.selectionStart = start },
   showModal() { this.props.open = true }, close() { this.props.open = false },
 })
@@ -68,6 +68,7 @@ const text = (element) => (element.type === "comment" ? "" : element.text) + ele
 const button = (root, label) => all(root).find((element) => element.type === "button" && (text(element) === label || element.props["aria-label"] === label))
 const flush = async () => { for (let i = 0; i < 8; i++) { await Promise.resolve(); await nextTick() } }
 const click = (element) => element.props.onClick({ stopPropagation() {} })
+const submitQuestion = (root) => all(root).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} })
 const question = (branchId, callId, multiSelect = false) => ({
   branchId, requestId: "batch", callId,
   questions: [{ id: "1", question: `Choose ${callId}`, options: [{ label: "Alpha" }, { label: "Beta" }], multiSelect, allowCustom: true }],
@@ -185,6 +186,47 @@ test("permission changes refresh live presets and conflicts without retrying or 
 })
 
 for (const branchId of ["main", "worker"]) {
+  test(`${branchId}: questions advance individually and retain edits through review and retry`, async (t) => {
+    const ask = question(branchId, "steps")
+    ask.questions.push({ id: "2", header: "Features", question: "Choose features", options: [{ label: "Audit" }, { label: "Export" }], multiSelect: true, allowCustom: true })
+    const { root, replies } = mount(t, branchId, [ask])
+    const inputs = () => all(root).filter((element) => element.type === "input")
+    assert.equal(all(root).filter((element) => element.type === "fieldset").length, 1)
+    assert.doesNotMatch(text(root), /Choose features/)
+    assert.equal(button(root, "question.next").props.disabled, true)
+    inputs()[1].props.onChange()
+    await submitQuestion(root); await flush()
+    assert.match(text(root), /Choose features/)
+    assert.doesNotMatch(text(root), /Choose steps/)
+    assert.equal(replies.length, 0)
+    inputs()[0].props.onChange()
+    inputs()[1].props.onChange()
+    inputs()[2].props.onInput({ target: { value: "  Backups  " } })
+    await flush()
+    await click(button(root, "question.previous")); await flush()
+    assert.equal(inputs()[1].props.checked, true, "the first answer survives navigation")
+    inputs()[2].props.onInput({ target: { value: "PostgreSQL" } })
+    await submitQuestion(root); await flush()
+    assert.equal(inputs()[0].props.checked, true)
+    assert.equal(inputs()[1].props.checked, true)
+    assert.equal(inputs()[2].props.value, "  Backups  ")
+    await submitQuestion(root); await flush()
+    assert.equal(all(root).filter((element) => element.type === "fieldset").length, 0)
+    assert.match(text(root), /PostgreSQL/)
+    assert.match(text(root), /Audit, Export, Backups/)
+    globalThis.chatInputStores.chat.answerQuestion = async () => { throw new RpcError(-32602, "Retry this answer", "invalid_params") }
+    await submitQuestion(root); await flush()
+    assert.match(text(root), /Retry this answer/)
+    assert.equal(button(root, "question.submit").props.disabled, false)
+    globalThis.chatInputStores.chat.answerQuestion = async (sessionId, ask, answers) => { replies.push({ sessionId, branch: ask.branchId, answers }) }
+    await submitQuestion(root); await flush()
+    assert.deepEqual(replies, [{ sessionId: "session", branch: branchId, answers: [
+      { questionId: "1", selected: [], custom: "PostgreSQL" },
+      { questionId: "2", selected: ["Audit", "Export"], custom: "Backups" },
+    ] }])
+    assert.equal(button(root, "question.submit").props.disabled, true)
+  })
+
   test(`${branchId}: all calls of a question batch can be answered before settlement`, async (t) => {
     const { root, view, replies } = mount(t, branchId, [question(branchId, "first"), question(branchId, "second"), question("elsewhere", "hidden")])
     const cards = () => all(root).filter((element) => element.type === "article")
@@ -193,7 +235,7 @@ for (const branchId of ["main", "worker"]) {
       all(card).find((element) => element.props.type === "radio").props.onChange()
       await flush()
       assert.equal(button(card, "question.submit").props.disabled, false)
-      await click(button(card, "question.submit"))
+      await submitQuestion(card)
       await flush()
       assert.equal(button(card, "question.submit").props.disabled, true)
     }
@@ -304,7 +346,7 @@ test("single-choice answers switch between options and custom text; multiple-cho
     custom.props.onInput({ target: { value: "Gamma" } })
     if (mode === "option") option.props.onChange()
     await flush()
-    await click(button(root, "question.submit"))
+    await submitQuestion(root)
     assert.deepEqual(replies[0].answers, [{ questionId: "1", selected: mode === "custom" ? [] : ["Alpha"], ...(mode === "option" ? {} : { custom: "Gamma" }) }])
   }
 })

@@ -243,7 +243,10 @@ impl PrepareModel for DefaultPrepareModel {
         settings.system = (!self.config.system_prompt.is_empty())
             .then(|| SystemPrompt::Text(self.config.system_prompt.clone()));
         settings.tools = Some(available_tools.to_vec());
-        settings.config = self.config.model.config.clone();
+        settings.config = crate::context_model::adopted_config(
+            settings.capability_snapshot.as_ref(),
+            self.config.model.config.as_ref(),
+        );
         settings.metadata = self.config.model.metadata.clone();
         Ok(settings)
     }

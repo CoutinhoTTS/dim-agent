@@ -809,20 +809,41 @@ fn apply_responses_provider_options(
     }
 }
 
-/// `service_tier` from the provider options.
-///
-/// dim patch (arcships/aimux#462): an explicitly selected tier is sent for
-/// every model id, deployment aliases included. The product catalog and the
-/// remote account entitlement remain the authorities.
+/// `service_tier` with model-capability validation.
 fn apply_responses_service_tier(
     ns: ResponsesNamespace,
     body: &mut Value,
     provider_opts: &Option<SharedProviderOptions>,
+    caps: &ModelCapabilities,
+    warnings: &mut Vec<Warning>,
 ) {
-    if let Some(st) =
-        openai_option(ns, provider_opts, "serviceTier").and_then(|v| v.as_str().map(str::to_owned))
+    // aimux extension (#462): `forceServiceTier` declares the tier support of
+    // a model id the capability table cannot know, such as a deployment alias.
+    let force = openai_option(ns, provider_opts, "forceServiceTier")
+        .is_some_and(|v| v.as_bool().unwrap_or(false));
+    if let Some(st) = openai_option(ns, provider_opts, "serviceTier")
+        .and_then(|v| v.as_str().map(std::string::ToString::to_string))
     {
-        body["service_tier"] = json!(st);
+        match st.as_str() {
+            "flex" if !caps.supports_flex_processing && !force => {
+                warnings.push(Warning::Unsupported {
+                    feature: "serviceTier".to_string(),
+                    details: Some(
+                        "flex processing is only available for o3, o4-mini, and gpt-5 models"
+                            .to_string(),
+                    ),
+                });
+            }
+            "priority" | "fast" if !caps.supports_priority_processing && !force => {
+                warnings.push(Warning::Unsupported {
+                    feature: "serviceTier".to_string(),
+                    details: Some("priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported".to_string()),
+                });
+            }
+            _ => {
+                body["service_tier"] = json!(st);
+            }
+        }
     }
 }
 
@@ -1063,8 +1084,8 @@ pub fn build_responses_request_body_for(
         }
     }
 
-    // -- service_tier --
-    apply_responses_service_tier(ns, &mut body, provider_opts);
+    // -- service_tier (with capability validation) --
+    apply_responses_service_tier(ns, &mut body, provider_opts, &caps, &mut warnings);
 
     // -- reasoning block (reasoning models only) --
     apply_responses_reasoning_block(
@@ -1503,7 +1524,6 @@ const MODELED_CHUNK_TYPES: &[&str] = &[
     "response.code_interpreter_call_code.delta",
     "response.code_interpreter_call_code.done",
     "response.completed",
-    "response.content_part.added",
     "response.created",
     "response.custom_tool_call_input.delta",
     "response.failed",
@@ -1519,6 +1539,7 @@ const MODELED_CHUNK_TYPES: &[&str] = &[
     "response.reasoning_summary_part.added",
     "response.reasoning_summary_part.done",
     "response.reasoning_summary_text.delta",
+    // aimux extension (#466): refusal events are modeled, not dropped.
     "response.refusal.delta",
     "response.refusal.done",
 ];
@@ -1646,9 +1667,6 @@ fn chunk_schema_error(chunk: &Value) -> Option<String> {
             (&[], &["output_index"])
         }
         "response.output_text.delta" => (&["item_id", "delta"], &[]),
-        "response.content_part.added" => (&["item_id"], &["output_index", "content_index"]),
-        "response.refusal.delta" => (&["item_id", "delta"], &["output_index", "content_index"]),
-        "response.refusal.done" => (&["item_id", "refusal"], &["output_index", "content_index"]),
         "response.function_call_arguments.delta"
         | "response.custom_tool_call_input.delta"
         | "response.code_interpreter_call_code.delta"
@@ -1708,6 +1726,35 @@ fn resolve_output_item_id(event: &Value, output_ids: &HashMap<usize, String>) ->
 fn reasoning_item_metadata(provider_key: &str, item_id: &str) -> ProviderMetadata {
     provider_namespace(provider_key, json!({ "itemId": item_id }))
         .expect("provider metadata must be an object")
+}
+
+/// The open text block of a message item, else the item id itself.
+fn text_block_id(text_blocks: &HashMap<String, (u64, String)>, item_id: String) -> String {
+    text_blocks
+        .get(&item_id)
+        .map_or(item_id, |(_, block)| block.clone())
+}
+
+/// aimux extension (#468): the AI SDK starts a function call without
+/// metadata; the item id is sent here too, not only on the tool call.
+fn tool_input_start(
+    controller: &mut Controller,
+    provider_key: &str,
+    item: &Value,
+    call_id: String,
+    tool_name: String,
+) {
+    controller.enqueue(StreamPart::ToolInputStart {
+        id: call_id,
+        tool_name,
+        provider_executed: None,
+        dynamic: None,
+        title: None,
+        provider_metadata: Some(
+            provider_namespace(provider_key, tool_metadata(item))
+                .expect("provider metadata must be an object"),
+        ),
+    });
 }
 
 fn tool_metadata(item: &Value) -> Value {
@@ -2022,10 +2069,10 @@ struct OpenAIResponsesStream {
     response_id: Option<String>,
     stream_errored: bool,
     text_states: HashMap<String, Value>,
-    /// Refusal parts that already received a delta, keyed by item and part.
+    /// Refusal parts (item id, content index) that streamed a delta.
     refusal_deltas: HashSet<(String, u64)>,
-    /// Text block ids by item id and content index.
-    text_part_ids: HashMap<(String, u64), String>,
+    /// The open text block of each message item: its content index and id.
+    text_blocks: HashMap<String, (u64, String)>,
     output_ids: HashMap<usize, String>,
     text_annotations: HashMap<String, Vec<Value>>,
     logprobs: Vec<Value>,
@@ -2072,7 +2119,7 @@ impl Transformer for OpenAIResponsesStream {
             ref mut stream_errored,
             ref mut text_states,
             ref mut refusal_deltas,
-            ref mut text_part_ids,
+            ref mut text_blocks,
             ref mut output_ids,
             ref mut text_annotations,
             ref mut logprobs,
@@ -2172,7 +2219,7 @@ impl Transformer for OpenAIResponsesStream {
                                         .to_string();
                                     output_ids.insert(output_index, id.clone());
                                     text_states.insert(id.clone(), item.clone());
-                                    text_part_ids.insert((id.clone(), 0), id.clone());
+                                    text_blocks.insert(id.clone(), (0, id.clone()));
                                     controller.enqueue(StreamPart::TextStart {
                                         id,
                                         provider_metadata: Some(
@@ -2201,17 +2248,7 @@ impl Transformer for OpenAIResponsesStream {
                                             tool_call_id: call_id.clone(),
                                         },
                                     );
-                                    controller.enqueue(StreamPart::ToolInputStart {
-                                        id: call_id,
-                                        tool_name: name,
-                                        provider_executed: None,
-                                        dynamic: None,
-                                        title: None,
-                                        provider_metadata: Some(
-                                            provider_namespace(provider_key, tool_metadata(item))
-                                                .expect("provider metadata must be an object"),
-                                        ),
-                                    });
+                                    tool_input_start(controller, provider_key, item, call_id, name);
                                 }
                                 "custom_tool_call" => {
                                     let call_id = item
@@ -2230,17 +2267,7 @@ impl Transformer for OpenAIResponsesStream {
                                             tool_call_id: call_id.clone(),
                                         },
                                     );
-                                    controller.enqueue(StreamPart::ToolInputStart {
-                                        id: call_id,
-                                        tool_name: name,
-                                        provider_executed: None,
-                                        dynamic: None,
-                                        title: None,
-                                        provider_metadata: Some(
-                                            provider_namespace(provider_key, tool_metadata(item))
-                                                .expect("provider metadata must be an object"),
-                                        ),
-                                    });
+                                    tool_input_start(controller, provider_key, item, call_id, name);
                                 }
                                 "reasoning" => {
                                     let id = item
@@ -2366,56 +2393,6 @@ impl Transformer for OpenAIResponsesStream {
                         }
                     }
 
-                    // ── response.content_part.added → split text blocks ───────
-                    "response.content_part.added" => {
-                        if parsed
-                            .get("part")
-                            .and_then(|part| part.get("type"))
-                            .and_then(Value::as_str)
-                            == Some("output_text")
-                        {
-                            let mut item_id = parsed
-                                .get("item_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if let Some(index) = parsed.get("output_index").and_then(Value::as_u64)
-                                && let Some(original_id) = output_ids.get(&(index as usize))
-                            {
-                                item_id = original_id.clone();
-                            }
-                            let content_index = parsed
-                                .get("content_index")
-                                .and_then(Value::as_u64)
-                                .unwrap_or(0);
-                            if content_index > 0
-                                && !text_part_ids.contains_key(&(item_id.clone(), content_index))
-                            {
-                                if let Some(previous_block) = text_part_ids
-                                    .get(&(item_id.clone(), content_index - 1))
-                                    .cloned()
-                                {
-                                    controller.text_end(previous_block);
-                                }
-                                let block_id = format!("{item_id}:{content_index}");
-                                text_part_ids
-                                    .insert((item_id.clone(), content_index), block_id.clone());
-                                let mut metadata = text_states
-                                    .get(&item_id)
-                                    .map(|item| text_metadata(item, None))
-                                    .unwrap_or_else(|| json!({ "itemId": item_id.clone() }));
-                                metadata["contentIndex"] = json!(content_index);
-                                controller.enqueue(StreamPart::TextStart {
-                                    id: block_id,
-                                    provider_metadata: Some(
-                                        provider_namespace(provider_key, metadata)
-                                            .expect("provider metadata must be an object"),
-                                    ),
-                                });
-                            }
-                        }
-                    }
-
                     // ── response.output_text.delta → TextDelta ────────────────
                     "response.output_text.delta" => {
                         if request_body
@@ -2426,7 +2403,7 @@ impl Transformer for OpenAIResponsesStream {
                         {
                             logprobs.push(logprobs_fields(value));
                         }
-                        let mut item_id = parsed
+                        let mut id = parsed
                             .get("item_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
@@ -2434,77 +2411,67 @@ impl Transformer for OpenAIResponsesStream {
                         if let Some(index) = parsed.get("output_index").and_then(Value::as_u64)
                             && let Some(original_id) = output_ids.get(&(index as usize))
                         {
-                            item_id = original_id.clone();
+                            id = original_id.clone();
                         }
-                        let content_index = parsed
-                            .get("content_index")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let id = text_part_ids
-                            .get(&(item_id.clone(), content_index))
-                            .cloned()
-                            .unwrap_or(item_id);
                         let delta = parsed
                             .get("delta")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        controller.text_delta(id, delta);
+                        controller.text_delta(text_block_id(text_blocks, id), delta);
                     }
 
-                    // ── response.refusal.delta → TextDelta ───────────────────
-                    "response.refusal.delta" => {
-                        let mut id = parsed
-                            .get("item_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if let Some(index) = parsed.get("output_index").and_then(Value::as_u64)
-                            && let Some(original_id) = output_ids.get(&(index as usize))
+                    // ── response.content_part.added → a new text block ────────
+                    // aimux extension (#468): the AI SDK merges the content
+                    // parts of a message into one text block; each part after
+                    // the first opens its own, marked with its `contentIndex`.
+                    "response.content_part.added" => {
+                        let item_id = resolve_output_item_id(&parsed, output_ids);
+                        let content_index = parsed["content_index"].as_u64().unwrap_or_default();
+                        if parsed["part"]["type"] == "output_text"
+                            && let Some((index, block)) = text_blocks.get_mut(&item_id)
+                            && content_index > *index
                         {
-                            id = original_id.clone();
-                        }
-                        let content_index = parsed
-                            .get("content_index")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        let delta = parsed.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-                        if !delta.is_empty() {
-                            refusal_deltas.insert((id.clone(), content_index));
-                            let id = text_part_ids
-                                .get(&(id.clone(), content_index))
-                                .cloned()
-                                .unwrap_or(id);
-                            controller.text_delta(id, delta.to_string());
+                            controller.text_end(std::mem::take(block));
+                            *index = content_index;
+                            *block = format!("{item_id}:{content_index}");
+                            let mut metadata = text_states.get(&item_id).map_or_else(
+                                || json!({ "itemId": item_id }),
+                                |item| text_metadata(item, None),
+                            );
+                            metadata["contentIndex"] = json!(content_index);
+                            controller.enqueue(StreamPart::TextStart {
+                                id: block.clone(),
+                                provider_metadata: Some(
+                                    provider_namespace(provider_key, metadata)
+                                        .expect("provider metadata must be an object"),
+                                ),
+                            });
                         }
                     }
 
-                    // ── response.refusal.done → TextDelta only without deltas ─
-                    "response.refusal.done" => {
-                        let mut id = parsed
-                            .get("item_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if let Some(index) = parsed.get("output_index").and_then(Value::as_u64)
-                            && let Some(original_id) = output_ids.get(&(index as usize))
-                        {
-                            id = original_id.clone();
-                        }
-                        let content_index = parsed
-                            .get("content_index")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        if !refusal_deltas.contains(&(id.clone(), content_index)) {
-                            let refusal =
-                                parsed.get("refusal").and_then(|v| v.as_str()).unwrap_or("");
-                            if !refusal.is_empty() {
-                                let id = text_part_ids
-                                    .get(&(id.clone(), content_index))
-                                    .cloned()
-                                    .unwrap_or(id);
-                                controller.text_delta(id, refusal.to_string());
+                    // ── response.refusal.delta/done → TextDelta ───────────────
+                    // aimux extension (#466): the AI SDK drops refusal events,
+                    // so a refusal would end as an empty answer. `done` carries
+                    // the whole refusal, sent only for a part without deltas.
+                    "response.refusal.delta" | "response.refusal.done" => {
+                        let id = resolve_output_item_id(&parsed, output_ids);
+                        let part = (
+                            id.clone(),
+                            parsed["content_index"].as_u64().unwrap_or_default(),
+                        );
+                        let text = if etype == "response.refusal.delta" {
+                            parsed["delta"].as_str().filter(|text| !text.is_empty())
+                        } else if refusal_deltas.contains(&part) {
+                            None
+                        } else {
+                            parsed["refusal"].as_str().filter(|text| !text.is_empty())
+                        };
+                        if let Some(text) = text {
+                            if etype == "response.refusal.delta" {
+                                refusal_deltas.insert(part);
                             }
+                            controller.text_delta(text_block_id(text_blocks, id), text.to_owned());
                         }
                     }
 
@@ -2644,14 +2611,9 @@ impl Transformer for OpenAIResponsesStream {
                                         metadata_item["phase"] = phase.clone();
                                     }
                                     let annotations = text_annotations.remove(&id);
-                                    let block_id = text_part_ids
-                                        .iter()
-                                        .filter(|((item_id, _), _)| item_id == &id)
-                                        .max_by_key(|((_, index), _)| *index)
-                                        .map(|(_, block)| block.clone())
-                                        .unwrap_or_else(|| id.clone());
+                                    let block = text_blocks.remove(&id).map(|(_, block)| block);
                                     controller.enqueue(StreamPart::TextEnd {
-                                        id: block_id,
+                                        id: block.unwrap_or(id),
                                         provider_metadata: Some(
                                             provider_namespace(
                                                 provider_key,

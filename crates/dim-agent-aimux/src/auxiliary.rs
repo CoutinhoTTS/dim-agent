@@ -36,7 +36,6 @@ impl CompleteAuxiliary for ConfiguredAuxiliary {
                         model: model.clone(),
                         config: entry.defaults.clone(),
                         capability_snapshot: None,
-                        max_output_tokens: entry.max_output_tokens,
                     };
                     auxiliary_model::complete(
                         &self.host,

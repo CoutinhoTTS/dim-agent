@@ -437,6 +437,8 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     let features = web.features.as_array().unwrap();
     for method in [
         "session.create",
+        "session.branch_create",
+        "session.branch_end",
         "session.permission.update",
         "provider.catalog",
         "account.providers",
@@ -492,9 +494,30 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     }
     let unreviewed = local.rpc("schedule.unreviewed", json!({})).await;
     assert_ok(&unreviewed);
-    let created = web.rpc("session.create", json!({"cwd":home})).await;
+    let created = web
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"tools":["read","branch"]}),
+        )
+        .await;
     assert_ok(&created);
     let session_id = created["result"]["sessionId"].as_str().unwrap();
+    let branch = web
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":session_id,"parentBranchId":"main","at":0,"prompt":"inspect the workspace"}),
+        )
+        .await;
+    assert_ok(&branch);
+    let branch_id = branch["result"]["branch"]["branchId"].as_str().unwrap();
+    assert_ne!(branch_id, "main");
+    assert_ok(
+        &web.rpc(
+            "session.branch_end",
+            json!({"sessionId":session_id,"branchId":branch_id}),
+        )
+        .await,
+    );
     assert_ok(
         &web.rpc(
             "session.permission.get",

@@ -1193,6 +1193,15 @@ Exported Markdown: /tmp/Session notes.md
 Exported JSON: /tmp/events.json
 
 > /exit
++--------------------------------------------------------+
+| Bye!                                                   |
+|                                                        |
+| Feedback or ideas? Join us on Discord:                  |
+| https://discord.gg/ds35K3TadP                           |
+|                                                        |
+| To resume this session:                                |
+|   dimcode --resume <session-id>                         |
++--------------------------------------------------------+
 $
 
 $ dimcode session export <session-id> --format markdown > notes.md
@@ -1201,6 +1210,8 @@ $ dimcode exec -p 'Explain this project' --json > run.jsonl
 
 提示符保持键盘焦点，终端保留滚动回显。没有新的对话框、浮层或固定宽度的列。路径和错误信息使用
 现有的终端文本过滤；窄终端正常换行。空 Session 导出空事件列表或只有标题的 Markdown，不编造消息。
+
+两种 TUI 模式退出时都会显示反馈邀请；只有存在可恢复的活动 Session 时，才显示恢复命令。
 
 ## 执行与 JSONL 输出
 

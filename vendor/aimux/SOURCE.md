@@ -1,10 +1,10 @@
 # aimux source
 
 - Upstream: https://github.com/arcships/aimux
-- Release: `v0.6.0`.
-- Revision: `fa29a30ad25e362acc349bea6ce4b025bdd8be5a`.
+- Release: `v0.6.1`.
+- Revision: `164d7f4bea6d6b726f5f9eef9bda492190766558`.
 - License: MIT, retained in `LICENSE`.
-- Included: the four Rust library crates needed by the Agent integration, their in-crate test modules, and the files those modules include: `fixtures/`, `contract-tests/`, `aimux-core/tests/fixtures/`, `aimux-providers/tests/fixtures/` and `scripts/aisdk-fixtures/package-lock.json`. FFI, CLI, web tools and the tag's standalone integration test binaries (`*/tests/*_test.rs`) are omitted.
+- Included: the four Rust library crates needed by the Agent integration, their in-crate test modules, and the files those modules include: `fixtures/`, `contract-tests/`, `aimux-core/tests/fixtures/`, `aimux-providers/tests/fixtures/` and `scripts/aisdk-fixtures/package-lock.json`. FFI, CLI, web tools and the tag's standalone integration test binaries (`*/tests/*_test.rs`, and `aimux-providers/tests/capabilities_export.rs`, which does not match that pattern) are omitted.
 - Three support files are copied verbatim because upstream test modules include them with `#[path]`, so the vendored tests need them beside the code: `fixtures/aisdk/pinned_versions.rs`, `aimux-providers/tests/common/mock_fetch.rs` and `aimux-providers/tests/common/replay.rs`.
 - The workspace member list is reduced to these crates; production source is retained verbatim except for the changes listed in `PATCHES.md`.
 - Local patches are temporary until an upstream revision provides the same contracts. `PATCHES.md` names each patch's upstream issue or request.

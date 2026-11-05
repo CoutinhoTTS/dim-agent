@@ -155,9 +155,9 @@ pub enum ToolResultOutput {
     },
     Content {
         value: Vec<ToolResultContent>,
-        /// Whether the tool call failed, carried beside content so a result
-        /// that has an image or a file can still be an error (dim patch for
-        /// arcships/aimux#470).
+        /// Whether the tool call failed. Beyond the AI SDK's `content` output,
+        /// so a result that carries an image or a file can still be an
+        /// error (#470).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },

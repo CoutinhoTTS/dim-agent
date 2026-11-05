@@ -74,7 +74,7 @@ Provider，model-config 配置为 ConfiguredModels）。
   `[{role: "user", content: "…"}]`。不提供工具；丢弃 thinking 输出；只有文本块组成 `text`。
 - `stopReason` 有三个取值。Rust 的 `ModelStopReason` 还有 `ToolUse`；因为不提供工具，出现工具
   停止属于提供方缺陷，调用以 `failed` 失败。
-- `maxOutputTokens` 限制回复长度；缺省为模型上限，并截到模型的 `max_output_tokens`。
+- `maxOutputTokens` 限制回复长度；缺省值与上限都是模型采用后的输出额度（由 Provider 按声明的窗口与最大输出推导，输入预算至少为窗口的一半），而不是声明的最大值本身。
 - 非流式：使用者需要完整文本。
 - 取消：使用者丢弃调用（或发送桥接协议的取消请求）。服务本身没有超时，预算归使用者。
 - 错误是数据 `{code, message}`：`invalid_request`、`model_unavailable`、`failed`、
@@ -213,5 +213,5 @@ Provider 通过 `ProviderService` 解析模型、通过 `ProductResolver` 解析
    将模型请求停在 HTTP 端点后，关闭调用方会完成取消引用，在 Provider 保持装载时关闭 HTTP 流。
    没有 auxiliaryModel 的所有者时，原生 Session 仍能创建，只有外来命名空间不可用。
 8. model-config 配置用其目录及 provider 声明的连接提供并运行该操作：调用把请求发往配置的模型，
-   `maxTokens` 截到模型的 `max_output_tokens`；未声明的模型返回 `model_unavailable` 且不发请求；
+   `maxTokens` 截到模型采用后的输出额度（按文件声明的一对上限推导）；未声明的模型返回 `model_unavailable` 且不发请求；
    Session 部分和 Session 的自动标题在该配置中都能到达它。
