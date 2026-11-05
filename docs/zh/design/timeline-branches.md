@@ -206,7 +206,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
   2. 这条线上没有更早的 `branch:parent` 输入仍被持有，即已提交、尚未消费；
   3. 父线在 `from = max(A, told, opened)` 之后有新活动：`A` 是这条线对父线的读取游标（还没读过时是它的切点），`told` 是这条线上最新一个 `branch:parent` 块报告的头部（没有时为 0），`opened` 是这条线的 `branch/create` 事件在父线上的序号，每个切点都不高于它。线存在之前发生的活动不算新闻，需要时线自己去读。
 - **什么算新活动。** 只有两类事件算：操作者输入，即带 `user` 内容的 `input/message`；以及工具调用。创建调用的 `step/tool-use` 写在 `opened` 之前，所以从不会被算进去。其他都不单独算：父线的文本、它的轮次结束、只有块的输入（名册、来自各线的消息）、以及创建调用的结果。规则是：父线行动时、或操作者告诉父线事情时，线被告知；只为开启它的那一轮（它的创建调用结果、文本和轮次结束）则从不告知，否则每条线都会白白读一次父线，并学会忽略这个块。
-- **检查方式。** 父线的事实通过唯一的事件查询读取（[ADR 019](../adr/019-event-query.md)）：该分支的 `input/message` 和 `step/tool-use` 事件，从新到旧分页，直到有一个符合条件，或读取到达 `from`。不折叠任何其他线的事件。
+- **检查方式。** 父线的事实通过唯一的事件查询读取（[ADR 019](../../adr/019-event-query.md)）：该分支的 `input/message` 和 `step/tool-use` 事件，从新到旧分页，直到有一个符合条件，或读取到达 `from`。不折叠任何其他线的事件。
 - **写入。** 一条带 key 的 Append，key 为 `branch:parent`，经 `TreeCommands.input` 写在这条线自己身上，属性是父线的 id、`head` 和 `after`。同一 key 的后一个块会在带 key 的基线里取代前一个。写完之后折叠记下新头部和新输入，所以队列里的第二次决定不会再写。
 - **开启时。** 子分支继承的前缀里持有活的 `branch:parent` 块时，子分支的开启输入在身份块之后再带一个原始块：key 为 `branch:parent`，活的、不 retire，名字是开出它的那条线 P，`head` 和 `after` 都等于切点 H。它像身份块取代继承的名册那样取代继承的块（§7.1），所以这条线最新的 `branch:parent` 总是名字它自己的父线，它的 `told` 从 H 开始，而 H 等于 `opened`；压缩重放的是这个块，从不重放上面那个，P 移动时照常的新块取代它。只有嵌套的线才会拿到它：从 `main` 切出来的线不继承任何 `branch:parent` 块，它的开启输入逐字节不变。TimelineTree 在写身份块的地方组合它，从子分支继承的前缀的带 key 状态判断这个 key 是否活着，绝不看渲染后的历史。它在开启子分支时读那份状态，如同读一条恢复的分支的 facts；读取失败时这次创建和任何其他开启失败一样失败（branch/create-failed）。
 - **随后发生什么。** 运行中的线在下一次模型请求时拿到这个块。空闲的线不会被唤醒：这个块在它下一轮的第一个请求里、先于开启那一轮的输入被消费，这是有文档记录的 Append 规则（[session access](contracts/session-access.md)、[Loop](../../architecture/rust-agent/plugins/Loop.md)）。重载不写任何东西；重启最多写当时已经该写的那个块。`main` 拿不到块：它上面没有东西。
@@ -278,7 +278,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - 一条线要改它区域之外的文件之前，先告诉 `main`。
 - 遇到 `file_modified_since_read` 时，这条线重新读取文件，告诉 `main` 之后再继续。
 
-文件改动只有工具声明的一种事实，即 `fileWritten`：成功的 `edit` 或 `write`，或者失败但可能已改动了文件的 `write`，在结果的 `effects` 中声明写入的路径（[工具契约 A.6](contracts/session-boundary.md#a6-工具效果)）。客户端折叠这些声明得到的集合在构造上就是部分的——它漏掉 `exec`、MCP 工具以及 Dim 之外对文件的改动——所以折叠描述的是工具声明的写入，而不是工作区的改动。没有任何方法承诺一轮或一条线的完整改动集。
+文件改动只有工具声明的一种事实，即 `fileWritten`：`edit` 和 `write` 只要已经发布了文件，就在结果的 `effects` 中声明它和路径——成功时如此，发布之后失败（例如同步父目录失败）时也如此；在发布之前失败或被取消的调用不声明（[工具契约 A.6](contracts/session-boundary.md#a6-工具效果)）。客户端折叠这些声明得到的集合在构造上就是部分的——它漏掉 `exec`、MCP 工具以及 Dim 之外对文件的改动——所以折叠描述的是工具声明的写入，而不是工作区的改动。没有任何方法承诺一轮或一条线的完整改动集。
 
 WorkspaceTools 不变。
 
