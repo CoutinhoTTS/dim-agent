@@ -1202,21 +1202,25 @@ impl TimelineTree {
             source,
             ancestor: None,
         };
-        context
-            .timeline()
-            .append_registered(EventKind::BranchEnd(data.clone()).into(), |_| {
+        context.timeline().append_registered(
+            EventKind::BranchEnd(data.clone()).into(),
+            |event| {
                 if context.ended() {
                     return Err(AgentError::BranchEnded(id.into()));
                 }
-                context.mark_ended();
+                context.mark_ended(event.sequence);
                 Ok(())
-            })?;
+            },
+        )?;
         loop {
             let notified = self.end_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
                 let state = self.state.lock().unwrap();
+                // After the commit above, `on_end` parks a tool-sourced end of
+                // a running line in `pending`; the tool call belongs to the
+                // turn the close waits for, so `end()` returns there.
                 if state.ended.contains_key(id) || state.pending.contains_key(id) {
                     return Ok(());
                 }
@@ -1356,16 +1360,16 @@ impl TimelineTree {
             source: source.clone(),
             ancestor: Some(ancestor.into()),
         };
-        let sequence =
-            context
-                .timeline()
-                .append_registered(EventKind::BranchEnd(data.clone()).into(), |_| {
-                    if context.ended() {
-                        return Err(AgentError::BranchEnded(id.into()));
-                    }
-                    context.mark_ended();
-                    Ok(())
-                });
+        let sequence = context.timeline().append_registered(
+            EventKind::BranchEnd(data.clone()).into(),
+            |event| {
+                if context.ended() {
+                    return Err(AgentError::BranchEnded(id.into()));
+                }
+                context.mark_ended(event.sequence);
+                Ok(())
+            },
+        );
         let sequence = match sequence {
             Ok(event) => event.sequence,
             Err(AgentError::BranchEnded(_)) => return self.wait_ended(id).await,
@@ -1908,15 +1912,18 @@ impl TimelineTreeControl for TimelineTree {
                 .values()
                 .filter(|node| matches!(&*node.ready.borrow(), Some(Ok(_))))
                 .map(|node| {
-                    let pending = state.pending.get(&node.info.id);
+                    let end_event = node
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.end_event());
                     BranchDirectoryEntry {
                         info: node.info.clone(),
                         head: 0,
-                        state: match pending {
+                        state: match end_event {
                             Some(_) => BranchDirectoryState::Ending,
                             None => BranchDirectoryState::Open,
                         },
-                        end_event: pending.map(|pending| pending.sequence),
+                        end_event,
                     }
                 })
                 .collect();

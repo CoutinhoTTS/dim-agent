@@ -120,8 +120,8 @@ pub struct TimelineInfo {
 pub enum BranchDirectoryState {
     /// The line takes input, and its head is live.
     Open,
-    /// The line's `branch/end` is committed while the turn that wrote it still
-    /// runs: input is refused, and its head is still live.
+    /// The line's own `branch/end` is committed and its ended row is not: input
+    /// is refused, and its head is still live.
     Ending,
     /// The line has ended: its head and its end event are fixed.
     Ended,
