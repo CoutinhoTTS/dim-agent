@@ -2456,6 +2456,45 @@ async fn a_refusal_named_from_the_closed_set_reaches_the_client() {
     assert!(!refused.contains("mcp.json"), "{list}");
     assert!(!refused.contains("hooks.json"), "{list}");
     assert!(!refused.contains(home.to_str().unwrap()), "{list}");
+
+    // A refusal whose cause carries no static reason keeps the generic
+    // message at the client, in the mutation reply and in `plugin.list`:
+    // a broken MCP entry refuses the document with the entry's own error.
+    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": {"leaky": 5}}"#).unwrap();
+    std::fs::write(source.join("hooks.json"), r#"{"hooks": {}}"#).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"],
+        json!([{"kind": "mcp", "error": "Plugin content was refused"}]),
+        "{reloaded}"
+    );
+    assert!(!reloaded.to_string().contains("leaky"), "{reloaded}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        json!([{"kind": "mcp", "error": "Plugin content was refused"}]),
+        "{list}"
+    );
+    assert!(!list.to_string().contains("leaky"), "{list}");
+
+    // A content path that resolves to a directory passes `Manifest::read`
+    // and fails the read itself: the client reads that reason, not the path.
+    std::fs::remove_file(source.join("mcp.json")).unwrap();
+    std::fs::create_dir(source.join("mcp.json")).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"],
+        json!([{"kind": "mcp", "error": "the file could not be read"}]),
+        "{reloaded}"
+    );
+    assert!(!reloaded.to_string().contains("mcp.json"), "{reloaded}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        json!([{"kind": "mcp", "error": "the file could not be read"}]),
+        "{list}"
+    );
+    assert!(!list.to_string().contains("mcp.json"), "{list}");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
