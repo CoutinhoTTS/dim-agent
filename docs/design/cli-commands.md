@@ -1375,9 +1375,12 @@ queue/steer rule. Nothing re-parses the command line after startup.
 A message no Session can take — no model, not signed in, or a Session that fails
 to start — leaves the text and its image tokens in the composer as an unsent
 draft beside the Home/sign-in hint or the startup error, instead of being
-discarded; the interface does not exit for that case. Without `-p` the existing startup rule
-stands: a resumed Session that cannot start shows the error and exits nonzero,
-and Home remains available after a failed creation.
+discarded. If the user has started another draft in the meantime, that newer
+draft is kept and the interface reports that the first message was not sent
+instead of restoring it. The interface does not exit for that case. Without
+`-p` the existing startup rule stands: a resumed Session that cannot start
+shows the error and exits nonzero, and Home remains available after a failed
+creation.
 
 ### Daemon startup failure
 

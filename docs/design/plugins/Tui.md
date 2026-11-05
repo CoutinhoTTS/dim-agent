@@ -123,8 +123,9 @@ environment. The interface submits it once, after the first frame, through its
 own composer, so it takes the same path as a typed message (an exact command
 runs, unmatched `/` text is input, `!`/`!!` is shell mode, the queue/steer
 rule applies) in both terminal modes. A message no Session can take stays in
-the composer as an unsent draft rather than being discarded, and the
-interface does not exit for that case.
+the composer as an unsent draft rather than being discarded, unless a new
+draft already holds the composer: that newer draft is kept and the loss of
+the first message is reported. The interface does not exit for that case.
 
 ### 3.2 `/web` from the TUI: daemon-owned switch
 
