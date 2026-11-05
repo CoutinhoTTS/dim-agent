@@ -1514,8 +1514,7 @@ enum Advice {
     Deny(&'static str),
     None,
     Error,
-    /// Waits on the token it is handed, then records that it saw it
-    /// cancelled.
+    /// Waits for its cancellation token.
     Hold,
     /// Never answers and never looks at its token, so only Permission
     /// dropping the call ends it.
@@ -1532,8 +1531,7 @@ struct TestAdvisor {
     requests: Arc<Mutex<Vec<ToolAdviceRequest>>>,
     /// Released when the advisor runs, so a test can act on a pending advice.
     entered: Arc<tokio::sync::Semaphore>,
-    /// Whether the advisor saw its token cancelled.
-    cancelled: Arc<AtomicBool>,
+    cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 impl AdviseTool for TestAdvisor {
     fn advise(
@@ -1543,12 +1541,12 @@ impl AdviseTool for TestAdvisor {
     ) -> HostFuture<'_, ToolAdviceReply> {
         self.asked.lock().unwrap().push(self.label);
         self.requests.lock().unwrap().push(request);
+        *self.cancel.lock().unwrap() = Some(cancel.clone());
         self.entered.add_permits(1);
         Box::pin(async move {
             match self.answer {
                 Advice::Hold => {
                     cancel.cancelled().await;
-                    self.cancelled.store(true, Ordering::SeqCst);
                     Ok(ToolAdviceReply::None)
                 }
                 Advice::Hang => {
@@ -1723,7 +1721,7 @@ fn advisor(
         asked,
         requests: handles.requests.clone(),
         entered: handles.entered.clone(),
-        cancelled: handles.cancelled.clone(),
+        cancel: handles.cancel.clone(),
     };
     (Arc::new(advisor), handles)
 }
@@ -1732,7 +1730,7 @@ fn advisor(
 struct AdvisorHandles {
     requests: Arc<Mutex<Vec<ToolAdviceRequest>>>,
     entered: Arc<tokio::sync::Semaphore>,
-    cancelled: Arc<AtomicBool>,
+    cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 /// Waits for the advisor to run; a missing call fails the test instead of
 /// hanging it.
@@ -1748,7 +1746,7 @@ impl Default for AdvisorHandles {
         Self {
             requests: Arc::default(),
             entered: Arc::new(tokio::sync::Semaphore::new(0)),
-            cancelled: Arc::default(),
+            cancel: Arc::default(),
         }
     }
 }
@@ -2177,8 +2175,9 @@ async fn cancelling_the_batch_fails_the_admission_and_the_advisor_sees_it() {
     });
     entered(&handles).await;
     cancel.cancel();
-    let error = admitted
+    let error = tokio::time::timeout(Duration::from_secs(10), admitted)
         .await
+        .expect("the cancelled admission settles")
         .unwrap()
         .expect_err("the admission was cancelled");
     assert!(
@@ -2186,8 +2185,14 @@ async fn cancelling_the_batch_fails_the_admission_and_the_advisor_sees_it() {
         "the admission did not fail as cancelled: {error}"
     );
     assert!(
-        handles.cancelled.load(Ordering::SeqCst),
-        "the advisor did not see its token cancelled"
+        handles
+            .cancel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .is_cancelled(),
+        "the advisor's token was not cancelled"
     );
     session.close().await.unwrap();
     agent.close().await.unwrap();
@@ -2276,8 +2281,14 @@ async fn an_advisor_withdrawn_while_its_advice_is_pending_counts_as_none() {
     assert!(admitted.await.unwrap().is_err());
     assert_eq!(*asked.lock().unwrap(), ["hooks"]);
     assert!(
-        !handles.cancelled.load(Ordering::SeqCst),
-        "the dropped advice was still running"
+        !handles
+            .cancel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .is_cancelled(),
+        "withdrawing an advisor must not cancel the batch token"
     );
     session.close().await.unwrap();
     agent.close().await.unwrap();

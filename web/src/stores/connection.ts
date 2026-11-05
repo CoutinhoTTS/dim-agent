@@ -5,6 +5,7 @@ import type { HelloResult } from "../rpc/protocol"
 import { useChatStore } from "./chat"
 import { useSessionsStore } from "./sessions"
 import { useToastStore } from "./toast"
+import { useExtensionsStore } from "./extensions"
 import { translate } from "../i18n"
 
 /** The one App Server connection of this tab and its handshake state. */
@@ -16,14 +17,17 @@ export const useConnectionStore = defineStore("connection", () => {
   const client = new RpcClient({
     phase(next) {
       phase.value = next
+      if (next !== "connected") useExtensionsStore().clear()
     },
     async ready(result, reconnected) {
       hello.value = result
       everConnected.value = true
+      void useExtensionsStore().refresh()
       if (reconnected) await useChatStore().resync()
       void useSessionsStore().refresh()
     },
     notification(notification) {
+      if (notification.method === "ui.extensions.changed") { void useExtensionsStore().refresh(true); return }
       if (notification.method === "session.title") useSessionsStore().setTitle(notification.sessionId, notification.data)
       else useChatStore().receive(notification)
     },

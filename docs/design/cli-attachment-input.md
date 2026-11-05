@@ -95,8 +95,11 @@ clipboard image in it comes back as the literal `[Image]` without the image.
 After submission, the transcript draws the message's image blocks as those markers on separate
 lines in content order, including image-only messages and messages restored from history; a
 submitted image block has no filename. Tool results retain their existing text-only display.
-Editing, quoting, branching, forking and withdrawing a queued message reuse only its text;
-display markers are never inserted into those drafts.
+Editing, quoting, branching and forking reuse only the message's text; display markers are
+never inserted into those drafts. Shift+Left recalls only the newest held message, and only
+when it has a single text block. Esc interrupt instead restores held messages' operator text,
+image blocks and stored paste/file links, excluding appended runtime context
+([queue rules](cli-commands.md#queued-messages)).
 
 Suggestions show the current directory's matching entries; `Tab` enters a selected directory
 or inserts a selected file. Up/Down selects a suggestion; Esc leaves its text in the draft.

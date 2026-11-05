@@ -191,6 +191,7 @@ pub const UI_HOST_METHODS: [&str; 6] = [
 /// Management methods available to authenticated loopback Web clients.
 /// Replies contain account metadata and credential presence, never credentials.
 pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
+    "ui.extensions.list",
     "provider.management",
     "provider.create",
     "provider.update",
@@ -1318,6 +1319,8 @@ pub struct ProgressNotice {
 #[derive(Debug, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Notification {
+    #[serde(rename = "ui.extensions.changed")]
+    UiExtensionsChanged { revision: u64 },
     #[serde(rename = "session.mcp.state")]
     McpState(McpStateResult),
     #[serde(rename = "ui.shutdown")]

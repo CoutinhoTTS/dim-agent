@@ -140,3 +140,16 @@ test("a request timeout leaves the socket usable and reports a failure rather th
   assert.deepEqual(await next, { ok: true })
   client.stop()
 })
+
+test("panel activity includes stopping siblings and excludes ended branches", async t => {
+  const chat = session(t, () => page([], 0))
+  await flush()
+  chat.receive({ method: "session.state", sessionId: "session", branchId: "worker", running: false, stopping: true })
+  await flush()
+  assert.equal(chat.views.session.running, false)
+  assert.equal(chat.views.session.sessionRunning, true)
+  receive(chat, "main", event(1, { kind: "branch-create", branchId: "worker", at: 0, prompt: "work", source: { kind: "host", operationId: "op" } }))
+  receive(chat, "main", event(2, { kind: "branch-ended", branchId: "worker", source: { kind: "host", operationId: "end" } }))
+  await flush()
+  assert.equal(chat.views.session.sessionRunning, false)
+})

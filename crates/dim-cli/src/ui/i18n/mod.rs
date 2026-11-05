@@ -136,7 +136,7 @@ pub fn active() -> Locale {
 }
 
 /// `english` in the active locale.
-pub fn t(english: &'static str) -> &'static str {
+pub fn t(english: &str) -> &str {
     let lookup = match active() {
         Locale::En => return english,
         Locale::ZhCn => zh_cn::lookup,

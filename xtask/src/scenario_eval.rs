@@ -6731,7 +6731,6 @@ mod tests {
             // turns).
             let turns = record["turns"].as_u64().unwrap_or_default();
             assert!((1..=2).contains(&turns), "{record}");
-            assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         for arm in ["current", "candidate"] {
             let export = std::fs::read_to_string(

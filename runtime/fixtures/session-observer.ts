@@ -50,6 +50,7 @@ export function observer(namespace: string, declaration: Record<string, Record<s
         work ??= ended.then(() => { settled = true })
         records.push(record); notify()
         if (hold && record.event.type === 'input' && record.event.name === 'applied') {
+          hold = false
           entered = true; notify()
           await new Promise<void>(resolve => { release = resolve })
         }
@@ -74,7 +75,10 @@ export function observer(namespace: string, declaration: Record<string, Record<s
           return { kind: 'value', value: {
             binding, generation, pid: process.pid, closed,
             eligible: binding.config.interactive !== false && binding.config.collaborationRole === 'leader',
-            records: records.filter(record => record.event.sequence > (call.params.after ?? 0)),
+            records: records.filter(record => record.event.sequence > (call.params.after ?? 0)
+              && (call.params.sequence === undefined
+                || (record.branchId === (call.params.branchId ?? 'main')
+                  && record.event.sequence <= call.params.sequence))),
           } }
         },
       )

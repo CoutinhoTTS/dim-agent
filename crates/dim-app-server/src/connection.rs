@@ -19,6 +19,7 @@ use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;
 mod tree;
+mod ui_extensions;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use serde_json::Value;

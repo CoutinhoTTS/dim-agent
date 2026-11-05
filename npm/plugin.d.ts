@@ -1,3 +1,5 @@
+import type { AgentEvent, JsonValue, JsonObject } from "./client-protocol.js";
+export type { AgentEvent, JsonValue, JsonObject } from "./client-protocol.js";
 /** Named services implemented by Dim's App Server. No runtime code is exported. */
 export type FileError = 'closed' | 'exists' | 'invalid_data' | 'invalid_path' | 'internal' | 'io';
 export type FileResult<T> = { ok: true; value: T } | { ok: false; error: FileError };
@@ -19,8 +21,6 @@ export interface PluginFiles {
 }
 
 /** JSON-only; rutis (0.11+) may deliver bigint in incoming tool data beyond this type. */
-export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
-export interface JsonObject { [key: string]: JsonValue }
 
 /** Project roots are process-local numbers, not durable identities. */
 export type SettingsScope = 'user' | { project: number };
@@ -127,19 +127,7 @@ export interface HistoryRequest extends SessionRef {
   atLeast?: number | null;
   limit?: number | null;
 }
-/** Current native event envelope; each event owner defines its data fields. */
-export interface AgentEvent {
-  id: string;
-  sequence: number;
-  create_at: number;
-  tags?: string[];
-  type: string;
-  name: string;
-  data: JsonObject;
-  /** Extension events only: the producer's reading switches. */
-  context_render?: boolean;
-  context_state?: boolean;
-}
+
 /** Native C5 bridge events retain number | bigint sequences. */
 export type BranchEvent = Omit<AgentEvent, 'sequence' | 'data'> & {
   sequence: number | bigint;
@@ -151,6 +139,7 @@ export type {
   AgentErrorThrown, BranchLifecycle, Dispatcher, PartRegistry, PartScope, Services, SessionIdentity, SessionLifecycle,
   TimelineIdentity, TreeCommands, PermissionState, SessionPermissions, SessionsErrorThrown,
   WorkflowFiles, WorkflowFileEntry, WorkflowRoot, WorkflowFilesErrorThrown,
+  UiResources, PublishFile, ResourceRef, ResourceErrorThrown,
 } from './branch-services.js';
 export interface HistoryPage { through: number; events: AgentEvent[] }
 export interface WithdrawRequest extends SessionRef { inputId: string; reason?: string | null }
