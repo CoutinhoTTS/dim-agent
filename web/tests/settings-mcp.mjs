@@ -288,7 +288,8 @@ const importSelects = (root) => all(root).filter((element) => element.type === "
 const closeImport = (app) => { app.unmount(); delete globalThis.settingsConnection; delete globalThis.window }
 
 test("an import preview shows every status and its fields without a value", async () => {
-  const document = '{"mcpServers":{"docs":{"env":{"TOKEN":"sk-web-secret-never-print"}}}}'
+  const secret = "sk-web-secret-never-print"
+  const document = `{"mcpServers":{"docs":{"env":{"TOKEN":"${secret}"}}}}`
   const preview = importPreviewReply([
     importEntry({ id: "keeps", status: "identical" }),
     importEntry({ id: "docs", changes: [{ field: "args", kind: "array" }, { field: "enabled", kind: "boolean" }], unsupported: [{ field: "x-extra", effect: "kept-unused" }] }),
@@ -301,6 +302,7 @@ test("an import preview shows every status and its fields without a value", asyn
     const previewCall = calls.find((call) => call.method === "mcp.import.preview")
     assert.equal(previewCall.params.source, "user")
     assert.equal(previewCall.params.document, document)
+    assert.equal(previewCall.params.document.includes(secret), true)
     assert.equal("cwd" in previewCall.params, false)
     const shown = text(root)
     assert.match(shown, /keeps · identical · stdio/)
@@ -312,7 +314,7 @@ test("an import preview shows every status and its fields without a value", asyn
     assert.match(shown, /auth\.audience \(dropped\)/)
     assert.match(shown, /broken: type is stdio, http or sse/)
     assert.match(shown, /Top-level members the import does not carry: otherTopLevel\./)
-    assert.equal(shown.includes("sk-web-secret-never-print"), false)
+    assert.equal(shown.includes(secret), false)
     assert.equal(importSelects(root).length, 4)
     // No default action is a rename, so no entry asks for a new id.
     assert.equal(all(root).find((element) => element.type === "label" && text(element).startsWith("New id")), undefined)
