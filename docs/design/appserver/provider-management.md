@@ -45,7 +45,7 @@ with its existing owner; management never writes another owner's state.
 | --- | --- |
 | `managementMethods`, process, namespace `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing namespace |
 | Provider module boundary `stored_selection` (Rust) | Native data-boundary consumers such as Migration; §3.7 adds one pure function over an admitted record, not an RPC, host port or management method |
-| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by the profile's model owner (Provider, or the configured model file) | In-process owners that route by model capability (Modality) and the `agent` tool's `models` action; §3.6 adds one read, not a management method or RPC method |
+| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by the profile's model owner (Provider, or the configured model file) | In-process owners that route by model capability (Modality) and the `agent` tool's `models` action; §3.6 adds two reads, not a management method or RPC method |
 | Existing `account`, `account.codex`, `account.grok` namespaces | Existing account operations; no new account method, event or managed host capability |
 | `ProviderConnectionResolver`, `ModelSelectionHost` | Provider implements catalog/route decisions through existing types; no new core port |
 | `auxiliaryModel.complete` | Existing caller-selected S4 contract, unchanged |
@@ -508,8 +508,8 @@ stored entry does not mark it, and only a limit no source declares is deleted.
 A process owner that routes work by model capability cannot keep its own copy of
 the availability rules of the models it routes to. The port below has one provider
 per profile — Provider in the product profile, the configured model profile
-(`dim-agent-aimux`) from its model file — and each provider owns one
-side-effect-free read of the models it would serve, with the identifiers and
+(`dim-agent-aimux`) from its model file — and each provider owns
+side-effect-free reads of the models it would serve, with the identifiers and
 declared capabilities a routing decision needs. This section defines the port and
 Provider's rules; the configured profile's rule is that page's. The read is a
 process host port, not a management method: it is not on the `provider` namespace,
@@ -535,6 +535,23 @@ is the descriptor execution adopts. A selectable model always declares both
 limits (§3.5), so the existing `capability_snapshot` conversion always succeeds.
 The caller passes its cancellation token; cancelling it cancels the read and
 returns `Cancelled`.
+
+**Second operation: `selectableForModality`.** The same port carries one more
+process read, for non-conversational uses (Modality §9.2): operation
+`selectableForModality`, asynchronous, request `{}`, reply
+`{models: ModalityModelSnapshot[]}` with each element
+`{target: {providerId, modelId}, operations: string[]}`. `operations` holds the
+`<category>.<operation>` ids the model's catalog entry declares in
+`metadata.raw.modalityCapabilities`, in that entry's order; a model that
+declares none is omitted. The read applies the same provider, account, model,
+route, credential and status rules as `selectableModels`, without its
+text-modality, chat-kind and declared-text-limit requirements: a model without
+a `text` modality, a non-chat model and a model with `limits_undeclared`
+remain candidates when they declare a modality operation, while an unavailable
+status, a disabled Provider or model, a missing route, a signed-out account and
+a missing static credential still exclude them. It carries no reason field: the
+consumer derives availability from the options and explains a persisted
+default that is no longer selectable from its own snapshot.
 
 **Rules Provider applies.** The candidates are the providers default resolution
 considers: every account provider the managed package advertises and every static

@@ -42,7 +42,8 @@ use dim_agent_capabilities::context_model::output_allowance;
 use dim_agent_capabilities::host::*;
 use dim_agent_runtime::{AgentError, Names};
 use dim_agent_types::{
-    ModelCapabilitySnapshot, ModelConfig, ModelId, ModelRequest, ModelSelection,
+    ModalityModelSnapshot, ModelCapabilitySnapshot, ModelConfig, ModelId, ModelRequest,
+    ModelSelection,
 };
 use futures_util::future::BoxFuture as SharedFuture;
 use reqwest::Client;
@@ -168,6 +169,14 @@ pub struct ProviderModel {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_limits: Vec<String>,
     pub unavailable_reason: Option<String>,
+    /// Why the model cannot serve a non-conversational (modality) use. The
+    /// conversational reason above also excludes models a modality operation
+    /// may use (text modality, chat kind, text limits), so the two are
+    /// separate rules over the same entry. This rule is the App Server's own
+    /// and is never part of a reply: a client learns what modality can use
+    /// from `modality.*`, so the field is skipped on the wire.
+    #[serde(skip)]
+    pub modality_unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub zdr: bool,
     pub metadata: Option<ModelMetadata>,
@@ -480,24 +489,36 @@ impl ProviderRecord {
             models: self
                 .effective_models(bundled)
                 .into_iter()
-                .map(|model| ProviderModel {
-                    id: model.entry.model_id,
-                    name: model.entry.display_name,
-                    endpoint: Some(model.source.protocol),
-                    config: ModelConfig {
-                        max_tokens: model.entry.capabilities.declared().map(|capabilities| {
-                            output_allowance(
-                                capabilities.context_window,
-                                capabilities.max_output_tokens,
-                            ) as f64
-                        }),
-                        ..Default::default()
-                    },
-                    capabilities: model.entry.capabilities,
-                    missing_limits: model.missing_limits,
-                    unavailable_reason: model.unavailable_reason,
-                    zdr: model.source.zdr,
-                    metadata: model.entry.metadata,
+                .map(|model| {
+                    // The chat-kind and text-limit reasons do not apply to a
+                    // non-conversational use; every other reason does.
+                    let modality_unavailable_reason = model
+                        .unavailable_reason
+                        .as_deref()
+                        .filter(|reason| {
+                            !matches!(*reason, "unsupported_model_type" | "limits_undeclared")
+                        })
+                        .map(str::to_owned);
+                    ProviderModel {
+                        id: model.entry.model_id,
+                        name: model.entry.display_name,
+                        endpoint: Some(model.source.protocol),
+                        config: ModelConfig {
+                            max_tokens: model.entry.capabilities.declared().map(|capabilities| {
+                                output_allowance(
+                                    capabilities.context_window,
+                                    capabilities.max_output_tokens,
+                                ) as f64
+                            }),
+                            ..Default::default()
+                        },
+                        capabilities: model.entry.capabilities,
+                        missing_limits: model.missing_limits,
+                        unavailable_reason: model.unavailable_reason,
+                        modality_unavailable_reason,
+                        zdr: model.source.zdr,
+                        metadata: model.entry.metadata,
+                    }
                 })
                 .collect(),
         }
@@ -553,6 +574,36 @@ impl ProviderCatalog {
                 && model.unavailable_reason.is_none()
                 && !self.disabled_model_ids.contains(&model.id)
         })
+    }
+
+    /// A model selectable for a non-conversational use: the same status,
+    /// route, credential and account rules as [`Self::selectable`], without
+    /// the text-modality, chat-kind and declared-text-limit requirements.
+    fn selectable_modality(&self, id: &str) -> Option<&ProviderModel> {
+        self.models.iter().find(|model| {
+            model.id == id
+                && model.modality_unavailable_reason.is_none()
+                && !self.disabled_model_ids.contains(&model.id)
+        })
+    }
+}
+
+impl ProviderModel {
+    /// The `<category>.<operation>` ids this entry declares for modality
+    /// (Modality §9.2), in their catalog order; `None` when it declares none.
+    fn modality_operations(&self) -> Option<Vec<String>> {
+        let values = self
+            .metadata
+            .as_ref()?
+            .raw
+            .get("modalityCapabilities")?
+            .as_array()?;
+        let operations: Vec<String> = values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        (!operations.is_empty()).then_some(operations)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -867,21 +918,25 @@ fn static_models(
         .into_iter()
         .map(|entry| {
             let missing_limits = entry.capabilities.missing_limits();
-            let unavailable =
-                matches!(entry.status, crate::model_catalog::ModelStatus::Unavailable)
-                    || !entry.capabilities.modalities.iter().any(|m| m == "text")
-                    || (record.driver_kind != "new-api-router"
-                        && entry
-                            .metadata
-                            .as_ref()
-                            .and_then(crate::model_catalog::model_kind)
-                            .is_some_and(|kind| kind != "chat"))
-                    || !record.enabled
-                    || !record.routes.contains_key(&entry.model_id)
-                    || !account_available
-                    || (record.credential_authority == CredentialAuthority::Static
-                        && record.auth != StaticAuth::Anonymous
-                        && record.credential.is_none());
+            let status_unavailable =
+                matches!(entry.status, crate::model_catalog::ModelStatus::Unavailable);
+            // Rules that exclude a model from execution but not from a
+            // non-conversational use: it needs neither a text modality, nor
+            // the chat kind, nor the two chat limits.
+            let chat_only_unavailable = !entry.capabilities.modalities.iter().any(|m| m == "text")
+                || (record.driver_kind != "new-api-router"
+                    && entry
+                        .metadata
+                        .as_ref()
+                        .and_then(crate::model_catalog::model_kind)
+                        .is_some_and(|kind| kind != "chat"));
+            let provider_unavailable = !record.enabled
+                || !record.routes.contains_key(&entry.model_id)
+                || !account_available
+                || (record.credential_authority == CredentialAuthority::Static
+                    && record.auth != StaticAuth::Anonymous
+                    && record.credential.is_none());
+            let unavailable = status_unavailable || chat_only_unavailable || provider_unavailable;
             let endpoint = record.routes.get(&entry.model_id).copied();
             ProviderModel {
                 id: entry.model_id,
@@ -904,6 +959,8 @@ fn static_models(
                 } else {
                     None
                 },
+                modality_unavailable_reason: (status_unavailable || provider_unavailable)
+                    .then(|| "provider_unavailable".into()),
                 missing_limits,
                 zdr: false,
                 metadata: entry.metadata,
@@ -1543,11 +1600,12 @@ impl ProviderService {
         Ok(list)
     }
 
-    /// Every model execution would accept, one snapshot per provider.
-    pub async fn selectable_models(
+    /// Every catalog the owner would serve, in provider-id order: the
+    /// providers it enumerates that have a readable catalog.
+    async fn selectable_catalogs(
         self: &Arc<Self>,
         cancel: &CancellationToken,
-    ) -> Result<Vec<ModelCapabilitySnapshot>, HostError> {
+    ) -> Result<Vec<(String, ProviderCatalog)>, HostError> {
         self.check(cancel)?;
         let mut providers: BTreeSet<String> = self
             .oauth
@@ -1564,12 +1622,24 @@ impl ProviderService {
                 .into_iter()
                 .map(|provider| provider.provider_id),
         );
-        let mut models = Vec::new();
+        let mut catalogs = Vec::new();
         for provider_id in providers {
-            let catalog = match self.catalog_for(provider_id.clone(), cancel).await {
-                Ok(Some(catalog)) => catalog,
+            match self.catalog_for(provider_id.clone(), cancel).await {
+                Ok(Some(catalog)) => catalogs.push((provider_id, catalog)),
                 Ok(None) | Err(_) => continue,
-            };
+            }
+        }
+        self.check(cancel)?;
+        Ok(catalogs)
+    }
+
+    /// Every model execution would accept, one snapshot per provider.
+    pub async fn selectable_models(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ModelCapabilitySnapshot>, HostError> {
+        let mut models = Vec::new();
+        for (provider_id, catalog) in self.selectable_catalogs(cancel).await? {
             for model in &catalog.models {
                 let Some(model) = catalog.selectable(&model.id) else {
                     continue;
@@ -1586,7 +1656,36 @@ impl ProviderService {
                 );
             }
         }
-        self.check(cancel)?;
+        Ok(models)
+    }
+
+    /// Every model a non-conversational use could select, with the modality
+    /// operations each declares (Modality §9.2). The same provider, account,
+    /// model, route, credential and status rules as [`Self::selectable_models`],
+    /// without its text-modality, chat-kind and declared-text-limit
+    /// requirements; a model that declares no operation is omitted.
+    pub async fn selectable_modality_models(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ModalityModelSnapshot>, HostError> {
+        let mut models = Vec::new();
+        for (provider_id, catalog) in self.selectable_catalogs(cancel).await? {
+            for model in &catalog.models {
+                let Some(model) = catalog.selectable_modality(&model.id) else {
+                    continue;
+                };
+                let Some(operations) = model.modality_operations() else {
+                    continue;
+                };
+                models.push(ModalityModelSnapshot {
+                    target: ModelId {
+                        provider_id: provider_id.clone(),
+                        model_id: model.id.clone(),
+                    },
+                    operations,
+                });
+            }
+        }
         Ok(models)
     }
 
@@ -2352,6 +2451,13 @@ impl SelectableModels for ProductResolver {
     ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>> {
         let owner = self.0.clone();
         Box::pin(async move { owner.selectable_models(&cancel).await })
+    }
+    fn selectable_for_modality(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<ModalityModelSnapshot>> {
+        let owner = self.0.clone();
+        Box::pin(async move { owner.selectable_modality_models(&cancel).await })
     }
 }
 struct ManagedRecovery {

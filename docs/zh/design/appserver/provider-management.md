@@ -41,7 +41,7 @@ Provider 拥有进程配置、目录、覆盖、偏好、校验、安全投影�
 | --- | --- |
 | `managementMethods`，process，命名空间 `provider` | 本地 v3 Desktop/CLI 和受信任进程调用者；§3 沿既有命名空间扩展 |
 | Provider 模块边界 `stored_selection`（Rust） | Migration 等原生数据边界消费方；§3.7 增加一个基于已准入记录的无副作用函数，不是 RPC、host 端口或管理方法 |
-| Provider host 端口 `SelectableModelsHost`（core `dim-agent-capabilities`），由该配置的模型拥有方提供（Provider，或配置式模型文件） | 按模型能力路由的进程内 owner（Modality）与 `agent` 工具的 `models` 动作；§3.6 增加一次读取，不是管理方法或 RPC 方法 |
+| Provider host 端口 `SelectableModelsHost`（core `dim-agent-capabilities`），由该配置的模型拥有方提供（Provider，或配置式模型文件） | 按模型能力路由的进程内 owner（Modality）与 `agent` 工具的 `models` 动作；§3.6 增加两次读取，不是管理方法或 RPC 方法 |
 | `account`、`account.codex`、`account.grok` | 复用账号调用，不新增账号方法、事件或 managed host capability |
 | `ProviderConnectionResolver`、`ModelSelectionHost` | Provider 沿现有类型处理目录和路由，不增加 core 端口 |
 | `auxiliaryModel.complete` | S4 由调用者显式选模型的合同不变 |
@@ -327,7 +327,7 @@ Session 保留已采用的能力快照。模型变为未声明的 Session 仍可
 
 按模型能力路由工作的进程 owner 不能自留一份它路由到的模型的可用性规则。下面的端口在每个
 配置里有一个提供方——产品配置是 Provider，配置式模型配置（`dim-agent-aimux`）是它的模型文件
-——各自提供一次无副作用的读取，返回它会服务的模型，以及路由决策需要的标识和已声明能力。本节
+——各自提供无副作用的读取，返回它会服务的模型，以及路由决策需要的标识和已声明能力。本节
 定义端口与 Provider 的规则；配置式配置的规则归它自己的页面。这次读取是进程 host 端口，不是
 管理方法：不在 `provider` 命名空间上，不经 RPC 提供，也不改变 `provider.catalog`。
 
@@ -345,6 +345,17 @@ ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：�
 标识与已声明能力，就是执行时采用的那份描述。可选模型一定声明了两项上限（§3.5），因此既有
 `capability_snapshot` 转换不会失败。调用方传入自己的取消 token；取消它即取消本次读取并返回
 `Cancelled`。
+
+**第二个操作：`selectableForModality`。** 同一端口还提供一次面向非对话用途的进程读取
+（Modality §9.2）：操作 `selectableForModality`，异步，请求 `{}`，回复
+`{models: ModalityModelSnapshot[]}`，元素为
+`{target: {providerId, modelId}, operations: string[]}`。`operations` 是该模型目录条目在
+`metadata.raw.modalityCapabilities` 中声明的 `<category>.<operation>` id，按条目中的顺序；
+未声明任何操作的模型被省略。本次读取应用与 `selectableModels` 相同的 provider、账号、模型、
+路由、凭据与状态规则，但去掉其 text modality、chat 类型与已声明文本上限三项要求：没有
+`text` modality 的模型、非 chat 模型与 `limits_undeclared` 的模型只要声明了 modality 操作
+仍是候选；不可用状态、停用的 Provider 或模型、缺少路由、已登出的账号与缺少静态凭据仍会排除
+它们。它不携带原因字段：消费方从选项推导可用性，并用自己的快照解释不再可选的持久默认值。
 
 **Provider 应用的规则。** 候选 provider 与默认解析一致：托管包公布的每个账号 provider，以及
 `provider.list` 返回的每个静态 provider。每个模型来自与 `provider.catalog` 相同的单 provider
