@@ -239,7 +239,7 @@ async function move(server: McpEntry): Promise<void> {
   if (busy.value || server.source === "plugin" || !connection.supports("mcp.move")) return
   const from = server.source === "user" ? "user" as const : "project" as const
   const to = from === "user" ? "project" as const : "user" as const
-  if (to === "project" && !loadedCwd.value) { error.value = s('Load a project directory before moving a server into it.', '移入项目前请先加载项目目录。'); return }
+  if (to === "project" && !loadedCwd.value) { error.value = s('Choose a workspace before moving a server into its project configuration.', '移入项目配置前请先选择工作区。'); return }
   if (dirty.value && !window.confirm(s('Discard unsaved MCP configuration?', '放弃未保存的 MCP 配置？'))) return
   const message = to === "project"
     ? s('Move this server to the project? Withheld values stay in your local Dim configuration, the workspace file gets only the public configuration, and the entry starts disabled.', '将此服务器移入项目？隐藏值保留在本地 Dim 配置中，工作区文件只包含公开配置，且条目默认禁用。')

@@ -19,19 +19,20 @@ const busy = ref(false)
 const error = ref("")
 const status = ref("")
 const entries = computed(() => catalog.value?.entries.filter((skill) => `${skill.name}\n${skill.description}\n${skill.filePath}`.toLocaleLowerCase().includes(search.value.toLocaleLowerCase())) ?? [])
-function scope(): Record<string, unknown> { return cwd.value ? { cwd: cwd.value } : {} }
-async function readCatalog(): Promise<void> {
-  catalog.value = await connection.client.call("skills.catalog", scope(), readSkills)
+function scope(path = cwd.value): Record<string, unknown> { return path ? { cwd: path } : {} }
+async function readCatalog(path = cwd.value): Promise<void> {
+  catalog.value = await connection.client.call("skills.catalog", scope(path), readSkills)
+  cwd.value = path
 }
-async function load(refresh = false): Promise<void> {
+async function load(refresh = false, path = cwd.value): Promise<void> {
   if (busy.value) return
   busy.value = true
   error.value = ""
   status.value = ""
   try {
     if (!connection.supports("skills.catalog")) throw new Error(s('Skills management is not available on this server.', '此服务器不支持技能管理。'))
-    if (refresh) await connection.client.call("skills.refresh", scope(), readAck)
-    await readCatalog()
+    if (refresh) await connection.client.call("skills.refresh", scope(path), readAck)
+    await readCatalog(path)
     if (refresh) status.value = s('Skills reloaded.', '技能已重新加载。')
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
@@ -47,10 +48,10 @@ async function toggle(skill: SkillEntry): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
-function changeScope(event: Event): void {
-  cwd.value = (event.target as HTMLSelectElement).value
-  catalog.value = undefined
-  void load()
+async function changeScope(event: Event): Promise<void> {
+  const select = event.target as HTMLSelectElement
+  await load(false, select.value)
+  select.value = cwd.value
 }
 reloadSettingsOnReconnect(connection, () => load())
 onMounted(() => load())

@@ -27,6 +27,7 @@ registerHooks({
 })
 const { default: PermissionsSettings } = await import("../src/features/settings/PermissionsSettings.vue")
 const { default: AgentSettings } = await import("../src/features/settings/AgentSettings.vue")
+const { RpcError } = await import("../src/rpc/client.ts")
 const node = (type, text = "") => ({ type, text, children: [], props: {}, parent: undefined, options: [], selectedIndex: -1, addEventListener() {}, getRootNode() { return {} } })
 const renderer = createRenderer({
   createElement: type => node(type), createText: text => node("text", text), createComment: text => node("comment", text),
@@ -52,18 +53,21 @@ function mount(t, component, call, supports = () => true) {
 }
 
 test("isolation modes preserve inactive network, reset both flags and retain conflicting drafts without retry", async t => {
-  let document = { sandbox: true, network: true }, revision = "exec:1", conflict = false
+  let document = { sandbox: true, network: true }, revision = "exec:1", conflict = false, failRead = false
   const writes = []
   const root = mount(t, PermissionsSettings, async (method, params) => {
     if (method === "permission.rules") return { revision: "rules:1", commandRules: [] }
     if (method === "host.execution.backend") return { available: false, reason: "fixture backend unavailable" }
     if (method === "settings.update") {
       writes.push(params)
-      if (conflict) throw new Error("settings_conflict: reload before saving")
+      if (conflict) throw new RpcError(-32000, "settings conflict", "settings_conflict")
       assert.equal(params.expectedRevision, revision)
       document = params.document
       revision += "+"
-    } else assert.equal(method, "settings.read")
+    } else {
+      assert.equal(method, "settings.read")
+      if (failRead) throw new Error("Settings read failed")
+    }
     return { revision, document }
   })
   await flush()
@@ -86,9 +90,62 @@ test("isolation modes preserve inactive network, reset both flags and retain con
   await submit(root, "Save isolation settings")
   assert.deepEqual(writes[3].document, { sandbox: true, network: true })
   assert.equal(writes.length, 4)
-  assert.match(text(root), /settings_conflict/)
-  assert.equal(button(root, "Save isolation settings").props.disabled, false)
+  assert.equal(button(root, "Save isolation settings").props.disabled, true)
+  assert.equal(button(root, "Reset to default").props.disabled, true)
+  assert.match(text(root), /Reload before saving again/)
+  await submit(root, "Save isolation settings")
+  await button(root, "Reset to default").props.onClick(); await flush()
+  assert.equal(writes.length, 4, "neither submit nor reset may replay a stale revision")
+  globalThis.window.confirm = () => false
+  await button(root, "Reload").props.onClick(); await flush()
+  assert.equal(button(root, "Save isolation settings").props.disabled, true)
+  globalThis.window.confirm = () => true
+  failRead = true
+  await button(root, "Reload").props.onClick(); await flush()
+  assert.match(text(root), /Settings read failed/)
+  assert.equal(button(root, "Save isolation settings").props.disabled, true)
+  failRead = false
+  revision = "exec:remote"
+  await button(root, "Reload").props.onClick(); await flush()
+  assert.equal(button(root, "Reset to default").props.disabled, false)
+  assert.equal(button(root, "Save isolation settings").props.disabled, true, "reload replaces the conflicting draft")
   assert.deepEqual(writes.map(write => [write.source, write.scope]), Array(4).fill(["execution", "user"]))
+  conflict = false
+  mode.props["onUpdate:modelValue"]("network"); await flush()
+  await submit(root, "Save isolation settings")
+  assert.equal(writes[4].expectedRevision, "exec:remote")
+  assert.deepEqual(writes[4].document, { sandbox: true, network: true })
+})
+
+test("enabling a sandbox with network adds isolation, while removing sandbox or network restrictions requires confirmation", async t => {
+  let document = { sandbox: false, network: false }
+  const writes = [], confirmations = []
+  const root = mount(t, PermissionsSettings, async (method, params) => {
+    if (method === "permission.rules") return { revision: "rules:1", commandRules: [] }
+    if (method === "host.execution.backend") return { available: true }
+    if (method === "settings.update") { writes.push(params); document = params.document }
+    else assert.equal(method, "settings.read")
+    return { revision: "exec:1", document }
+  })
+  await flush()
+  globalThis.window.confirm = message => { confirmations.push(message); return false }
+  const mode = field(root, "Mode")
+  mode.props["onUpdate:modelValue"]("network"); await flush()
+  await submit(root, "Save isolation settings")
+  assert.deepEqual(writes.map(write => write.document), [{ sandbox: true, network: true }])
+  assert.equal(confirmations.length, 0)
+  mode.props["onUpdate:modelValue"]("off"); await flush()
+  await submit(root, "Save isolation settings")
+  assert.equal(writes.length, 1)
+  assert.equal(confirmations.length, 1)
+  mode.props["onUpdate:modelValue"]("isolated"); await flush()
+  await submit(root, "Save isolation settings")
+  assert.deepEqual(writes[1].document, { sandbox: true, network: false })
+  assert.equal(confirmations.length, 1)
+  mode.props["onUpdate:modelValue"]("network"); await flush()
+  await submit(root, "Save isolation settings")
+  assert.equal(writes.length, 2)
+  assert.equal(confirmations.length, 2)
 })
 
 test("unsupported isolation does not display an invented default", async t => {

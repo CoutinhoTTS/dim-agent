@@ -97,3 +97,37 @@ test("failed reloads preserve the list, expose a retry and never report success"
   await button(root, "Reload").props.onClick(); await flush()
   assert.doesNotMatch(text(root), /Discovery failed/)
 })
+
+test("failed scope switches retain the loaded skills and target subsequent actions at that scope", async t => {
+  let fail = false
+  const writes = []
+  const root = mount(t, async (method, params) => {
+    if (method === "skills.catalog") {
+      if (fail) throw new Error("Workspace discovery failed")
+      return { version: 1, entries: [skill(params.cwd === "/project-a" ? "project-a" : "project-b")], issues: [] }
+    }
+    writes.push([method, params])
+    return {}
+  })
+  await flush()
+  const scope = all(root).find(el => el.type === "select")
+  await scope.props.onChange({ target: { value: "/project-a" } }); await flush()
+  fail = true
+  const target = { value: "/project-b" }
+  await scope.props.onChange({ target }); await flush()
+  assert.equal(target.value, "/project-a")
+  assert.equal(scope.props.value, "/project-a")
+  assert.match(text(root), /Workspace discovery failed/)
+  assert.ok(button(root, "Disable project-a"))
+  assert.equal(button(root, "Disable project-b"), undefined)
+  fail = false
+  await button(root, "Disable project-a").props.onClick(); await flush()
+  await button(root, "Reload skills").props.onClick(); await flush()
+  assert.deepEqual(writes, [
+    ["skills.set_enabled", { cwd: "/project-a", id: "project-a", enabled: false }],
+    ["skills.refresh", { cwd: "/project-a" }],
+  ])
+  await scope.props.onChange({ target: { value: "/project-b" } }); await flush()
+  assert.equal(scope.props.value, "/project-b")
+  assert.ok(button(root, "Disable project-b"))
+})
