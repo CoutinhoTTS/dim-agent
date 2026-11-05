@@ -1116,6 +1116,10 @@ pub enum Update {
     RepositoryWorkspaces(Vec<String>),
     /// A command failed without ending the session.
     Notice(String),
+    /// A submission could not be sent because no Session could be started
+    /// for it; the message says why. The interface restores the invocation's
+    /// first message, or reports it when a newer draft holds the composer.
+    SubmitNotSent(String),
     /// A newer version the user has not skipped, once per start.
     Upgrade(crate::update::Offer),
     /// What installing the offered version came to.
@@ -1226,7 +1230,9 @@ pub enum Update {
     },
     /// The session cannot continue.
     Failed(String),
-    /// Startup failed; show the error and exit nonzero.
+    /// Startup failed; show the error and exit nonzero, except that an
+    /// invocation's first message stays in the draft and the interface
+    /// continues.
     StartupFailed(String),
     /// The App Server asked this interface to leave (`ui.shutdown`); the
     /// Session goes on without it.

@@ -494,7 +494,7 @@ async fn run(
                         worker.send(Update::StartupFailed(error.to_string()));
                         break;
                     }
-                    worker.send(Update::Notice(
+                    worker.send(Update::SubmitNotSent(
                         if worker.options.startup.is_some() || worker.model_session.is_some() {
                             error.to_string()
                         } else {

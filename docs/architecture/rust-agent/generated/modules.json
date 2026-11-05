@@ -3172,6 +3172,16 @@
       ]
     },
     {
+      "id": "dim_cli::args::prompt_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::args",
+      "file": "crates/dim-cli/src/args.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::args::source_tests",
       "crate": "dim_cli",
       "parent": "dim_cli::args",
@@ -28166,7 +28176,8 @@
       "to": "dim_cli::ui",
       "references": [
         "mod ui",
-        "path ui::Env"
+        "path ui::Env",
+        "path ui::Initial"
       ]
     },
     {
@@ -28272,6 +28283,13 @@
     },
     {
       "from": "dim_cli::args",
+      "to": "dim_cli::args::prompt_tests",
+      "references": [
+        "mod prompt_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
       "to": "dim_cli::args::source_tests",
       "references": [
         "mod source_tests"
@@ -28350,6 +28368,13 @@
       "to": "dim_cli::update",
       "references": [
         "path crate::update::channel"
+      ]
+    },
+    {
+      "from": "dim_cli::args::prompt_tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options::parse"
       ]
     },
     {
@@ -32366,6 +32391,13 @@
         "path EventContent::ToolCall",
         "path EventContent::ToolCompleted",
         "path EventContent::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::images",
+      "references": [
+        "path crate::images::Attached"
       ]
     },
     {
@@ -38542,6 +38574,7 @@
         "path RenameReply::Unsupported",
         "path RenameReply::Untitled",
         "path SessionPort",
+        "path SubmitMode",
         "path SubmitMode::Queue",
         "path SubmitMode::Steer",
         "path SuggestionSetting",
@@ -38587,6 +38620,7 @@
         "path Update::Skills",
         "path Update::Snapshot",
         "path Update::StartupFailed",
+        "path Update::SubmitNotSent",
         "path Update::SuggestionCleared",
         "path Update::SuggestionMethods",
         "path Update::SuggestionOffer",
@@ -38679,8 +38713,10 @@
       "to": "dim_cli::ui",
       "references": [
         "path Env",
+        "path Initial",
         "path crate::ui::tilde",
-        "use crate::ui::Env"
+        "use crate::ui::Env",
+        "use crate::ui::Initial"
       ]
     },
     {
@@ -38714,6 +38750,7 @@
       "references": [
         "path Composer",
         "path Composer::new",
+        "path ComposerOutcome",
         "path ComposerOutcome::Command",
         "path ComposerOutcome::Handled",
         "path ComposerOutcome::Pass",
@@ -39155,6 +39192,7 @@
         "path InputEvent::Key",
         "path InputEvent::Mouse",
         "path InputEvent::Paste",
+        "path InputEvent::Submit",
         "path KeyCode::BackTab",
         "path KeyCode::Char",
         "path KeyCode::Down",

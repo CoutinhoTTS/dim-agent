@@ -14,10 +14,16 @@ writers for scripts. Development verification uses disposable user homes.
 only for that invocation. Source checks, stopped-source acknowledgement, progress,
 JSON reports, cancellation and exit codes follow the [migration command contract](../../docs/design/cli-commands.md#migration-interaction).
 
-`dimcode tui` opens the interactive client. `dimcode exec -p TEXT` runs one prompt
-and exits; redirected stdin supplies the prompt when `-p` is absent.
-`dimcode exec resume SESSION_ID -p TEXT` continues a persisted Session. Existing
-`--prompt`, piped stdin and `--resume` entries remain available.
+`dimcode tui` opens the interactive client. `dimcode tui -p TEXT` opens it and
+sends TEXT as its first message in both terminal modes, through the same
+composer a typed message uses; `--image PATH` is accepted with `tui` only
+together with `-p` and attaches to that message, and a message no Session can
+take stays in the composer as an unsent draft instead of being discarded.
+`dimcode tui --resume SESSION_ID -p TEXT` attaches to that Session and stays
+interactive. `dimcode exec -p TEXT` runs one prompt and exits; redirected stdin
+supplies the prompt when `-p` is absent. `dimcode exec resume SESSION_ID -p TEXT`
+continues a persisted Session. Existing piped stdin and `--resume` entries
+remain available.
 
 `dimcode acp [--agent ID]` mounts the reusable [ACP Gateway](../dim-acp/README.md)
 over stdin/stdout, using the same home, server and model-profile options. It has

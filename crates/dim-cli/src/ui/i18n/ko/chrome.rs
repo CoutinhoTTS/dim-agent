@@ -537,6 +537,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "고정된 입력",
         "digest" => "다이제스트",
         "summary" => "요약",
+        "The first message was not sent; your new draft was kept." => {
+            "첫 메시지는 전송되지 않았습니다. 새 초안은 유지되었습니다."
+        }
         _ => return None,
     })
 }

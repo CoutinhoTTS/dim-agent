@@ -9,7 +9,9 @@ pub(crate) const SERVER_REQUIREMENT: &str = "--server must name a standalone dim
 pub const HELP: &str = "dimcode [OPTIONS]\n\n\
 Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n\
 Commands:\n\
-  tui                              Open the interactive scrollback client\n\
+  tui [-p TEXT] [--image PATH ...]\n\
+                                   Open the interactive scrollback client;\n\
+                                   -p sends TEXT as its first message\n\
   acp [--agent ID]                  Serve ACP over stdin/stdout\n\
   exec [-p TEXT] [--image PATH ...] [--json] [--permission PRESET]\n\
                                    Run text and/or local images and exit\n\
@@ -130,8 +132,11 @@ Commands:\n\
 web --off                        Turn off the daemon-owned Web switch
 web install                      Install this version's Web workspace\n\
 Options:\n\
-  -p, --prompt TEXT                Run one prompt and exit\n\
-  --image PATH                     Add a local image to exec (repeatable)\n\
+  -p, --prompt TEXT                The prompt: exec runs it and exits; tui\n\
+                                   sends it as the first message of an\n\
+                                   interactive session\n\
+  --image PATH                     Add a local image to exec, or to the tui\n\
+                                   first message (repeatable)\n\
   --resume SESSION_ID              Attach and continue a persisted session\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
@@ -1298,14 +1303,13 @@ impl Options {
         {
             return Err("Commands cannot be combined with chat options".into());
         }
-        if matches!(options.action, Action::Tui) && options.prompt.is_some() {
-            return Err("tui does not accept --prompt; use exec".into());
-        }
         if options.json && !matches!(options.action, Action::Exec | Action::Migration(_)) {
             return Err("--json requires exec or migration".into());
         }
-        if !options.images.is_empty() && !matches!(options.action, Action::Exec) {
-            return Err("--image requires exec".into());
+        let images_for_tui = matches!(options.action, Action::Tui) && options.prompt.is_some();
+        if !options.images.is_empty() && !matches!(options.action, Action::Exec) && !images_for_tui
+        {
+            return Err("--image requires exec or tui -p".into());
         }
         if options.images.len() > crate::attachments::MAX_IMAGES {
             return Err("At most 20 images may be submitted".into());
@@ -2001,5 +2005,42 @@ mod source_tests {
         ] {
             assert!(parse(&arguments).is_err(), "{arguments:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    /// `tui` takes the first prompt `-p` names, with images only for it;
+    /// `exec` and the bare chat keep their one-shot prompt.
+    #[test]
+    fn a_tui_invocation_takes_a_first_prompt_and_images_only_with_it() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let parse = |arguments: &[&str]| {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            Options::parse(args)
+        };
+        let options = parse(&["tui", "-p", "hello"]).unwrap();
+        assert!(matches!(options.action, Action::Tui));
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
+        let options = parse(&["tui", "--resume", "session", "-p", "hello"]).unwrap();
+        assert_eq!(options.resume.as_deref(), Some("session"));
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
+        let options = parse(&["tui", "-p", "hello", "--image", "one.png"]).unwrap();
+        assert_eq!(options.images, [PathBuf::from("one.png")]);
+        assert!(parse(&["tui", "--image", "one.png"]).is_err());
+        assert!(parse(&["tui", "-p", "hello", "--json"]).is_err());
+        let options = parse(&["-p", "hello"]).unwrap();
+        assert!(matches!(options.action, Action::Chat));
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
+        let options = parse(&["exec", "-p", "hello"]).unwrap();
+        assert!(matches!(options.action, Action::Exec));
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
     }
 }

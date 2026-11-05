@@ -575,6 +575,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "input yang dipatok",
         "digest" => "digest",
         "summary" => "ringkasan",
+        "The first message was not sent; your new draft was kept." => {
+            "Pesan pertama tidak terkirim; draf baru Anda dipertahankan."
+        }
         _ => return None,
     })
 }
