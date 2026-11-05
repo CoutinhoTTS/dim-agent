@@ -323,9 +323,10 @@ fn tool_call_content() -> Value {
 }
 
 fn finish_usage(input: u32, output: u32, raw: Value) -> Value {
+    // #478: unreported counts stay unknown (the AI SDK fills 0).
     json!({
-        "inputTokens": { "cacheRead": 0, "noCache": input, "total": input },
-        "outputTokens": { "reasoning": 0, "text": output, "total": output },
+        "inputTokens": { "noCache": input, "total": input },
+        "outputTokens": { "text": output, "total": output },
         "raw": raw,
     })
 }
@@ -365,6 +366,21 @@ mod do_generate {
         assert_eq!(
             json!(result.content),
             json!([{ "text": "Hello, World!", "type": "text" }])
+        );
+    }
+
+    /// aimux #461: a refusal is the visible text of the answer.
+    #[tokio::test]
+    async fn should_extract_refusal_as_text() {
+        let message =
+            json!({ "role": "assistant", "content": null, "refusal": "I cannot help with that." });
+        let body = completion(message, "stop", usage_4_34_30());
+
+        let (result, _) = generate("gpt-4o", json_value(&body), json!({})).await;
+
+        assert_eq!(
+            json!(result.content),
+            json!([{ "text": "I cannot help with that.", "type": "text" }])
         );
     }
 
@@ -449,8 +465,9 @@ mod do_generate {
         assert_eq!(
             json!(result.usage),
             json!({
-                "inputTokens": { "cacheRead": 0, "noCache": 20, "total": 20 },
-                "outputTokens": { "reasoning": 0, "text": 5, "total": 5 },
+                // #478: unreported counts stay unknown (the AI SDK fills 0).
+                "inputTokens": { "noCache": 20, "total": 20 },
+                "outputTokens": { "text": 5, "total": 5 },
                 "raw": { "completion_tokens": 5, "prompt_tokens": 20, "total_tokens": 25 },
             })
         );
@@ -528,9 +545,10 @@ mod do_generate {
 
         assert_eq!(
             json!(result.usage),
+            // #478: unreported counts stay unknown (the AI SDK fills 0).
             json!({
-                "inputTokens": { "cacheRead": 0, "noCache": 20, "total": 20 },
-                "outputTokens": { "reasoning": 0, "text": 0, "total": 0 },
+                "inputTokens": { "noCache": 20, "total": 20 },
+                "outputTokens": {},
                 "raw": { "prompt_tokens": 20, "total_tokens": 20 },
             })
         );
@@ -1161,7 +1179,8 @@ mod do_generate {
             json!(result.usage),
             json!({
                 "inputTokens": { "cacheRead": 1152, "cacheWrite": 256, "noCache": 592, "total": 2000 },
-                "outputTokens": { "reasoning": 0, "text": 20, "total": 20 },
+                // #478: unreported counts stay unknown (the AI SDK fills 0).
+                "outputTokens": { "text": 20, "total": 20 },
                 "raw": usage,
             })
         );
@@ -1519,7 +1538,8 @@ mod do_generate {
         assert_eq!(
             json!(result.usage),
             json!({
-                "inputTokens": { "cacheRead": 0, "noCache": 15, "total": 15 },
+                // #478: unreported counts stay unknown (the AI SDK fills 0).
+                "inputTokens": { "noCache": 15, "total": 15 },
                 "outputTokens": { "reasoning": 10, "text": 10, "total": 20 },
                 "raw": usage,
             })
@@ -1703,6 +1723,8 @@ mod do_generate {
         (result, body)
     }
 
+    const PRIORITY_WARNING: &str = "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported";
+
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should send serviceTier flex processing setting
     #[tokio::test]
     async fn should_send_service_tier_flex_processing_setting() {
@@ -1714,13 +1736,18 @@ mod do_generate {
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should show warning when using flex processing with unsupported model
-    /// The vendored patch for arcships/aimux#462 sends the selected tier for
-    /// every model id, so the model produces no warning.
     #[tokio::test]
-    async fn should_send_flex_processing_for_an_unsupported_model_without_a_warning() {
+    async fn should_show_warning_when_using_flex_processing_with_unsupported_model() {
         let (result, body) = service_tier("gpt-4o-mini", "flex").await;
-        assert_eq!(body["service_tier"], json!("flex"));
-        assert_eq!(warnings(&result), json!([]));
+        assert_eq!(body.get("service_tier"), None);
+        assert_eq!(
+            warnings(&result),
+            json!([{
+                "details": "flex processing is only available for o3, o4-mini, and gpt-5 models",
+                "feature": "serviceTier",
+                "type": "unsupported",
+            }])
+        );
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should allow flex processing with o4-mini model without warnings
@@ -1745,13 +1772,14 @@ mod do_generate {
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should show warning when using priority processing with unsupported model
-    /// The vendored patch for arcships/aimux#462 sends the selected tier for
-    /// every model id, so the model produces no warning.
     #[tokio::test]
-    async fn should_send_priority_processing_for_an_unsupported_model_without_a_warning() {
+    async fn should_show_warning_when_using_priority_processing_with_unsupported_model() {
         let (result, body) = service_tier("gpt-3.5-turbo", "priority").await;
-        assert_eq!(body["service_tier"], json!("priority"));
-        assert_eq!(warnings(&result), json!([]));
+        assert_eq!(body.get("service_tier"), None);
+        assert_eq!(
+            warnings(&result),
+            json!([{ "details": PRIORITY_WARNING, "feature": "serviceTier", "type": "unsupported" }])
+        );
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should allow priority processing with gpt-4o model without warnings
@@ -1770,6 +1798,25 @@ mod do_generate {
         assert_eq!(warnings(&result), json!([]));
     }
 
+    /// aimux #462: `forceServiceTier` sends the tier to a model id the
+    /// capability table does not know, without a warning.
+    #[tokio::test]
+    async fn should_send_forced_service_tier_to_a_deployment_alias() {
+        for tier in ["flex", "priority"] {
+            let (result, mock) = generate(
+                "my-deployment-alias",
+                openai_text_json(),
+                json!({ "providerOptions": { "openai": { "serviceTier": tier, "forceServiceTier": true } } }),
+            )
+            .await;
+            assert_eq!(request_body(&mock)["service_tier"], json!(tier));
+            assert_eq!(warnings(&result), json!([]));
+
+            let (_, body) = service_tier("my-deployment-alias", tier).await;
+            assert_eq!(body.get("service_tier"), None);
+        }
+    }
+
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should send serviceTier fast processing setting
     #[tokio::test]
     async fn should_send_service_tier_fast_processing_setting() {
@@ -1781,13 +1828,14 @@ mod do_generate {
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should show warning when using fast processing with unsupported model
-    /// The vendored patch for arcships/aimux#462 sends the selected tier for
-    /// every model id, so the model produces no warning.
     #[tokio::test]
-    async fn should_send_fast_processing_for_an_unsupported_model_without_a_warning() {
+    async fn should_show_warning_when_using_fast_processing_with_unsupported_model() {
         let (result, body) = service_tier("gpt-3.5-turbo", "fast").await;
-        assert_eq!(body["service_tier"], json!("fast"));
-        assert_eq!(warnings(&result), json!([]));
+        assert_eq!(body.get("service_tier"), None);
+        assert_eq!(
+            warnings(&result),
+            json!([{ "details": PRIORITY_WARNING, "feature": "serviceTier", "type": "unsupported" }])
+        );
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doGenerate › should allow fast processing with gpt-4o model without warnings
@@ -2071,6 +2119,38 @@ mod do_stream {
         assert_eq!(finish["type"], "finish", "{parts:?}");
         assert_eq!(finish["finishReason"]["unified"], "stop", "{parts:?}");
         assert_eq!(finish["usage"]["outputTokens"]["total"], 1, "{parts:?}");
+    }
+
+    /// aimux #461: refusal deltas stream as text deltas.
+    #[tokio::test]
+    async fn should_stream_refusal_deltas_as_text() {
+        let model = "gpt-4o";
+        let chunks = sse(&[
+            text_chunk(
+                model,
+                0,
+                r#"{"role":"assistant","content":"","refusal":"I cannot "}"#,
+                "null",
+                "",
+            ),
+            text_chunk(model, 0, r#"{"refusal":"help with that."}"#, "null", ""),
+            text_chunk(model, 0, "{}", r#""stop""#, ""),
+        ]);
+
+        let (parts, _) = stream_parts(model, stream_chunks(&chunks), json!({})).await;
+
+        let deltas: Vec<_> = parts
+            .iter()
+            .filter(|part| part["type"] == "text-delta")
+            .cloned()
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                json!({ "type": "text-delta", "id": "0", "delta": "I cannot " }),
+                json!({ "type": "text-delta", "id": "0", "delta": "help with that." }),
+            ]
+        );
     }
 
     /// upstream: @ai-sdk/openai src/chat/openai-chat-language-model.test.ts › doStream › should stream text deltas
@@ -2709,7 +2789,8 @@ mod do_stream {
                 "type": "finish",
                 "usage": {
                     "inputTokens": { "cacheRead": 1152, "cacheWrite": 256, "noCache": 592, "total": 2000 },
-                    "outputTokens": { "reasoning": 0, "text": 20, "total": 20 },
+                    // #478: unreported counts stay unknown (the AI SDK fills 0).
+                    "outputTokens": { "text": 20, "total": 20 },
                     "raw": {
                         "completion_tokens": 20,
                         "prompt_tokens": 2000,
@@ -2913,7 +2994,8 @@ mod do_stream {
             assert_eq!(
                 parts,
                 expected(json!({
-                    "inputTokens": { "cacheRead": 0, "noCache": 15, "total": 15 },
+                    // #478: unreported counts stay unknown (the AI SDK fills 0).
+                    "inputTokens": { "noCache": 15, "total": 15 },
                     "outputTokens": { "reasoning": 10, "text": 10, "total": 20 },
                     "raw": {
                         "completion_tokens": 20,

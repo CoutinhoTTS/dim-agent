@@ -194,6 +194,9 @@ pub(crate) async fn execute_generate(
         .message
         .content
         .filter(|text| !text.is_empty())
+        // aimux extension (#461): the AI SDK does not read `refusal`.
+        .or(choice.message.refusal)
+        .filter(|text| !text.is_empty())
         .or_else(|| choice.message.audio.and_then(|audio| audio.transcript))
         && !text.is_empty()
     {
@@ -531,7 +534,13 @@ impl Transformer for OpenAIChatStream {
             }
 
             // Text delta; an active reasoning block ends before text starts.
-            if let Some(content) = choice.delta.content {
+            // aimux extension (#461): a refusal delta is text too.
+            let refusal = choice.delta.refusal.filter(|text| !text.is_empty());
+            let text = match choice.delta.content {
+                Some(content) if content.is_empty() => refusal.or(Some(content)),
+                content => content.or(refusal),
+            };
+            if let Some(content) = text {
                 self.end_reasoning(controller);
                 if !self.text_started {
                     self.text_started = true;
@@ -895,16 +904,50 @@ fn apply_provider_option_passthrough(
     }
 }
 
-/// `service_tier` from the provider options.
-///
-/// dim patch (arcships/aimux#462): an explicitly selected tier is sent for
-/// every model id, deployment aliases included. The product catalog and the
-/// remote account entitlement remain the authorities.
-fn apply_service_tier(body: &mut Value, provider_opts: &Option<SharedProviderOptions>) {
-    if let Some(st) =
-        openai_option(provider_opts, "serviceTier").and_then(|v| v.as_str().map(str::to_owned))
-    {
-        body["service_tier"] = json!(st);
+/// `service_tier` with model-capability validation.
+fn apply_service_tier(
+    body: &mut Value,
+    provider_opts: &Option<SharedProviderOptions>,
+    caps: &ModelCapabilities,
+    warnings: &mut Vec<Warning>,
+) {
+    let service_tier = openai_option(provider_opts, "serviceTier")
+        .and_then(|v| v.as_str().map(std::string::ToString::to_string));
+    // aimux extension (#462): `forceServiceTier` declares the tier support of
+    // a model id the capability table cannot know, such as a deployment alias.
+    let force = openai_option(provider_opts, "forceServiceTier")
+        .is_some_and(|v| v.as_bool().unwrap_or(false));
+    if let Some(ref st) = service_tier {
+        match st.as_str() {
+            "flex" => {
+                if caps.supports_flex_processing || force {
+                    body["service_tier"] = json!(st);
+                } else {
+                    warnings.push(Warning::Unsupported {
+                        feature: "serviceTier".to_string(),
+                        details: Some(
+                            "flex processing is only available for o3, o4-mini, and gpt-5 models"
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
+            "priority" | "fast" => {
+                if caps.supports_priority_processing || force {
+                    body["service_tier"] = json!(st);
+                } else {
+                    warnings.push(Warning::Unsupported {
+                        feature: "serviceTier".to_string(),
+                        details: Some(
+                            "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported".to_string(),
+                        ),
+                    });
+                }
+            }
+            _ => {
+                body["service_tier"] = json!(st);
+            }
+        }
     }
 }
 
@@ -1040,10 +1083,9 @@ pub(crate) fn build_request_body_with_chat_options(
         body["stream_options"] = json!({ "include_usage": true });
     }
 
-    // OpenAI itself has no `top_k`, but dim sent it as a body field for every
-    // model id on this protocol before the upgrade, and compatible endpoints
-    // read it; the tag drops it with a warning, which a strict stream then
-    // fails the call on.
+    // OpenAI itself has no `top_k`, but dim sends it as a body field on this
+    // protocol and compatible endpoints read it; the tag drops it with a
+    // warning, which a strict stream then fails the call on.
     if let Some(top_k) = options.top_k {
         body["top_k"] = json!(top_k);
     }
@@ -1093,7 +1135,7 @@ pub(crate) fn build_request_body_with_chat_options(
         body["reasoning_effort"] = json!(effort);
     }
 
-    apply_service_tier(&mut body, provider_opts);
+    apply_service_tier(&mut body, provider_opts, &caps, &mut warnings);
     apply_tools(&mut body, options, &mut warnings)?;
 
     Ok(RequestBodyResult { body, warnings })

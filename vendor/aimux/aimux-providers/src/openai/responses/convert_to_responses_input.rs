@@ -124,9 +124,12 @@ pub(crate) fn convert_responses_input_with_conversation(
                 // message, as `reasoningMessages` upstream).
                 let mut reasoning_items: std::collections::HashMap<String, Option<usize>> =
                     std::collections::HashMap::new();
-                // Text parts of one item become one input item, keyed by the
-                // item id carried in the provider options.
-                let mut text_items: std::collections::HashMap<String, usize> =
+                // The text parts of one message item reference it once (#468:
+                // each content part streams as its own text part).
+                let mut text_items = std::collections::HashSet::new();
+                // Without `store`, a message item's text parts replay as one
+                // input item that keeps its id and per-part content (#468).
+                let mut replayed_text_items: std::collections::HashMap<String, usize> =
                     std::collections::HashMap::new();
                 for part in content {
                     match part {
@@ -139,11 +142,13 @@ pub(crate) fn convert_responses_input_with_conversation(
                                 continue;
                             }
                             if store && let Some(ref id) = id {
-                                input.push(json!({ "type": "item_reference", "id": id }));
+                                if text_items.insert(id.clone()) {
+                                    input.push(json!({ "type": "item_reference", "id": id }));
+                                }
                                 continue;
                             }
                             if let Some(ref id) = id {
-                                if let Some(&index) = text_items.get(id) {
+                                if let Some(&index) = replayed_text_items.get(id) {
                                     let part = json!({ "type": "output_text", "text": text });
                                     input[index]["content"]
                                         .as_array_mut()
@@ -159,7 +164,7 @@ pub(crate) fn convert_responses_input_with_conversation(
                                     if let Some(phase) = phase {
                                         item["phase"] = json!(phase);
                                     }
-                                    text_items.insert(id.clone(), input.len());
+                                    replayed_text_items.insert(id.clone(), input.len());
                                     input.push(item);
                                 }
                             } else {
@@ -245,7 +250,9 @@ pub(crate) fn convert_responses_input_with_conversation(
                                 "name": tool_name,
                                 "arguments": serialize_arguments(tool_input),
                             });
-                            if let Some(ref id) = id {
+                            // Without `store`, the client call keeps the item
+                            // id it was streamed with (#468).
+                            if !store && let Some(ref id) = id {
                                 item["id"] = json!(id);
                             }
                             if let Some(ref namespace) = namespace {

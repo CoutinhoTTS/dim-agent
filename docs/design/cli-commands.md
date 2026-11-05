@@ -1807,6 +1807,15 @@ Exported Markdown: /tmp/Session notes.md
 Exported JSON: /tmp/events.json
 
 > /exit
++--------------------------------------------------------+
+| Bye!                                                   |
+|                                                        |
+| Feedback or ideas? Join us on Discord:                  |
+| https://discord.gg/ds35K3TadP                           |
+|                                                        |
+| To resume this session:                                |
+|   dimcode --resume <session-id>                         |
++--------------------------------------------------------+
 $
 
 $ dimcode session export <session-id> --format markdown > notes.md
@@ -1817,6 +1826,9 @@ The prompt keeps keyboard focus and the terminal keeps scrollback. There are no
 new dialogs, overlays or fixed-width columns. Paths and error messages use the
 existing terminal text filter; narrow terminals wrap normally. An empty Session
 exports an empty event list or a Markdown heading without fabricated messages.
+
+Both TUI modes print the feedback invitation when exiting. The resume command
+appears only when there is an active Session to resume.
 
 ## Execution and JSONL output
 

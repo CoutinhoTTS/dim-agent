@@ -468,7 +468,6 @@ async fn startup_admission_rejects_unsafe_connections_and_ambiguous_models_witho
         ),
         ("/contextWindow", json!(0)),
         ("/contextWindow", json!(9_007_199_254_740_992u64)),
-        ("/maxOutputTokens", json!(64001)),
         ("/autoCompactWindow", json!(64001)),
         ("/autoCompactWindow", json!(0)),
     ] {
@@ -1058,6 +1057,41 @@ async fn forks_and_new_sessions_retain_the_adopted_connection_after_the_source_c
         seen.lock().unwrap().last().unwrap().0.path(),
         "/new/v1/chat/completions"
     );
+    server.shutdown();
+    server.join().await.unwrap();
+    fixture.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_output_limit_above_the_window_is_adopted_with_the_derived_allowance() {
+    let home = std::env::temp_dir().join(format!("dim-startup-allowance-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let seen = Seen::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let fixture = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new().fallback(endpoint).with_state(seen.clone()),
+        )
+        .into_future(),
+    );
+    let server = start(&home).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut above = startup(&base, "openai-compatible", "private-above");
+    above["maxOutputTokens"] = json!(64001);
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"model":{"modelId":"startup-fixture"},"startup":above}),
+        )
+        .await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    submit(&mut client, &sid, "main").await;
+    let body = seen.lock().unwrap().last().unwrap().2.clone();
+    assert_eq!(body["max_tokens"], 32000, "{body}");
     server.shutdown();
     server.join().await.unwrap();
     fixture.abort();

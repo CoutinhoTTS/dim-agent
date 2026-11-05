@@ -6241,7 +6241,12 @@ fn git_branch(head: &std::path::Path) -> Option<String> {
 /// Its margin and padding are the welcome box's, so the two line up.
 fn goodbye_panel(resume: Option<&str>) -> Vec<String> {
     let margin = " ".repeat(MARGIN);
-    let mut body = vec![t("Bye!").to_owned()];
+    let mut body = vec![
+        t("Bye!").to_owned(),
+        String::new(),
+        t("Feedback or ideas? Join us on Discord:").to_owned(),
+        "https://discord.gg/ds35K3TadP".to_owned(),
+    ];
     if let Some(session_id) = resume {
         body.extend([
             String::new(),
