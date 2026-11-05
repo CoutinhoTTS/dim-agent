@@ -273,7 +273,7 @@ pub(crate) fn sources(environment: &Environment, workspace: Option<&Workspace>) 
     let claude_path = display_path(StoreId::ClaudeUser, environment, workspace);
     let claude = environment
         .claude_file()
-        .map(|file| read_claude(&file, workspace));
+        .map(|file| read_claude(&file, workspace, MAX_SOURCE_BYTES));
     rows.push(match &claude {
         Some(Ok(file)) => match claude_user(file) {
             Ok(prepared) => ready(StoreId::ClaudeUser, claude_path, &prepared),
@@ -388,7 +388,7 @@ fn prepare(
             let file = environment
                 .claude_file()
                 .ok_or_else(|| StoreError::unreadable("the home directory is not set"))?;
-            claude_user(&read_claude(&file, None)?)
+            claude_user(&read_claude(&file, None, MAX_SOURCE_BYTES)?)
         }
         StoreId::ClaudeLocal => {
             let workspace =
@@ -396,24 +396,24 @@ fn prepare(
             let file = environment
                 .claude_file()
                 .ok_or_else(|| StoreError::unreadable("the home directory is not set"))?;
-            let parsed = read_claude(&file, Some(workspace))?;
+            let parsed = read_claude(&file, Some(workspace), MAX_SOURCE_BYTES)?;
             let (prepared, _) = claude_local(&parsed, workspace)?;
             Ok(prepared)
         }
         StoreId::CodexUser | StoreId::CodexProject => {
             let file = store_path(store, environment, workspace)?;
-            let text = read_text(&file)?;
+            let text = read_text(&file, MAX_SOURCE_BYTES)?;
             prepared(codex_entries(&text)?, Map::new())
         }
         StoreId::OmpUser => {
             let file = environment
                 .omp_file()
                 .ok_or_else(|| StoreError::unreadable("the home directory is not set"))?;
-            omp(&read_json(&file)?)
+            omp(&read_json(&file, MAX_SOURCE_BYTES)?)
         }
         StoreId::OmpProject => {
             let file = store_path(store, environment, workspace)?;
-            omp(&read_json(&file)?)
+            omp(&read_json(&file, MAX_SOURCE_BYTES)?)
         }
     }
 }
@@ -488,8 +488,8 @@ fn display_path(
     path.display().to_string()
 }
 
-fn read_json(path: &Path) -> Result<Value, StoreError> {
-    let text = read_text(path)?;
+fn read_json(path: &Path, limit: u64) -> Result<Value, StoreError> {
+    let text = read_text(path, limit)?;
     serde_json::from_str(&text).map_err(|error| {
         StoreError::malformed(format!(
             "the file is not valid JSON at line {} column {}",
@@ -499,28 +499,30 @@ fn read_json(path: &Path) -> Result<Value, StoreError> {
     })
 }
 
-fn read_text(path: &Path) -> Result<String, StoreError> {
-    let bytes = read_file(path)?;
+fn read_text(path: &Path, limit: u64) -> Result<String, StoreError> {
+    let bytes = read_file(path, limit)?;
     String::from_utf8(bytes).map_err(|_| StoreError::malformed("the file is not UTF-8"))
 }
 
-fn read_file(path: &Path) -> Result<Vec<u8>, StoreError> {
-    let file = open_source(path)?;
+fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>, StoreError> {
+    let file = open_source(path, limit)?;
     let mut bytes = Vec::new();
-    file.take(MAX_SOURCE_BYTES + 1)
+    file.take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| StoreError::unreadable(error.to_string()))?;
-    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(StoreError::too_large(format!(
-            "the file exceeds {MAX_SOURCE_BYTES} bytes"
+            "the file exceeds {limit} bytes"
         )));
     }
     Ok(bytes)
 }
 
 /// Opens a store file after the same checks every source gets: it must exist,
-/// be a regular file, and be openable.
-fn open_source(path: &Path) -> Result<std::fs::File, StoreError> {
+/// be a regular file, be openable, and its metadata must not exceed `limit`.
+/// The open file is measured again, and the read paths measure what they
+/// actually read, because the file can grow after this check.
+fn open_source(path: &Path, limit: u64) -> Result<std::fs::File, StoreError> {
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(StoreError::unreadable("the path is not a regular file")),
@@ -536,6 +538,11 @@ fn open_source(path: &Path) -> Result<std::fs::File, StoreError> {
         .map_err(|error| StoreError::unreadable(error.to_string()))?;
     if !metadata.is_file() {
         return Err(StoreError::unreadable("the path is not a regular file"));
+    }
+    if metadata.len() > limit {
+        return Err(StoreError::too_large(format!(
+            "the file exceeds {limit} bytes"
+        )));
     }
     Ok(file)
 }
@@ -617,13 +624,20 @@ impl Projects {
     }
 }
 
-fn read_claude(path: &Path, workspace: Option<&Workspace>) -> Result<ClaudeFile, StoreError> {
-    parse_claude(open_source(path)?, workspace, MAX_SOURCE_BYTES)
+/// Reads and parses one Claude file. `limit` is the size cap; production
+/// passes `MAX_SOURCE_BYTES`.
+fn read_claude(
+    path: &Path,
+    workspace: Option<&Workspace>,
+    limit: u64,
+) -> Result<ClaudeFile, StoreError> {
+    parse_claude(open_source(path, limit)?, workspace, limit)
 }
 
 /// Parses the file as it streams through the capped reader, so a discovery
 /// call holds no copy of the file and its memory does not follow the file's
-/// size. `limit` is the size cap; production passes `MAX_SOURCE_BYTES`.
+/// size. The size was already checked from the metadata by `open_source`;
+/// `limit` bounds this read too, in case the file grew since.
 fn parse_claude<R: Read>(
     reader: R,
     workspace: Option<&Workspace>,
@@ -1391,6 +1405,82 @@ env_http_headers = { "X-Env" = "OTHER" }
         let file =
             parse_claude(std::fs::File::open(&path).unwrap(), None, text.len() as u64).unwrap();
         assert_eq!(file.mcp_servers, Some(json!({"x": {"command": "x"}})));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The size is classified from the metadata before the parse, so a syntax
+    /// error near the start cannot answer `malformed` for a file over the
+    /// cap. The lowered cap is above the parser's read buffer: a larger read
+    /// would trip the counting reader's own cap and hide the metadata check.
+    #[test]
+    fn a_malformed_claude_file_just_over_a_lowered_cap_is_too_large() {
+        const LIMIT: u64 = 64 * 1024;
+        let root = std::env::temp_dir().join(format!("dim-discovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(".claude.json");
+        let mut text = String::from("}");
+        text.push_str(&" ".repeat(LIMIT as usize));
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(text.len() as u64, LIMIT + 1);
+        let error = match read_claude(&path, None, LIMIT) {
+            Ok(_) => panic!("the over-cap file parses"),
+            Err(error) => error,
+        };
+        assert_eq!(error.state, State::TooLarge);
+        assert_eq!(error.message, format!("the file exceeds {LIMIT} bytes"));
+        // At the cap the parse runs and reports the syntax error.
+        let error = match read_claude(&path, None, text.len() as u64) {
+            Ok(_) => panic!("the malformed file parses"),
+            Err(error) => error,
+        };
+        assert_eq!(error.state, State::Malformed);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every store reads through `open_source`, so the OMP row is classified
+    /// from its metadata too.
+    #[test]
+    fn a_malformed_omp_file_just_over_a_lowered_cap_is_too_large() {
+        const LIMIT: u64 = 64 * 1024;
+        let root = std::env::temp_dir().join(format!("dim-discovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("mcp.json");
+        let mut text = String::from("}");
+        text.push_str(&" ".repeat(LIMIT as usize));
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(text.len() as u64, LIMIT + 1);
+        let error = read_json(&path, LIMIT).unwrap_err();
+        assert_eq!(error.state, State::TooLarge);
+        assert_eq!(error.message, format!("the file exceeds {LIMIT} bytes"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Both reads of one store answer `too-large`: the `sources` row and the
+    /// `from` document the import reads. The fixture file is sparse, so it
+    /// costs no disk space.
+    #[test]
+    fn an_oversized_malformed_store_is_too_large_from_sources_and_from() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("dim-discovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(".claude.json");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"}{").unwrap();
+        file.set_len(MAX_SOURCE_BYTES + 1).unwrap();
+        drop(file);
+        let environment = Environment {
+            home: Some(root.clone()),
+            ..Default::default()
+        };
+        let error = document(StoreId::ClaudeUser, &environment, None).unwrap_err();
+        assert_eq!(error.state, State::TooLarge);
+        let rows = sources(&environment, None);
+        let user = rows
+            .iter()
+            .find(|row| row.id == "claude-code:user")
+            .expect("the user row is reported");
+        assert_eq!(user.state, State::TooLarge);
+        assert!(user.error.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

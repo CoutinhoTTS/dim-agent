@@ -2301,6 +2301,7 @@
         "assert",
         "assert_eq",
         "format",
+        "json",
         "panic",
         "vec"
       ]
@@ -22352,6 +22353,7 @@
         "path Environment::from_vars",
         "path MAX_SOURCE_BYTES",
         "path Prepared",
+        "path StoreId::ClaudeUser",
         "path StoreId::CodexProject",
         "path StoreId::OmpUser",
         "path Workspace",
@@ -22361,7 +22363,10 @@
         "path document",
         "path omp",
         "path parse_claude",
-        "path prepared"
+        "path prepared",
+        "path read_claude",
+        "path read_json",
+        "path sources"
       ]
     },
     {

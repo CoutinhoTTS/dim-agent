@@ -1158,9 +1158,11 @@ An out-of-range value makes that entry `invalid` under D20; it is never clamped 
 `${NAME}` is expanded and no `headersHelper` or other command is run.
 
 Bounds and files: each source file is read through one handle, must be a regular file, and is
-refused as `too-large` above 32 MiB; it is never truncated. A user store follows symlinks. A
-project store is canonicalized and must stay inside the authorized workspace, or the row is
-`unreadable` and its target is never read. Reading and parsing run on a blocking task.
+refused as `too-large` above 32 MiB from its metadata before it is read; it is never truncated.
+A file that grows past the cap after that check is still refused when the read reaches it. A user
+store follows symlinks. A project store is canonicalized and must stay inside the authorized
+workspace, or the row is `unreadable` and its target is never read. Reading and parsing run on a
+blocking task.
 `~/.claude.json` is parsed as a stream, so no call holds a copy of the file; a non-UTF-8 byte
 inside a skipped member may go unnoticed, while every member the import uses is still decoded as
 UTF-8. The converted document still passes the import's own 8 MiB and 1,000-entry caps, and a
