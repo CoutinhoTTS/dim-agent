@@ -498,8 +498,43 @@ async fn create(fixture: &Fixture, interactive: bool) -> (Client, String) {
         .await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
+    let attached = client.rpc("session.attach", json!({"sessionId":id})).await;
+    assert_ok(&attached);
+    clients_applied(
+        fixture,
+        &id,
+        attached["result"]["attachedClients"].as_u64().unwrap(),
+    )
+    .await;
     (client, id)
+}
+
+async fn clients_applied(fixture: &Fixture, id: &str, count: u64) {
+    let session = fixture.server.agent().unwrap().get_session(id).unwrap();
+    let audience = format!(
+        "{count} client connection{} attached:",
+        if count == 1 { "" } else { "s" }
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let events = branch_events(&session, "main", ..).await.unwrap();
+            let presence = events.iter().find(|event| {
+                matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.blocks.iter().any(|block| matches!(block,
+                        dim_agent_types::InputBlock::Raw { text, .. } if text.contains(&audience))))
+            });
+            if presence.is_some_and(|presence| {
+                events.iter().any(|event| {
+                matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == presence.id)
+            })
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the attached audience is applied before the conversation");
 }
 
 /// Sends `text` as input without waiting for the run it may start.
@@ -528,11 +563,16 @@ async fn submit(client: &mut Client, id: &str, text: &str) {
 /// first one waits.
 async fn attach(fixture: &Fixture, session_id: &str) -> Client {
     let mut client = Client::new_version(&fixture.server, false, 3).await;
-    assert_ok(
-        &client
-            .rpc("session.attach", json!({"sessionId": session_id}))
-            .await,
-    );
+    let attached = client
+        .rpc("session.attach", json!({"sessionId": session_id}))
+        .await;
+    assert_ok(&attached);
+    clients_applied(
+        fixture,
+        session_id,
+        attached["result"]["attachedClients"].as_u64().unwrap(),
+    )
+    .await;
     client
 }
 
@@ -999,10 +1039,10 @@ async fn a_sharer_answers_compaction_due_when_the_shared_preflight_refuses() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());
@@ -1034,10 +1074,10 @@ async fn a_sharer_is_accepted_when_the_shared_preflight_starts() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());
@@ -1135,10 +1175,10 @@ async fn disabling_during_the_usage_check_starts_no_request() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());
@@ -1162,10 +1202,10 @@ async fn dismissing_during_the_usage_check_starts_no_request() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());

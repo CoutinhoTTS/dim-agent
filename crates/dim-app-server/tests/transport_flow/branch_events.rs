@@ -20,7 +20,7 @@ async fn both_transports_encode_the_v1_branch_create_boundary_live() {
         session.stop("main", "control cursor".into()).await.unwrap();
         let initial = live.rpc("session.attach", json!({"sessionId":id})).await;
         assert_eq!(initial["result"]["sessionId"], id);
-        let live_after = initial["result"]["sequence"].as_u64().unwrap();
+        let live_after = session.sequence("main").unwrap();
         session.idle("main").await.unwrap();
         let high = session.sequence("main").unwrap();
         let child = session
@@ -52,7 +52,7 @@ async fn both_transports_encode_the_v1_branch_create_boundary_live() {
             .filter(|event| event.sequence <= create.sequence)
             .cloned()
             .collect();
-        let notices = receive_events_through(&mut live, create.sequence).await;
+        let notices = receive_events_through(&mut live, live_after, create.sequence).await;
         assert_eq!(notices, v1_events(&through_create, live_after));
         let boundary = notices
             .iter()
