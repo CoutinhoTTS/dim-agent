@@ -31,8 +31,9 @@ Existing alternatives do not supply a client read:
 
 Expose the existing preview through the existing WorkspaceTools Session part.
 No output event stream, file-read endpoint, new Capability or core mechanism is
-needed. This contract does not settle member controls (#263), recently ended
-task retention, full-file browsing, or Workflow task presentation.
+needed. This contract settles paged reading of a task's registered output file;
+it does not settle member controls (#263), recently ended task retention,
+export, or Workflow task presentation.
 
 ## 2. Client method
 
@@ -128,9 +129,9 @@ Session cannot select a file; a task whose file was cleaned answers
 unknown task answers `exec_task_unknown` saying no such task is known on the
 branch, since an ended task's file is still readable there. The
 `session.exec.output` tail keeps its preview rule and its
-`exec_task_unknown` once the live capture is cleared. The full-file browsing
-this method provides was left open by §1; it does not settle a daemon-hosted
-open/export method, retention, or member controls.
+`exec_task_unknown` once the live capture is cleared. This paged read is the
+full-file browsing §1 settles; it does not settle a daemon-hosted open/export
+method, retention, or member controls.
 
 ## 3. Ownership and lifecycle
 
