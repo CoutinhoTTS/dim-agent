@@ -558,13 +558,31 @@ fn servers_of(object: &Map<String, Value>) -> Result<Map<String, Value>, StoreEr
 /// and every other project's record is skipped with `IgnoredAny`, so the parse
 /// never builds it; a file with thousands of project records costs one scan,
 /// not one tree.
-#[derive(Debug)]
+///
+/// `Debug` is redacted: this type and `Projects` hold the raw `mcpServers`
+/// values, which may be an environment, a header or a bearer token. It names
+/// the type and counts, never a value, as `Document` does.
 struct ClaudeFile {
     mcp_servers: Option<Value>,
     projects: Option<Projects>,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for ClaudeFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClaudeFile")
+            .field(
+                "mcp_servers",
+                &self
+                    .mcp_servers
+                    .as_ref()
+                    .map(|value| value.as_object().map_or(0, Map::len)),
+            )
+            .field("projects", &self.projects)
+            .finish()
+    }
+}
+
+/// The `projects` member of `ClaudeFile`; see there for the redacted `Debug`.
 enum Projects {
     NotObject,
     /// The record under the canonical cwd and the one under the request's
@@ -575,9 +593,20 @@ enum Projects {
     },
 }
 
+impl fmt::Debug for Projects {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotObject => f.write_str("Projects::NotObject"),
+            Self::Records { .. } => f
+                .debug_struct("Projects::Records")
+                .field("retained", &self.retained())
+                .finish(),
+        }
+    }
+}
+
 impl Projects {
     /// How many project records the parse kept.
-    #[cfg(test)]
     fn retained(&self) -> usize {
         match self {
             Self::NotObject => 0,
@@ -1227,6 +1256,30 @@ env_http_headers = { "X-Env" = "OTHER" }
         let text = format!("{}  {{\"mcpServers\": {{}}}}", " ".repeat(9 * 1024));
         let file = parse_claude(text.as_bytes(), None, MAX_SOURCE_BYTES).unwrap();
         assert_eq!(file.mcp_servers, Some(json!({})));
+    }
+
+    /// The parsed-store types format counts only: a fixture secret must not
+    /// reach a log through `{:?}`.
+    #[test]
+    fn parsed_store_values_stay_out_of_debug() {
+        const SECRET: &str = "fixture-store-secret";
+        let text = json!({
+            "mcpServers": {
+                "remote": {"headers": {"Authorization": format!("Bearer {SECRET}")}}
+            },
+            "projects": {
+                "/workspace": {"mcpServers": {"local": {"env": {"TOKEN": SECRET}}}}
+            }
+        })
+        .to_string();
+        let workspace = workspace("/workspace");
+        let file = parse_claude(text.as_bytes(), Some(&workspace), MAX_SOURCE_BYTES).unwrap();
+        let formatted = format!("{file:?}");
+        assert!(!formatted.contains(SECRET), "{formatted}");
+        assert!(formatted.starts_with("ClaudeFile"), "{formatted}");
+        assert!(formatted.contains("mcp_servers: Some(1)"), "{formatted}");
+        let projects = format!("{:?}", file.projects.as_ref().expect("the record"));
+        assert_eq!(projects, "Projects::Records { retained: 1 }");
     }
 
     #[test]
