@@ -9,15 +9,17 @@ It follows the [design rules](../architecture/rust-agent/principles.md),
 
 `/effort` changes reasoning effort, `/fast` selects a supported service tier, and
 `/agent` adopts an existing Agent profile's prompt and optional model on the current
-Session's `main` branch. The profile is a configuration template for this operation.
-The Session keeps its Agent owner, identity, workspace, tools, permissions,
-capabilities and existing branches. `AgentProfile.tools` is not applied.
+Session's `main` branch. The profile is a configuration template for this operation,
+and the configuration it produces records the profile's id, so a client can read back
+which profile a branch is configured with (§Agent configuration adoption). The Session
+keeps its Agent owner, identity, workspace, tools, permissions, capabilities and
+existing branches. `AgentProfile.tools` is not applied.
 
 | Owner | Responsibility |
 | --- | --- |
 | Agents, process | Resolve immutable profiles by exact ID from the existing directory; no second mode catalog. |
 | Provider, process | Validate advertised effort/tier support and produce typed model configuration. |
-| Agents, Session entry | Serve profile adoption through `sessionMethods`; no adopted state or background reconciler. |
+| Agents, Session entry | Serve profile adoption and its readback through `sessionMethods`; the record rides on the adopted configuration, so the entry keeps no adopted state and no background reconciler. |
 | Prompt, branch | Order configuration commands, supersede work, atomically publish facts and rebuild state. |
 | PromptSources, Session | Construct the existing `dim/session` System entry from the selected text. |
 | CLI | Parse commands, list choices and render replies; no preference authority or shadow configuration. |
@@ -28,10 +30,11 @@ per-call lookup. Rpc's generic Session-method dispatch does not implement modes.
 
 `AgentsSession` injects process `AgentIndex` and Session `TreeCommands` and
 `sessionMethods`, registers the namespace `session.agent` with `sessionMethods`
-from its `apply`, and reads the addressed branch's public Prompt service per
-call. The Session's method table owns admission, tasks and cleanup of the
-registration; unload reports interruption and releases the waiter without
-revoking committed Prompt commands. The entry stores no adopted configuration. Its implementation is
+from its `apply`, and reads the addressed branch's public Prompt service and
+published `PromptSnapshot` per call. The Session's method table owns admission,
+tasks and cleanup of the registration; unload reports interruption and releases the
+waiter without revoking committed Prompt commands. The entry stores no adopted
+configuration and no profile record of its own. Its implementation is
 [Agents' configuration entry](../../crates/dim-app-server/src/agents/configuration.rs).
 
 ## Existing mechanisms
@@ -281,14 +284,17 @@ so a client can send back what it read.
 
 ## Agent configuration adoption
 
-Add one mutating Session method, contributed by Agents in namespace `session.agent`:
+Add one mutating Session method and one read, contributed by Agents in namespace
+`session.agent`:
 
 ```text
 session.agent.update {sessionId, branchId, agentId}
   -> {outcome: "adopted" | "unchanged"}
+session.agent.get {sessionId, branchId}
+  -> {agentId?}
 ```
 
-It uses existing `sessionMethods` admission/cancellation and supports `main` only.
+The update uses existing `sessionMethods` admission/cancellation and supports `main` only.
 Agents resolves a currently available profile by exact ID. Its `systemPrompt`
 replaces the `dim/session` entry. An absent profile model preserves the adopted
 model and preferences. A specified model adopts the resolved target's defaults,
@@ -315,6 +321,26 @@ dropping its waiter does not revoke a committed command. Prompt owns cancellatio
 on supersession/unload. This adds no second service key or named-service adapter;
 cross-language exposure remains C4's work, not an assumed F3 prerequisite.
 
+**The record and its readback.** The adoption stamps the profile's id into
+`metadata` of the `context/configured` settings it publishes, materializing the
+previous configuration when the profile names no model. A model selection
+resolved by Provider writes a fresh metadata without the record; a preference-only
+update copies the metadata it keeps, so `/effort` and `/fast` retain it and a new
+model choice clears it. An identical adoption still writes nothing and reports
+`unchanged`: the record is part of the settings the comparison covers. The record
+is the adopted configuration's own metadata, not a new identity — `SessionInfo.agentId`
+stays the Session's creation agent.
+
+`session.agent.get` answers the record from the branch's published `PromptSnapshot`,
+the derived value `session.attach` reads its `model` from, so a child cut after the
+adoption answers the parent's profile and one cut before answers none. Absent means
+the branch's effective configuration was never adopted from a profile; the client
+then shows `SessionInfo.agentId`. An ended branch answers `branch_ended`, the error
+the Session already gives for an operation on it, an unknown branch
+`session_invalid_input`, and a missing branch id is refused `invalid_params`. Both
+methods are v3 and are listed through `session.methods`: a v1 or v2 client has
+`unknown_method`.
+
 This is Prompt configuration behavior, not runtime infrastructure. Neither
 `ConfigureControl` nor `ConfigureUpdate` changes. Source-name-only loading cannot
 carry selected profile text without mutating a shared source behind another
@@ -334,6 +360,12 @@ matching periodic refresh. It does not reload static base/Session sources and so
 cannot restore the creation-time prompt after a switch. Opening already preserves
 System entries. Restored Sessions retain adopted prompt/model facts; new branches
 inherit their cut, and existing branches do not follow later main changes.
+
+### Decisions
+
+| # | Decision | Rejected alternative | Why |
+| --- | --- | --- | --- |
+| D1 | An adoption from a profile records the profile's id in the adopted configuration's `metadata`, and `session.agent.get` answers that record | A profile reference kept by the Agents Session entry, a new adoption event, or a write-only profile | Clients need a readback that survives another client, reconnect and restart, and the adopted configuration is already the branch's durable fact; its metadata is descriptive data on that fact, not a new identity beside `SessionInfo.agentId`. Entry state would be lost on unload and would need its own event, and a write-only profile leaves the client unable to tell which profile the branch runs |
 
 ## Ordering and failure
 
@@ -425,15 +457,15 @@ become model input; headless prompt/stdin content keeps its literal meaning.
 | --- | --- |
 | Provider / current model-update entry | Apply preferences to an adopted base when no target is supplied; apply the per-field set/clear patch, clearing one field from the model's declared configuration while keeping the sibling; preserve explicit-target behavior. |
 | App Server `session.attach` | Derive the reply's `model` and `modelPreferences` from the latest adopted configuration, falling back to the creation configuration. |
-| Agents Session entry | Resolve a profile and submit prompt/model through one contributed method. |
+| Agents Session entry | Resolve a profile and submit prompt/model through one contributed method, and answer a branch's recorded profile from its published snapshot. |
 | Prompt | Accept frozen sources through its current command/adoption path; expose adopted ModelConfiguration in its existing published snapshot. |
 | PromptSources | Reuse System-entry construction and refresh dynamic sources only. |
 | CLI | Three commands, choice display and replies. |
 
 New public content is the absent-target model-update semantics, the per-field
-clear action and the attach reply's current source, the Agent Session method,
-Prompt's resolved-source operation and its derived configuration snapshot
-field. Each serves the operations above.
+clear action and the attach reply's current source, the Agent Session methods and
+the adopted configuration's profile record, Prompt's resolved-source operation
+and its derived configuration snapshot field. Each serves the operations above.
 No core port, durable event, persistence format, loader option, lifecycle stage,
 dependency manager or general configuration registry is added.
 
