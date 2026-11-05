@@ -731,7 +731,7 @@ pub async fn apply_import(
 pub fn import_failure(error: crate::Error) -> crate::Error {
     match crate::client::app_error(&error) {
         Some("mcp_settings_conflict") => t(
-            "The MCP source changed since the preview; nothing was imported. Preview again.",
+            "The MCP source changed since the preview; no entry was imported, and an entry it would have replaced may now be disabled. Preview again.",
         )
         .into(),
         Some("mcp_import_partial") => t(

@@ -1207,7 +1207,7 @@ fn mcp_import_project_sends_withheld_values_to_the_user_record() {
 }
 
 /// A source that changed since the preview refuses the apply; the preview it
-/// printed stays, nothing is written and the command says to preview again.
+/// printed stays, no entry is written and the command says to preview again.
 #[test]
 fn mcp_import_reports_a_stale_revision() {
     let home = Home::new();
@@ -1234,7 +1234,7 @@ fn mcp_import_reports_a_stale_revision() {
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains(
-            "The MCP source changed since the preview; nothing was imported. Preview again."
+            "The MCP source changed since the preview; no entry was imported, and an entry it would have replaced may now be disabled. Preview again."
         ),
         "{}",
         String::from_utf8_lossy(&output.stderr)

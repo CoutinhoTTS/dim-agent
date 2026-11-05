@@ -525,10 +525,12 @@ and 32 in `unsupported`, and `omitted` counts the distinct names those caps left
 the document and re-checks every resolution against the source it reads at `expectedVersion`; it
 never trusts a preview result sent back. Every accepted entry enters that one snapshot and is
 committed by one source update: one revision check, one source write, and no entry visible before
-the commit. A project import then writes its withheld records in one `mcp-secrets` update (D25).
+the commit. A project import withdraws the enablement record of every entry it writes before the
+source update and writes its withheld records after it (D24, D25).
 A refused resolution answers before either write, so the request changes nothing; a stale revision
-answers `mcp_settings_conflict`; a request that accepts no entry writes nothing. Entries it does
-not touch keep their stored value, broken entries included (D18).
+answers `mcp_settings_conflict` and leaves the source as it was, though an entry the import would
+have replaced may be left disabled (D24); a request that accepts no entry writes nothing. Entries
+it does not touch keep their stored value, broken entries included (D18).
 
 ### D24. An import never enables anything
 
@@ -537,10 +539,15 @@ The document's `enabled` member is not carried as enablement. A user entry is wr
 record, so only `mcp.set_enabled` can enable it (ADR 003 D3). An entry whose configuration is
 identical is not rewritten, so an enabled user entry keeps its enablement. Every id a project
 import writes, imported or replaced, has its `mcp-projects` record withdrawn before the source
-write, so a replace starts disabled like an import; this includes a destination whose entry an
-external edit removed and whose record stayed. The record is inert while no entry holds the id,
-so withdrawing one changes nothing else, and the same write is what `mcp.remove` would do if the
-entry were still there.
+write, so a replace starts disabled like an import and an imported configuration never runs
+enabled; this includes a destination whose entry an external edit removed and whose record
+stayed. Withdrawing first makes an import fail closed: one that answers `mcp_settings_conflict`,
+or fails before or during the source write, writes no entry, but an entry it would have replaced
+may be left disabled, and `mcp.set_enabled` enables it again. The withdrawn records are not
+restored after a failed write, because two imports that replace one entry can interleave so that
+the failed one re-enables the entry the successful one wrote. The record is inert while no entry
+holds the id, so withdrawing one changes nothing else, and the same write is what `mcp.remove`
+would do if the entry were still there.
 
 ### D25. A project import writes through the withheld split
 
@@ -561,13 +568,15 @@ the import nor leaks into the imported entry: the import carries the withheld va
 the hazard `mcp.save` refuses (D17) does not arise here. `replace` and `rename` write the same
 pair as `import`.
 
-The two stores cannot commit together. The source update commits first; every written id has its
-enablement withdrawn before it (D24), so the entry cannot run while it still reads with its old
-record, which it does until the `mcp-secrets` update commits. A record write that fails after the
-source commit answers `mcp_import_partial`: the entries are written with their skeletons and
-their withheld values are missing or old, and replacing the entries again rewrites both. The
-reverse order is not used: it would write a record whose source entry does not exist yet, and a
-failed source write would leave the old entry running with the new import's credentials.
+The two stores cannot commit together. Every written id has its enablement record withdrawn
+before the source write (D24), so the entry cannot run while it reads its new skeleton with its
+old record, which it does until the `mcp-secrets` update commits; a withdrawal that fails answers
+before the source write, leaving `.mcp.json` as it was. The source update commits next and the
+withheld records last. A record write that fails after the source commit answers
+`mcp_import_partial`: the entries are written with their skeletons, their withheld values are
+missing or old, and replacing the entries again rewrites both. The reverse order is not used: it
+would write a record whose source entry does not exist yet, and a failed source write would leave
+the old entry running with the new import's credentials.
 
 ## 4. Contract
 
@@ -1035,20 +1044,23 @@ An `id` the document does not contain and a `newId` on another action are `inval
 The apply re-parses the document and re-checks every resolution against the source it reads at
 `expectedVersion`; it uses no preview result (D23). Every accepted entry enters that one snapshot
 and is committed by one source update, so one compare-and-set and one settings write cover the
-whole selection. A refused resolution answers before the write, so nothing changes:
-`mcp_settings_conflict` for a stale revision, `mcp_import_conflict` for a resolution the source
-does not allow. Entries it does not touch keep their stored value, broken entries included (D18).
+whole selection. A `mcp_import_conflict` refusal answers before any write, so nothing changes. A
+stale revision answers `mcp_settings_conflict` and leaves the source's entries as they were,
+though an entry the import would have replaced may be left disabled (D24). Entries it does not
+touch keep their stored value, broken entries included (D18).
 A request that accepts no entry writes nothing and answers the source's current revision.
 
 An import never enables anything (D24): the document's `enabled` member is not carried as
 enablement, a user entry is written with `enabled: false`, and a project entry is written without
 the member and gets no `mcp-projects` record. Every id a project import writes, replaced ones
-included, has its enablement record withdrawn before the source write. A project import writes
-through the withheld split (D25): each accepted entry enters the source as its public skeleton,
-and the workspace's `mcp-secrets` record receives the withheld members, replacing or removing the
-destination's record. The records are written in one update after the source commit; if that
-write fails, the reply is `mcp_import_partial` and replacing the entries again rewrites both
-stores.
+included, has its enablement record withdrawn before the source write, so an imported
+configuration never runs enabled and a failed compare-and-set writes no entry but leaves an entry
+the import would have replaced disabled; `mcp.set_enabled` enables it again. A project import
+writes through the withheld split (D25): each accepted entry enters the source as its public
+skeleton, and the workspace's `mcp-secrets` record receives the withheld members, replacing or
+removing the destination's record. The records are written in one update after the source commit;
+if that write fails, the reply is `mcp_import_partial` and replacing the entries again rewrites
+both stores.
 
 ## 5. What changes for a client
 

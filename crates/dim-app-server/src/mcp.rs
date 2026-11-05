@@ -1437,9 +1437,13 @@ async fn write(
 ///
 /// A project import writes what a move into project writes (D25): the public
 /// skeleton enters `.mcp.json` and the withheld part the workspace's
-/// user-scope record. The source update commits first and the records second;
-/// a record write that fails after it answers `ImportPartial`, and the source
-/// entries stay as written.
+/// user-scope record. The enablement records are withdrawn first, so an
+/// imported configuration never runs enabled; a compare-and-set that then
+/// fails writes no entry but leaves an entry the import would have replaced
+/// disabled, and `mcp.set_enabled` enables it again. The source update
+/// commits next and the withheld records last; a record failure after the
+/// source commit answers `ImportPartial`, and the source entries stay as
+/// written.
 async fn write_import(
     settings: &Arc<SettingsService>,
     source: SettingsScope,
@@ -1476,13 +1480,15 @@ async fn write_import(
     }
     let workspace = config::workspace(settings, source)?;
     // Every id the import writes, an import or a replace, has its
-    // `mcp-projects` record withdrawn before the write, so an import never
-    // enables anything and a replace starts disabled like an import (D24).
-    let project_enablement = enablement(settings, source, cancel).await;
+    // `mcp-projects` record withdrawn before the source write, so an imported
+    // configuration never runs enabled and a replaced entry cannot run while
+    // it reads its new skeleton with its old record (D24, D25). Withdrawing
+    // first also makes a failed compare-and-set fail closed: it writes no
+    // entry, but an entry it would have replaced stays disabled, and
+    // `mcp.set_enabled` enables it again. A failed withdrawal answers before
+    // the source write, so `.mcp.json` is unchanged.
     for id in changes.keys() {
-        if project_enablement.contains(&workspace, id) {
-            set_project_enabled(settings, source, id, false, cancel).await?;
-        }
+        set_project_enabled(settings, source, id, false, cancel).await?;
     }
     let mut records = Vec::with_capacity(changes.len());
     for (id, configuration) in changes {

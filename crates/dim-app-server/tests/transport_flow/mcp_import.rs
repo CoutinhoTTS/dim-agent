@@ -711,6 +711,155 @@ async fn project_revision(client: &mut Client, project: &std::path::Path) -> Val
     catalog["result"]["projectRevision"].clone()
 }
 
+/// A source compare-and-set that fails writes no entry, but it withdraws
+/// enablement before the source write, so the entry it would have replaced
+/// stays disabled: the fail-closed direction, which `mcp.set_enabled`
+/// reverses. The source keeps the winner's write and nothing of the loser's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_that_loses_the_source_cas_leaves_the_entry_disabled() {
+    let home = scratch("dm-import-cas");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let first = servers_document(json!({
+        "alpha": {"command":"echo","args":["--one"]},
+        "beta": {"command":"echo","args":["--two"]}
+    }));
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":first}),
+        )
+        .await;
+    assert_ok(&preview);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":first,
+                    "expectedVersion":preview["result"]["revision"],
+                    "resolutions":[
+                        {"id":"alpha","action":"import"},
+                        {"id":"beta","action":"import"}
+                    ]
+                }),
+            )
+            .await,
+    );
+    let revision = project_revision(&mut client, &project).await;
+    for id in ["alpha", "beta"] {
+        assert_ok(
+            &client
+                .rpc(
+                    "mcp.set_enabled",
+                    json!({"source":"project","id":id,"cwd":project,"expectedVersion":revision,"enabled":true}),
+                )
+                .await,
+        );
+    }
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(catalog_entry(&catalog, "alpha")["enabled"], true);
+    assert_eq!(catalog_entry(&catalog, "beta")["enabled"], true);
+    let revision = catalog["result"]["projectRevision"].clone();
+    // Each document changes its entry's public skeleton, so the source
+    // revision moves: a replace that only rewrote withheld values would
+    // leave the bytes equal and the loser's compare-and-set would pass.
+    let alpha = servers_document(json!({"alpha": {"command":"alpha-two","args":["--three"]}}));
+    let beta = servers_document(json!({"beta": {"command":"beta-two","args":["--four"]}}));
+    let alpha_id = client
+        .send(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":alpha,
+                "expectedVersion":revision,
+                "resolutions":[{"id":"alpha","action":"replace"}]
+            }),
+        )
+        .await;
+    let beta_id = client
+        .send(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":beta,
+                "expectedVersion":revision,
+                "resolutions":[{"id":"beta","action":"replace"}]
+            }),
+        )
+        .await;
+    let alpha_result = client.response(alpha_id).await;
+    let beta_result = client.response(beta_id).await;
+    assert!(
+        alpha_result.get("error").is_none() != beta_result.get("error").is_none(),
+        "one import wins the source revision: {alpha_result} {beta_result}"
+    );
+    let (winner, loser, loser_result) = if alpha_result.get("error").is_none() {
+        ("alpha", "beta", &beta_result)
+    } else {
+        ("beta", "alpha", &alpha_result)
+    };
+    assert_eq!(
+        loser_result["error"]["data"]["appError"], "mcp_settings_conflict",
+        "the import that lost the write answers a conflict: {loser_result}"
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(
+        catalog_entry(&catalog, winner)["enabled"],
+        false,
+        "the import that committed starts its entry disabled (D24)"
+    );
+    assert_eq!(
+        catalog_entry(&catalog, loser)["enabled"],
+        false,
+        "a failed source write leaves the entry it would have replaced disabled"
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    let (winner_command, loser_command) = if winner == "alpha" {
+        ("alpha-two", "beta-two")
+    } else {
+        ("beta-two", "alpha-two")
+    };
+    assert_eq!(
+        stored["mcpServers"][winner]["command"], winner_command,
+        "the source holds the winner's write: {stored}"
+    );
+    assert_eq!(
+        stored["mcpServers"][loser]["command"], "echo",
+        "the source holds nothing of the loser's write: {stored}"
+    );
+    assert!(
+        !stored.to_string().contains(loser_command),
+        "the loser's write never enters the source: {stored}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Saves an entry in user scope and moves it into the project source, where a
 /// literal value becomes a withheld `mcp-secrets` record.
 async fn move_to_project(
