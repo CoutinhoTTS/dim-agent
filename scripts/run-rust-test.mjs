@@ -38,7 +38,7 @@ await Promise.all(Array.from({length:workspace?2:1},async()=>{
     const started=performance.now();
     const label=`${record.target.name} (${dirname(record.manifest_path)})`;
     console.error(`[test] START ${label}`);
-    const child=spawn(record.executable,args,{cwd:dirname(record.manifest_path),stdio:'inherit',detached:process.platform!=='win32'});
+    const child=spawn(record.executable,args,{cwd:dirname(record.manifest_path),stdio:workspace?['ignore','inherit','inherit']:'inherit',detached:process.platform!=='win32'});
     active.add(child);
     let timedOut=false;
     const timer=setTimeout(()=>{

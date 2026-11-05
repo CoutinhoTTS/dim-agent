@@ -21,6 +21,8 @@ The [Web workspace](../design/web-workspace.md) frontend in `web/` is a separate
 
 Full-workspace CI uses self-hosted macOS ARM64 runners; pull requests run only the check groups their paths need (see [GitHub workflows](../release/README.md#github-workflows)). A separate CLI job uses a self-hosted Windows x64 runner for its native boundary flows; its clipboard fixture writes the runner's current clipboard. Release builds use separate GitHub-hosted VMs matching each target OS and CPU. See the [runner setup and release matrix](../release/README.md#runner-setup).
 
+The macOS clipboard flows use private pasteboards and serialize access to the shared pasteboard server; other tests remain parallel.
+
 Each runner's OS/libc baseline must be recorded and verified before declaring that platform supported. Cross-built executables are checked for the target architecture during staging, but installation and runtime acceptance still require the corresponding target system.
 
 Public Node provider and MCP interoperability fixtures use development dependencies declared in `runtime/package.json`. Install them with `npm ci --prefix runtime --ignore-scripts`; distribution staging uses `--omit=dev` and does not ship those SDKs.
