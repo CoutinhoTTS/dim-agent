@@ -173,7 +173,6 @@ fn source(wire: &mut Wire) {
 /// requests.
 fn started(wire: &mut Wire) {
     hello(wire);
-    wire.created();
     let attach = wire.read("session.attach");
     wire.reply(&attach, attach_record(&attach));
     let history = wire.read("session.history");
@@ -295,7 +294,7 @@ fn tui_mcp_panel_lists_manages_and_tests_entries() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -401,7 +400,7 @@ fn tui_mcp_panel_edits_and_creates_entries() {
                 line.clear();
             }
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/mcp\r");
@@ -460,7 +459,7 @@ fn tui_mcp_panel_seeds_a_remote_patch_without_stored_values() {
     });
     let mut command = home.command();
     command.env_remove("VISUAL").env("EDITOR", &script);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -505,7 +504,7 @@ fn tui_mcp_panel_shows_one_entries_failed_configuration_read() {
         configuration(wire, "notes", "plugin", notes());
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -528,7 +527,6 @@ fn tui_mcp_panel_lists_entries_when_the_read_is_absent() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -561,7 +559,7 @@ fn tui_mcp_panel_lists_entries_when_the_read_is_absent() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -631,7 +629,7 @@ fn tui_mcp_panel_keeps_the_users_text_when_the_revision_is_stale() {
                 line.clear();
             }
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/mcp\r");
@@ -684,7 +682,7 @@ fn tui_mcp_panel_reports_a_refused_write() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    let mut terminal = Terminal::resume_tui(edit_command(&home, &script, false));
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -726,7 +724,7 @@ fn tui_mcp_panel_draws_tool_text_sanitized() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -762,7 +760,7 @@ fn tui_mcp_panel_shows_a_failed_catalog_read() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -1707,7 +1705,7 @@ fn tui_mcp_list_keeps_a_session_state_on_one_line() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp list\r");
@@ -1959,7 +1957,7 @@ fn mcp_disconnect_closes_the_entry_connections() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/mcp disconnect docs\r");
     terminal.until("Disconnected docs.");
@@ -2014,7 +2012,7 @@ fn tui_mcp_panel_keeps_the_users_text_when_a_create_finds_a_conflict() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    let mut terminal = Terminal::resume_tui(edit_command(&home, &script, false));
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -2353,7 +2351,7 @@ fn tui_mcp_panel_marks_a_broken_entry_invalid_and_offers_removal() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -2459,7 +2457,7 @@ fn tui_mcp_panel_removes_the_row_of_the_source_it_names() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp\r");
@@ -2617,7 +2615,7 @@ fn tui_mcp_line_commands_take_the_source_that_picks_the_entry() {
         wire.reply(&set, json!({}));
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/mcp disable docs\r");

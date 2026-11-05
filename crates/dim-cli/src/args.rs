@@ -345,13 +345,6 @@ pub enum Action {
     Version,
 }
 
-/// The registration a hosted leaf `Tui` is (Tui design §3.6).
-#[derive(Clone, Debug)]
-pub struct UiIdentity {
-    pub ui_id: String,
-    pub token: String,
-}
-
 /// The workspace every request names: the launch directory, resolved once as
 /// a UTF-8 string. A `Path` cannot stand in for it, so no request can carry a
 /// path serde refuses or one a lossy conversion would alter; the client's own
@@ -406,11 +399,6 @@ pub struct Options {
     pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
-    /// Set only for a hosted leaf `Tui`.
-    pub ui_identity: Option<UiIdentity>,
-    /// The hosted leaf's Session was created by this invocation, so `resume`
-    /// names a new Session rather than one the user chose to resume.
-    pub created_session: bool,
     /// Use the scrollback client instead of the full terminal UI.
     pub no_tui: bool,
     /// Terminal UI mode for this run; `None` uses the saved default.
@@ -453,8 +441,6 @@ impl Options {
             permission: None,
             directory: None,
             device: false,
-            ui_identity: None,
-            created_session: false,
             no_tui: false,
             fullscreen: None,
             refresh: false,

@@ -106,7 +106,6 @@ fn renamed(request: &Value) -> Value {
 /// Starts the interface on one Session, as the TUI does without `ui.leaf.2`.
 fn startup(wire: &mut Wire, extra: &[&str]) {
     wire.hello(extra);
-    wire.created();
     let attach = wire.read("session.attach");
     wire.reply(&attach, attach_record(&attach));
     let history = wire.read("session.history");
@@ -323,7 +322,7 @@ fn tui_rename_sets_and_clears_the_title_without_submitting_it() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         terminal.write(b"/rename Foo\r");
         terminal.until("Renamed to Foo");
@@ -352,7 +351,7 @@ fn tui_palette_rename_waits_for_the_title() {
             } else {
                 "--scrollback"
             });
-            let mut terminal = Terminal::launch_tui(command);
+            let mut terminal = Terminal::resume_tui(command);
             terminal.until("test / model");
             terminal.write(b"/ren");
             terminal.raw(key);
@@ -381,7 +380,7 @@ fn tui_rename_alone_is_refused_with_the_needs_notice() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         terminal.write(b"/rename");
         terminal.raw(b"\r");
@@ -454,7 +453,7 @@ fn tui_rename_during_a_running_turn_is_a_command_not_a_queued_input() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         terminal.write(b"hello\r");
         is_running.recv_timeout(PATIENCE).unwrap();
@@ -483,7 +482,7 @@ fn tui_rename_without_a_session_sends_nothing() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         terminal.write(b"/new\r");
         terminal.until("new session");
@@ -542,7 +541,7 @@ fn tui_rename_reports_a_daemon_without_the_method() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         terminal.write(b"/rename Foo\r");
         terminal.until("This daemon does not support renaming Sessions");
