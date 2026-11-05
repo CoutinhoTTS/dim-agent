@@ -17782,7 +17782,6 @@
         "path ConnectionHub",
         "path ConnectionPlugin::new",
         "path RpcPlugin::new",
-        "path crate::connection::ConnectionHub",
         "use connection::ConnectionHub",
         "use connection::ConnectionPlugin",
         "use connection::RpcPlugin"
@@ -20209,6 +20208,8 @@
       "to": "dim_app_server",
       "references": [
         "path ServerConfig",
+        "path crate::FollowHold",
+        "path crate::FollowHold::default",
         "use crate::ServerConfig"
       ]
     },

@@ -1651,6 +1651,9 @@ pub(crate) struct ConnectionHub {
     rpc: RwLock<Option<Arc<RpcService>>>,
     pub web: crate::web_entry::WebEntry,
     pub ui: Arc<crate::ui_host::UiHost>,
+    /// Feature `testing`: holds the next subscription's `follow` task.
+    #[cfg(feature = "testing")]
+    follow_hold: Mutex<Option<Arc<crate::FollowHold>>>,
     /// Feature `testing`: fails the next attach's listener registration.
     #[cfg(feature = "testing")]
     fail_attach: std::sync::atomic::AtomicBool,
@@ -1672,6 +1675,8 @@ impl ConnectionHub {
             rpc: RwLock::new(None),
             control,
             config,
+            #[cfg(feature = "testing")]
+            follow_hold: Mutex::new(None),
             #[cfg(feature = "testing")]
             fail_attach: std::sync::atomic::AtomicBool::new(false),
         }
@@ -1752,6 +1757,18 @@ impl ConnectionHub {
             .filter_map(Weak::upgrade)
             .filter(|conn| conn.is_attached(session))
             .count()
+    }
+    /// Holds the next subscription's `follow` task until `release`, so a test
+    /// can keep a retirement in flight. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_follow(&self) -> Arc<crate::FollowHold> {
+        let hold = Arc::new(crate::FollowHold::default());
+        *self.follow_hold.lock().expect("follow hold") = Some(hold.clone());
+        hold
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_follow_hold(&self) -> Option<Arc<crate::FollowHold>> {
+        self.follow_hold.lock().expect("follow hold").take()
     }
     /// Feature `testing`: the next attach fails its listener registration.
     #[cfg(feature = "testing")]

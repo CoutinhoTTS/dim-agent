@@ -638,6 +638,17 @@ impl Connection {
         mut active: Option<watch::Receiver<()>>,
         mut ended: bool,
     ) {
+        #[cfg(feature = "testing")]
+        if let Some(hold) = self.hub.take_follow_hold() {
+            hold.waiting.notify_one();
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    hold.cancelled.notify_one();
+                    hold.release.notified().await;
+                }
+                _ = hold.release.notified() => {}
+            }
+        }
         let version = self.protocol_version();
         let id = session.id().to_owned();
         let mut watches = FuturesUnordered::<StateChange>::new();

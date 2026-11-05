@@ -171,6 +171,17 @@ pub enum ShutdownReason {
     Forced,
 }
 
+/// Feature `testing`: a hold on one subscription's `follow` task. It notifies
+/// `waiting` once it is held, `cancelled` once retirement cancels it, and
+/// returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct FollowHold {
+    pub waiting: tokio::sync::Notify,
+    pub cancelled: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 pub struct RunningServer {
     pub unix_path: Option<PathBuf>,
     pub pipe_name: Option<String>,
@@ -260,20 +271,29 @@ impl RunningServer {
             .get::<AgentIndex>()
             .map(|index| index.idle_admitted())
     }
+    /// Holds the next subscription's `follow` task open until `release`, so a
+    /// test can keep an attach or detach in flight at a known point. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_follow(&self) -> Option<Arc<FollowHold>> {
+        self.root
+            .get::<ConnectionHub>()
+            .map(|hub| hub.hold_next_follow())
+    }
     /// Subscription tasks the server's live connections still track: zero
     /// once every attach, detach and finish has settled. Feature `testing`
     /// only.
     #[cfg(feature = "testing")]
     pub fn live_subscriptions(&self) -> usize {
         self.root
-            .get::<crate::connection::ConnectionHub>()
+            .get::<ConnectionHub>()
             .map_or(0, |hub| hub.live_subscriptions())
     }
     /// Makes the next attach fail its listener registration. Feature `testing`
     /// only.
     #[cfg(feature = "testing")]
     pub fn fail_next_attach(&self) {
-        if let Some(hub) = self.root.get::<crate::connection::ConnectionHub>() {
+        if let Some(hub) = self.root.get::<ConnectionHub>() {
             hub.fail_next_attach();
         }
     }
