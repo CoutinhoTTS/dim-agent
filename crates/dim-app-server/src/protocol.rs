@@ -591,6 +591,10 @@ pub struct Catalog {
     /// Whether Sessions whose origin is `acp` are listed (#557).
     #[serde(default)]
     pub with_acp_sessions: bool,
+    /// Whether the catalog also lists Sessions this daemon closed, which
+    /// keep their stored rows. The flag is part of the cursor's filter set.
+    #[serde(default)]
+    pub include_closed: bool,
 }
 
 /// The workspaces a catalog read selects: one workspace, or any of a set.

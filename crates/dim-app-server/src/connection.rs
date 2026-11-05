@@ -761,12 +761,19 @@ impl Connection {
                     )));
                 }
                 params.limit = Some(limit);
+                let include_closed = params.include_closed;
                 let cancel = self.ids.lock().expect("request identities")[&id]
                     .clone()
                     .expect("catalog reads have cancellation");
                 match rpc
                     .index
-                    .session_catalog(params, None, self.protocol_version(), false, cancel)
+                    .session_catalog(
+                        params,
+                        None,
+                        self.protocol_version(),
+                        include_closed,
+                        cancel,
+                    )
                     .await
                 {
                     Ok(mut page) => {

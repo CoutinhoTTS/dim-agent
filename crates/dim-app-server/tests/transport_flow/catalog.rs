@@ -842,3 +842,148 @@ async fn catalog_activity_time_follows_user_activity_not_housekeeping() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// #1171: a Session this daemon closed stays out of the catalog until the
+/// read asks for it; `includeClosed` lists it marked `closed`, an unknown
+/// parameter is still refused, and a restart forgets the close, so the
+/// default read lists the Session again with no closed mark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_lists_a_closed_session_only_when_asked() {
+    use super::deletion;
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let open = deletion::session(&mut client).await;
+    let closed = deletion::session(&mut client).await;
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId":closed}))
+            .await,
+    );
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.catalog.includeClosed")),
+        "the feature is advertised: {:?}",
+        client.features
+    );
+
+    let page = client.rpc("session.catalog", json!({})).await;
+    assert_ok(&page);
+    let rows = page["result"]["sessions"].as_array().unwrap();
+    assert!(
+        rows.iter().any(|row| row["sessionId"] == open),
+        "the open Session is listed: {page}"
+    );
+    assert!(
+        !rows.iter().any(|row| row["sessionId"] == closed),
+        "the closed Session is not listed: {page}"
+    );
+    assert!(
+        rows.iter().all(|row| row["closed"] == false),
+        "every row carries closed: {page}"
+    );
+
+    let including = client
+        .rpc("session.catalog", json!({"includeClosed":true}))
+        .await;
+    assert_ok(&including);
+    let rows = including["result"]["sessions"].as_array().unwrap();
+    let row = rows
+        .iter()
+        .find(|row| row["sessionId"] == closed)
+        .unwrap_or_else(|| panic!("the closed Session is listed: {including}"));
+    assert_eq!(row["closed"], true, "{including}");
+    assert!(
+        rows.iter()
+            .filter(|row| row["sessionId"] != closed)
+            .all(|row| row["closed"] == false),
+        "{including}"
+    );
+
+    let refused = client
+        .rpc("session.catalog", json!({"unknownField":true}))
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    assert_eq!(
+        refused["error"]["data"]["appError"], "invalid_params",
+        "{refused}"
+    );
+
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // The closed flag is process-local: a daemon that restarts on the same
+    // store lists the Session again, with no closed mark.
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let page = client.rpc("session.catalog", json!({})).await;
+    assert_ok(&page);
+    let rows = page["result"]["sessions"].as_array().unwrap();
+    let row = rows
+        .iter()
+        .find(|row| row["sessionId"] == closed)
+        .unwrap_or_else(|| panic!("the restarted daemon lists it: {page}"));
+    assert_eq!(row["closed"], false, "{page}");
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// #1171: `includeClosed` is part of the cursor's filter set, so a cursor
+/// taken under one filter is refused by the other and continues under its
+/// own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_cursor_belongs_to_one_include_closed_filter() {
+    use super::deletion;
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for _ in 0..3 {
+        deletion::session(&mut client).await;
+    }
+    let first = client.rpc("session.catalog", json!({"limit":1})).await;
+    assert_ok(&first);
+    let open_cursor = first["result"]["nextCursor"].as_str().unwrap().to_owned();
+    let first_including = client
+        .rpc("session.catalog", json!({"limit":1,"includeClosed":true}))
+        .await;
+    assert_ok(&first_including);
+    let closed_cursor = first_including["result"]["nextCursor"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for params in [
+        json!({"limit":1,"cursor":open_cursor,"includeClosed":true}),
+        json!({"limit":1,"cursor":closed_cursor}),
+    ] {
+        let reply = client.rpc("session.catalog", params).await;
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        assert_eq!(
+            reply["error"]["data"]["appError"], "invalid_params",
+            "{reply}"
+        );
+    }
+    assert_ok(
+        &client
+            .rpc("session.catalog", json!({"limit":1,"cursor":open_cursor}))
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "session.catalog",
+                json!({"limit":1,"cursor":closed_cursor,"includeClosed":true}),
+            )
+            .await,
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
