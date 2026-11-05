@@ -314,10 +314,7 @@ fn project(
     }
     let (context, output) = declared_limit_values(source);
     for value in context.iter().chain(output.iter()) {
-        if !value
-            .as_u64()
-            .is_some_and(|n| (1..=MAX_MODEL_TOKENS).contains(&n))
-        {
+        if !value.as_u64().is_some_and(limit_valid) {
             return Err(failure(
                 "Remote model limits must be positive safe JSON integers",
             ));

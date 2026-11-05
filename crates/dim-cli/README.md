@@ -355,10 +355,12 @@ conflicts with generated authentication fail without printing values. Credential
 and headers without direct mode are errors, not silently ignored inputs.
 
 `DIM_MAX_CONTEXT_TOKENS` and `DIM_MAX_OUTPUT_TOKENS` declare positive JS-safe
-integer capacities; output cannot exceed context. Empty or invalid startup
-inputs fail before Session creation. Overrides pass through `session.create` or,
-on resume, `session.model.update` before the first input. They do not write
-Provider records, defaults, daemon environment or secret configuration files.
+integer capacities; the request output allowance is derived from the pair, so a
+declared output may equal or exceed the declared context window. Empty or
+invalid startup inputs fail before Session creation. Overrides pass through
+`session.create` or, on resume, `session.model.update` before the first input.
+They do not write Provider records, defaults, daemon environment or secret
+configuration files.
 Interactive startup waits at Home without creating a Session; the first message
 uses these overrides. Exiting Home without sending leaves no saved Session.
 When launching a daemon for a parsed startup override, the CLI removes these

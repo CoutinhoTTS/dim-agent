@@ -1,5 +1,5 @@
 use crate::config::{ModelConfigFile, ProviderKind};
-use dim_agent_capabilities::context_model::window_facts;
+use dim_agent_capabilities::context_model::{output_allowance, window_facts};
 use dim_agent_capabilities::host::{ContextModel, HostError, HostFuture, ResolveContextModel};
 use dim_agent_runtime::ModelId;
 use dim_agent_types::{ModelCapabilities, ModelCapabilitySnapshot, ModelConfig, ModelRequest};
@@ -16,6 +16,7 @@ pub(crate) struct Model {
     pub preset: Option<String>,
     pub context_window: u64,
     pub max_output_tokens: u64,
+    pub output_allowance: u64,
 }
 
 /// Validated development catalog; credentials are resolved for each request.
@@ -125,7 +126,14 @@ impl AimuxModels {
                     )));
                 }
                 let mut request = ModelRequest::new(&provider.id, &entry.id, Vec::new());
-                request.config = Some(entry.config.clone());
+                let allowance = output_allowance(context_window, max_output_tokens);
+                let mut defaults = entry.config;
+                defaults.max_tokens = Some(
+                    defaults
+                        .max_tokens
+                        .map_or(allowance as f64, |max| max.min(allowance as f64)),
+                );
+                request.config = Some(defaults.clone());
                 crate::request::convert(&request, &provider.kind, preset.as_deref())?;
                 models.insert(
                     entry.id,
@@ -133,11 +141,12 @@ impl AimuxModels {
                         base_url: provider.base_url.clone(),
                         headers: provider.headers.clone(),
                         api_key_env: provider.api_key_env.clone(),
-                        defaults: entry.config,
+                        defaults,
                         kind: provider.kind,
                         preset: preset.clone(),
                         context_window,
                         max_output_tokens,
+                        output_allowance: allowance,
                     },
                 );
             }
@@ -222,7 +231,7 @@ impl ResolveContextModel for AimuxModels {
             let model = self.get(&request.provider_id, &request.model_id)?;
             Ok(window_facts(
                 model.context_window,
-                model.max_output_tokens,
+                model.output_allowance as f64,
                 &request,
             ))
         })

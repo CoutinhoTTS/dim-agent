@@ -539,6 +539,41 @@ fn anonymous_direct_startup_sends_no_credentials() {
 }
 
 #[test]
+fn an_output_limit_at_or_above_the_context_limit_reaches_the_daemon() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let create = wire.read("session.create");
+        assert_eq!(
+            create["params"]["startup"],
+            json!({"connection":{
+            "baseUrl":"https://gateway.example/prefix","apiFormat":"openai-compatible"},
+            "contextWindow":4,"maxOutputTokens":5})
+        );
+        reject(wire, &create);
+    });
+    let output = command(&home)
+        .envs([
+            ("DIM_BASE_URL", "https://gateway.example/prefix"),
+            ("DIM_API_FORMAT", "openai-compatible"),
+            ("DIM_MODEL", "model"),
+            ("DIM_MAX_CONTEXT_TOKENS", "4"),
+            ("DIM_MAX_OUTPUT_TOKENS", "5"),
+        ])
+        .args(["exec", "-p", "Hello"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("startup fixture rejection"), "{text}");
+    assert!(!text.contains("cannot exceed"), "{text}");
+}
+
+#[test]
 fn temporary_model_preferences_use_adopted_choices_without_a_provider_catalog() {
     for from_history in [false, true] {
         let home = Home::new();
@@ -646,14 +681,6 @@ fn invalid_startup_inputs_fail_before_daemon_creation_without_echoing_values() {
             vec![("DIM_MAX_OUTPUT_TOKENS", "1.2")],
             vec![],
             "positive integer",
-        ),
-        (
-            vec![
-                ("DIM_MAX_CONTEXT_TOKENS", "4"),
-                ("DIM_MAX_OUTPUT_TOKENS", "5"),
-            ],
-            vec![],
-            "cannot exceed",
         ),
         (
             vec![("DIM_AUTO_COMPACT_WINDOW", "0k")],

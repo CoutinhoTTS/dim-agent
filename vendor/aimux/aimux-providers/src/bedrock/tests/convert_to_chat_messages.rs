@@ -2694,11 +2694,47 @@ mod bedrock_convert {
                         "toolResult": {
                             "toolUseId": "call-123",
                             "content": [{ "text": "The result is 42" }],
-                            "status": "success"
+                            "status": "success",
                         }
                     }]
                 })
             );
+        }
+
+        /// Every toolResult carries its status; an error result that carries
+        /// an image keeps `status: "error"` (#470).
+        #[test]
+        fn tool_result_status_follows_the_error_flag() {
+            let image_error = ToolResultOutput::Content {
+                value: vec![ToolResultContent::File(FilePart {
+                    data: FileData::Data {
+                        data: FileBytes::Base64("aGVsbG8=".to_string()),
+                    },
+                    media_type: "image/png".to_string(),
+                    filename: None,
+                    provider_options: None,
+                })],
+                is_error: Some(true),
+            };
+            let denied = ToolResultOutput::ExecutionDenied {
+                reason: None,
+                provider_options: None,
+            };
+            let text = ToolResultOutput::Text {
+                value: "ok".to_string(),
+                provider_options: None,
+            };
+            let (_, messages) = convert_prompt_to_bedrock(&vec![tool_msg(vec![
+                tool_result("call-1", image_error),
+                tool_result("call-2", denied),
+                tool_result("call-3", text),
+            ])])
+            .unwrap();
+            let result = |i: usize| &messages[0]["content"][i]["toolResult"];
+            assert_eq!(result(0)["status"], json!("error"));
+            assert_eq!(result(0)["content"][0]["image"]["format"], json!("png"));
+            assert_eq!(result(1)["status"], json!("error"));
+            assert_eq!(result(2)["status"], json!("success"));
         }
     }
 
@@ -3106,7 +3142,7 @@ mod bedrock_convert {
                     "toolUse": { "input": { "city": "SF" }, "name": "getWeather", "toolUseId": "call-1" }
                 }]},
                 { "role": "user", "content": [{
-                    "toolResult": { "toolUseId": "call-1", "content": [{ "text": "Sunny, 72F" }] , "status": "success"}
+                    "toolResult": { "toolUseId": "call-1", "content": [{ "text": "Sunny, 72F" }], "status": "success" }
                 }]},
             ])
         );
@@ -3145,7 +3181,7 @@ mod bedrock_convert {
                     { "toolUse": { "input": { "city": "SF" }, "name": "getWeather", "toolUseId": "call-1" } },
                 ]},
                 { "role": "user", "content": [{
-                    "toolResult": { "toolUseId": "call-1", "content": [{ "text": "Sunny, 72F" }] , "status": "success"}
+                    "toolResult": { "toolUseId": "call-1", "content": [{ "text": "Sunny, 72F" }], "status": "success" }
                 }]},
                 { "role": "assistant", "content": [
                     { "reasoningContent": { "reasoningText": {
@@ -3301,7 +3337,7 @@ mod bedrock_convert {
                 "toolResult": {
                     "toolUseId": "call-123",
                     "content": [{ "image": { "format": "jpeg", "source": { "bytes": "base64data" } } }],
-                    "status": "success"
+                    "status": "success",
                 }
             })
         );
@@ -3333,7 +3369,7 @@ mod bedrock_convert {
                     "content": [{
                         "document": { "format": "pdf", "name": "tool-result", "source": { "bytes": "base64data" } }
                     }],
-                    "status": "success"
+                    "status": "success",
                 }
             })
         );

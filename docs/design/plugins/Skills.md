@@ -293,13 +293,13 @@ directory they use and the record they write. Skills states none of them again.
 
 ## 5. Cross-module requirements
 
-**R1. Web workspace: admit the five methods and render them ([§4.3 and §8](../web-workspace.md#8-requirements-raised-to-mechanism-owners)).**
+**R1. Web workspace: separate installed-skill management from installation ([§4.3](../web-workspace.md#43-settings-and-account-management-on-the-local-web-entry)).**
 
 | Field | Content |
 | --- | --- |
-| Problem | The Web Settings allowlist carries `skills.catalog`, `skills.set_enabled` and `skills.refresh` only, so a manifest-free source cannot be previewed, selectively installed, updated or removed from the browser. The current page offers `plugin.install` instead, which needs `dim-plugin.json`. |
-| Why existing mechanisms do not suffice | `plugin.install` installs a whole package and requires a manifest; the generic `settings.update` path is user-only for the `model-log` and `execution` sources and must not become a JSON editor; a browser-side filesystem or Git write would duplicate an owner. |
-| Required capability and ordering | Admission of `skills.preview`, `skills.install`, `skills.update`, `skills.remove` and `skills.installations` on the authenticated local Web entry, filtered by the same list that dispatch uses; the Skills page renders preview, selection, overwrite confirmation, update and confirmed removal from these replies, keeps the draft on failure and refreshes the catalog after success. The Web advertisement must not offer them when the server lacks them. |
+| Problem | Installed-skill management and source installation are different operator tasks. Admitting installation methods on the authenticated local Web entry does not require installation forms on its Skills page. |
+| Why existing mechanisms do not suffice | `plugin.install` installs a whole package and requires a manifest; it cannot replace Skills' source-installation contract. Browser-side filesystem or Git writes would duplicate the owner. |
+| Required capability and ordering | The Skills page manages installed skills through catalog, enablement and refresh operations only, following the Web workspace interaction contract. Source preview, selective installation, update, removal and installation records remain Skills-owned operations, admitted on the authenticated local Web entry and advertised only when the server provides them; admission does not require this page to render them. Plugin-package installation and activation remain on Plugins. |
 | Owner and issue | Web workspace ([WebEntry](../web-workspace.md)); #740. |
 
 **R2. Settings: none.** The installations field is Skills' own document content and needs no new
@@ -427,9 +427,11 @@ and a path source's preview write nothing outside the expected places; the stagi
 abnormal end leaves behind is gone after a restart; `skills.json` keeps unrelated fields and a
 document written before this field existed still loads.
 
-Rendered verification follows the Web workspace's acceptance for the Skills page: desktop and
-compact layouts, preview with conflicts and shadows, cancelled and accepted overwrite, a failed
-acquisition with retry, stale preview, update and confirmed removal, and a draft kept on failure.
+Rendered verification follows the [Web workspace's Skills interaction](../web-workspace.md#skills-interaction):
+desktop and compact layouts, installed catalog, search, scope, collapsed details, enablement,
+shadowed entries, reload, empty lists and failure recovery. Source preview, selective installation,
+overwrite, update and removal are verified through the owner and App Server flows above, not
+through installation forms on the Skills page.
 
 ## 9. References load with the operator's input
 

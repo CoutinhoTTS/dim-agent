@@ -289,7 +289,8 @@ fn push_tool_result(
     is_mistral: bool,
 ) {
     let result_content = resolve_tool_result_output(&part.output, doc_counter);
-    // The Converse API carries the outcome beside the content.
+    // The Converse API carries the outcome beside the content; the AI SDK
+    // never writes it (#470).
     let status = if tool_result_is_error(&part.output) {
         "error"
     } else {

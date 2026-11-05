@@ -160,7 +160,7 @@ Model startup:\n\
     Names are case-insensitive; duplicates and generated auth conflicts fail.\n\
     Credentials and headers require direct mode; anonymous gateways are allowed.\n\
   DIM_MAX_CONTEXT_TOKENS and DIM_MAX_OUTPUT_TOKENS declare positive capacities\n\
-    up to 9007199254740991; output cannot exceed context.\n\
+    up to 9007199254740991; the request output allowance is derived from them.\n\
   --autocompact overrides DIM_AUTO_COMPACT_WINDOW: auto or a positive count,\n\
     optionally suffixed k/m (1000/1000000). This is not the model capacity.\n\
   Effort, autocompact and capacity startup controls require the product Provider\n\
@@ -1456,13 +1456,6 @@ impl Options {
             if let Some(value) = startup_env(env)? {
                 startup[field] = serde_json::json!(parse_limit(env, &value)?);
             }
-        }
-        if let (Some(context), Some(output)) = (
-            startup["contextWindow"].as_u64(),
-            startup["maxOutputTokens"].as_u64(),
-        ) && output > context
-        {
-            return Err("DIM_MAX_OUTPUT_TOKENS cannot exceed DIM_MAX_CONTEXT_TOKENS".into());
         }
         if let Some(value) = &autocompact {
             startup["autoCompactWindow"] = if value == "auto" {

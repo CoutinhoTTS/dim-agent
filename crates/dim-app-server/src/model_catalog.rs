@@ -805,13 +805,18 @@ fn merge_entry(mut current: ModelEntry, fallback: &ModelEntry, explicit: &[Strin
     current
 }
 
+/// One declared limit: a positive safe JSON integer.
+pub fn limit_valid(limit: u64) -> bool {
+    (1..=MAX_MODEL_TOKENS).contains(&limit)
+}
+
 /// Every limit that is present is a positive safe JSON integer; an absent one
 /// is the undeclared value.
 pub fn limits_valid(capabilities: &CatalogCapabilities) -> bool {
     [capabilities.context_window, capabilities.max_output_tokens]
         .into_iter()
         .flatten()
-        .all(|limit| (1..=MAX_MODEL_TOKENS).contains(&limit))
+        .all(limit_valid)
 }
 
 /// The values that declare a model's two limits, in the order the projection

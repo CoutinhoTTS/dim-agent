@@ -633,6 +633,18 @@ mod convert_to_openai_responses_input {
             );
         }
 
+        /// aimux #468: the text parts of one message item, one per content
+        /// part, reference that item once.
+        #[tokio::test]
+        async fn should_reference_a_message_item_once_for_its_text_parts() {
+            let part = |text: &str| json!({"type": "text", "text": text, "providerOptions": {"openai": {"itemId": "msg-1"}}});
+            let result = convert(json!({"prompt": [{"role": "assistant", "content": [part("before"), part("after")]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": true})).await.unwrap();
+            assert_eq!(
+                result.input,
+                json!([{"type": "item_reference", "id": "msg-1"}])
+            );
+        }
+
         /// upstream: @ai-sdk/openai src/responses/convert-to-openai-responses-input.test.ts › convertToOpenAIResponsesInput › assistant messages › should convert text parts with ids to item_reference but not client-executed tool calls
         #[tokio::test]
         async fn should_convert_text_parts_with_ids_to_item_reference_but_not_client_executed_too()
@@ -648,7 +660,6 @@ mod convert_to_openai_responses_input {
                     {
                         "arguments": r#"{"query":"weather in San Francisco"}"#,
                         "call_id": "call_123",
-                        "id": "id_456",
                         "name": "search",
                         "type": "function_call",
                     },
@@ -683,7 +694,7 @@ mod convert_to_openai_responses_input {
             let result = convert(json!({"prompt": [{"role": "assistant", "content": [{"type": "tool-call", "toolCallId": "call_a", "toolName": "search", "input": {"query": "first"}, "providerOptions": {"openai": {"itemId": "fc_a"}}}, {"type": "tool-call", "toolCallId": "call_b", "toolName": "search", "input": {"query": "second"}, "providerOptions": {"openai": {"itemId": "fc_b"}}}]}, {"role": "tool", "content": [{"type": "tool-result", "toolCallId": "call_a", "toolName": "search", "output": {"type": "json", "value": {"results": []}}}, {"type": "tool-result", "toolCallId": "call_b", "toolName": "search", "output": {"type": "json", "value": {"results": ["x"]}}}]}], "systemMessageMode": "system", "providerOptionsName": "openai", "store": true})).await.unwrap();
             assert_eq!(
                 result.input,
-                json!([{"type": "function_call", "id": "fc_a", "call_id": "call_a", "name": "search", "arguments": json!({"query": "first"}).to_string()}, {"type": "function_call", "id": "fc_b", "call_id": "call_b", "name": "search", "arguments": json!({"query": "second"}).to_string()}, {"type": "function_call_output", "call_id": "call_a", "output": json!({"results": []}).to_string()}, {"type": "function_call_output", "call_id": "call_b", "output": json!({"results": ["x"]}).to_string()}])
+                json!([{"type": "function_call", "call_id": "call_a", "name": "search", "arguments": json!({"query": "first"}).to_string()}, {"type": "function_call", "call_id": "call_b", "name": "search", "arguments": json!({"query": "second"}).to_string()}, {"type": "function_call_output", "call_id": "call_a", "output": json!({"results": []}).to_string()}, {"type": "function_call_output", "call_id": "call_b", "output": json!({"results": ["x"]}).to_string()}])
             );
         }
 
@@ -2049,7 +2060,6 @@ mod convert_to_openai_responses_input {
                     {
                         "arguments": r#"{"location":"San Francisco"}"#,
                         "call_id": "call_123",
-                        "id": "fc_existing_456",
                         "name": "getWeather",
                         "type": "function_call",
                     },

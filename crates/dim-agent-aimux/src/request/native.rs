@@ -214,6 +214,9 @@ pub(super) fn apply(
                 }
                 if let Some(tier) = &openai.service_tier {
                     fields.insert("serviceTier".into(), json!(tier));
+                    // The Responses model gates `serviceTier` on the model
+                    // id; the catalogue and the account entitlement decide.
+                    fields.insert("forceServiceTier".into(), json!(true));
                 }
             }
             if generic.is_some_and(|r| r.enabled.is_some())

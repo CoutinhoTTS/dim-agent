@@ -31,13 +31,14 @@ use crate::{
     managed_oauth,
     managed_provider::{AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders},
     model_catalog::{
-        BundledCatalog, CatalogCapabilities, CatalogProvider, MAX_MODEL_TOKENS, ModelEdit,
-        ModelEntry, ModelMetadata, ModelSource, NewApiEndpoint, ProviderProjection,
-        declarations_hold, declare, declare_supplied_limits, declared_limit_values,
-        drop_undeclared_limits, inherit_limits, limits_valid,
+        BundledCatalog, CatalogCapabilities, CatalogProvider, ModelEdit, ModelEntry, ModelMetadata,
+        ModelSource, NewApiEndpoint, ProviderProjection, declarations_hold, declare,
+        declare_supplied_limits, declared_limit_values, drop_undeclared_limits, inherit_limits,
+        limit_valid, limits_valid,
     },
     storage::SqliteStorage,
 };
+use dim_agent_capabilities::context_model::output_allowance;
 use dim_agent_capabilities::host::*;
 use dim_agent_runtime::{AgentError, Names};
 use dim_agent_types::{
@@ -484,7 +485,12 @@ impl ProviderRecord {
                     name: model.entry.display_name,
                     endpoint: Some(model.source.protocol),
                     config: ModelConfig {
-                        max_tokens: model.entry.capabilities.max_output_tokens.map(|n| n as f64),
+                        max_tokens: model.entry.capabilities.declared().map(|capabilities| {
+                            output_allowance(
+                                capabilities.context_window,
+                                capabilities.max_output_tokens,
+                            ) as f64
+                        }),
                         ..Default::default()
                     },
                     capabilities: model.entry.capabilities,
@@ -531,6 +537,12 @@ impl ProviderCatalog {
                 && model.missing_limits.is_empty()
             {
                 model.unavailable_reason = None;
+            }
+            if let (Some(window), Some(declared)) = (
+                model.capabilities.context_window,
+                model.capabilities.max_output_tokens,
+            ) {
+                model.config.max_tokens = Some(output_allowance(window, declared) as f64);
             }
         }
     }
@@ -876,7 +888,12 @@ fn static_models(
                 name: entry.display_name,
                 endpoint,
                 config: ModelConfig {
-                    max_tokens: entry.capabilities.max_output_tokens.map(|n| n as f64),
+                    max_tokens: entry.capabilities.declared().map(|capabilities| {
+                        output_allowance(
+                            capabilities.context_window,
+                            capabilities.max_output_tokens,
+                        ) as f64
+                    }),
                     ..Default::default()
                 },
                 capabilities: entry.capabilities,
