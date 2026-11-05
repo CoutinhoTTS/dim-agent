@@ -345,10 +345,11 @@ async fn exec_output_page(shell: &mut Shell, params: &Value, cursor: u64, limit:
 }
 
 /// The task id of the next `exec/started` notice, skipping other events.
-async fn next_exec_started(shell: &mut Shell) -> Value {
+async fn next_exec_started(shell: &mut Shell, after: u64) -> Value {
     loop {
         let event = shell.client.notice("session.event").await;
-        if event["params"]["event"]["type"] == "exec"
+        if event["params"]["event"]["sequence"].as_u64().unwrap() > after
+            && event["params"]["event"]["type"] == "exec"
             && event["params"]["event"]["name"] == "started"
         {
             return event["params"]["event"]["data"]["task_id"].clone();
@@ -394,7 +395,7 @@ async fn background_exec_output_pages_running_finished_and_restored_tasks() {
             )
             .await,
     );
-    let task = next_exec_started(&mut shell).await;
+    let task = next_exec_started(&mut shell, 0).await;
     session.idle("main").await.unwrap();
     let params = json!({"sessionId":shell.sid,"branchId":"main","taskId":task});
     // Before any output the registered file is empty: an empty page, no next
@@ -606,7 +607,7 @@ async fn background_exec_output_page_clamps_scopes_and_errors() {
             )
             .await,
     );
-    let task = next_exec_started(&mut shell).await;
+    let task = next_exec_started(&mut shell, 0).await;
     session.idle("main").await.unwrap();
     let params = json!({"sessionId":shell.sid,"branchId":"main","taskId":task});
     std::fs::write(shell.work.join("go"), b"go").unwrap();
@@ -737,7 +738,7 @@ async fn background_exec_output_page_clamps_scopes_and_errors() {
             )
             .await,
     );
-    let big = next_exec_started(&mut shell).await;
+    let big = next_exec_started(&mut shell, 0).await;
     session.idle("main").await.unwrap();
     std::fs::write(shell.work.join("big"), b"go").unwrap();
     let status = loop {
@@ -782,7 +783,7 @@ async fn background_exec_output_page_clamps_scopes_and_errors() {
             )
             .await,
     );
-    let face = next_exec_started(&mut shell).await;
+    let face = next_exec_started(&mut shell, 0).await;
     session.idle("main").await.unwrap();
     std::fs::write(shell.work.join("face"), b"go").unwrap();
     let status = loop {
@@ -878,10 +879,13 @@ async fn reloading_workspace_tools_answers_the_page_method_with_service_reloadin
     .expect("the page method answers service_reloading while WorkspaceTools reloads");
     drop(hold);
     restart.await.unwrap().unwrap();
-    // The held start completes as the reload settles, so its own
-    // `exec/started` is the next one; the task this test pages is registered
-    // after the reload, in the new generation.
-    let held_task = next_exec_started(&mut shell).await;
+    assert_ok(
+        &shell
+            .client
+            .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
+            .await,
+    );
+    let after = shell.through().await;
     let text = format!(
         "tool:exec {}",
         json!({"command":"echo after","runInBackground":true,"timeoutMs":-1})
@@ -895,8 +899,7 @@ async fn reloading_workspace_tools_answers_the_page_method_with_service_reloadin
             )
             .await,
     );
-    let task = next_exec_started(&mut shell).await;
-    assert_ne!(task, held_task);
+    let task = next_exec_started(&mut shell, after).await;
     let params = json!({"sessionId":sid,"branchId":"main","taskId":task});
     let reply = tokio::time::timeout(Duration::from_secs(5), async {
         loop {

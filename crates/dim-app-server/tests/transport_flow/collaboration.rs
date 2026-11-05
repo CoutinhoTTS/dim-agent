@@ -5489,7 +5489,8 @@ async fn new_members_sample_requesting_branch_policy_and_reused_members_keep_the
         lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(0, serde_json::from_value(policy.clone()).unwrap()).await.unwrap();
         let cut = events(&lead_session).await.last().unwrap().sequence;
         let branch = lead_session.branch("main".into(), cut, dim_agent_runtime::BranchOptions { prompt: "Permission inheritance child".into(), source: dim_agent_types::BranchSource::Host { operation_id: "permission-inheritance".into() } }).await.unwrap();
-        lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(cut, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
+        let state = lead_session.get::<dim_agent_capabilities::permission::PermissionState>("main").unwrap().unwrap();
+        lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(state.version, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
         let agent_id = client.rpc("agent.list", json!({})).await["result"][0]["agentId"].as_str().unwrap().to_owned();
         lead_session.submit(tool(json!({"action":"request","agentId":agent_id,"prompt":"hello"})), dim_agent_types::InputMode::Queue, &branch).await.unwrap();
         lead_session.idle(&branch).await.unwrap();
