@@ -2049,6 +2049,7 @@
       "unexpandedMacros": [
         "matches",
         "tokio::select",
+        "tracing::warn",
         "vec"
       ]
     },
@@ -20207,6 +20208,8 @@
       "to": "dim_app_server",
       "references": [
         "path ServerConfig",
+        "path crate::FollowHold",
+        "path crate::FollowHold::default",
         "use crate::ServerConfig"
       ]
     },

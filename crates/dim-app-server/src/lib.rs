@@ -171,6 +171,17 @@ pub enum ShutdownReason {
     Forced,
 }
 
+/// Feature `testing`: a hold on one subscription's `follow` task. It notifies
+/// `waiting` once it is held, `cancelled` once retirement cancels it, and
+/// returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct FollowHold {
+    pub waiting: tokio::sync::Notify,
+    pub cancelled: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 pub struct RunningServer {
     pub unix_path: Option<PathBuf>,
     pub pipe_name: Option<String>,
@@ -259,6 +270,31 @@ impl RunningServer {
         self.root
             .get::<AgentIndex>()
             .map(|index| index.idle_admitted())
+    }
+    /// Holds the next subscription's `follow` task open until `release`, so a
+    /// test can keep an attach or detach in flight at a known point. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_follow(&self) -> Option<Arc<FollowHold>> {
+        self.root
+            .get::<ConnectionHub>()
+            .map(|hub| hub.hold_next_follow())
+    }
+    /// Makes the next attach fail before it registers its listener. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn fail_next_attach_before_registration(&self) {
+        if let Some(hub) = self.root.get::<ConnectionHub>() {
+            hub.fail_next_attach_before_registration();
+        }
+    }
+    /// How many uses Session `session_id` has right now. Feature `testing`
+    /// only.
+    #[cfg(feature = "testing")]
+    pub fn uses(&self, session_id: &str) -> usize {
+        self.root
+            .get::<AgentIndex>()
+            .map_or(0, |index| index.uses(session_id))
     }
     pub async fn join(mut self) -> Result<ShutdownReason> {
         self.task.take().expect("server task").await?

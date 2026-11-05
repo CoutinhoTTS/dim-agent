@@ -154,6 +154,9 @@ mod deletion;
 #[path = "transport_flow/notices.rs"]
 mod notices;
 
+#[path = "transport_flow/attachments.rs"]
+mod attachments;
+
 #[path = "transport_flow/fork.rs"]
 mod fork;
 
