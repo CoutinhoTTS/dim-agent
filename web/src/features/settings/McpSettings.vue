@@ -212,6 +212,9 @@ function importChanged(entry: McpImportEntry): string {
 function importUnsupported(entry: McpImportEntry): string {
   return entry.unsupported.map((field) => `${field.field} (${field.effect === "kept-unused" ? s('kept unused', '保留未用') : s('dropped', '丢弃')})`).join(", ")
 }
+function importOmitted(entry: McpImportEntry): string {
+  return s(`${entry.omitted} more field names are not listed.`, `另有 ${entry.omitted} 个字段名未列出。`)
+}
 function importUnknown(): string {
   const names = importPreview.value?.unknownTopLevel ?? []
   return names.length
@@ -441,6 +444,7 @@ onBeforeUnmount(() => {
         <h4>{{ entry.id }} · {{ entry.status }}<template v-if="entry.transport"> · {{ entry.transport }}</template></h4>
         <p v-if="entry.changes.length">{{ s('Changed fields', '变更字段') }}: {{ importChanged(entry) }}</p>
         <p v-if="entry.unsupported.length">{{ s('Not carried', '不携带') }}: {{ importUnsupported(entry) }}</p>
+        <p v-if="entry.omitted">{{ importOmitted(entry) }}</p>
         <p v-if="entry.confirm.length">{{ s('Literal fields to confirm', '需要确认的字面值字段') }}: {{ entry.confirm.join(', ') }}</p>
         <p v-if="entry.error">{{ entry.error }}</p>
         <label><span>{{ s('Action', '操作') }}</span><select v-model="entry.action" class="ui-field" data-size="md" :disabled="busy" :aria-label="s('Import action', '导入操作')"><option value="import">{{ s('Import', '导入') }}</option><option value="skip">{{ s('Skip', '跳过') }}</option><option value="replace">{{ s('Replace the existing entry', '替换现有条目') }}</option><option value="rename">{{ s('Import under a new id', '以新 ID 导入') }}</option></select></label>

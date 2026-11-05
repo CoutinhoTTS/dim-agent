@@ -524,8 +524,10 @@ The page decodes nothing itself: the owner's preview supplies each entry's id,
 status (`identical`, `changed`, `conflict` or `invalid`), transport, changed
 field names with their JSON kinds, members the decoder keeps unused or drops,
 the project fields whose literal values need confirmation, and the entry's
-error. The page shows the unknown top-level members and never renders a value,
-because the reply carries none.
+error. The owner caps each entry's field-name lists, so the page states how many
+names the cap left out rather than showing a partial list as complete. The page
+shows the unknown top-level members and never renders a value, because the reply
+carries none.
 
 Each previewed entry has an action: Import, Skip, Replace the existing entry, or
 Import under a new id with a new-id field. The defaults match the CLI: `changed`

@@ -251,7 +251,7 @@ test("changing MCP scope keeps cancelled or failed drafts and saves only to the 
 function importPreviewReply(entries, revision = "user:1", unknownTopLevel = []) {
   return { revision, entries, unknownTopLevel }
 }
-const importEntry = (overrides) => ({ id: "docs", transport: "stdio", status: "changed", changes: [], unsupported: [], confirm: [], ...overrides })
+const importEntry = (overrides) => ({ id: "docs", transport: "stdio", status: "changed", changes: [], unsupported: [], omitted: 0, confirm: [], ...overrides })
 function mountImport({ preview, catalogs, apply }) {
   const calls = []
   let served = 0
@@ -292,7 +292,7 @@ test("an import preview shows every status and its fields without a value", asyn
   const document = `{"mcpServers":{"docs":{"env":{"TOKEN":"${secret}"}}}}`
   const preview = importPreviewReply([
     importEntry({ id: "keeps", status: "identical" }),
-    importEntry({ id: "docs", changes: [{ field: "args", kind: "array" }, { field: "enabled", kind: "boolean" }], unsupported: [{ field: "x-extra", effect: "kept-unused" }] }),
+    importEntry({ id: "docs", changes: [{ field: "args", kind: "array" }, { field: "enabled", kind: "boolean" }], unsupported: [{ field: "x-extra", effect: "kept-unused" }], omitted: 7 }),
     importEntry({ id: "taken", transport: "http", status: "conflict", changes: [{ field: "url", kind: "string" }] }),
     importEntry({ id: "broken", transport: undefined, status: "invalid", unsupported: [{ field: "auth.audience", effect: "dropped" }], error: "broken: type is stdio, http or sse" }),
   ], "user:1", ["otherTopLevel"])
@@ -309,6 +309,7 @@ test("an import preview shows every status and its fields without a value", asyn
     assert.match(shown, /docs · changed · stdio/)
     assert.match(shown, /Changed fields: args \(array\), enabled \(boolean\)/)
     assert.match(shown, /Not carried: x-extra \(kept unused\)/)
+    assert.match(shown, /7 more field names are not listed\./)
     assert.match(shown, /taken · conflict · http/)
     assert.match(shown, /broken · invalid/)
     assert.match(shown, /auth\.audience \(dropped\)/)

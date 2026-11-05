@@ -209,7 +209,8 @@ export type McpImportField = { field: string; kind: string }
 export type McpImportUnsupported = { field: string; effect: "kept-unused" | "dropped" }
 export type McpImportEntry = {
   id: string; transport: string | undefined; status: McpImportStatus
-  changes: McpImportField[]; unsupported: McpImportUnsupported[]; confirm: string[]; error: string | undefined
+  changes: McpImportField[]; unsupported: McpImportUnsupported[]; omitted: number
+  confirm: string[]; error: string | undefined
 }
 /** The owner's preview of a standard `mcpServers` document: names and kinds,
  * never a value. */
@@ -232,6 +233,7 @@ export function readMcpImportPreview(value: unknown): McpImportPreview {
           const field = object(item)
           return { field: string(field.field), effect: choice(field.effect, ["kept-unused", "dropped"]) }
         }),
+        omitted: number(entry.omitted),
         confirm: array(entry.confirm, string),
         error: optionalString(entry.error),
       }
