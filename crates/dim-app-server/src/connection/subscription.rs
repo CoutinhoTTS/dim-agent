@@ -450,9 +450,12 @@ impl Connection {
             .await
             .map_err(RpcError::from)?;
         // The transition lock keeps one attach, detach or finish in flight per
-        // connection. The new attachment below replaces the previous one before
-        // that one retires, so every event committed after this reply's pin has
-        // a listener: the previous one until the map changes, this one after.
+        // connection. When this attach replaces an existing attachment, the new
+        // one is in place before the previous retires, so every event committed
+        // after this reply's pin has a listener: the previous one until the map
+        // changes, this one after. With no previous attachment — a first
+        // attach, or a detach that completed first — events committed between
+        // the pin and the new listener have none.
         let _transition = self.transitions.lock().await;
         let generation = self.next_attachment.fetch_add(1, Ordering::Relaxed);
         let cancel = self.closed.child_token();
