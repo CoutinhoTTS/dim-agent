@@ -479,7 +479,7 @@ impl Connection {
             delivery: delivery.clone(),
         });
         #[cfg(feature = "testing")]
-        if self.hub.take_attach_failure() {
+        if self.hub.take_attach_failure_before_registration() {
             return Err(RpcError::closed());
         }
         let listener = host

@@ -280,12 +280,12 @@ impl RunningServer {
             .get::<ConnectionHub>()
             .map(|hub| hub.hold_next_follow())
     }
-    /// Makes the next attach fail its listener registration. Feature `testing`
-    /// only.
+    /// Makes the next attach fail before it registers its listener. Feature
+    /// `testing` only.
     #[cfg(feature = "testing")]
-    pub fn fail_next_attach(&self) {
+    pub fn fail_next_attach_before_registration(&self) {
         if let Some(hub) = self.root.get::<ConnectionHub>() {
-            hub.fail_next_attach();
+            hub.fail_next_attach_before_registration();
         }
     }
     /// How many uses Session `session_id` has right now. Feature `testing`

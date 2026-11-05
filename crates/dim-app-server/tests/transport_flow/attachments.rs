@@ -76,10 +76,10 @@ async fn a_detach_settles_its_subscription_before_the_reply() {
     server.join().await.unwrap();
 }
 
-/// A re-attach that cannot register its listener keeps the previous
+/// A re-attach that fails before it registers its listener keeps the previous
 /// subscription: its use stays, and it still delivers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_re_attach_keeps_the_previous_subscription() {
+async fn an_attach_failure_before_registration_keeps_the_previous_subscription() {
     let (server, _) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let sid = historical(&mut client).await;
@@ -89,7 +89,7 @@ async fn a_failed_re_attach_keeps_the_previous_subscription() {
             .await,
     );
     let attached_uses = server.uses(&sid);
-    server.fail_next_attach();
+    server.fail_next_attach_before_registration();
     let failed = client
         .rpc("session.attach", json!({"sessionId": sid}))
         .await;

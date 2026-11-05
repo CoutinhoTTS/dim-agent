@@ -1650,9 +1650,10 @@ pub(crate) struct ConnectionHub {
     /// Feature `testing`: holds the next subscription's `follow` task.
     #[cfg(feature = "testing")]
     follow_hold: Mutex<Option<Arc<crate::FollowHold>>>,
-    /// Feature `testing`: fails the next attach's listener registration.
+    /// Feature `testing`: fails the next attach before it registers its
+    /// listener.
     #[cfg(feature = "testing")]
-    fail_attach: std::sync::atomic::AtomicBool,
+    fail_attach_before_registration: std::sync::atomic::AtomicBool,
 }
 impl ConnectionHub {
     fn new(
@@ -1674,7 +1675,7 @@ impl ConnectionHub {
             #[cfg(feature = "testing")]
             follow_hold: Mutex::new(None),
             #[cfg(feature = "testing")]
-            fail_attach: std::sync::atomic::AtomicBool::new(false),
+            fail_attach_before_registration: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub fn config(&self) -> &ServerConfig {
@@ -1766,14 +1767,17 @@ impl ConnectionHub {
     pub(crate) fn take_follow_hold(&self) -> Option<Arc<crate::FollowHold>> {
         self.follow_hold.lock().expect("follow hold").take()
     }
-    /// Feature `testing`: the next attach fails its listener registration.
+    /// Feature `testing`: the next attach fails before it registers its
+    /// listener.
     #[cfg(feature = "testing")]
-    pub(crate) fn fail_next_attach(&self) {
-        self.fail_attach.store(true, Ordering::SeqCst);
+    pub(crate) fn fail_next_attach_before_registration(&self) {
+        self.fail_attach_before_registration
+            .store(true, Ordering::SeqCst);
     }
     #[cfg(feature = "testing")]
-    pub(crate) fn take_attach_failure(&self) -> bool {
-        self.fail_attach.swap(false, Ordering::SeqCst)
+    pub(crate) fn take_attach_failure_before_registration(&self) -> bool {
+        self.fail_attach_before_registration
+            .swap(false, Ordering::SeqCst)
     }
     fn set_client_emitter(&self, ctx: rutis::Ctx) {
         *self.client_emitter.lock().expect("client emitter") = Some(ctx);
