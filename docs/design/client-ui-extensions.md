@@ -20,7 +20,7 @@ Status: Ready.
 | 插件自行打包全部运行依赖 | 不增加共享依赖解析器、import map、模块联邦或宿主框架导出；接受不同插件重复携带框架代码的体积成本 |
 | 固定的客户端公开能力，加上声明过的 Session 方法 | 复用业务 owner 的协议；不暴露内部 store、任意服务定位器或任意 RPC/IPC 转发 |
 | 一个面板位置 | 满足预览、播放器、图表等用途；不建设任意 slot、页面路由、菜单和布局组合系统 |
-| 独立的二进制资源读取 | 图片与视频不经 JSON/base64 搬运；首期支持有限长度的文件，不提供网络代理和实时转码服务 |
+| 独立的资源读取 | 有字节流入口的宿主（Web 的 HTTP 路由）继续用字节流，图片与视频不经 JSON/base64 搬运；没有字节流入口的宿主按协议分页读取交互尺寸的资源（§6.1、§6.2）；两条路径都不做网络代理和实时转码 |
 
 不新增 Agent Capability、Timeline 事件、模型上下文输入路径或插件安装系统。此扩展不属于终端 UI registry / UiLeaf（见 [TUI §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)）；CLI 不持有网页面板或展示资源。TUI 不渲染 HTML；MCP 工具携带的文档继续遵循 [MCP Apps](appserver/mcp-apps.md)，整个 UI 进程继续遵循 [Clients](clients.md)，不由面板生命周期管理。
 
@@ -185,6 +185,8 @@ UI 资源读取需要当前服务入口的身份认证，不能成为匿名静�
 
 Web 使用当前已授权服务入口下的资源地址与原生动态 import，相对模块、CSS 和媒体地址也留在同一版本的资源根。模块不能要求额外 localhost 端口或扩大的 CSP。Desktop 的受控 scheme/资源入口必须支持同样的相对地址、模块 MIME 和版本语义，不能把插件放到有全权限 native 桥的页面里。
 
+没有字节流入口的宿主（Desktop、TUI 等非 Web 客户端）通过 `ui.extensions.read` 分页读取：请求 `{generation, path, offset?, limit?}`，返回 `{offset, bytes, total, mediaType, data}`，`data` 为标准 base64。默认页 1 MiB，最大 4 MiB，更大的 `limit` 截断为 4 MiB，`limit: 0` 为 `invalid_params`。资源不可变、`total` 固定：客户端在 `offset + bytes == total` 时读完，不需要额外的空页；`offset == total` 返回空页，`offset > total` 为 `invalid_params`（不截断，避免掩盖客户端错误）。线上开销约为原字节的 1.33 倍（base64 与 JSON）；一页占用该连接出站队列一帧的时间，页越大，其他回复与通知在该连接上被推迟得越久，4 MiB 的页面上限限制了这一推迟，所以交互尺寸的模块、CSS、图片与短音频可接受；有字节流入口的宿主（Web 的 HTTP 路由）继续用字节流，分页不是大视频等大文件的通用传输。错误语义见 §7。
+
 ### 6.2 Session 文件资源
 
 UiResources 提供通用的**已完成文件发布**：受信任的后端 Session part 把自己决定可以向该 Session 客户端展示的普通文件交给资源 owner，取得不含路径的资源引用，作为其业务方法结果的一部分返回。UI 根据该引用设置图片或视频地址。
@@ -222,6 +224,9 @@ Rust 和 TypeScript Session part 均可使用此服务。路径由已持有文�
 | 发布路径不是绝对路径，或撤下其他 part 的引用 | UiResources：`ResourceError.code = invalid_params` | 修正调用参数或使用发布者撤下 |
 | Session / 资源 owner 已结束，或引用所属 Session 不匹配 | UiResources：`ResourceError.code = resource_gone` | 使用活动 Session 的新引用 |
 | 发布者关闭导致清理注册失败 | UiResources：`ResourceError.code = resource_closed` | 由新的活动发布者重新发布 |
+| 页读取的路径非法、`limit: 0` 或 `offset > total` | UiExtensions：`invalid_params`（-32602） | 修正参数 |
+| 页读取的 generation 未知或已替换、路径不在该快照内 | UiExtensions：`resource_gone` | 重新读取目录后取新 generation |
+| 页读取的文件 I/O 失败 | UiExtensions：`resource_unavailable` | 生产者修复资源；不返回空页成功 |
 | 文件定位、打开或撤下清理失败 | UiResources：`ResourceError.code = resource_unavailable` | 生产者修复资源；不返回空文件成功结果 |
 | 内容 generation、文件或动态引用不可用 | WebEntry：HTTP 404，响应 `error.code = resource_gone` | 重新发现内容或取得新引用 |
 | 已开始的 HTTP 资源读取失败或取消 | WebEntry：响应流中断；已发送响应头后不追加 JSON 错误码 | 由展示方处理加载失败，不自动重放业务操作 |
@@ -253,8 +258,8 @@ Rust 和 TypeScript Session part 均可使用此服务。路径由已持有文�
 ### R2. WebEntry 与 Desktop 资源适配：受保护的字节流
 
 - **阻塞与规则：** §6 需要受保护包资源和有限文件流；[Web workspace §2](web-workspace.md#2-local-web-entry) 的宿主静态文件与 SPA 入口不是插件资源权限和媒体读取契约。
-- **考虑的机制：** 现有 JSON RPC 不适合大文件；文本型 pluginFiles 不是媒体服务；独立端口破坏当前服务入口的身份与远端访问。
-- **所需通用能力：** 资源适配读取 UiExtensions/UiResources 的已准入资源，保持身份、Session 授权、根限制、MIME、缓存、Range、背压和取消语义。Web 只增加明确路径，保留现有 Host/Origin/CSP 规则；读请求校验 Host，存在 Origin 时校验，拒绝显式跨站资源请求，不要求所有同源图片/媒体 GET 都携带 Origin。不增加 CORS 放行，不把全体管理方法开放给 Web。
+- **考虑的机制：** 现有 JSON RPC 不是大文件的字节流，所以 Web 宿主保留 HTTP 路由，分页读取只服务没有字节流入口的宿主（§6.1）；文本型 pluginFiles 不是媒体服务；独立端口破坏当前服务入口的身份与远端访问。
+- **所需通用能力：** 资源适配读取 UiExtensions/UiResources 的已准入资源，保持身份、Session 授权、根限制、MIME、缓存、Range、背压和取消语义。没有字节流入口的宿主改由 App Server 协议的 `ui.extensions.read` 分页读取同一资源（§6.1、附录 C）；WebEntry 继续拥有 Web 宿主的字节流入口。Web 只增加明确路径，保留现有 Host/Origin/CSP 规则；读请求校验 Host，存在 Origin 时校验，拒绝显式跨站资源请求，不要求所有同源图片/媒体 GET 都携带 Origin。不增加 CORS 放行，不把全体管理方法开放给 Web。
 - **时序影响：** 每次读取在 owner 准入时绑定版本；撤下停止新读取并结算旧读取。取消传输不取消后端业务。无 Timeline 影响。
 - **Owner / issue：** WebEntry，[#1136](https://github.com/arcships/dim/issues/1136)；Desktop 适配由其仓库承接，[#437](https://github.com/arcships/dim/issues/437)。
 
@@ -309,6 +314,7 @@ Rust 和 TypeScript Session part 均可使用此服务。路径由已持有文�
 5. 未认证/无权访问、跨站请求、编码路径穿越、符号链接逃逸、旧 generation、原目录在懒加载前被修改；不能读到根外文件或混合版本。
 6. 文件读取的 GET/HEAD、单 Range、suffix、416、多 Range 的 200、慢消费者、取消、撤下与 Session closing；读取内存有界，文件可在撤下完成后删除。通过当前授权入口的外部浏览器访问不依赖浏览器本机端口。
 7. v1 安装记录迁移后保持选择、off、安装来源和目录；写入失败保留原记录；未知版本不覆盖。只使用临时 home 和可丢弃 fixture。
+8. 没有字节流入口的本地客户端按 generation 分页读取包内资源：两页衔接与 `offset + bytes == total`、`offset == total` 的空页、`offset > total` 与非法路径与 `limit: 0` 的 `invalid_params`、未知或已替换 generation 和快照外路径的 `resource_gone`；Web 入口上该方法为 `unknown_method` 且不出现在其 `hello.features`，HTTP 路由照常。
 
 消融结论：不增加通用前端插件容器、共享依赖机制、持久化面板状态服务或第二条 RPC 通路。UiExtensions 必须拥有内容版本和目录，UiResources 必须拥有 Session 资源与读取收尾，面板宿主必须拥有视图实例；这些状态不能分别推给 PluginManager、进程全局 Session 选择或业务组件。原型若无需某个公开能力，则从首期导出集合删除，不以占位接口保留。
 
@@ -424,6 +430,7 @@ type PreviewMethods = {
 | `uiExtensions` | process，后端命名服务 | 接受 PluginManager 的已验证内容注册/撤下；提供目录快照及变化观察，不供页面发布内容 |
 | `uiResources` | Session，后端命名服务 | `publishFile({path, mediaType}) -> ResourceRef`；`withdraw(ref)` 等到读取结束；注册自动归调用者生命周期，调用者不能撤下其他注册 |
 | `ui.extensions.list` | 已授权客户端的精确只读方法 | `{}` → `{revision, extensions, errors}`；extension 包含插件名、generation 和面板声明，不含 URL；errors 仅含 UiExtensions 自己产生的内容错误且不含绝对路径 |
+| `ui.extensions.read` | 已授权客户端的精确只读方法（local） | `{generation, path, offset?, limit?}` → `{offset, bytes, total, mediaType, data}`；`data` 为标准 base64；默认 1 MiB、上限 4 MiB；不在 `WEB_MANAGEMENT_METHODS` |
 | `ui.extensions.changed` | 同一连接的控制通知 | `{revision}`；不是 Timeline 或 Session 广播事实 |
 | `ResourceRef` | 公开可序列化数据 | `{sessionId, id}`；id 不复用、定位一个发布注册，不包含文件路径或认证令牌 |
 

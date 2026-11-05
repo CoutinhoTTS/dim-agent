@@ -10,12 +10,12 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
 use manifest::{Package, Panel};
-use resources::{Reads, ResourceError, UiResourcesPlugin, file_error, gone};
+use resources::{Reads, ResourceError, UiResourcesPlugin, file_error, gone, read_page};
 use rutis::{
     Ctx,
     host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -44,6 +44,17 @@ pub struct Directory {
     pub revision: u64,
     pub extensions: Vec<Extension>,
     pub errors: Vec<Unavailable>,
+}
+/// The `ui.extensions.read` request: one file of the generation
+/// `ui.extensions.list` named, from `offset` (default 0) up to `limit` bytes
+/// (default [`resources::DEFAULT_PAGE`], clamped to [`resources::MAX_PAGE`]).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExtensionRead {
+    generation: String,
+    path: String,
+    offset: Option<u64>,
+    limit: Option<usize>,
 }
 struct Snapshot {
     extension: Extension,
@@ -343,7 +354,7 @@ impl UiExtensions {
         generation: &str,
         relative: &str,
     ) -> Result<Read, ResourceError> {
-        manifest::relative(relative).map_err(file_error)?;
+        manifest::relative(relative).map_err(|error| ResourceError::invalid(&error))?;
         let snapshot = self
             .catalog
             .lock()
@@ -492,16 +503,32 @@ impl DynPlugin for UiExtensionsPlugin {
             ctx.require_at(&self.methods)?.register(
                 ctx,
                 "ui.extensions",
-                vec![MethodDecl::new(
-                    "ui.extensions.list",
-                    false,
-                    Interruption::Report,
-                )],
-                Arc::new(move |_method, value, _stop, _progress| {
+                vec![
+                    MethodDecl::new("ui.extensions.list", false, Interruption::Report),
+                    MethodDecl::new("ui.extensions.read", false, Interruption::Report),
+                ],
+                Arc::new(move |method, value, stop, _progress| {
                     let service = handler.clone();
                     Box::pin(async move {
-                        let _: crate::protocol::Empty = params(value)?;
-                        reply(service.directory())
+                        match method.as_str() {
+                            "ui.extensions.list" => {
+                                let _: crate::protocol::Empty = params(value)?;
+                                reply(service.directory())
+                            }
+                            "ui.extensions.read" => {
+                                let request: ExtensionRead = params(value)?;
+                                let read = service
+                                    .read(&request.generation, &request.path)
+                                    .await
+                                    .map_err(|error| error.wire())?;
+                                reply(
+                                    read_page(read, request.offset, request.limit, stop)
+                                        .await
+                                        .map_err(|error| error.wire())?,
+                                )
+                            }
+                            _ => unreachable!("registered ui.extensions method"),
+                        }
                     })
                 }),
             )?;

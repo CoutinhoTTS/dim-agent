@@ -512,3 +512,229 @@ async fn failed_record_migration_and_unknown_versions_preserve_original_bytes() 
     assert_eq!(std::fs::read(home.join("plugins.json")).unwrap(), unknown);
     std::fs::remove_dir_all(home).unwrap();
 }
+
+fn decode(reply: &Value) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(reply["data"].as_str().unwrap())
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_client_reads_snapshot_resources_by_generation() {
+    let home = super::plugin_manager::home();
+    let mut config = super::plugin_manager::config(&home);
+    config.product_home = None;
+    config.target_home = Some(home.clone());
+    config.file_roots = vec![home.canonicalize().unwrap()];
+    let assets = frontend_fixture();
+    config.web_assets = Some(assets.clone());
+    let source = home.join("preview");
+    std::fs::create_dir_all(source.join("ui")).unwrap();
+    std::fs::write(source.join("dim-plugin.json"), manifest().to_string()).unwrap();
+    let panel = b"export const revision = 1";
+    std::fs::write(source.join("ui/panel.js"), panel).unwrap();
+    std::fs::write(source.join("ui/panel.js.map"), "private source map").unwrap();
+    std::fs::write(
+        home.join("plugins.json"),
+        r#"{"version":1,"installed":[],"names":{"unused":{"off":true}}}"#,
+    )
+    .unwrap();
+    let (server, _agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    assert!(
+        local
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("ui.extensions.read")),
+        "a local client must discover the read method"
+    );
+    let opened = local.rpc("web.open", json!({"port":0})).await["result"].clone();
+    let address = opened["address"].as_str().unwrap().to_owned();
+    let bootstrap = opened["url"]
+        .as_str()
+        .unwrap()
+        .split_once("#bootstrap=")
+        .unwrap()
+        .1;
+    let (status, headers, _) = http(
+        &address,
+        post(
+            &address,
+            "/api/auth/exchange",
+            &format!("http://{address}"),
+            &json!({"token":bootstrap}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let cookie = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let mut browser = web_client(&address, &cookie).await;
+    let installed = local
+        .rpc("plugin.install", json!({"source":{"path":source}}))
+        .await;
+    assert!(installed.get("error").is_none(), "{installed}");
+    let directory = local.rpc("ui.extensions.list", json!({})).await["result"].clone();
+    let generation = directory["extensions"][0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let first = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":generation,"path":"panel.js","limit":13}),
+        )
+        .await;
+    assert_ok(&first);
+    assert_eq!(first["result"]["offset"], 0);
+    assert_eq!(first["result"]["bytes"], 13);
+    assert_eq!(first["result"]["total"], panel.len());
+    assert_eq!(first["result"]["mediaType"], "text/javascript");
+    assert_eq!(decode(&first["result"]), &panel[..13]);
+    let second = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":generation,"path":"panel.js","offset":13,"limit":13}),
+        )
+        .await;
+    assert_ok(&second);
+    assert_eq!(second["result"]["offset"], 13);
+    assert_eq!(second["result"]["bytes"], panel.len() - 13);
+    assert_eq!(decode(&second["result"]), &panel[13..]);
+    assert_eq!(
+        second["result"]["offset"].as_u64().unwrap() + second["result"]["bytes"].as_u64().unwrap(),
+        second["result"]["total"].as_u64().unwrap(),
+        "the last page ends the resource, so no empty read is needed"
+    );
+    let end = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":generation,"path":"panel.js","offset":panel.len()}),
+        )
+        .await;
+    assert_ok(&end);
+    assert_eq!(end["result"]["bytes"], 0);
+    assert_eq!(end["result"]["offset"], panel.len());
+    assert_eq!(decode(&end["result"]), Vec::<u8>::new());
+    let beyond = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":generation,"path":"panel.js","offset":panel.len() + 1}),
+        )
+        .await;
+    assert_eq!(
+        beyond["error"]["data"]["appError"], "invalid_params",
+        "{beyond}"
+    );
+    for path in ["missing.js", "panel.js.map"] {
+        let reply = local
+            .rpc(
+                "ui.extensions.read",
+                json!({"generation":generation,"path":path}),
+            )
+            .await;
+        assert_eq!(
+            reply["error"]["data"]["appError"], "resource_gone",
+            "{path}: {reply}"
+        );
+    }
+    for path in ["../x", "/x", ""] {
+        let reply = local
+            .rpc(
+                "ui.extensions.read",
+                json!({"generation":generation,"path":path}),
+            )
+            .await;
+        assert_eq!(
+            reply["error"]["data"]["appError"], "invalid_params",
+            "{path:?}: {reply}"
+        );
+    }
+    let zero = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":generation,"path":"panel.js","limit":0}),
+        )
+        .await;
+    assert_eq!(
+        zero["error"]["data"]["appError"], "invalid_params",
+        "{zero}"
+    );
+    let unknown = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":generation,"path":"panel.js","limt":13}),
+        )
+        .await;
+    assert_eq!(
+        unknown["error"]["data"]["appError"], "invalid_params",
+        "{unknown}"
+    );
+
+    let reload = local.rpc("plugin.reload", json!({"name":"preview"})).await;
+    assert!(reload.get("error").is_none(), "{reload}");
+    let next = local.rpc("ui.extensions.list", json!({})).await["result"].clone();
+    let next_generation = next["extensions"][0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(next_generation, generation);
+    let stale = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":generation,"path":"panel.js","limit":13}),
+        )
+        .await;
+    assert_eq!(
+        stale["error"]["data"]["appError"], "resource_gone",
+        "{stale}"
+    );
+    let fresh = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":next_generation,"path":"panel.js","limit":13}),
+        )
+        .await;
+    assert_ok(&fresh);
+    assert_eq!(decode(&fresh["result"]), &panel[..13]);
+
+    let denied = browser
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":next_generation,"path":"panel.js"}),
+        )
+        .await;
+    assert_eq!(
+        denied["error"]["data"]["appError"], "unknown_method",
+        "{denied}"
+    );
+    assert!(
+        !browser
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("ui.extensions.read")),
+        "the web entry must not advertise the read method: {}",
+        browser.features
+    );
+    let asset = format!("/api/ui/extensions/{next_generation}/panel.js");
+    let (status, _, body) = http(
+        &address,
+        format!("GET {asset} HTTP/1.1\r\nHost: {address}\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert_eq!((status, body.as_str()), (200, "export const revision = 1"));
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+    std::fs::remove_dir_all(assets).unwrap();
+}

@@ -805,6 +805,11 @@ Authenticated resource routes share this listener:
 | `/api/ui/extensions/{generation}/{path}` | UiExtensions snapshot |
 | `/api/ui/sessions/{sessionId}/resources/{id}` | Session UiResources |
 
+These routes stay the Web host's byte-stream entry; `ui.extensions.read` is not
+on the Web entry's management allowlist, so a browser reads both kinds of
+resources through these routes, while a client without a byte-stream entry uses
+the protocol page read ([client UI extensions §6](client-ui-extensions.md#6-静态与动态资源)).
+
 Both routes preserve Host checking and cookies, reject an explicit foreign
 Origin or cross-site fetch, and allow same-origin GET without an Origin header.
 There is no resource SPA fallback. MIME and `nosniff` remain explicit; CSP and

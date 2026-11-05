@@ -1,4 +1,8 @@
-use dim_agent_capabilities::file_storage::{FileReader, FileStorage};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use dim_agent_capabilities::{
+    file_storage::{FileReader, FileStorage, FileStorageError},
+    methods::RpcError,
+};
 use dim_agent_runtime::{Names, PublicService, SessionIdentity, SessionLifecycle, SessionPhase};
 use rutis::{
     Ctx,
@@ -28,7 +32,7 @@ impl ResourceError {
             message: message.into(),
         }
     }
-    fn invalid(message: &str) -> Self {
+    pub(crate) fn invalid(message: &str) -> Self {
         Self::service("invalid_params", message)
     }
 }
@@ -70,6 +74,88 @@ pub(crate) struct Read {
     pub media_type: String,
     pub attachment: bool,
     pub etag: Option<String>,
+}
+
+/// The page a read returns when the caller names no `limit`.
+pub(crate) const DEFAULT_PAGE: usize = 1024 * 1024;
+/// The most a caller may read in one reply; a larger `limit` is clamped.
+pub(crate) const MAX_PAGE: usize = 4 * 1024 * 1024;
+
+/// One page of a UI resource: the reply both read methods share. `offset` is
+/// where the page starts and `data` is `bytes` bytes of the resource from
+/// there, base64 encoded, so the next page starts at `offset + bytes`. The
+/// resource is immutable and `total` is fixed: a client is done when
+/// `offset + bytes == total` and never needs an empty page to learn the end.
+/// A page can be empty only when the caller asks for `offset == total`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Page {
+    pub offset: u64,
+    pub bytes: usize,
+    pub total: u64,
+    pub media_type: String,
+    pub data: String,
+}
+
+/// Reads one page of `read`, honoring the caller's cancellation. The read
+/// keeps its [`Reads`] token for the whole page, so a withdrawal waits for it
+/// and a closed resource answers `resource_gone` instead of a partial page.
+/// `offset` defaults to 0 and `limit` to [`DEFAULT_PAGE`], clamped to
+/// [`MAX_PAGE`].
+pub(crate) async fn read_page(
+    read: Read,
+    offset: Option<u64>,
+    limit: Option<usize>,
+    cancel: CancellationToken,
+) -> Result<Page, ResourceError> {
+    let limit = limit.unwrap_or(DEFAULT_PAGE).min(MAX_PAGE);
+    if limit == 0 {
+        return Err(ResourceError::invalid("limit must be positive"));
+    }
+    let total = read.file.len();
+    let offset = offset.unwrap_or(0);
+    if offset > total {
+        return Err(ResourceError::invalid("offset is beyond the resource"));
+    }
+    let end = offset.saturating_add(limit as u64).min(total);
+    let mut data = Vec::with_capacity((end - offset) as usize);
+    let stop = read.stop.child_token();
+    while offset + (data.len() as u64) < end {
+        let at = offset + data.len() as u64;
+        let chunk = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(gone()),
+            _ = stop.cancelled() => return Err(gone()),
+            chunk = read.file.read_at(at, (end - at).min(65536) as usize, &stop) => chunk,
+        }
+        .map_err(page_error)?;
+        if chunk.is_empty() {
+            break;
+        }
+        data.extend_from_slice(&chunk);
+    }
+    Ok(Page {
+        offset,
+        bytes: data.len(),
+        total,
+        media_type: read.media_type.clone(),
+        data: STANDARD.encode(&data),
+    })
+}
+
+fn page_error(error: FileStorageError) -> ResourceError {
+    match error {
+        FileStorageError::Cancelled | FileStorageError::Closed => gone(),
+        other => file_error(other),
+    }
+}
+
+impl ResourceError {
+    /// The wire error a client receives: the resource code becomes the
+    /// application error of the same name.
+    pub(crate) fn wire(self) -> RpcError {
+        RpcError::service(&self.code, self.message)
+    }
 }
 
 struct Published {
