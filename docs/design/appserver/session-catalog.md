@@ -53,7 +53,7 @@ It does not own:
 | --- | --- |
 | Kind | Rpc built-in. Agents answers it from the catalog projection, joined with the `agent_sessions` rows and the title metadata; Rpc validates the envelope |
 | Protocol | v3. v1 and v2 reply `unknown_method` ("Method requires protocol v3"), as they do for `session.summaries` |
-| Discovery | `hello.features` lists it only while a native store is open, the condition `session.fork` uses, so a client that does not see it keeps using `session.summaries`. Without a store there is no projection to page, and `session.summaries` answers from the loaded Sessions as today (§3.3). `session.catalog.workspaces` is listed beside it, under the same condition, and tells a client that `cwd` accepts a set |
+| Discovery | `hello.features` lists it only while a native store is open, the condition `session.fork` uses, so a client that does not see it keeps using `session.summaries`. Without a store there is no projection to page, and `session.summaries` answers from the loaded Sessions as today (§3.3). `session.catalog.workspaces` and `session.catalog.includeClosed` are listed beside it, under the same condition: the first tells a client that `cwd` accepts a set, and the second that it accepts `includeClosed` |
 | `limit` | 1 to 200, default 50. A larger one is rejected, not clamped, as `history`'s `limit` is |
 | `cursor` | Opaque. It encodes the last returned row's `(updatedAt, sessionId)` and a digest of the request's `query`, `cwd`, `withPreview`, `withInternal`, `withAcpSessions` and `includeClosed`; it pages by keyset, and a client echoes it back unchanged. `cwd` enters the digest as its canonical set: `"a"` and `["a"]` are one filter, and so are `["a","b"]` and `["b","a"]`. It is not a Session id |
 | Order | `updatedAt` descending, then `sessionId` ascending |
@@ -133,7 +133,9 @@ default read lists every Session again and no row carries `closed: true`. A clie
 previous process made, and the catalog does not make the flag durable.
 
 The flag is part of the cursor's filter set: a cursor continues only under the filters it was taken under, so one
-taken with `includeClosed` is refused by a read without it, and the reverse.
+taken with `includeClosed` is refused by a read without it, and the reverse. Adding the flag to the digest also
+refuses, once, every cursor an earlier daemon issued, including one taken with the default: cursors are opaque and
+do not outlive the daemon's filter set, so a client reads the first page again.
 
 **The preview keeps today's rule, its batch-complete window included.** The window is the batches that start within
 the first 256 `main` events, and it is batch-complete as today's read is: the batch that holds sequence 256 is read

@@ -34,7 +34,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 | --- | --- |
 | 形态 | Rpc 内建方法。Agents 像回答目录读取那样，从目录投影联结 `agent_sessions` 行与标题元数据来回答；Rpc 校验信封 |
 | 协议 | v3。v1 与 v2 回复 `unknown_method`（"Method requires protocol v3"），与 `session.summaries` 相同 |
-| 发现 | `hello.features` 只在原生存储打开时列出它，条件与 `session.fork` 相同，因此看不到它的客户端继续用 `session.summaries`。没有存储就没有可读取的投影，`session.summaries` 与今天一样从已装载的 Session 回答（§3.3）。`session.catalog.workspaces` 在同一条件下与它并列列出，告诉客户端 `cwd` 接受一个集合 |
+| 发现 | `hello.features` 只在原生存储打开时列出它，条件与 `session.fork` 相同，因此看不到它的客户端继续用 `session.summaries`。没有存储就没有可读取的投影，`session.summaries` 与今天一样从已装载的 Session 回答（§3.3）。`session.catalog.workspaces` 与 `session.catalog.includeClosed` 在同一条件下与它并列列出：前者告诉客户端 `cwd` 接受一个集合，后者告诉客户端它接受 `includeClosed` |
 | `limit` | 1 到 200，缺省 50。更大的值被拒绝而不是截断，与 `history` 的 `limit` 相同 |
 | `cursor` | 不透明。它编码上一行返回的 `(updatedAt, sessionId)` 与请求的 `query`、`cwd`、`withPreview`、`withInternal`、`withAcpSessions` 与 `includeClosed` 的摘要，按键集分页；调用方原样回传，它不是 Session ID。`cwd` 以它的规范集合进入摘要：`"a"` 与 `["a"]` 是同一种过滤，`["a","b"]` 与 `["b","a"]` 也是 |
 | 顺序 | `updatedAt` 降序，再 `sessionId` 升序 |
@@ -62,7 +62,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 关闭事实是进程内的（[空闲卸载 §6.4](idle-unload.md#64-准入槽)；[Session 删除与 fork D5](session-deletion-and-fork.md#16-实现中的设计变更)）：重启从没有任何关闭标志的状态开始，因此默认读取重新列出每个 Session，也没有行带 `closed: true`。客户端读不回上一个进程做过的关闭，目录也不把这个标志持久化。
 
-该标志属于游标的过滤集：游标只在取出它时的过滤条件下继续，因此带 `includeClosed` 取出的游标会被不带它的读取拒绝，反之亦然。
+该标志属于游标的过滤集：游标只在取出它时的过滤条件下继续，因此带 `includeClosed` 取出的游标会被不带它的读取拒绝，反之亦然。把该标志加入摘要也会一次性拒绝旧版守护进程发出的每个游标，包括按缺省值取出的游标：游标是不透明的，不会比守护进程的过滤集活得更久，客户端因此重新读取第一页。
 
 **预览保持今天的规则，包括按批次完整的窗口。** 窗口是起始于 `main` 前 256 个事件内的批次，且与今天的读取一样按批次完整：承载第 256 个事件的批次整批读入，因此该批次里紧接 256 之后的用户输入也在窗口内。窗口事件里第一条带用户部分的 `input/message` 决定预览：该部分的文本块以换行连接，截到 120 个字符，更长时以 `…` 结尾。这个决定是最终的——第一条用户消息的文字为空时（例如只有图片）`preview` 为 NULL，之后的消息不再填它；窗口里没有这样的消息时也保持 NULL。投影对实时写入和回填应用同一条规则：批次只在行的预览仍未决定、且决定它的消息在窗口内时才写 `preview`，一旦决定就不再改变。因此回填行与实时行逐列相同（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)）。去掉或收窄这个窗口是对 `session.summaries` 所列内容的另一次可见变更。
 
