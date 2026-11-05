@@ -315,6 +315,26 @@ impl Connection {
         Ok(Reply::Keys(result))
     }
 
+    pub(super) async fn branches(
+        &self,
+        rpc: &RpcService,
+        params: Branches,
+    ) -> Result<Reply, RpcError> {
+        let session = self.session(rpc, &params.session_id)?;
+        let branches = session
+            .directory()
+            .into_iter()
+            .map(|entry| wire::BranchDirectoryView {
+                branch: wire::BranchInfo::from(entry.info.clone()),
+                source: entry.info.source,
+                state: if entry.ended { "ended" } else { "open" },
+                head: entry.head,
+                end_event: entry.end_event,
+            })
+            .collect();
+        Ok(Reply::Branches(wire::BranchesResult { branches }))
+    }
+
     pub(super) async fn end_branch(
         &self,
         rpc: &RpcService,

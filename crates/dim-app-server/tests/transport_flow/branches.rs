@@ -1,0 +1,320 @@
+use super::deletion::Store;
+use super::*;
+
+fn create_with_branch() -> Value {
+    json!({
+        "cwd": std::env::temp_dir(),
+        "tools": ["branch"],
+        "permissionPolicy": {"allowedTools": ["branch"]}
+    })
+}
+
+/// The last rest point of `branch`, as a client reads it.
+async fn through(client: &mut Client, session: &str, branch: &str) -> u64 {
+    let page = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":session,"branchId":branch,"after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&page);
+    page["result"]["through"].as_u64().unwrap()
+}
+
+/// Opens a child of `parent` at its last rest point.
+async fn open_line(client: &mut Client, session: &str, parent: &str, prompt: &str) -> String {
+    let at = through(client, session, parent).await;
+    let created = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":session,"parentBranchId":parent,"at":at,"prompt":prompt}),
+        )
+        .await;
+    assert_ok(&created);
+    created["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+async fn directory(client: &mut Client, session: &str) -> Vec<Value> {
+    let reply = client
+        .rpc("session.branches", json!({"sessionId":session}))
+        .await;
+    assert_ok(&reply);
+    reply["result"]["branches"].as_array().unwrap().clone()
+}
+
+fn row<'a>(rows: &'a [Value], id: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row["branchId"] == id)
+        .unwrap_or_else(|| panic!("{id} is missing: {rows:?}"))
+}
+
+/// The sequence of the line's own `branch/end`, read through its history.
+async fn own_end(client: &mut Client, session: &str, branch: &str) -> u64 {
+    let line = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":session,"branchId":branch,"after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&line);
+    line["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|event| event["type"] == "branch" && event["name"] == "end")
+        .unwrap_or_else(|| panic!("{branch} holds its own end: {line}"))["sequence"]
+        .as_u64()
+        .unwrap()
+}
+
+/// Waits until the branch's published head reaches `at_least`.
+async fn published_head(session: &dim_agent_runtime::Session, branch: &str, at_least: u64) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while session.sequence(branch).unwrap() < at_least {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the parent publishes what the tree recorded");
+}
+
+/// #1165: the directory lists main, its child and grandchild; a cascade end
+/// records each ended line with the sequence of its own `branch/end`, and
+/// `session.history` reads an ended line up to the head the directory gives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn branches_list_main_and_its_lines_and_read_an_ended_line_through_its_head() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.branches")),
+        "the feature is advertised: {:?}",
+        client.features
+    );
+    let created = client.rpc("session.create", create_with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    let child = open_line(&mut client, &id, "main", "child work").await;
+    session.idle(&child).await.unwrap();
+    let grandchild = open_line(&mut client, &id, &child, "grand work").await;
+    session.idle(&grandchild).await.unwrap();
+
+    let rows = directory(&mut client, &id).await;
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[0]["branchId"], "main", "main comes first: {rows:?}");
+    assert_eq!(rows[0]["state"], "open");
+    assert!(rows[0].get("endEvent").is_none());
+    let open = row(&rows, &child);
+    assert_eq!(open["state"], "open");
+    assert_eq!(open["parentBranchId"], "main");
+    assert!(open["branchPoint"].as_u64().is_some(), "{open}");
+    assert!(open["createEvent"].as_u64().is_some(), "{open}");
+    assert_eq!(open["source"]["kind"], "host", "{open}");
+    assert_eq!(row(&rows, &grandchild)["parentBranchId"], child);
+
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":id,"branchId":child}),
+            )
+            .await,
+    );
+    let rows = directory(&mut client, &id).await;
+    let ended = row(&rows, &child);
+    let cascaded = row(&rows, &grandchild);
+    assert_eq!(ended["state"], "ended", "{rows:?}");
+    assert_eq!(ended["endEvent"], own_end(&mut client, &id, &child).await);
+    assert_eq!(ended["head"], session.sequence(&child).unwrap());
+    assert_eq!(cascaded["state"], "ended");
+    assert_eq!(
+        cascaded["endEvent"],
+        own_end(&mut client, &id, &grandchild).await
+    );
+    assert_eq!(cascaded["head"], session.sequence(&grandchild).unwrap());
+    assert_eq!(rows[0]["state"], "open", "main stays open");
+
+    let head = ended["head"].as_u64().unwrap();
+    let read = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":child,"after":0,"limit":256,"through":head}),
+        )
+        .await;
+    assert_ok(&read);
+    assert_eq!(read["result"]["done"], true, "{read}");
+    assert_eq!(read["result"]["through"], head);
+    assert!(read["result"]["events"].as_array().unwrap().len() > 1);
+
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// #1165: after a restart the directory keeps ids, parents, branch points,
+/// create events and states; ended lines keep their fixed head and
+/// `endEvent`, and open lines' heads are at or above their old value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn branches_answer_the_same_directory_after_a_restart() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create_with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    let child = open_line(&mut client, &id, "main", "child work").await;
+    session.idle(&child).await.unwrap();
+    let grandchild = open_line(&mut client, &id, &child, "grand work").await;
+    session.idle(&grandchild).await.unwrap();
+    let open = open_line(&mut client, &id, "main", "second child").await;
+    session.idle(&open).await.unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":id,"branchId":child}),
+            )
+            .await,
+    );
+    let before = directory(&mut client, &id).await;
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let after = directory(&mut client, &id).await;
+    assert_eq!(before.len(), after.len(), "{after:?}");
+    for was in &before {
+        let id = was["branchId"].as_str().unwrap();
+        let now = row(&after, id);
+        for field in [
+            "parentBranchId",
+            "branchPoint",
+            "createEvent",
+            "source",
+            "state",
+        ] {
+            assert_eq!(was.get(field), now.get(field), "{id} keeps {field}: {now}");
+        }
+        if was["state"] == "ended" {
+            assert_eq!(was["head"], now["head"], "{id} keeps its fixed head");
+            assert_eq!(was["endEvent"], now["endEvent"], "{id} keeps its end");
+        } else {
+            assert!(
+                now["head"].as_u64().unwrap() >= was["head"].as_u64().unwrap(),
+                "{id} head moves forward: {now}"
+            );
+        }
+    }
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// #1165: a fork's directory lists the lines that ended before the fork,
+/// with the end their source recorded, and those lines have no events in
+/// the fork.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_lists_the_lines_that_ended_before_the_fork() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create_with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    let child = open_line(&mut client, &id, "main", "child work").await;
+    session.idle(&child).await.unwrap();
+    let main_head = session.sequence("main").unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":id,"branchId":child}),
+            )
+            .await,
+    );
+    // The end is recorded on main when the tree closes the line; a fork cut
+    // taken after it copies that record, one taken before does not.
+    published_head(&session, "main", main_head + 1).await;
+    let ended = row(&directory(&mut client, &id).await, &child).clone();
+    let at = through(&mut client, &id, "main").await;
+    let forked = client
+        .rpc("session.fork", json!({"sessionId":id,"at":at}))
+        .await;
+    assert_ok(&forked);
+    let fork = forked["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    let rows = directory(&mut client, &fork).await;
+    assert_eq!(rows[0]["branchId"], "main", "{rows:?}");
+    let copied = row(&rows, &child);
+    assert_eq!(copied["state"], "ended", "{rows:?}");
+    assert_eq!(copied["endEvent"], ended["endEvent"]);
+    assert_eq!(copied["parentBranchId"], "main");
+    let read = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":fork,"branchId":child,"after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&read);
+    assert!(
+        read["result"]["events"].as_array().unwrap().is_empty(),
+        "the fork holds none of the line's events: {read}"
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// #1165: a v1/v2 client has no `session.branches`, and a closed Session
+/// answers the existing closed error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn branches_require_v3_and_the_session() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create_with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    let mut v2 = Client::new_version(&server, false, 2).await;
+    let refused = v2.rpc("session.branches", json!({"sessionId":id})).await;
+    assert_eq!(refused["error"]["code"], -32601, "{refused}");
+    assert_eq!(
+        refused["error"]["data"]["appError"], "unknown_method",
+        "{refused}"
+    );
+    drop(v2);
+
+    assert_ok(&client.rpc("session.close", json!({"sessionId":id})).await);
+    let closed = client
+        .rpc("session.branches", json!({"sessionId":id}))
+        .await;
+    assert_eq!(
+        closed["error"]["data"]["appError"], "session_closed",
+        "{closed}"
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}

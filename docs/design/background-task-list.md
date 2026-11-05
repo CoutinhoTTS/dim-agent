@@ -17,6 +17,7 @@ Use the existing Session attachment and history, not a server task registry:
 | `session.history {sessionId,branchId,after,limit,through?}` | Branch-local, fixed-watermark history; read through the existing authorization and dispatch boundary |
 | `branch/create`, `branch/start`, `branch/create-failed` | Discover branch identities and creation outcomes from their owner's facts |
 | `session.state {sessionId,branchId,...}` | Discover published branches through the attachment's initial state watches and subsequent updates |
+| `session.branches {sessionId}` | The complete line directory, open and ended, with each line's state and head ([timeline branches §14](timeline-branches.md#14-clients)) |
 | `session.event {sessionId,branchId,event}` | Live facts, with a separate sequence cursor for each branch |
 | `exec/started`, `exec/ended` | Command identity, description and actual terminal result |
 | `collaboration/request`, `collaboration/delivered`, `collaboration/result` | Delegation identity, actual member Session and outcome |
@@ -30,8 +31,9 @@ stored branch directory and publishes successfully restored branches; failed or
 unfinished child creations are not published. Thus an existing child can be
 discovered by its state notice without finding its creation in main's local history. A
 reloading branch's state can be delayed until its Loop returns. Clients consume
-these public notices, not the internal branch directory. There is no initial
-enumeration-complete notice or snapshot barrier. The public
+these public notices; `session.branches` answers the complete directory, so a
+client enumerates with one read and uses the notices for lines that open or end
+after it rather than waiting for an enumeration notice. The public
 [history handler](../../crates/dim-app-server/src/connection/tree.rs) reads
 the named branch's own records; it does not
 copy ancestor records into that branch's task list. The v3
@@ -45,7 +47,8 @@ cursors from #299. Seed main and enqueue every branch ID observed in
 `session.state`, independently of the parent or its history cursor. Branch
 identities in local `branch/create`/`branch/start` or live task facts supplement
 discovery; read each discovered branch's own history and follow further identities
-there. Main's local history is not a complete branch directory. An explicit
+there. Main's local history is not a complete branch directory; `session.branches`
+is ([timeline branches §14](timeline-branches.md#14-clients)). An explicit
 create-failed fact settles that creation attempt;
 an unavailable history read does not mean the branch is empty or finished.
 Key discovery by branch ID within the current Session projection: repeated

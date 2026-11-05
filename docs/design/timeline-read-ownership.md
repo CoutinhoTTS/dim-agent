@@ -126,6 +126,7 @@ TreeCommands::batch_end(id: String, sequence: u64) -> Result<()>                
 TimelineStore::branches(session_id) -> Result<Vec<StoredBranch>>
 TimelineStore::head(key) -> Result<u64>
 Session::branches() -> Vec<TimelineInfo>   // id, parent, branch_point, create_anchor, source
+Session::directory() -> Vec<BranchDirectoryEntry>   // open and ended lines, fixed heads and end events
 
 // database file
 storage::export_timeline(path, session, out) -> Result<()>

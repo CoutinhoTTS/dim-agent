@@ -83,7 +83,7 @@ Every part belongs to the TimelineTree plugin ([timeline_tree.rs](../../crates/d
 
 | Part | Scope | Capability | Owns in this design |
 | --- | --- | --- | --- |
-| TimelineTree | Session | No | The line lifecycle: the identity block in every child's opening input, `TimelineInfo.source`, the end of a line (`branch/end` → `branch/ended`), refusing input once a line is ending, the restore rule, and reads of an ended line's history |
+| TimelineTree | Session | No | The line lifecycle: the identity block in every child's opening input, `TimelineInfo.source`, the end of a line (`branch/end` → `branch/ended`), refusing input once a line is ending, the restore rule, reads of an ended line's history, and the branch directory (§14) |
 | TreeTimeline | Branch | Yes | Routes `branch/end` to TimelineTree, as it routes `branch/create` today. For an end issued by a tool call, it also routes the turn end that the close waits for |
 | BranchTool | Session | No | The action-based `branch` tool (§11). It finds the calling line's BranchLine per call, the way WorkspaceTools finds FileReads |
 | **BranchLine** (new) | Branch | Yes | One line's view of its lines. Its role (main, tool line or host line) and its parent come from `TreeCommands.info(own id)`. From its own facts it folds its open tool lines and the state of its current turn. It writes the roster, the idle notice and the ended notice |
@@ -499,6 +499,21 @@ The panel is separate from the tasks panel, which lists background commands, mem
 └────────── Enter show the line · x end it · Esc close ───────────┘
 ```
 
+**The branch directory.** `session.branches {sessionId}` (v3, listed in `hello.features` with the other
+Session methods under the same admission rules as `session.history`) answers one entry per line: its identity
+(`branchId`, with `parentBranchId`, `branchPoint` and `createEvent` when it has them), its `source` as
+`TimelineInfo.source` carries it, `state` (`open` or `ended`), `head`, and, for an ended line, `endEvent`. `main`
+comes first and the rest follow in `branchId` order. The reply is not paged: it grows with the number of lines,
+which a Session bounds by its own use, not with history. `TimelineTree` owns the answer (`directory()`); `branches()`
+stays open-only for the callers that hold a live line.
+
+Two rules about `head` decide what a client may do with it:
+
+- An ended line's `head` and `endEvent` are fixed. The client passes `head` as `through` to `session.history` to
+  read the line, and `endEvent` names the line's own `branch/end`, including when an ancestor's end cascaded to it.
+- An open line's `head` is live. Restore appends `branch/resume` and the interruption facts to every open line, so
+  `head` moves across a restart; a client re-reads the directory after it reconnects instead of caching a head.
+
 **Web** keeps `main` in the center and follows lines in a right-side detail panel: a Lines tree, one tab per opened line, and line-scoped submit, stop, approvals and end ([Web workspace §4.1](web-workspace.md#41-lines-and-branch)). Desktop gets the protocol: `session.branch_end` and the two events in v3 history.
 
 ## 15. Changes
@@ -510,7 +525,7 @@ The panel is separate from the tasks panel, which lists background commands, mem
 | TreeTimeline | Consumes `branch/end`, plus the line's next turn end for an end issued by a tool call, and routes them to TimelineTree. It reports every `turn/end` to TimelineTree, which publishes it for the line's children | It routes `branch/create` the same way |
 | BranchTool | The action-based tool, plus the new BranchLine branch part. `read` reaches the line the caller was cut from as well as, on `main`, the tool lines it opened, with one cursor rule | The tool's actions and one line's view of its lines |
 | Session facade | `Session::end_branch(id, source)`. An ended line's head is `Session::sequence`; its history is read at that fixed head through `TreeCommands.page` | §17 |
-| App Server | `session.branch_end` (v3, a host source with a minted `operation_id`, listed in `hello.features` with the other Session methods when `session_execution` is on and the connection's entry is not bare or the daemon profile is not protected). `session.history` on an ended line returns immediately, at its stored head. `ProductEvent::new` carries the two kinds in v3 and leaves them out of v1 and v2 | An entry and a read, no business logic |
+| App Server | `session.branch_end` (v3, a host source with a minted `operation_id`, listed in `hello.features` with the other Session methods when `session_execution` is on and the connection's entry is not bare or the daemon profile is not protected). `session.history` on an ended line returns immediately, at its stored head. `session.branches` reads the tree's directory (§14). `ProductEvent::new` carries the two kinds in v3 and leaves them out of v1 and v2 | An entry and two reads, no business logic |
 | dim-agent-types | `branch/end` and `branch/ended` in `EventKind` and the v1 exclusion list, registered in the contract tests. The frozen fixtures are unchanged | Two core facts (§16) |
 | Goal (Pursuit amendment) | Recognizes its evaluator from the line's source and ends it ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) | Goal owns its evaluator's protocol |
 | Branch TypeScript binding | Regenerated `npm/branch-services.d.ts`: TreeCommands gains `end` and `page`, and `TimelineInfo` gains `source`. The `treeCommands` row of the [binding table](branch-typescript.md) lists `end` | TreeCommands is an exported service |
@@ -520,7 +535,7 @@ The panel is separate from the tasks panel, which lists background commands, mem
 New public content:
 
 - two events;
-- one RPC method;
+- two RPC methods;
 - two TreeCommands methods: `end(id, source)` and `page(id, after, limit)`;
 - `TimelineInfo.source`, read by BranchLine and by Goal;
 - the `branch` tool's new input.
@@ -628,6 +643,12 @@ Line end and sources:
 15. Ending a host line that has a child ends the child first, with `ancestor` set and `source` copied, then the line.
 16. `TreeCommands.list` and `info` return `source` for a new child and for a restored one, and none for `main`. The stored directory rows are byte-for-byte unchanged.
 
+The branch directory:
+
+17. `session.branches` returns `main` first and the rest in `branchId` order, with each line's identity, source, state and head. A cascade end records the ended child with the sequence of its own `branch/end` as `endEvent`, and `session.history` with `through` set to that child's `head` reads it.
+18. After a restart the directory keeps ids, parents, branch points, create events and states; ended lines keep their `head` and `endEvent`, and an open line's `head` is at or above its old value.
+19. A fork's directory lists the lines that ended before the fork, with the end the source recorded, and those lines have no events in the fork. A v1 or v2 client has no `session.branches`, and a closed Session answers `session_closed`.
+
 ## 21. Ablation review
 
 What is left, and why each piece is needed:
@@ -642,6 +663,7 @@ What is left, and why each piece is needed:
 | `branch/end` and `branch/ended` | Without them a line cannot end durably, and restore reopens it |
 | `source` on the end (`BranchSource`) | A create and an end record their issuer the same way, so a plugin's end is not recorded as the line's own |
 | `TimelineInfo.source` | An opener finds its own lines without parsing prompt text |
+| The directory's `endEvent` | Without it a client cannot name a cascaded line's end, and the line's own `branch/end` is one page away |
 | The tool restricted to `main` and to tool lines | One coordinator, and creators keep their own protocols |
 | The prompt rules on files | The only guard is FileReads; the rest is protocol |
 
