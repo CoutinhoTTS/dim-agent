@@ -274,11 +274,11 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
     );
     assert_eq!(
         goal_block(&session, "main", r#"count="1""#).await,
-        texts::continuation("main", 1, Some(2), ends[0])
+        texts::continuation("main", 1, Some(2), 0, ends[0])
     );
     assert_eq!(
         goal_block(&session, "main", r#"count="2""#).await,
-        texts::continuation("main", 2, Some(2), ends[1])
+        texts::continuation("main", 2, Some(2), 1, ends[1])
     );
     assert_eq!(
         goal_block(&session, "main", r#"reason="limit""#).await,
@@ -562,7 +562,7 @@ async fn goal_pending_input_and_interrupts() {
         .expect("the deciding turn");
     assert_eq!(
         goal_block(&session, "main", r#"count="1""#).await,
-        texts::continuation("main", 1, Some(1), deciding)
+        texts::continuation("main", 1, Some(1), 0, deciding)
     );
 
     // Appendix D 3: an interrupt after the goal starts pauses it, and no
@@ -812,9 +812,17 @@ async fn goal_on_a_line_behaves_as_on_main() {
         "the continuation after the operator input counts {expected}: {reset}"
     );
     let after = after_of(&reset).expect("the continuation's after");
+    // The operator's input restarts the count; the idle streak depends on
+    // whether its turn joined the continuation's, so the marker states it.
+    let idle: usize = reset
+        .split("idle=\"")
+        .nth(1)
+        .and_then(|value| value.split('"').next())
+        .and_then(|value| value.parse().ok())
+        .expect("the continuation's idle");
     assert_eq!(
         goal_block(&session, &child, &format!(r#"count="{expected}""#)).await,
-        texts::continuation(&child, expected, Some(1000), after),
+        texts::continuation(&child, expected, Some(1000), idle, after),
         "the line's continuation"
     );
     assert!(goal_writes(&session, "main").await.is_empty());
@@ -1116,7 +1124,7 @@ async fn goal_evaluator_asks_again_and_continues() {
     let after = after_of(&continuation).expect("the continuation's after");
     assert_eq!(
         continuation,
-        texts::evaluated_continuation("main", count, Some(5), after, evaluation),
+        texts::evaluated_continuation("main", count, Some(5), 0, after, evaluation),
         "the evaluator's continuation"
     );
     fixture.close().await;

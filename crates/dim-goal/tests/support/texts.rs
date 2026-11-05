@@ -90,9 +90,15 @@ fn limit_attr(limit: Option<u64>) -> String {
         .unwrap_or_default()
 }
 
-pub fn continuation(branch: &str, count: usize, limit: Option<u64>, after: u64) -> String {
+pub fn continuation(
+    branch: &str,
+    count: usize,
+    limit: Option<u64>,
+    idle: usize,
+    after: u64,
+) -> String {
     format!(
-        "<dim-goal kind=\"continuation\" count=\"{count}\"{} after=\"{after}\" branch=\"{branch}\">\n\
+        "<dim-goal kind=\"continuation\" count=\"{count}\"{} after=\"{after}\" idle=\"{idle}\" branch=\"{branch}\">\n\
          Continue working toward the active goal for branch {branch}. If it is completed or blocked, call goal_update. If you are on another line of this Session, the goal belongs to branch {branch}: do not call goal_update for it.\n\
          </dim-goal>",
         limit_attr(limit)
@@ -165,11 +171,12 @@ pub fn evaluated_continuation(
     branch: &str,
     count: usize,
     limit: Option<u64>,
+    idle: usize,
     after: u64,
     evaluation: u64,
 ) -> String {
     format!(
-        "<dim-goal kind=\"continuation\" count=\"{count}\"{} after=\"{after}\" evaluation=\"{evaluation}\" branch=\"{branch}\">\n\
+        "<dim-goal kind=\"continuation\" count=\"{count}\"{} after=\"{after}\" evaluation=\"{evaluation}\" idle=\"{idle}\" branch=\"{branch}\">\n\
          An evaluator checked your report that the goal for branch {branch} is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status \"completed\" again.\n\
          </dim-goal>",
         limit_attr(limit)

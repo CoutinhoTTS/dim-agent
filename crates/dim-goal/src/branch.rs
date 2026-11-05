@@ -479,13 +479,31 @@ impl Owner {
         Ok(!reply.events.is_empty())
     }
 
+    /// Whether the turn `turn_id` made a tool call: one bounded query from the
+    /// turn's start, limit one (A.4 C7). The kind is not folded (A.6).
+    async fn turn_had_tool_call(&self, turn_start: u64, turn_id: &str) -> Result<bool, AgentError> {
+        let reply = self
+            .timeline
+            .query(TimelineQuery {
+                kinds: vec!["step/tool-call".into()],
+                predicate: Some(TimelineQueryPredicate {
+                    path: "turn_id".into(),
+                    value: turn_id.into(),
+                }),
+                limit: NonZeroU64::new(1).expect("one fact is a page"),
+                ..read_page(TimelineQueryScope::Branch, Some(turn_start), 1, true)
+            })
+            .await?;
+        Ok(!reply.events.is_empty())
+    }
+
     /// The turn-end decision (A.4, Pursuit §4.1): an evaluator creation when
     /// the judge asks for one, otherwise the continuation limit.
     async fn do_turn_end(self: &Arc<Self>, after: u64) -> Result<(), AgentError> {
         let (request, evaluation, objective) = {
             let state = self.state.lock().unwrap();
             let fold = &state.fold;
-            if fold.turn_end.map(|end| end.sequence) != Some(after) {
+            if fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
                 return Ok(());
             }
             (
@@ -544,20 +562,53 @@ impl Owner {
         if self.stopped() {
             return Ok(());
         }
+        // C7's answer comes from the ending turn, read at decision time and
+        // only when a continuation drove it; `step/tool-call` is not a fold
+        // kind (A.6, #1113).
+        let progress = {
+            let end = {
+                let state = self.state.lock().unwrap();
+                if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
+                    return Ok(());
+                }
+                state.fold.turn_end.clone()
+            };
+            let Some(end) = end else {
+                return Ok(());
+            };
+            if !end.continuation_driven {
+                None
+            } else if self
+                .turn_had_tool_call(end.turn_start, &end.turn_id)
+                .await?
+            {
+                Some(fold::Progress::ToolCall)
+            } else {
+                Some(fold::Progress::NoToolCall)
+            }
+        };
+        if self.stopped() {
+            return Ok(());
+        }
         let decision = {
             let state = self.state.lock().unwrap();
-            if state.fold.turn_end.map(|end| end.sequence) != Some(after) {
+            if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
                 return Ok(());
             }
-            fold::decide_turn_end(&state.fold, limit.value())
+            fold::decide_turn_end(&state.fold, limit.value(), progress)
         };
         let Some(decision) = decision else {
             return Ok(());
         };
         let input = match decision {
-            Decision::Continuation { count } => {
-                text::continuation(&self.branch_id, count, limit.value(), after, &self.texts)
-            }
+            Decision::Continuation { count, idle } => text::continuation(
+                &self.branch_id,
+                count,
+                limit.value(),
+                idle,
+                after,
+                &self.texts,
+            ),
             Decision::Pause { reason } => text::automatic_pause(&self.branch_id, reason, after),
         };
         self.tree.input(self.branch_id.clone(), input).await?;
@@ -567,7 +618,7 @@ impl Owner {
     /// The latest `turn/end` without a live decision: an open decision the
     /// rebuild still owes after an input was deleted (§5).
     fn decide_end(self: &Arc<Self>) {
-        let end = self.state.lock().unwrap().fold.turn_end;
+        let end = self.state.lock().unwrap().fold.turn_end.clone();
         let Some(TurnEnd { sequence, .. }) = end else {
             return;
         };
@@ -584,7 +635,7 @@ impl Owner {
                 let skip = {
                     let state = owner.state.lock().unwrap();
                     state.role.is_some()
-                        || state.fold.turn_end.map(|end| end.sequence) != Some(sequence)
+                        || state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(sequence)
                 };
                 if owner.stopped() || skip {
                     return Ok(());
@@ -640,6 +691,7 @@ impl Owner {
             .unwrap()
             .fold
             .turn_end
+            .as_ref()
             .map(|end| end.sequence)
             != Some(sequence)
         {
@@ -815,23 +867,60 @@ impl Owner {
                         if owner.stopped() {
                             return Ok(());
                         }
+                        let (end, progress) = {
+                            let end = {
+                                let state = owner.state.lock().unwrap();
+                                if fold::decide_conclusion(&state.fold, sequence, &conclusion)
+                                    != Some(ConclusionAction::Continue)
+                                {
+                                    return Ok(());
+                                }
+                                state.fold.turn_end.clone()
+                            };
+                            let Some(end) = end else {
+                                return Ok(());
+                            };
+                            let progress = if end.continuation_driven {
+                                if owner
+                                    .turn_had_tool_call(end.turn_start, &end.turn_id)
+                                    .await?
+                                {
+                                    Some(fold::Progress::ToolCall)
+                                } else {
+                                    Some(fold::Progress::NoToolCall)
+                                }
+                            } else {
+                                None
+                            };
+                            (end, progress)
+                        };
+                        if owner.stopped() {
+                            return Ok(());
+                        }
                         let decision = {
                             let state = owner.state.lock().unwrap();
                             if fold::decide_conclusion(&state.fold, sequence, &conclusion)
                                 != Some(ConclusionAction::Continue)
+                                || state.fold.turn_end.as_ref().map(|end| end.sequence)
+                                    != Some(end.sequence)
                             {
                                 return Ok(());
                             }
-                            fold::decide_evaluated_continuation(&state.fold, limit.value())
+                            fold::decide_evaluated_continuation(
+                                &state.fold,
+                                limit.value(),
+                                progress,
+                            )
                         };
                         let Some(decision) = decision else {
                             return Ok(());
                         };
                         let input = match decision {
-                            Decision::Continuation { count } => text::evaluated_continuation(
+                            Decision::Continuation { count, idle } => text::evaluated_continuation(
                                 &owner.branch_id,
                                 count,
                                 limit.value(),
+                                idle,
                                 evaluation,
                                 &named,
                             ),

@@ -42,7 +42,7 @@ flowchart LR
 | `GoalSession` | Session | `TreeCommands`、`ToolRegistry`、`SessionMethods`、`GuideEntries`（Session 导出） | 把 `goal_update` 注册到 `ToolRegistry`，把 `session.goal` 注册到 `SessionMethods`；经 `TreeCommands::input` 按分支 id 写变更输入 |
 | `GoalBranch` | 分支 | `Dispatcher`、`Timeline`、`TimelineIdentity`、`BranchLifecycle`（分支导出）、`SessionLifecycle`（Session 导出，用于加载时核对）、`TreeCommands`、用于其来源 `goal` 的进程服务 `SettingsService`（S8b） | 不提供服务；拥有折叠结果、续跑决策和 Goal 自己的写入 |
 
-Session 部分在 apply 中把工具注册到 `ToolRegistry`，把方法命名空间 `session.goal` 注册到 `SessionMethods`。分支部分不提供服务；它作为分支定义注册，因此每个分支都有一份副本（C5）。安装了 Goal 的装配的每个 Session 都运行 Goal 的 Session 部分，因此该部分激活后，每个这样的 Session 都有 `session.goal`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。`maxContinuations` 是 Goal 的 Settings 来源 `goal` 中文档的可选字段，属于业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4）。Goal 只通过 S8b 的进程服务 `settings` 读取它（[Settings 服务](../appserver/settings-service.md)）：每次使用时调用 `SettingsService::read_declared`，经其公开的 Rust 绑定。Goal 的行在其 `apply` 中按 S8b §3.1 登记该来源：`source: "goal"`，一个用户文件，没有项目文件（只有用户作用域），没有 user-only 字段，JSON Schema 中 `maxContinuations` 为整数，`minimum: 1`、`maximum: 1000`，没有默认值（A4）。字段缺失表示没有上限；`null` 不是合法值。Settings 在写入和读取持久化文件时校验，因此 Goal 按交付的样子使用文档；变更是数据更新，从不重载。Dispatcher 回调登记自有任务后即返回，不等待 Settings。分支发布后，每个 turn/end 任务使用时调用 `settings.read {source: "goal", scope: "user"}`，再在写入前复核其决定轮次及当前已消费的折叠结果（A.6）。不缓存上限，也不监听 `settings.changed`。在该读取前已提交的变更无须重载即生效，包括文件后端 Settings 用户文档的直接编辑。来源不可读时停止该次决策，不产生自动输入，也不使用回退上限（附录 C）。中断暂停与继承目标的起始 clear 不需要读取上限。Goal 的工具都不写它；客户端经 `settings.read`/`settings.update` 写入它。Goal 只读取 `branch/start`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end` 和 `stop/interrupt` 的公开数据契约；从不读取其他插件的状态。
+Session 部分在 apply 中把工具注册到 `ToolRegistry`，把方法命名空间 `session.goal` 注册到 `SessionMethods`。分支部分不提供服务；它作为分支定义注册，因此每个分支都有一份副本（C5）。安装了 Goal 的装配的每个 Session 都运行 Goal 的 Session 部分，因此该部分激活后，每个这样的 Session 都有 `session.goal`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。`maxContinuations` 是 Goal 的 Settings 来源 `goal` 中文档的可选字段，属于业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4）。Goal 只通过 S8b 的进程服务 `settings` 读取它（[Settings 服务](../appserver/settings-service.md)）：每次使用时调用 `SettingsService::read_declared`，经其公开的 Rust 绑定。Goal 的行在其 `apply` 中按 S8b §3.1 登记该来源：`source: "goal"`，一个用户文件，没有项目文件（只有用户作用域），没有 user-only 字段，JSON Schema 中 `maxContinuations` 为整数，`minimum: 1`、`maximum: 1000`，没有默认值（A4）。字段缺失表示没有上限；`null` 不是合法值。Settings 在写入和读取持久化文件时校验，因此 Goal 按交付的样子使用文档；变更是数据更新，从不重载。Dispatcher 回调登记自有任务后即返回，不等待 Settings。分支发布后，每个 turn/end 任务使用时调用 `settings.read {source: "goal", scope: "user"}`，再在写入前复核其决定轮次及当前已消费的折叠结果（A.6）。不缓存上限，也不监听 `settings.changed`。在该读取前已提交的变更无须重载即生效，包括文件后端 Settings 用户文档的直接编辑。来源不可读时停止该次决策，不产生自动输入，也不使用回退上限（附录 C）。中断暂停与继承目标的起始 clear 不需要读取上限。Goal 的工具都不写它；客户端经 `settings.read`/`settings.update` 写入它。Goal 只读取 `branch/start`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end` 和 `stop/interrupt` 的公开数据契约，并在 turn/end 决策时读取结束回合的一页有界 `step/tool-call`（A.4 C7）；从不读取其他插件的状态。
 
 ## 2. 数据与状态
 
@@ -79,8 +79,8 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事�
 | `clear` | `session.goal.clear` | 两者都退役 | 没有目标、没有状态，也没有 `judge` |
 | `clear`（原因 `new_branch`） | Goal 自己，在新分支上（§3.4） | 两者都退役 | 没有目标、没有状态，也没有 `judge`；在模型上下文中退役继承来的 key |
 | `completed` / `blocked {summary}` | `goal_update` | `goal:status` | `status = completed` / `blocked`，带 `summary`，无论之前是什么；重复报告只是重述。只改变写入所在分支的折叠结果。在 [Pursuit](Pursuit.md) 的评审裁判下，干活模型的 `completed` 是请求，不改变状态，由评审者自己的块设置状态（A16） |
-| `pause`（原因 `interrupted`、`limit`、`turn_failed`） | Goal 自己 | `goal:status` | `status = paused (reason)`；Goal 只在 C1 成立后写它（A.4） |
-| 续跑（不是变更） | Goal 自己 | 无 | 只计数：计数加 1 |
+| `pause`（原因 `interrupted`、`limit`、`turn_failed`、`no_progress`） | Goal 自己 | `goal:status` | `status = paused (reason)`；Goal 只在 C1 成立后写它（A.4） |
+| 续跑（不是变更） | Goal 自己 | 无 | 只计数：计数加 1；其 `idle` 记录 C7 的连续停滞数 |
 
 基于已消费事件的推导值：
 
@@ -92,6 +92,7 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事�
 | `inherited_live` | 尚无本地目标块，且 `B` 的 `branch/start` 之前的前缀中有存活的 `goal:objective` 或 `goal:status` 块（§3.4） |
 | `last_operator` | 最新的操作者输入：带 `user` 内容且未被来源标记的 `input/message`（A5） |
 | `count` | 序号大于 `max(A, last_operator)` 的 Goal 续跑输入（标记 `kind="continuation"`，无 key） |
+| `idle` | `max(A, last_operator)` 之后最新续跑标记的 `idle` 属性：在该续跑所跟随的回合结束前，连续由续跑驱动且没有 `step/tool-call` 的回合数；没有这种续跑或属性缺失时为零（C7）。结束回合自身的工具调用答案在决策时查询，不进入折叠 |
 | `decided` | 对每个 `turn/end` 序号 `N`，是否存在标有 `after="N"` 的 Goal 写入（续跑或自动暂停），或在 [Pursuit](Pursuit.md) 的评审裁判下 `goal:evaluate:N` 的 `branch/create`；对 `B` 位于 `S` 的 `branch/start`，是否存在标有 `after="S"` 的起始 `clear` |
 | `judge` | 最新的存活本地 `goal:objective` 块（`set`）的 `judge` 属性；`edit` 保留它，`clear` 退役它；缺省为 `model`（[Pursuit](Pursuit.md) §3） |
 | `request` | 评审裁判下，`goal_update` 写入的 `op="completed"` 且不带 `by="evaluator"` 的 `goal:status` 块：一次完成请求，不改变 `status` 与 `A`（A16） |
@@ -121,7 +122,7 @@ sequenceDiagram
   TL-->>IQ: input/applied、turn/start、input/consumed
   IQ->>TL: 在 N 处 turn/end completed
   TL-->>G: Dispatcher 投递 turn/end N
-  Note over G: 基于已消费状态判断 C1..C6
+  Note over G: 基于已消费状态判断 C1..C7
   G->>G: 登记写入任务，处理器返回
   G->>TL: 任务复核，Branch::input 写 N 之后的续跑（Queue）
 ```
@@ -354,7 +355,12 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | C4 | `N` 是最新的 `turn/end`、`!turn_open`，且 `N` 不是 `decided` | 停止（更新一轮的结束会触发） |
 | C5 | `!pending_driving`（包括 Goal 自己未消费的续跑；不包括已删除的输入） | 停止 |
 | C6 | 没有显式 `maxContinuations`，或 `count < maxContinuations` | 写暂停（`limit`）并停止 |
-| — | 全部成立 | 写入续跑（Queue），计数为 `count + 1` |
+| C7 | 结束回合不是由 Goal 自己的续跑驱动，或它调用了工具，或包含它的连续停滞数低于 `NO_PROGRESS_TURNS`（3） | 写暂停（`no_progress`）并停止 |
+| — | 全部成立 | 写入续跑（Queue），计数为 `count + 1`，并带 `idle` |
+
+C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两者在 `turn/start` 与 `turn/end` 时保存），以及折叠结果中的 `idle`（§2）。turn/end 任务在决策时查询一次分支的 `step/tool-call`：以结束回合的 `turn_id` 为谓词、limit 为 1，从该回合的 `turn/start` 开始；`step/tool-call` 不是 Goal 消费的种类，重建也不读它（A.6、#1113）。只有当续跑驱动了结束回合时才查询，因此由其他驱动输入开启的回合不读即从零开始。
+
+下一条续跑的 `idle` 在结束回合由 Goal 续跑驱动且没有工具调用时为 `idle + 1`，否则为零（结束回合不是续跑驱动，或它调用了工具）。因此即使续跑驱动了回合，一次工具调用也会重置停滞数。停滞数读取自 `max(A, last_operator)` 之后最新的续跑，所以 `set`、`resume` 或操作者输入会丢弃它之前的回合；若一个回合同时消费了操作者输入和续跑，且由续跑驱动、未调用工具，它仍计一次。`NO_PROGRESS_TURNS` 是常量，不是设置项。
 
 投递 `M` 处的 `stop/interrupt`（`scope: turn`）时：若 C1 成立且 `A < M`，写暂停（`interrupted`）。
 
@@ -379,10 +385,10 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | `completed` / `blocked` | `goal:status` live | Append | `op="completed"` 或 `op="blocked"`；`Result:` 或 `Blocker:` / `<summary>` / 空行 / `goal_update set the goal status for branch B to completed.` 或 `... to blocked.` + ` Do not continue working toward a goal for branch B on your own.` |
 | `clear` | 1：`goal:objective` retire；2：`goal:status` retire | Append | 1：`op="clear"`；`The previous goal was cleared by the user. Disregard it.`；2：`<dim-goal kind="status" status="cleared" branch="B">` / `The goal for branch B has no status.` / `</dim-goal>` |
 | `clear`（Goal，新分支） | 同 `clear` | Append | 1：`op="clear" reason="new_branch" after="S"`；`Any goal above belongs to another branch, not to branch B. Disregard it; branch B has no goal.`；2：同 `clear` |
-| 暂停（Goal） | `goal:status` live | Append | `op="pause" reason="interrupted\|limit\|turn_failed" after="N"`；`The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
-| 续跑 | 无 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" branch="B">` / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are on another line of this Session, the goal belongs to branch B: do not call goal_update for it.`；只有当文档设置了上限时才写 `limit` |
+| 暂停（Goal） | `goal:status` live | Append | `op="pause" reason="interrupted\|limit\|turn_failed\|no_progress" after="N"`；`The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
+| 续跑 | 无 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" idle="k" branch="B">` / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are on another line of this Session, the goal belongs to branch B: do not call goal_update for it.`；只有当文档设置了上限时才写 `limit`，`idle` 始终写 |
 
-状态块只陈述状态，目标文本是单独的块，因此没有存活目标文本时被重放的状态块不声称存在目标；`set` 与 Goal 的暂停只会与存活的目标文本一起写入或在其存活时写入。原因短语：`interrupted` "the user interrupted the turn"，`limit` "the automatic continuation limit was reached"，`turn_failed` "the last turn failed"。工具声明描述："Report that the current goal is completed or blocked."
+状态块只陈述状态，目标文本是单独的块，因此没有存活目标文本时被重放的状态块不声称存在目标；`set` 与 Goal 的暂停只会与存活的目标文本一起写入或在其存活时写入。原因短语：`interrupted` "the user interrupted the turn"，`limit` "the automatic continuation limit was reached"，`turn_failed` "the last turn failed"，`no_progress` "the goal made no tool call in its last 3 continued turns"。工具声明描述："Report that the current goal is completed or blocked."
 
 ### A.5.1 协议与策略
 
@@ -391,7 +397,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 项 | 类别 | 依据 |
 | --- | --- | --- |
 | 标记名 `dim-goal`；它的 `kind` 值 `goal`、`status`、`continuation`，以及 Pursuit 的 `evaluate`、`evaluate-again`、`report`（[Pursuit](Pursuit.md) §5）；它的 key `goal:objective` 与 `goal:status` | 协议 | 折叠、客户端与指南条目都要读它们。改动与行为和断言它的流程测试同批落地，并让按旧形式记录的历史仍可理解 |
-| 折叠与客户端读取的属性名与值——`op` 及其 `set`、`edit`、`pause`、`resume`、`clear`、`completed`、`blocked`；`status` 及其 `active`、`cleared`；`reason` 及其 `user`、`new_branch`、`interrupted`、`limit`、`turn_failed` 和 Pursuit 的 `evaluation_failed`；`branch`、`count`、`limit`、`after`、`judge`、`evaluation`、`evaluator`、`result`、`by`——以及标签行 `Objective:`、`Result:`、`Blocker:`、`Evaluator report:` | 协议 | 属性与标签命名一种机制（[model-facing prompts §4](../model-prompts.md#4-协议与策略)）；上面的编码规则与它们同属协议 |
+| 折叠与客户端读取的属性名与值——`op` 及其 `set`、`edit`、`pause`、`resume`、`clear`、`completed`、`blocked`；`status` 及其 `active`、`cleared`；`reason` 及其 `user`、`new_branch`、`interrupted`、`limit`、`turn_failed`、`no_progress` 和 Pursuit 的 `evaluation_failed`；`branch`、`count`、`limit`、`after`、`idle`、`judge`、`evaluation`、`evaluator`、`result`、`by`——以及标签行 `Objective:`、`Result:`、`Blocker:`、`Evaluator report:` | 协议 | 属性与标签命名一种机制（[model-facing prompts §4](../model-prompts.md#4-协议与策略)）；上面的编码规则与它们同属协议 |
 | 本页措辞改动涉及的三句话：目标块的、续跑块的，以及 §3.4 与 §5 那一行陈述的子分支规则 | 策略 | 它们说的是怎么工作，不是运行时做什么：目标仍属于一条线，另一条线既不续跑它，也不为它调用 `goal_update` |
 | 上表其余块中的句子 | 策略 | 关于怎么工作的指引。与它们并列的 `goal_update` 声明是协议——它的 schema、结果格式，以及陈述调用做什么的描述 “Report that the current goal is completed or blocked.” |
 
@@ -411,11 +417,11 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 
 | 步骤 | 路径 |
 | --- | --- |
-| 加载 | 在 Dispatcher 上注册（`"Goal"`，`consume`），折叠重放的直到截点 `S` 的本地事件。在同一次重放中、任何实时事件之前：若最新的 `turn/end` 不是 `decided` 且目标为 active，执行其决策一次；若 `branch/start` 已消费、未 `decided` 且 `inherited_live`，执行起始 `clear` 决策一次 |
-| 消费 | 对 `S` 之后的每个实时事件，Dispatcher 处理器推进折叠结果，并对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 决策（A.4）；需要时登记写入任务，不等待即返回 |
+| 加载 | 在 Dispatcher 上注册（`"Goal"`，`consume`），折叠重放的直到截点 `S` 的本地事件。在同一次重放中、任何实时事件之前：若最新的 `turn/end` 不是 `decided` 且目标为 active，执行其决策一次，包括 C7 的一次有界 `step/tool-call` 读取；若 `branch/start` 已消费、未 `decided` 且 `inherited_live`，执行起始 `clear` 决策一次 |
+| 消费 | 对 `S` 之后的每个实时事件，Dispatcher 处理器推进折叠结果，并对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 决策（A.4）；需要时登记写入任务，不等待即返回。turn/end 任务在写入前读取 Settings，并在续跑驱动了结束回合时读取其一次有界的 `step/tool-call` 进度页（C7，见复核） |
 | 写入 | 来源为 `goal` 的 `input/message`，`submissionId: "goal:<uuid>"`，带标记和模式，经分支的公开输入入口 `Branch::input` 写入，由它在边界校验并追加 `input/message`（[interrupt](../../../architecture/rust-agent/interrupt.md)）。Session 部分的调用以同样方式写入，从不查询折叠结果 |
 | 消费路径 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed`。Goal 从不写 Steer |
-| 复核 | turn/end 任务读取 Settings 后，基于相同决定轮次的已消费状态复核（[time-bus](../../../architecture/rust-agent/time-bus.md) §4）；之后的事实在序号上先于写入，由 InputQueue、Loop 和折叠结果处理 |
+| 复核 | turn/end 任务读取 Settings，并在续跑驱动了结束回合时读取其进度，然后基于相同决定轮次的已消费状态复核（[time-bus](../../../architecture/rust-agent/time-bus.md) §4）；之后的事实在序号上先于写入，由 InputQueue、Loop 和折叠结果处理 |
 | 卸载 | 卸载清理函数结束订阅和在途写入任务；在追加前被取消的任务不写任何内容 |
 | 重启、Session 恢复 | 与加载相同；已提交但未消费的续跑随 Session 一起恢复 |
 
@@ -474,8 +480,12 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 重复 `resume` | — | 两条 Queue 输入，两轮；每条都设置 `active` 并重新开始计数 | Goal（A12） |
 | 重复 `set` | — | 每次都设置新目标；计数重新开始 | Goal（A12） |
 | 轮次失败 | `turn/end {failed}` | 暂停（`turn_failed`）（A6） | Goal |
+| 续跑的回合没有工具调用 | 续跑之后的 `turn/end` N | C7：下一条续跑写 `idle` + 1；该回合有 `step/tool-call` 则写 `idle="0"` | Goal |
+| 停滞数达到 3 | 连续第三个由续跑驱动且没有 `step/tool-call` 的回合 | 暂停（`no_progress`），不再续跑 | Goal |
+| 续跑回合之间的操作者输入 | 操作者输入 < `turn/end` | 它之前的回合不计入停滞数；该回合若也由续跑驱动则计一次 | Goal |
+| 停滞期间重载 | 续跑 < 重载 < 下一个 `turn/end` | 续跑的 `idle` 重建停滞数；未决的结束决策一次 | Goal |
 | 达到显式上限 | count = limit | 暂停（`limit`） | Goal |
-| 没有设置上限 | — | 目标 active 期间每个完成的回合都续跑；只有完成或用户操作使其停止（A4） | Goal |
+| 没有设置上限 | — | 目标 active 期间每个完成的回合都续跑；只有完成、用户操作或停滞规则使其停止（A4、C7） | Goal |
 | 资源节点离线 | 节点上的调用失败 | Goal 不使用节点服务：输入照常提交，轮次照常运行；工作区工具调用以 `node_unavailable` 作为工具错误失败；不重载，也不进入 Pending（[overview §6.3](../overview.md)） | Goal；WorkspaceTools |
 | 客户端断开 | — | 无影响 | — |
 
@@ -511,6 +521,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 10. `edit`（只改变 `goal:objective`）、`clear`（两个退役的 key 都不重放）、目标文本或 summary 中伪造的 `</dim-goal>` 被转义；分支最新存活的块在每次写入的 `sequence` 处反映每种状态。
 11. 设置 → `completed` → `resume`：目标重新打开（`active`，计数重新开始），resume 输入驱动一轮，其正常结束写入续跑；resume 之后压缩，上下文中最新的 `goal:status` 块是 resume 块，目标为 `active`。
 12. 设置 → `completed` → `blocked`：当前状态为 `blocked` 及第二个 summary；每次状态变更之后压缩，上下文中最新的 `goal:status` 块就是当前状态。
+13. 没有默认上限：未设置 `maxContinuations` 的目标会越过任何固定计数继续；连续三个由续跑驱动且没有 `step/tool-call` 的回合会使其暂停（`no_progress`），期间的工具调用或操作者输入会重置停滞数，续跑的 `idle` 在重载后重建它。`CONTINUE` 结论遵循同一规则，达到停滞时写暂停而不是评审续跑。
 
 ## 附录 E. 假设
 
@@ -519,7 +530,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 | A1 | `set`、`resume` 和续跑使用 Queue；`edit`、`pause`、`clear`、`goal_update` 和 Goal 的暂停使用 Append | 判断（总体设计只为续跑固定了 Queue）；方法无法知道状态，所以 `edit` 从不开启一轮 | 设置不会在空闲分支上开始工作，或暂停会开启一轮 |
 | A2 | 附录 A.5 中的确切块格式与文本；目标与状态是分开的 key（`goal:objective`、`goal:status`），`set` 和 `clear` 在一条输入中写两者，续跑不带 key | 判断；[session access A.1](../contracts/session-access.md#a1-sessions-服务) 允许一条输入携带多个带 key 的 raw 块 | 文本与解析一起改变；若只有一个 key，压缩只重放最新的变更，状态变更后会丢失目标 |
 | A3 | 一个目标只属于一个分支：折叠只使用该分支的本地事件，新分支用一次起始 `clear` 退役存活的继承目标 key | 用户决定 | 子分支会续跑或完成父分支的目标，或那里的模型会把父目标当作自己的 |
-| A4 | 可选的 `maxContinuations`（来源 `goal`），默认缺失即没有上限；设置时范围 1..=1000 | 判断 | 缺失的文档会在固定计数处暂停，或文档需要默认值才完整 |
+| A4 | 可选的 `maxContinuations`（来源 `goal`），默认缺失即没有上限；设置时范围 1..=1000。目标在连续 3 个由续跑驱动且没有 `step/tool-call` 的回合后暂停（`no_progress`），该数值是常量 | 判断：回合数不代表进展，工具调用是运行时可见的进展信号 | 缺失的文档会在固定计数处暂停，或文档需要默认值才完整；没有停滞规则时纯文本循环可能永远继续，而只在文本中报告进展的目标会在 3 个续跑回合后暂停 |
 | A5 | 计数只在 `set`、`resume` 和操作者输入时重新开始：带 `user` 内容且第一个 raw 块不是来源标记 | 判断 | 其他插件的自动输入会重置上限 |
 | A6 | 失败的轮次暂停目标（`turn_failed`） | 判断（避免因提供方错误进入重试循环） | 失败轮次会继续并消耗上限 |
 | A7 | 暂停不中断正在运行的轮次 | 判断 | 暂停也会调用 `stop` |

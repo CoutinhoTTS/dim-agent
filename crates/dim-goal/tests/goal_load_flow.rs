@@ -259,7 +259,7 @@ async fn e2_a_restored_evaluator_already_asked_writes_no_further_follow_up() {
     let continuation = env.wait_for("main", &needle).await;
     assert_eq!(
         continuation.text,
-        texts::evaluated_continuation("main", 1, None, evaluation, evaluation)
+        texts::evaluated_continuation("main", 1, None, 0, evaluation, evaluation)
     );
     assert_eq!(
         env.writes("eval").await.len(),
@@ -462,7 +462,7 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, None, end.sequence),
+        texts::continuation("main", 1, None, 0, end.sequence),
         "the fold is the one the kinds behind the noise leave"
     );
     let events = env.all_events("main").await;

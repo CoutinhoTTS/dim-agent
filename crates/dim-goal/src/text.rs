@@ -284,6 +284,7 @@ pub fn continuation(
     branch: &str,
     count: usize,
     limit: Option<u64>,
+    idle: usize,
     after: u64,
     texts: &GoalTexts,
 ) -> InputMessageData {
@@ -295,6 +296,7 @@ pub fn continuation(
         attrs.push(("limit", limit.to_string()));
     }
     attrs.push(("after", after.to_string()));
+    attrs.push(("idle", idle.to_string()));
     attrs.push(("branch", branch.to_owned()));
     input(
         vec![Block::new(
@@ -306,13 +308,17 @@ pub fn continuation(
 }
 
 /// The reason phrases an automatic pause states (A.5).
-pub fn reason_phrase(reason: &str) -> &'static str {
+pub fn reason_phrase(reason: &str) -> String {
     match reason {
-        "interrupted" => "the user interrupted the turn",
-        "limit" => "the automatic continuation limit was reached",
-        "turn_failed" => "the last turn failed",
-        "evaluation_failed" => "the evaluator could not check the result",
-        _ => "",
+        "interrupted" => "the user interrupted the turn".to_owned(),
+        "limit" => "the automatic continuation limit was reached".to_owned(),
+        "turn_failed" => "the last turn failed".to_owned(),
+        "no_progress" => format!(
+            "the goal made no tool call in its last {} continued turns",
+            crate::fold::NO_PROGRESS_TURNS
+        ),
+        "evaluation_failed" => "the evaluator could not check the result".to_owned(),
+        _ => String::new(),
     }
 }
 
@@ -429,6 +435,7 @@ pub fn evaluated_continuation(
     branch: &str,
     count: usize,
     limit: Option<u64>,
+    idle: usize,
     after: u64,
     evaluation: &str,
 ) -> InputMessageData {
@@ -441,6 +448,7 @@ pub fn evaluated_continuation(
     }
     attrs.push(("after", after.to_string()));
     attrs.push(("evaluation", evaluation.to_owned()));
+    attrs.push(("idle", idle.to_string()));
     attrs.push(("branch", branch.to_owned()));
     input(
         vec![Block::new(

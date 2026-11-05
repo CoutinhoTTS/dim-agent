@@ -39779,6 +39779,8 @@
         "path fold::ConclusionKind::Continue",
         "path fold::ConclusionKind::Done",
         "path fold::ConclusionKind::Failed",
+        "path fold::Progress::NoToolCall",
+        "path fold::Progress::ToolCall",
         "path fold::conclusion_of",
         "path fold::decide_conclusion",
         "path fold::decide_evaluated_continuation",
