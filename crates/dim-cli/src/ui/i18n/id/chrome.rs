@@ -1,5 +1,31 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "Antrean",
+        "Export session" => "Ekspor sesi",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter steer · x hapus pesan tertahan · Esc tutup"
+        }
+        "No queued messages." => "Tidak ada pesan dalam antrean.",
+        "Held · awaiting application" => "Ditahan · menunggu penerapan",
+        "Incorporating · awaiting model consumption" => {
+            "Sedang dimasukkan · menunggu pemrosesan oleh model"
+        }
+        "Held" => "Ditahan",
+        "Incorporating" => "Sedang dimasukkan",
+        "Enter export · Esc cancel" => "Enter ekspor · Esc batal",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "Pesan dengan lampiran tetap dalam antrean; gunakan /queue untuk steer atau menghapusnya"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue kelola · shift+← edit terakhir · ctrl+s steer kini"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count} lagi · /queue kelola · shift+← edit terakhir · ctrl+s steer kini"
+        }
+        "steer or delete queued messages" => "steer atau hapus pesan dalam antrean",
+        "export this conversation" => "ekspor percakapan ini",
+        "That message has already left the queue." => "Pesan itu sudah keluar dari antrean.",
+        "Exported {format}: {path}" => "{format} diekspor: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter output / interupsi anggota · x stop perintah · Esc tutup"

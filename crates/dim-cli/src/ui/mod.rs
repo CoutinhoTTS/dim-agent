@@ -55,6 +55,7 @@ pub mod plugins_panel;
 pub mod progress;
 pub mod prompts;
 pub mod providers_panel;
+pub mod queue_panel;
 pub mod render;
 pub mod rows;
 pub mod runtime_panel;

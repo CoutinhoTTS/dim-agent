@@ -173,6 +173,48 @@ impl Composer {
         self.area.set_cursor(text.len());
     }
 
+    /// Appends withdrawn operator content, excluding appended runtime blocks.
+    /// Adjacent text blocks are separated by newlines; images stay atomic.
+    pub fn restore(&mut self, input: dim_agent_types::UserInput) {
+        self.shell = None;
+        self.area.set_cursor(self.area.text().len());
+        if !self.area.text().trim().is_empty() {
+            self.area.insert_str("\n");
+        }
+        let mut previous_text = false;
+        for (index, block) in input.content.into_iter().enumerate() {
+            match block {
+                dim_agent_types::ContentBlock::Text { text } => {
+                    if index > 0 && text.starts_with("<dim-") {
+                        continue;
+                    }
+                    if previous_text {
+                        self.area.insert_str("\n");
+                    }
+                    self.area.insert_str(&text);
+                    previous_text = true;
+                }
+                block @ dim_agent_types::ContentBlock::Image { .. } => {
+                    previous_text = false;
+                    let buffer = "[Image]".to_owned();
+                    let id =
+                        self.area
+                            .insert_element(&buffer, TOKEN_KIND, Some(token_line(&buffer)));
+                    self.tokens.push(Token {
+                        id,
+                        label: buffer.clone(),
+                        buffer,
+                        content: String::new(),
+                        block: Some(block),
+                        file: None,
+                        details: String::new(),
+                    });
+                }
+            }
+        }
+        self.renumber();
+    }
+
     /// Appends `text` to the draft as a Markdown quote and a blank line,
     /// keeping what is already there; the cursor goes to the end. The
     /// format is the one the Web composer writes (member-conversation
@@ -1995,7 +2037,7 @@ mod tests {
 
     #[test]
     fn palette_requires_an_exact_exit_before_dispatch() {
-        for query in ["/ex", "/qui"] {
+        for query in ["/exi", "/qui"] {
             let mut c = Composer::new(Vec::new());
             typed(&mut c, query);
             assert_eq!(c.handle_key(key(KeyCode::Enter)), Outcome::Handled);
@@ -2033,7 +2075,8 @@ mod tests {
             ("/", "/new"),
             ("/ke", "/keys"),
             ("/ren", "/rename "),
-            ("/ex", "/exit"),
+            ("/exi", "/exit"),
+            ("/ex", "/export"),
         ] {
             let mut c = Composer::new(Vec::new());
             typed(&mut c, query);

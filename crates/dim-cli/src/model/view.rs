@@ -207,12 +207,13 @@ pub struct ApprovalView {
     pub always: Option<String>,
 }
 
-/// A message the queue strip shows: submitted while a turn runs, without its
-/// `input/applied` yet.
+/// A message not yet consumed by the model, held or already applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
     pub id: String,
     pub text: String,
+    pub held: bool,
+    pub recallable: bool,
     /// Presentation of an image message; never restored into a draft.
     pub display: Option<String>,
 }

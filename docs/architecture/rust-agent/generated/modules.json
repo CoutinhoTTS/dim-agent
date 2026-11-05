@@ -3784,6 +3784,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/session.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "json",
         "matches",
@@ -4814,6 +4815,13 @@
         "panic",
         "vec"
       ]
+    },
+    {
+      "id": "dim_cli::ui::queue_panel",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/queue_panel.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_cli::ui::render",
@@ -29891,6 +29899,13 @@
     },
     {
       "from": "dim_cli::model::session",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
       "to": "dim_agent_types::permission",
       "references": [
         "path dim_agent_types::PermissionPolicy",
@@ -29909,6 +29924,13 @@
       "to": "dim_cli::configure",
       "references": [
         "path crate::configure::EffortChoices"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
+      "to": "dim_cli::export",
+      "references": [
+        "path crate::export::Format"
       ]
     },
     {
@@ -30809,6 +30831,7 @@
       "to": "dim_cli",
       "references": [
         "path Result",
+        "path crate::Error",
         "path crate::model_adoption_error",
         "path crate::session_create_from_options",
         "use crate::Result"
@@ -30856,6 +30879,7 @@
       "from": "dim_cli::session",
       "to": "dim_cli::export",
       "references": [
+        "path export::Format",
         "path export::write",
         "use crate::export"
       ]
@@ -31157,6 +31181,15 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::export",
+      "references": [
+        "path crate::export::Format::Json",
+        "path crate::export::Format::Markdown",
+        "path crate::export::write"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::goal",
       "references": [
         "path crate::goal::Call",
@@ -31249,6 +31282,7 @@
         "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
+        "path Command::Export",
         "path Command::FindRepository",
         "path Command::FocusLine",
         "path Command::Fork",
@@ -31364,6 +31398,7 @@
         "path Update::Compacted",
         "path Update::Context",
         "path Update::EffortChoices",
+        "path Update::Exported",
         "path Update::Failed",
         "path Update::Isolation",
         "path Update::IsolationBackend",
@@ -32033,6 +32068,13 @@
     },
     {
       "from": "dim_cli::ui",
+      "to": "dim_cli::ui::queue_panel",
+      "references": [
+        "mod queue_panel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
       "to": "dim_cli::ui::render",
       "references": [
         "mod render"
@@ -32252,7 +32294,16 @@
       "from": "dim_cli::ui::composer",
       "to": "dim_agent_types::content",
       "references": [
-        "path dim_agent_types::ContentBlock"
+        "path dim_agent_types::ContentBlock",
+        "path dim_agent_types::ContentBlock::Image",
+        "path dim_agent_types::ContentBlock::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
       ]
     },
     {
@@ -34909,6 +34960,13 @@
     },
     {
       "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::export",
+      "references": [
+        "path crate::export::Format"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
       "to": "dim_cli::member_approval",
       "references": [
         "path crate::member_approval::DetailError",
@@ -35358,6 +35416,77 @@
         "use crate::ui::theme::palette::Appearance",
         "use crate::ui::theme::palette::ColorMode",
         "use crate::ui::theme::palette::terminal_palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::queue_panel",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path ViewSnapshot",
+        "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::queue_panel",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe",
+        "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::queue_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "use crate::ui::i18n::t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::queue_panel",
+      "to": "dim_cli::ui::list_panel",
+      "references": [
+        "path Event::Close",
+        "path Event::None",
+        "path Event::Pick",
+        "path Event::Refresh",
+        "path Item::new",
+        "path ListPanel",
+        "path ListPanel::new",
+        "use crate::ui::list_panel::Event",
+        "use crate::ui::list_panel::Item",
+        "use crate::ui::list_panel::ListPanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::queue_panel",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect",
+        "path Effect::Close",
+        "path Effect::InputControl",
+        "path Effect::None",
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::queue_panel",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::Char",
+        "path KeyEvent",
+        "path Modifiers::NONE",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::queue_panel",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
       ]
     },
     {
@@ -37834,6 +37963,14 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::export",
+      "references": [
+        "path crate::export::Format::Json",
+        "path crate::export::Format::Markdown"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::goal",
       "references": [
         "path crate::goal::Status::Active",
@@ -37887,6 +38024,7 @@
         "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
+        "path Command::Export",
         "path Command::FindRepository",
         "path Command::FocusLine",
         "path Command::Fork",
@@ -37973,6 +38111,7 @@
         "path Update::Compacted",
         "path Update::Context",
         "path Update::EffortChoices",
+        "path Update::Exported",
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Isolation",
@@ -38232,6 +38371,21 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::list_panel",
+      "references": [
+        "path ListEvent::Close",
+        "path ListEvent::None",
+        "path ListEvent::Pick",
+        "path ListEvent::Refresh",
+        "path ListPanel",
+        "path ListPanel::new",
+        "use crate::ui::list_panel::Event",
+        "use crate::ui::list_panel::Item",
+        "use crate::ui::list_panel::ListPanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::management_panel",
       "references": [
         "path ManagementPanel",
@@ -38303,8 +38457,10 @@
         "path Effect::EditManagement",
         "path Effect::EndLine",
         "path Effect::Exit",
+        "path Effect::Export",
         "path Effect::FocusLine",
         "path Effect::Fork",
+        "path Effect::InputControl",
         "path Effect::LanguageApply",
         "path Effect::LanguagePreview",
         "path Effect::LanguageRestore",
@@ -38381,6 +38537,15 @@
         "path ProvidersPanel",
         "path ProvidersPanel::new",
         "use crate::ui::providers_panel::ProvidersPanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::queue_panel",
+      "references": [
+        "path QueuePanel",
+        "path QueuePanel::new",
+        "use crate::ui::queue_panel::QueuePanel"
       ]
     },
     {
@@ -38832,6 +38997,13 @@
       "to": "dim_agent_capabilities::prompt_suggestion",
       "references": [
         "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
       ]
     },
     {

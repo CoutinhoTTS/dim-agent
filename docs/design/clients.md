@@ -48,7 +48,7 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 
 | Contract | Owner document |
 | --- | --- |
-| Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 5); [App Server README](../../crates/dim-app-server/README.md) |
+| Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 2); [App Server README](../../crates/dim-app-server/README.md) |
 | Session methods versus management methods, and which entry is served which | [Session boundary](contracts/session-boundary.md) (A.3 entries), [management methods](appserver/management-methods.md) |
 | Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves. The attach reply carries that Session's `SessionInfo`, whose `model` follows the Session's latest adopted configuration, so a client that opens a known Session takes the model from it and reads no catalog; `session.summaries` items still report the creation model until [#795](https://github.com/arcships/dim/issues/795) lands. A reload leaves the title fields absent and `running` false, and the notices that follow correct them. The `session.create` and `session.attach` replies also carry `modelPreferences`, the preferences the Session's adopted configuration sends, derived from it and absent when it carries none; `session.summaries` items do not carry it | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
 | Broadcast notices that are not Timeline facts (`session.notice`, e.g. titles) | [Session notices](appserver/session-notices.md) |
@@ -111,7 +111,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | Capability | CLI | Web | Source |
 | --- | --- | --- | --- |
 | New, resume, Session list | done; `/resume` opens on the local scope — the launch workspace, or its repository's worktrees once git answers — and `Ctrl+S` toggles it with every workspace; two states, never three. It labels each row by creation origin and hides ACP Sessions unless the preference says otherwise | done (grouped by directory) | [Session classification](appserver/session-classification.md), [CLI commands](cli-commands.md#the-resume-picker) |
-| Export conversation | done in the line client and `dimcode session export`; inside the terminal UIs: none | — | [CLI commands](cli-commands.md) |
+| Export conversation | done in the line client, both terminal UIs and `dimcode session export` | — | [CLI commands](cli-commands.md) |
 | `/timeline` and message actions | done in the TUI; it also replaces `/history`'s paging | — | [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message) |
 | Titles | automatic: done (optional SessionTitle package); manual rename: designed | — | [SessionTitle](plugins/SessionTitle.md) |
 | Fork | designed in the CLI (server `session.fork` done) | later phase | [Session deletion and fork](appserver/session-deletion-and-fork.md) |
@@ -125,8 +125,8 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | --- | --- | --- | --- |
 | Send, queue (`Enter` while running), automatic sending, steer (`Ctrl+S`, or `Enter` on an empty draft), interrupt | done | send and stop: done; queue: later phase | InputQueue (S1) |
 | Lines: tree, switch, create, send, stop, approvals, end | done | done (right-side Lines panel) | [Timeline branches](timeline-branches.md) §14, [Web workspace](web-workspace.md#41-lines-and-branch) |
-| `/queue` panel and queue deletion | none | — | server contract done (S1) |
-| Retrieve a queued message for editing | done; a message with attachments loses them (§4 item 4) | — | |
+| `/queue` panel and queue deletion | done in both terminal UIs | — | [CLI commands](cli-commands.md#queued-messages) |
+| Retrieve a queued message for editing | done; images and multi-block messages remain queued with a notice | — | [CLI commands](cli-commands.md#queued-messages) |
 | Multiline, paste, large paste, images, mixed attachments, `@` files, `!` / `!!` | done | attachments: later phase | [CLI attachment input](cli-attachment-input.md), [ShellInput](plugins/ShellInput.md) |
 | Skill references: the `/` palette lists them, and `$skill: <name>` loads one with the message | done | none | [Skills](plugins/Skills.md#9-references-load-with-the-operators-input) |
 | Clipboard text, images, files; selection copy; OSC 52 | done | browser | |
@@ -163,11 +163,9 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 Undesigned capabilities from §3, in feature-list order:
 
 1. Message copying (`/timeline` and its other message actions: [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message)).
-2. The `/queue` panel and queue deletion (the server contract exists).
-3. Retrieving a queued message that has attachments: `QueuedInput` keeps only text, so the attachments are lost. Either the client refuses it, as the feature list says, or the queue keeps the attachments.
-4. A prose reference for protocol v3: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
-5. Questions in the Web workspace: it handles approvals but not `ask_user`, and web-workspace §4 does not list it as deferred.
-6. Session list project/all switch, `/debug`, the remaining `/settings` items, export inside the terminal UIs, `dimcode upgrade`.
+2. A prose reference for protocol v3: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
+3. Questions in the Web workspace: it handles approvals but not `ask_user`, and web-workspace §4 does not list it as deferred.
+4. Session list project/all switch, `/debug`, the remaining `/settings` items, `dimcode upgrade`.
 
 Documents that disagree with the code or with each other:
 
@@ -207,7 +205,7 @@ flowchart LR
 
 1. **Fullscreen terminal UI.** The code ships it; the overview says it is out of scope. Either accept it in scope (update the overview and CLI commands, and decide whether rollback and `/stats` stay out) or freeze it.
 2. **Web phase 2 scope**, including whether the loopback web entry may carry management methods for settings pages (web-workspace Q2), and whether Questions is required in the Web workspace.
-3. **Which §4 gaps get designs**, and in which milestone: `/timeline` and message actions, `/queue`, queued attachments.
-4. **A protocol v3 reference** (§4 item 4): write one, or keep the code as the reference.
+3. **Which §4 gaps get designs**, and in which milestone: message copying and the remaining `/timeline` actions.
+4. **A protocol v3 reference** (§4 item 2): write one, or keep the code as the reference.
 5. **Milestones for the open client issues**: [#263](https://github.com/arcships/dim/issues/263) (member transcript cards, subagent model policy runtime), [#264](https://github.com/arcships/dim/issues/264) (Workflow view), [#386](https://github.com/arcships/dim/issues/386) (UI events toward the agent).
 6. **Owner of the client lane** in the roadmap.

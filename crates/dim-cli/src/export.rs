@@ -19,10 +19,19 @@ use std::{
     str::FromStr,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     Markdown,
     Json,
+}
+
+impl Format {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Markdown => "Markdown",
+            Self::Json => "JSON",
+        }
+    }
 }
 
 impl FromStr for Format {
@@ -50,17 +59,7 @@ pub async fn write(
     let result = stream(client, session_id, format, &mut file).await;
     drop(file);
     match result {
-        Ok(()) => {
-            let label = match format {
-                Format::Markdown => "Markdown",
-                Format::Json => "JSON",
-            };
-            eprintln!(
-                "Exported {label}: {}",
-                crate::sanitize::safe(&path.display().to_string())
-            );
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(error) => {
             let _ = std::fs::remove_file(path);
             Err(error)

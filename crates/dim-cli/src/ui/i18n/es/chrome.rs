@@ -1,5 +1,31 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "Cola",
+        "Export session" => "Exportar sesión",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter steer · x eliminar mensaje retenido · Esc cerrar"
+        }
+        "No queued messages." => "No hay mensajes en cola.",
+        "Held · awaiting application" => "Retenido · pendiente de aplicación",
+        "Incorporating · awaiting model consumption" => {
+            "Incorporando · pendiente de procesamiento por el modelo"
+        }
+        "Held" => "Retenido",
+        "Incorporating" => "Incorporando",
+        "Enter export · Esc cancel" => "Enter exportar · Esc cancelar",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "Los mensajes con archivos adjuntos permanecen en cola; usa /queue para hacer steer o eliminarlos"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue gestionar · shift+← editar el último · ctrl+s steer ahora"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count} más · /queue gestionar · shift+← editar el último · ctrl+s steer ahora"
+        }
+        "steer or delete queued messages" => "hacer steer con mensajes en cola o eliminarlos",
+        "export this conversation" => "exportar esta conversación",
+        "That message has already left the queue." => "Ese mensaje ya ha salido de la cola.",
+        "Exported {format}: {path}" => "Exportado {format}: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter salida / interrumpir miembro · x parar comando · Esc cerrar"
