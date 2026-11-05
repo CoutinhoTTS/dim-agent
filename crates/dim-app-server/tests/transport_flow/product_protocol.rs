@@ -2545,6 +2545,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
     assert_ok(&created);
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
     let session = agent.get_session(&sid).unwrap();
+    let head = session.sequence("main").unwrap();
     assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
     let empty = json!({"sessionId":sid,"branchId":"main","turnId":null,"requestId":null,
         "text":"","textOffset":0,"thinking":"","thinkingOffset":0,"tools":[]});
@@ -2605,15 +2606,15 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         other.notice("session.model.progress").await["params"],
         empty
     );
-    let persisted = dim_agent_runtime::testing::chain_events(&session, "main", ..)
+    let appended = dim_agent_runtime::testing::branch_events(&session, "main", head + 1..)
         .await
         .unwrap();
     assert!(
-        persisted.iter().all(|event| matches!(
-            event.kind,
-            EventKind::BranchStart(_) | EventKind::InputMessage(_) | EventKind::InputApplied(_)
-        )),
-        "{persisted:?}"
+        appended.iter().all(|event| {
+            matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_none())
+                || matches!(event.kind, EventKind::InputApplied(_))
+        }),
+        "model progress does not persist facts: {appended:?}"
     );
 
     let mut legacy = Client::new_version(&server, false, 2).await;

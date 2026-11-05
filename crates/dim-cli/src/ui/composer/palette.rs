@@ -441,6 +441,8 @@ mod tests {
             "fork",
             "lines",
             "timeline",
+            "queue",
+            "export",
             "goal",
             "tasks",
             "rename",
@@ -512,7 +514,7 @@ mod tests {
         );
         assert!(names("/ss", SCROLLBACK).contains(&"resume"));
         assert!(names("/quit", SCROLLBACK).contains(&"exit"));
-        assert_eq!(names("/ex", SCROLLBACK)[0], "exit");
+        assert_eq!(names("/ex", SCROLLBACK)[..2], ["export", "exit"]);
         assert_eq!(names("/tim", SCROLLBACK), ["timeline", "runtime"]);
     }
 

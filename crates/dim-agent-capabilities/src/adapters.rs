@@ -14,7 +14,7 @@ pub const MAX_MOCK_OUTPUT_BYTES: usize = 1024 * 1024;
 pub struct EchoModel;
 impl EchoModel {
     /// Selects the latest mock command or tool result, skipping runtime state and rules.
-    pub fn input(request: &ModelRequest) -> Option<&Message> {
+    pub fn last_message(request: &ModelRequest) -> Option<&Message> {
         request.messages.iter().rev().map(AsRef::as_ref).find(|message: &&Message| {
             message.role != Role::User || !match &message.content {
                 MessageContent::Text(text) => crate::context_block::is_state_or_rule(text),
@@ -36,7 +36,7 @@ impl ModelDriver for EchoModel {
             let mut chunks = vec![Ok(ModelChunk::MessageStart {
                 message_id: id.clone(),
             })];
-            let last = Self::input(&request);
+            let last = Self::last_message(&request);
             let text = last.map(message_text).transpose()?.unwrap_or_default();
             let text = delegated_message_body(&text).unwrap_or(text);
             let reason = if last.is_some_and(|message| message.role == Role::User)

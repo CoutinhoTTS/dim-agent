@@ -249,6 +249,31 @@ settlement rule. Errors return to the prompt. `/exit` takes no arguments. Slash 
 in exec or redirected input remain literal model input.
 See [CLI commands and exports](../../docs/design/cli-commands.md).
 
+In either terminal UI, `/export` requires an opened Session and shows a dialog
+with just Markdown (.md) and JSON (.json). Up/Down chooses, Enter exports and
+Esc cancels without writing. The file is saved in the CLI current directory
+as `session-<unique-id>.md` or `.json`; success shows its absolute path and
+errors stay in the interface. The content matches `dimcode session export`'s
+fixed main-branch history. Existing files are never overwritten.
+
+`/queue` opens the shown line's unconsumed messages in either terminal mode.
+Up/Down selects a row; Enter steers a held message and `x` deletes it. Applied
+messages are labelled Incorporating and cannot be withdrawn; a raced operation
+reports that the input has already left the queue. Esc closes the panel.
+Shift+Left keeps messages with images or multiple content blocks queued with a
+notice rather than losing attachments. Esc interrupt withdraws every held message
+before stopping and restores its operator content, including images and stored
+paste/file links, after withdrawal succeeds. Appended runtime context is omitted
+so skill references load fresh context on resubmission; adjacent operator text
+blocks retain a newline separator. No held message starts another run.
+
+```text
+Queue
+  first request       Incorporating · awaiting model consumption
+› follow-up           Held · awaiting application
+Enter steer · x delete held · Esc close
+```
+
 At the idle interactive prompt, `/effort VALUE` (alias `/reasoning`) changes
 reasoning effort, `/fast on|off` selects priority/default service tiers, and
 `/agent ID` adopts an Agent profile's prompt and optional model. Tools and

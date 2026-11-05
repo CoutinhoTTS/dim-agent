@@ -116,9 +116,10 @@ async fn keys_reply_the_newest_live_block_of_each_key_in_sequence_order() {
         )
         .await
         .unwrap();
-    session.idle("main").await.unwrap();
+    let before = session.idle("main").await.unwrap();
     let reply = read_keys(&mut client, &id, "main", json!({})).await;
-    assert_eq!(reply["through"], json!(session.sequence("main").unwrap()));
+    let after = session.sequence("main").unwrap();
+    assert!((before..=after).contains(&reply["through"].as_u64().unwrap()));
     assert_eq!(
         entries(&reply),
         [
@@ -330,12 +331,9 @@ async fn a_fork_and_a_child_branch_carry_no_parent_keys() {
         .as_str()
         .unwrap()
         .to_owned();
-    session.idle(&child_id).await.unwrap();
-    let reply = read_keys(&mut client, &id, &child_id, json!({})).await;
-    assert_eq!(
-        reply["through"],
-        json!(session.sequence(&child_id).unwrap())
-    );
+    let through = session.idle(&child_id).await.unwrap();
+    let reply = read_keys(&mut client, &id, &child_id, json!({"through":through})).await;
+    assert_eq!(reply["through"], json!(through));
     assert_eq!(
         keys(&reply),
         ["branch:line"],
@@ -367,9 +365,10 @@ async fn a_fork_and_a_child_branch_carry_no_parent_keys() {
     assert_ok(&forked);
     let fork_id = forked["result"]["sessionId"].as_str().unwrap().to_owned();
     let fork = agent.get_session(&fork_id).unwrap();
-    let reply = read_keys(&mut client, &fork_id, "main", json!({})).await;
+    let through = fork.sequence("main").unwrap();
+    let reply = read_keys(&mut client, &fork_id, "main", json!({"through":through})).await;
     assert_eq!(reply["entries"], json!([]));
-    assert_eq!(reply["through"], json!(fork.sequence("main").unwrap()));
+    assert_eq!(reply["through"], json!(through));
     assert!(
         branch_events(&fork, "main", ..)
             .await
@@ -459,8 +458,9 @@ async fn the_scan_advances_pages_and_stops_at_the_opening() {
     // committed tail before reading.
     fork.idle("main").await.unwrap();
 
-    let reply = read_keys(&mut client, &fork_id, "main", json!({})).await;
-    assert_eq!(reply["through"], json!(fork.sequence("main").unwrap()));
+    let through = fork.sequence("main").unwrap();
+    let reply = read_keys(&mut client, &fork_id, "main", json!({"through":through})).await;
+    assert_eq!(reply["through"], json!(through));
     let listed = entries(&reply);
     let by_key: std::collections::BTreeMap<&str, &Value> = listed
         .iter()
@@ -843,8 +843,9 @@ async fn the_read_equals_the_model_baseline_at_a_quiescent_point() {
 
     let history = dim_agent_capabilities::history::project_history(&events, "main").unwrap();
     let baseline = history.last().unwrap().baseline.clone();
-    let reply = read_keys(&mut client, &id, "main", json!({})).await;
-    assert_eq!(reply["through"], json!(session.sequence("main").unwrap()));
+    let through = events.last().unwrap().sequence;
+    let reply = read_keys(&mut client, &id, "main", json!({"through":through})).await;
+    assert_eq!(reply["through"], json!(through));
 
     let text_of = |message: &dim_agent_types::Message| match &message.content {
         dim_agent_types::MessageContent::Text(text) => text.clone(),

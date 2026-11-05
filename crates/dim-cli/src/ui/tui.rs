@@ -26,6 +26,7 @@ use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
 use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::lines_panel::{LinesPanel, short_id};
+use crate::ui::list_panel::{Event as ListEvent, Item, ListPanel};
 use crate::ui::management_panel::ManagementPanel;
 use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::OauthView;
@@ -35,6 +36,7 @@ use crate::ui::prompts::{
     AskUserPrompt, Effect, EffortPrompt, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
 };
 use crate::ui::providers_panel::ProvidersPanel;
+use crate::ui::queue_panel::QueuePanel;
 use crate::ui::render::fullscreen::Document;
 use crate::ui::render::fullscreen::MouseOutcome;
 use crate::ui::render::markdown::MarkdownRenderer;
@@ -995,9 +997,6 @@ struct App {
     /// The entry a management action the panel sent names, with the label the
     /// panel showed then: the panel may close before the reply lands.
     management_named: Option<(Area, ManagementAction, Option<String>)>,
-    /// Queued messages withdrawn for the draft, by input id, until the host
-    /// confirms each withdrawal; a confirmed one goes into the draft.
-    recovering: Vec<(String, String)>,
     /// The message the Session offered for the turn its composer belongs to.
     suggestion: Option<Suggestion>,
     /// The `prompt-suggestion` switch as last read or written; none until a
@@ -1182,6 +1181,8 @@ enum Prompt {
     Tasks(TasksPanel),
     Lines(Box<LinesPanel>),
     Timeline(Box<TimelinePanel>),
+    Queue(QueuePanel),
+    Export(ListPanel),
     Fork(ForkAsk),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
@@ -1304,7 +1305,6 @@ impl App {
             fork_draft: None,
             management_edits: Vec::new(),
             management_named: None,
-            recovering: Vec::new(),
             suggestion: None,
             suggestion_setting: None,
             suggestion_methods: false,
@@ -1520,7 +1520,7 @@ impl App {
     /// Sends the oldest queued message in as steering (Ctrl+S, and Enter on an
     /// empty draft).
     fn steer(&mut self) {
-        if let Some((id, _)) = self.queued().into_iter().next() {
+        if let Some(id) = self.queued().into_iter().next() {
             self.host.send(Command::InputControl {
                 input_id: id,
                 action: "steer",
@@ -1542,8 +1542,8 @@ impl App {
 
     /// Withdraws the newest queued message into the draft (Shift+Left).
     fn recall_newest_queued(&mut self) {
-        if let Some((id, text)) = self.queued().pop() {
-            self.withdraw(id, text);
+        if let Some(id) = self.queued().pop() {
+            self.withdraw(id);
         }
     }
 
@@ -1551,32 +1551,31 @@ impl App {
     /// withdrawals reach the session before its stop, so no queued message
     /// starts the next run.
     fn recall_all_queued(&mut self) {
-        for (id, text) in self.queued() {
-            self.withdraw(id, text);
+        for id in self.queued() {
+            self.host.send(Command::InputControl {
+                input_id: id,
+                action: "withdraw",
+            });
         }
     }
 
-    fn withdraw(&mut self, id: String, text: String) {
-        self.recovering.push((id.clone(), text));
+    fn withdraw(&mut self, id: String) {
+        if self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .queued
+                .iter()
+                .any(|input| input.id == id && !input.recallable)
+        }) {
+            self.notices.push(
+                t("Messages with attachments stay queued; use /queue to steer or delete them")
+                    .into(),
+            );
+            return;
+        }
         self.host.send(Command::InputControl {
             input_id: id,
             action: "withdraw",
         });
-    }
-
-    /// Puts a withdrawn message into the draft after the text already there,
-    /// once the session confirmed the withdrawal.
-    fn restore_withdrawn(&mut self, input_id: &str) {
-        let Some(at) = self.recovering.iter().position(|(id, _)| id == input_id) else {
-            return;
-        };
-        let (_, text) = self.recovering.remove(at);
-        let draft = self.composer.text();
-        if draft.trim().is_empty() {
-            self.set_draft(&text);
-        } else {
-            self.set_draft(&format!("{draft}\n{text}"));
-        }
     }
 
     fn set_notice(&mut self, text: impl Into<String>) {
@@ -1633,6 +1632,8 @@ impl App {
             | Some(Prompt::Isolation(_))
             | Some(Prompt::Lines(_))
             | Some(Prompt::Timeline(_))
+            | Some(Prompt::Queue(_))
+            | Some(Prompt::Export(_))
             | Some(Prompt::Fork(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
@@ -1788,14 +1789,15 @@ impl App {
 
     /// Queued inputs, oldest first: submitted while a turn was already
     /// running, without their `input/applied` yet.
-    fn queued(&self) -> Vec<(String, String)> {
+    fn queued(&self) -> Vec<String> {
         self.snapshot
             .as_ref()
             .map(|snapshot| {
                 snapshot
                     .queued
                     .iter()
-                    .map(|input| (input.id.clone(), input.text.clone()))
+                    .filter(|input| input.held)
+                    .map(|input| input.id.clone())
                     .collect()
             })
             .unwrap_or_default()
@@ -1803,7 +1805,17 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Withdrawn { input_id } => self.restore_withdrawn(&input_id),
+            Update::Withdrawn(input) => {
+                self.dismiss_suggestion();
+                self.composer.restore(input);
+            }
+            Update::Exported { format, path } => self.notices.push(tf(
+                "Exported {format}: {path}",
+                &[
+                    ("format", format.label()),
+                    ("path", &crate::sanitize::safe(&path.display().to_string())),
+                ],
+            )),
             Update::Ready(configuration) => {
                 self.label = Some(ModelLabel::new(&configuration));
             }
@@ -1838,6 +1850,13 @@ impl App {
                     }
                 }
                 if let Some(Prompt::Timeline(panel)) = &mut self.prompt {
+                    if panel.current(&snapshot) {
+                        panel.set_rows(&snapshot);
+                    } else {
+                        self.prompt = None;
+                    }
+                }
+                if let Some(Prompt::Queue(panel)) = &mut self.prompt {
                     if panel.current(&snapshot) {
                         panel.set_rows(&snapshot);
                     } else {
@@ -2371,7 +2390,7 @@ impl App {
                 }
             }
             Update::Notice(text) => {
-                self.notices.push(text);
+                self.notices.push(t(&text).to_owned());
             }
             Update::Upgrade(offer) => {
                 self.upgrade = Some(UpgradeDialog::new(offer));
@@ -2514,6 +2533,16 @@ impl App {
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Lines(p) => p.handle_key(key),
                 Prompt::Timeline(p) => p.handle_key(key),
+                Prompt::Queue(p) => p.handle_key(key),
+                Prompt::Export(p) => match p.handle_key(key) {
+                    ListEvent::Pick(format) => Effect::Export(if format == "markdown" {
+                        crate::export::Format::Markdown
+                    } else {
+                        crate::export::Format::Json
+                    }),
+                    ListEvent::Close => Effect::Close,
+                    ListEvent::None | ListEvent::Refresh => Effect::None,
+                },
                 Prompt::Fork(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
@@ -3134,6 +3163,13 @@ impl App {
                 });
             }
             Effect::Notice(text) => self.set_notice(text),
+            Effect::InputControl { input_id, action } => {
+                self.host.send(Command::InputControl { input_id, action });
+            }
+            Effect::Export(format) => {
+                self.prompt = None;
+                self.host.send(Command::Export(format));
+            }
             Effect::FocusLine(line) => {
                 self.prompt = None;
                 self.host.send(Command::FocusLine(line));
@@ -4040,6 +4076,26 @@ impl App {
                 self.host.send(Command::Compact);
                 Outcome::Continue
             }
+            "export" => {
+                let mut panel = ListPanel::new(
+                    "Export session",
+                    t("Enter export · Esc cancel"),
+                    "",
+                    "",
+                    "",
+                    false,
+                )
+                .without_filter();
+                panel.set_items(
+                    Ok(vec![
+                        Item::new("markdown", "Markdown (.md)", ""),
+                        Item::new("json", "JSON (.json)", ""),
+                    ]),
+                    Some("markdown"),
+                );
+                self.open_prompt(Prompt::Export(panel));
+                Outcome::Continue
+            }
             "rename" => {
                 let title = args.trim();
                 let title = if title == "--clear" {
@@ -4105,6 +4161,13 @@ impl App {
                 if let Some(snapshot) = &self.snapshot {
                     let panel = TimelinePanel::new(snapshot);
                     self.open_prompt(Prompt::Timeline(Box::new(panel)));
+                }
+                Outcome::Continue
+            }
+            "queue" => {
+                if let Some(snapshot) = &self.snapshot {
+                    let panel = QueuePanel::new(snapshot);
+                    self.open_prompt(Prompt::Queue(panel));
                 }
                 Outcome::Continue
             }
@@ -4474,7 +4537,11 @@ impl App {
                 .map(|input| {
                     (
                         input.id.clone(),
-                        input.display.as_deref().unwrap_or(&input.text).to_owned(),
+                        format!(
+                            "{} · {}",
+                            t(if input.held { "Held" } else { "Incorporating" }),
+                            input.display.as_deref().unwrap_or(&input.text)
+                        ),
                     )
                 })
                 .collect();
@@ -4698,6 +4765,8 @@ impl App {
                         | Prompt::Upgrade(_)
                         | Prompt::Fork(_)
                         | Prompt::Timeline(_)
+                        | Prompt::Queue(_)
+                        | Prompt::Export(_)
                 )
             );
         if !replaced {
@@ -4722,6 +4791,8 @@ impl App {
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Lines(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Timeline(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Queue(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Export(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width, height)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width, height)),
@@ -4760,6 +4831,8 @@ impl App {
                         Some(Prompt::Timeline(prompt)) => {
                             Some(prompt.render(list_width, budget, p))
                         }
+                        Some(Prompt::Queue(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Export(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Fork(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Models(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Providers(prompt)) => {
@@ -4808,6 +4881,8 @@ impl App {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
             }
             Some(Prompt::Timeline(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Queue(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Export(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Fork(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -5877,8 +5952,9 @@ const QUEUE_ROWS: usize = 5;
 
 /// The queue strip's hint, and its form when messages are not shown. Every
 /// `/name` it can draw is a command in the table.
-const QUEUE_HINT: &str = "shift+← edit last · ctrl+s steer now";
-const QUEUE_HINT_MORE: &str = "+{count} more · shift+← edit last · ctrl+s steer now";
+const QUEUE_HINT: &str = "/queue manage · shift+← edit last · ctrl+s steer now";
+const QUEUE_HINT_MORE: &str =
+    "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now";
 
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
@@ -8535,16 +8611,13 @@ mod tests {
                         .take_while(|row| {
                             !row.contains("Callback URL") && !row.contains("Restart device login")
                         })
-                        .map(|row| {
-                            row.trim()
-                                .strip_prefix('│')
-                                .expect("the link keeps the left dialog border")
-                                .strip_suffix('│')
-                                .expect("the link keeps the right dialog border")
-                                .trim()
-                        })
+                        .map(|row| row.trim())
                         .collect::<Vec<_>>()
                         .join("\n");
+                    assert!(
+                        !selected.contains(['│', '|']),
+                        "Native selection must not include dialog borders: {selected}"
+                    );
                     if shortened && !mode.starts_with("device") {
                         let prefix = selected.replace('\n', "");
                         assert!(prefix.ends_with('…'));
@@ -9608,6 +9681,7 @@ mod tests {
         snapshot.focus = "main".into();
         drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
         drawn.app.composer.clear();
+        let before = sent.borrow().len();
         let _ = drawn
             .app
             .handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
@@ -9615,16 +9689,11 @@ mod tests {
                 Modifiers::SHIFT,
             )));
         assert!(drawn.app.composer.is_empty());
-        assert!(
-            matches!(sent.borrow().last(), Some(Command::InputControl { input_id, action: "withdraw" }) if input_id == "queued-image")
-        );
-        drawn.app.apply(Update::Withdrawn {
-            input_id: "queued-image".into(),
-        });
-        assert_eq!(drawn.app.composer.text(), "look [Image #7]");
-        drawn.key(KeyCode::Enter);
-        assert!(
-            matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == "look [Image #7]")
+        assert_eq!(sent.borrow().len(), before);
+        assert!(drawn.app.notices.last().unwrap().contains("stay queued"));
+        assert_eq!(
+            drawn.app.snapshot.as_ref().unwrap().queued[0].id,
+            "queued-image"
         );
     }
 
@@ -10103,6 +10172,8 @@ mod tests {
                     id: (*id).into(),
                     text: (*text).into(),
                     display: None,
+                    held: true,
+                    recallable: true,
                 })
                 .collect(),
             ..ViewSnapshot::default()
@@ -10277,12 +10348,16 @@ mod tests {
             ["withdraw:a", "withdraw:b", "stop"]
         );
         assert!(app.composer.is_empty());
-        app.apply(Update::Withdrawn {
-            input_id: "a".into(),
-        });
-        app.apply(Update::Withdrawn {
-            input_id: "b".into(),
-        });
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "second".into(),
+            }],
+        }));
         assert_eq!(app.composer.text(), "first\nsecond");
     }
 
@@ -10297,9 +10372,11 @@ mod tests {
         )));
         assert_eq!(describe(&sent.borrow()), ["withdraw:b"]);
         assert!(app.composer.is_empty());
-        app.apply(Update::Withdrawn {
-            input_id: "b".into(),
-        });
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "second".into(),
+            }],
+        }));
         assert_eq!(app.composer.text(), "second");
     }
 

@@ -2086,11 +2086,13 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
             .unwrap();
         assert_eq!(request.provider_id, selection.provider_id);
         assert_eq!(request.model_id, selection.model_id);
-        let expected_config = selection.config.clone().or(Some(ModelConfig {
-            max_tokens: Some(6789.),
-            ..Default::default()
-        }));
-        assert_eq!(request.config, expected_config);
+        assert_eq!(
+            request.config,
+            dim_agent_capabilities::context_model::adopted_config(
+                selection.capability_snapshot.as_ref(),
+                selection.config.as_ref(),
+            )
+        );
         assert_eq!(request.metadata, selection.metadata);
         assert_eq!(request.tools.as_deref(), tools.as_ref());
     }

@@ -2022,8 +2022,7 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
     let before = settlement_status(&mut client).await;
     let request = input(&target, "test:retired-before-handoff", json!([]));
-    target.idle("main").await.unwrap();
-    assert!(target.unload_if_idle().await.unwrap());
+    super::collaboration::unload(&agent, target.id()).await;
     rules.hold.send_replace(true);
     let call = client.send("settlement.input", request.clone()).await;
     tokio::time::timeout(Duration::from_secs(5), rules.held.notified())

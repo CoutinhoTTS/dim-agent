@@ -53,7 +53,7 @@ order, not alphabetically or by recent use. The menu draws no category column:
 ```text
 /new /resume /models /compact /usage
 /effort /fast /agent /permissions /settings
-/branch /fork /lines /timeline /goal
+/branch /fork /lines /timeline /queue /export /goal
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
@@ -174,9 +174,9 @@ Enter               submit                       queue the draft; empty draft:
                                                  steer the oldest queued message
 Tab                 pick an earlier message      pick an earlier message
                     (fullscreen)                 (fullscreen)
-Shift+Left          —                            empty draft: take the newest queued
-                                                 message back into the draft
-Esc                 keep the draft               interrupt; every queued message
+Shift+Left          —                            empty draft: recall the newest held
+                                                 message only if one text block
+Esc                 keep the draft               interrupt; every held message
                                                  returns to the draft, oldest first
 Ctrl+S              —                            draft not empty: steer the draft;
                                                  empty: steer the oldest queued message
@@ -187,26 +187,52 @@ Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
 - A queued message runs after the current run ends, one message per run. A
   steered message joins the current run at its next turn boundary.
 - Taking a message back, and interrupting, withdraw the message through
-  `session.input.withdraw`. The text
-  enters the draft only after the withdrawal is deleted. A message that already left
-  the queue is not put back, and its text is not sent again.
+  `session.input.withdraw`. Its content enters the draft only after the withdrawal
+  is deleted. Shift+Left accepts only a single text block; interrupt restores
+  every held message, including its image blocks and stored paste/file links.
+  A message that already left the queue is not put back or sent again.
 - Withdrawals of an interrupt are sent before the stop, so the run does not start the
   next queued message.
 - `Ctrl+C` clears the draft. `Esc` never clears it.
 
+### Queued messages
+
+`/queue` requires an attached Session and opens the shown line's unconsumed
+messages in both terminal modes. Applied-but-unconsumed messages are labelled
+`Incorporating`; unapplied messages are labelled `Held`. Up/Down selects a row,
+Enter steers it and `x` deletes it through the existing withdrawal operation.
+Only held messages can change; `notHeld` is a notice, not a failed run. Esc
+closes the panel without interrupting. Committed events refresh the panel,
+and changing attachment or shown line closes it.
+
+Shift+Left only withdraws a message with one text block. Images and multi-block
+messages remain held with a notice directing the user to `/queue`; no partial
+text draft replaces their attachments. Esc interrupt instead withdraws all held
+messages before stopping, restoring their operator content to the draft, oldest
+first, so they cannot start a new run automatically. Appended runtime text blocks
+(after the first block, starting with `<dim-`) are not restored; references such
+as `$skill: name` stay so resubmission loads fresh context. Adjacent operator text
+blocks are separated by newlines. Images and stored paste/file links are kept.
+Steering always uses the owner's full held input.
+
 ### Queue strip
 
-With a message queued, the strip above the composer draws the queue in a titled border: messages oldest first, the next to run at the top, then a hint naming the keys that act on them. During a run, `Shift+Left` on an empty draft withdraws the newest queued message into the composer to edit. `Ctrl+S` steers the draft, or the oldest queued message when the draft is empty; `Enter` on an empty draft also steers the oldest queued message. Up/Down remain input history. The hint names a command only when the command table has one for the queue, so a typed `/name` it shows runs locally instead of being sent to the model. No command views the queue, so the hint names keys only.
+The strip and `/queue` read the same unconsumed input projection: incorporating
+messages in transcript order, then held messages oldest first. Each strip row
+names its state. During a run, `Shift+Left` on an empty draft recalls the newest
+held message subject to the attachment rule above. `Ctrl+S` steers the draft,
+or the oldest held message when the draft is empty; empty Enter does the same.
+Up/Down remain input history outside the panel.
 
 ```text
-┌─ Queue (2) ─────────────────────────────────────┐
-│ › fix the failing test in session_host          │
-│ › then update the design note                   │
-│ shift+← edit last · ctrl+s steer now            │
-└────────────────────────────────────────────────┘
+┌─ Queue (2) ──────────────────────────────────────────────┐
+│ › Incorporating · fix the failing test                   │
+│ › Held · then update the design note                     │
+│ /queue manage · shift+← edit last · ctrl+s steer         │
+└──────────────────────────────────────────────────────────┘
 ```
 
-A queued message the strip does not show adds its count to the hint: `+3 more · shift+← edit last · ctrl+s steer now`. The strip shows at most five messages and keeps the height it reached while the queue drains.
+A queued message the strip does not show adds its count to the hint. The strip shows at most five messages and keeps the height it reached while the queue drains.
 
 ## Usage report
 
@@ -405,7 +431,7 @@ form, and opening it starts nothing.
         ▼
 ╭─ OpenAI Codex OAuth ─────────────────────────╮
 │   Browser login                              │
-│ https://…/authorize?…                        │
+  https://…/authorize?…
 │   Callback URL: (paste here)                 │
 │   Submit callback                            │
 ╰─ Select to copy · Enter opens link ──────────╯
@@ -413,11 +439,15 @@ form, and opening it starts nothing.
 ╭─ Grok Build OAuth ───────────────────────────╮
 │   Device login                               │
 │   Enter code:    ABCD-EFGH                   │
-│ https://…/device                             │
+  https://…/device
 │   Restart device login                       │
 │   Waiting for authorization                  │
 ╰─ Select to copy · Enter opens link ──────────╯
 ```
+
+Authorization URL rows have no side borders, including wrapped continuation
+rows, so native terminal selection does not copy dialog borders into the URL.
+The other rows keep their borders; Enter on the URL still opens the full link.
 
 `dimcode login [PROVIDER]` starts the same flow in the line client and prints
 the URL or the code the daemon returns; without a PROVIDER it lists the
@@ -1268,6 +1298,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
 | `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` toggles between the local scope — the launch workspace, or its repository once git answers — and every workspace. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
+| `/export` in either terminal UI | Choose Markdown or JSON in a dialog for an opened Session; save a uniquely named file in the CLI current directory. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
@@ -1396,7 +1427,7 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
   Details: /Users/me/.dimcode-alpha/rust/daemon.log
 ```
 
-The interactive export parser reads the format token and treats the remainder
+The line-client export parser reads the format token and treats the remainder
 of the line as a literal path, including spaces, without shell evaluation or
 quote expansion. Missing paths and unsupported formats print usage and return
 to the prompt without submitting input. `/exit` takes no arguments. Only these
@@ -1877,11 +1908,27 @@ best-effort semantics; consumers needing a fixed complete record use export.
 
 ## Conversation export
 
-Both entries call the existing `session.history` RPC. The first response fixes
+The subcommand, line client and both terminal UIs call the existing `session.history` RPC. The first response fixes
 `through`; subsequent pages use that watermark and the server's `nextAfter`,
 including gaps caused by filtered records. The CLI reuses its existing cursor
 checks. Export does not submit input, change model context, close the Session,
 or implement a server-side exporter.
+
+In both terminal UIs `/export` is available only with an opened Session and
+opens a dialog containing exactly `Markdown (.md)` and `JSON (.json)`.
+Up/Down chooses, Enter exports and Esc cancels without a history read or file
+write. There are no inline arguments or path-entry steps. Files are saved in
+the CLI current directory as `session-<unique-id>.md` or `.json`, with a fresh
+UUID per export. Success names the absolute path; errors remain UI diagnostics,
+never model input. The worker settles an admitted export before processing
+further commands and leaves rendering on the interface thread.
+
+```text
+╭─ Export session ───────────────────────╮
+│ > Markdown (.md)                       │
+│   JSON (.json)                         │
+╰──────────── Enter export · Esc cancel ─╯
+```
 
 The exported branch is always `main`; child branch histories are not fetched or
 included. Markdown renders each `branch/create` fact with its child id as

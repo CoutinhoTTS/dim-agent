@@ -191,6 +191,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Session,
     ),
     slash(
+        "queue",
+        "steer or delete queued messages",
+        &[],
+        Needs::Session,
+    ),
+    slash("export", "export this conversation", &[], Needs::Session),
+    slash(
         "goal",
         "follow or change the shown line's goal",
         &[],

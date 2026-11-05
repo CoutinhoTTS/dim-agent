@@ -790,6 +790,9 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
         heads.insert(branch.to_owned(), idle);
     }
     assert_eq!(stored_heads(&store, &id), heads);
+    // #1099: the activity time is what the turn wrote. Unload writes
+    // nothing, and the restore writes only `branch/resume`, which is
+    // housekeeping, so the row must not move either time.
     let updated_at = |store: &Store, id: &str| -> i64 {
         rusqlite::Connection::open(store.database())
             .unwrap()
@@ -828,15 +831,14 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
             .as_array()
             .unwrap()
             .iter()
+            .filter(|event| {
+                !(event["type"] == "input"
+                    && ((event["name"] == "applied" && event["data"]["mode"] == "append")
+                        || (event["name"] == "message" && event["data"]["user"].is_null())))
+            })
             .map(|event| format!("{}/{}", event["type"], event["name"]).replace('"', ""))
             .collect();
-        assert_eq!(added[0], "branch/resume", "{branch}");
-        assert!(
-            added[1..]
-                .iter()
-                .all(|kind| matches!(kind.as_str(), "input/message" | "input/applied")),
-            "{branch}: {added:?}"
-        );
+        assert_eq!(added, ["branch/resume"], "{branch}");
     }
     assert_eq!(loads.of(&id), (2, true));
     server.shutdown();

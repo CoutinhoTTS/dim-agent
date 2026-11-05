@@ -16,7 +16,7 @@ use dim_agent_capabilities::prompt_suggestion;
 use dim_agent_capabilities::timeline_tree::BranchToolConfig;
 use dim_agent_capabilities::workspace_tools::WorkspaceToolsConfig;
 use dim_agent_runtime::testing::branch_events;
-use dim_agent_types::{EventKind, MessageContent, MessagePart, ModelRequest, Role};
+use dim_agent_types::{EventKind, Message, MessageContent, MessagePart, ModelRequest, Role};
 use std::sync::Mutex;
 
 #[derive(Clone)]
@@ -120,7 +120,7 @@ impl Scripted {
 }
 
 fn last_text(request: &ModelRequest) -> Option<String> {
-    match &request.messages.last()?.content {
+    match &dim_agent_capabilities::adapters::EchoModel::last_message(request)?.content {
         MessageContent::Text(text) => Some(text.clone()),
         MessageContent::Parts(parts) => parts.iter().find_map(|part| match part {
             MessagePart::Text { text, .. } => Some(text.clone()),
@@ -498,8 +498,43 @@ async fn create(fixture: &Fixture, interactive: bool) -> (Client, String) {
         .await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
+    let attached = client.rpc("session.attach", json!({"sessionId":id})).await;
+    assert_ok(&attached);
+    clients_applied(
+        fixture,
+        &id,
+        attached["result"]["attachedClients"].as_u64().unwrap(),
+    )
+    .await;
     (client, id)
+}
+
+async fn clients_applied(fixture: &Fixture, id: &str, count: u64) {
+    let session = fixture.server.agent().unwrap().get_session(id).unwrap();
+    let audience = format!(
+        "{count} client connection{} attached:",
+        if count == 1 { "" } else { "s" }
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let events = branch_events(&session, "main", ..).await.unwrap();
+            let presence = events.iter().find(|event| {
+                matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.blocks.iter().any(|block| matches!(block,
+                        dim_agent_types::InputBlock::Raw { text, .. } if text.contains(&audience))))
+            });
+            if presence.is_some_and(|presence| {
+                events.iter().any(|event| {
+                matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == presence.id)
+            })
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the attached audience is applied before the conversation");
 }
 
 /// Sends `text` as input without waiting for the run it may start.
@@ -528,11 +563,16 @@ async fn submit(client: &mut Client, id: &str, text: &str) {
 /// first one waits.
 async fn attach(fixture: &Fixture, session_id: &str) -> Client {
     let mut client = Client::new_version(&fixture.server, false, 3).await;
-    assert_ok(
-        &client
-            .rpc("session.attach", json!({"sessionId": session_id}))
-            .await,
-    );
+    let attached = client
+        .rpc("session.attach", json!({"sessionId": session_id}))
+        .await;
+    assert_ok(&attached);
+    clients_applied(
+        fixture,
+        session_id,
+        attached["result"]["attachedClients"].as_u64().unwrap(),
+    )
+    .await;
     client
 }
 
@@ -770,24 +810,26 @@ async fn a_suggestion_reuses_the_turn_request_and_changes_nothing() {
             })
             .expect("another model call")
     };
-    assert!(
-        !last.messages.iter().any(|message| {
-            matches!(&message.content, MessageContent::Text(text) if text == &instruction)
-        }),
-        "the suggestion never entered history"
-    );
+    let conversation = |request: &ModelRequest| {
+        request
+            .messages
+            .iter()
+            .filter(|message| {
+                !matches!(&message.content, MessageContent::Text(text)
+                    if message.role == Role::User
+                        && text.starts_with("<dim-state ")
+                        && text.ends_with("</dim-state>"))
+            })
+            .map(serialized)
+            .collect::<Vec<_>>()
+    };
+    let mut expected = conversation(&call.request);
+    expected.push(serialized(&suggestion.messages[prefix]));
+    expected.push(serialized(Message::text(Role::User, "and the next one")));
     assert_eq!(
-        serialized(&last.messages[..prefix]),
-        serialized(&call.request.messages)
-    );
-    let tail: Vec<_> = last.messages[prefix..].iter().filter(|message| {
-        !matches!(&message.content, MessageContent::Text(text) if message.role == Role::User && dim_agent_capabilities::context_block::is_state_or_rule(text))
-    }).collect();
-    assert_eq!(tail.len(), 2, "assistant and the new conversational input");
-    assert_eq!(
-        serialized(tail[0]),
-        serialized(&suggestion.messages[prefix]),
-        "the completed assistant message is history's own"
+        conversation(&last),
+        expected,
+        "only the completed assistant and new input enter the conversation"
     );
     fixture.end().await;
 }
@@ -1226,22 +1268,30 @@ async fn an_invalid_reply_clears_invalid() {
     let fixture = serve_fixture(Reply::Text(String::new())).await;
     let (mut client, id) = create(&fixture, true).await;
     submit(&mut client, &id, "add a test").await;
-    let turn = latest_turn(&mut client, &id).await;
-    configure(&mut client, json!({"enabled":true})).await;
-
-    let mut request = (*fixture.model.requests.lock().unwrap()[0]).clone();
-    for text in [
-        "<dim-state source=\"test\">Current runtime state</dim-state>",
-        "<dim-rule source=\"test\">A runtime rule</dim-rule>",
-    ] {
-        request
-            .messages
-            .push(Arc::new(dim_agent_types::Message::text(Role::User, text)));
-    }
+    let mut request = fixture
+        .model
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .expect("the turn reached the model")
+        .as_ref()
+        .clone();
+    request.messages.push(Arc::new(Message::text(
+        Role::User,
+        "<dim-state source=\"fixture\">state</dim-state>",
+    )));
+    request.messages.push(Arc::new(Message::text(
+        Role::User,
+        "<dim-rule source=\"fixture\">rule</dim-rule>",
+    )));
     assert_eq!(
         prompt_suggestion::last_user_text(&request).as_deref(),
-        Some("add a test")
+        Some("add a test"),
+        "a trailing runtime snapshot never replaces the operator input"
     );
+    let turn = latest_turn(&mut client, &id).await;
+    configure(&mut client, json!({"enabled":true})).await;
 
     for reply in [
         "run the tests\nand then commit",

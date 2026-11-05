@@ -633,14 +633,16 @@ fn v1_events(events: &[Arc<dim_agent_types::AgentEvent>], after: u64) -> Vec<Val
         .map(|event| serde_json::to_value(event).unwrap())
         .collect()
 }
-async fn receive_events_through(client: &mut Client, through: u64) -> Vec<Value> {
+async fn receive_events_through(client: &mut Client, after: u64, through: u64) -> Vec<Value> {
     let mut events = vec![];
     loop {
         let notice = client.notice("session.event").await;
         let event = notice["params"]["event"].clone();
         let typed: dim_agent_types::v1::AgentEvent = serde_json::from_value(event.clone()).unwrap();
         assert!(typed.sequence <= through, "received past fixed snapshot");
-        events.push(event);
+        if typed.sequence > after {
+            events.push(event);
+        }
         if typed.sequence == through {
             return events;
         }
@@ -756,21 +758,19 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         assert_ok(&created);
         let sid = created["result"]["sessionId"].as_str().unwrap();
         let session = agent.get_session(sid).unwrap();
-        let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
-        assert_ok(&attached);
-        let attached_at = attached["result"]["sequence"].as_u64().unwrap();
-
+        let initial = client.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_ok(&initial);
+        let live_after = session.sequence("main").unwrap();
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         let idle_events = chain_events(&session, "main", ..).await.unwrap();
-        assert!(idle_events.iter().any(|event| matches!(
-            &event.kind,
-            EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn
-        )));
-        assert!(
-            v1_events(&idle_events, 0)
-                .iter()
-                .all(|event| event["type"] != "stop")
-        );
+        let stop = idle_events
+            .iter()
+            .find(|event| {
+                matches!(&event.kind,
+                EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn)
+            })
+            .expect("the idle stop records its control fact");
+        assert!(v1_events(std::slice::from_ref(stop), 0).is_empty());
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
         assert_eq!(attached["result"]["sessionId"], sid);
 
@@ -797,9 +797,10 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
         let stopped = chain_events(&session, "main", ..).await.unwrap();
-        let expected = v1_events(&stopped, attached_at);
+        let expected = v1_events(&stopped, live_after);
         let last_business = expected.last().unwrap()["sequence"].as_u64().unwrap();
-        live.extend(receive_events_through(&mut client, last_business).await);
+        live.retain(|event| event["sequence"].as_u64().unwrap() > live_after);
+        live.extend(receive_events_through(&mut client, live_after, last_business).await);
         assert_eq!(
             live, expected,
             "live events must retain their real IDs and sequences"
@@ -814,7 +815,7 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         let mut client = Client::new(&server, ws).await;
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
         assert_eq!(attached["result"]["sessionId"], sid);
-        let high = attached["result"]["sequence"].as_u64().unwrap();
+        let high = session.sequence("main").unwrap();
         assert_ok(
             &client
                 .rpc("session.submit", json!({"sessionId":sid,"text":"resumed"}))
@@ -824,7 +825,10 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         let resumed = chain_events(&session, "main", ..).await.unwrap();
         let expected = v1_events(&resumed, high);
         let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
-        assert_eq!(receive_events_through(&mut client, last).await, expected);
+        assert_eq!(
+            receive_events_through(&mut client, high, last).await,
+            expected
+        );
 
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         let high = session.sequence("main").unwrap();
@@ -840,7 +844,10 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         let final_events = chain_events(&session, "main", ..).await.unwrap();
         let expected = v1_events(&final_events, high);
         let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
-        assert_eq!(receive_events_through(&mut client, last).await, expected);
+        assert_eq!(
+            receive_events_through(&mut client, high, last).await,
+            expected
+        );
         assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
         client.notice("session.closed").await;
         assert!(
@@ -1330,7 +1337,7 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
     let session = agent.get_session(sid.as_str().unwrap()).unwrap();
     let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
     assert_ok(&attached);
-    let attached_at = attached["result"]["sequence"].as_u64().unwrap();
+    let live_after = attached["result"]["sequence"].as_u64().unwrap();
     assert_ok(
         &client
             .rpc(
@@ -1363,7 +1370,7 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
         .filter(|event| !event.kind.key().starts_with("stop/"))
         .cloned()
         .collect();
-    assert_eq!(v1_events(&business, attached_at), observed);
+    assert_eq!(v1_events(&business, live_after), observed);
     assert!(
         history
             .iter()
@@ -1579,16 +1586,15 @@ async fn attach_replies_the_record_the_listing_shows_for_that_session() {
             .find(|entry| entry["sessionId"] == sid.as_str())
             .expect("the Session is listed")
             .clone();
-        let mut attached_record = attached["result"].clone();
-        assert!(
-            attached_record["sequence"].as_u64().unwrap() <= entry["sequence"].as_u64().unwrap()
-        );
-        attached_record.as_object_mut().unwrap().remove("sequence");
-        for field in ["preview", "updatedAt", "closed", "sequence"] {
+        for field in ["preview", "updatedAt", "closed"] {
             entry.as_object_mut().unwrap().remove(field);
         }
+        let mut attached_info = attached["result"].clone();
+        assert!(entry["sequence"].as_u64().unwrap() >= attached_info["sequence"].as_u64().unwrap());
+        entry.as_object_mut().unwrap().remove("sequence");
+        attached_info.as_object_mut().unwrap().remove("sequence");
         assert_eq!(
-            attached_record, entry,
+            attached_info, entry,
             "the attach reply is the listed record"
         );
         assert_eq!(attached["result"]["attachedClients"], 1);
@@ -1679,7 +1685,7 @@ async fn attach_replies_first_and_replays_only_current_pending_approvals() {
             .submit("after attach".into(), InputMode::Append, "main")
             .await
             .unwrap();
-        receive_events_through(&mut client, last.sequence).await;
+        receive_events_through(&mut client, 0, last.sequence).await;
         assert!(
             !client
                 .notices

@@ -690,7 +690,9 @@ impl Projection {
         row.cut = Some(submitted.saturating_sub(1));
         row.display = user_display(&user.content);
         row.pending = kind == RowKind::UserMessage;
-        self.input_rows.insert(input_id.to_owned(), index);
+        if row.pending {
+            self.input_rows.insert(input_id.to_owned(), index);
+        }
     }
 
     /// The content of a held message, to re-submit it as Steer.
@@ -764,23 +766,34 @@ impl Projection {
     }
 
     pub fn snapshot(&self) -> ViewSnapshot {
+        let mut pending: Vec<_> = self.input_rows.iter().collect();
+        pending.sort_by_key(|(_, index)| **index);
+        let queued = pending
+            .into_iter()
+            .map(|(id, index)| {
+                let row = &self.rows[*index];
+                QueuedInput {
+                    id: id.clone(),
+                    text: row.text.clone(),
+                    display: row.display.clone(),
+                    held: false,
+                    recallable: false,
+                }
+            })
+            .chain(self.held.iter().map(|(id, _, user)| QueuedInput {
+                id: id.clone(),
+                text: text_of(&user.content),
+                display: user_display(&user.content),
+                held: true,
+                recallable: matches!(user.content.as_slice(), [ContentBlock::Text { .. }]),
+            }))
+            .collect();
         ViewSnapshot {
             rows: self.rows.clone(),
             running: self.running,
             approvals: self.approvals.clone(),
             questions: self.questions.calls().cloned().collect(),
-            queued: if self.running {
-                self.held
-                    .iter()
-                    .map(|(id, _, user)| QueuedInput {
-                        id: id.clone(),
-                        text: text_of(&user.content),
-                        display: user_display(&user.content),
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            },
+            queued,
             tasks: self.tasks.clone(),
             ended: self.ended,
             goal: self.goal.goal(),
@@ -1828,7 +1841,7 @@ mod tests {
             "display markers preserve the original queued image blocks"
         );
         apply(&mut live, std::slice::from_ref(&applied));
-        assert!(live.snapshot().queued.is_empty());
+        assert!(!live.snapshot().queued[0].held);
         assert_eq!(live.snapshot().rows[1].text, "Compare\nwith");
         assert_eq!(live.snapshot().rows[1].display.as_deref(), Some(expected));
         let previous = crate::ui::i18n::active();
@@ -2022,10 +2035,7 @@ mod tests {
             main.snapshot().rows.is_empty(),
             "a message enters the transcript when the queue applies it"
         );
-        assert!(
-            main.snapshot().queued.is_empty(),
-            "the queue strip belongs to a running turn"
-        );
+        assert!(main.snapshot().queued[0].held);
         apply(&mut main, &[control(2, "applied", "in-1")]);
         let rows = main.snapshot().rows;
         assert!(
@@ -2056,10 +2066,7 @@ mod tests {
             rows[1].pending,
             "a message applied but not consumed is pending"
         );
-        assert!(
-            main.snapshot().queued.is_empty(),
-            "an applied message leaves the queue strip"
-        );
+        assert!(!main.snapshot().queued[0].held);
         // A cancelled turn settles its own row after the applied message
         // (timeline UI §4.8): the message has to be committed first.
         apply(
@@ -2111,10 +2118,8 @@ mod tests {
             replay.snapshot().rows.is_empty(),
             "replay draws nothing before its input/applied"
         );
-        assert!(
-            replay.snapshot().queued.is_empty(),
-            "replay does not guess that a turn runs"
-        );
+        assert_eq!(replay.snapshot().queued[0].id, "in-6");
+        assert!(replay.snapshot().queued[0].held);
     }
 
     #[test]

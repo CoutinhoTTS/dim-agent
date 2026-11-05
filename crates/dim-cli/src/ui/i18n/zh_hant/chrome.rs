@@ -1,5 +1,27 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "佇列",
+        "Export session" => "匯出工作階段",
+        "Enter steer · x delete held · Esc close" => "Enter steer · x 刪除暫存訊息 · Esc 關閉",
+        "No queued messages." => "佇列中沒有訊息。",
+        "Held · awaiting application" => "暫存中 · 等待套用",
+        "Incorporating · awaiting model consumption" => "納入中 · 等待模型讀取",
+        "Held" => "暫存中",
+        "Incorporating" => "納入中",
+        "Enter export · Esc cancel" => "Enter 匯出 · Esc 取消",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "附有附件的訊息會留在佇列中；使用 /queue 對其執行 steer 或刪除"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue 管理 · shift+← 編輯最後一則 · ctrl+s 立即 steer"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "還有 {count} 則 · /queue 管理 · shift+← 編輯最後一則 · ctrl+s 立即 steer"
+        }
+        "steer or delete queued messages" => "對佇列訊息執行 steer 或刪除",
+        "export this conversation" => "匯出此對話",
+        "That message has already left the queue." => "該訊息已離開佇列。",
+        "Exported {format}: {path}" => "已匯出 {format}：{path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 輸出/中斷成員 · x 停止指令 · Esc 關閉"

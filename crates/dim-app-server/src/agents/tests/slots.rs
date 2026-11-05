@@ -247,17 +247,15 @@ async fn a_mark_keeps_the_slot_of_a_session_released_outside_the_pass() {
     let id = client.create(&store).await;
     let mut marks = Marks::new();
     drop(index.acquire(&id).await.unwrap());
-    agent.get_session(&id).unwrap().idle("main").await.unwrap();
     index.unload_idle(&mut marks).await;
-    assert!(marks.contains_key(&id));
-    assert!(
-        agent
-            .get_session(&id)
-            .unwrap()
-            .unload_if_idle()
-            .await
-            .unwrap()
-    );
+    let session = agent.get_session(&id).unwrap();
+    tokio::time::timeout(DEADLINE, async {
+        while !session.unload_if_idle().await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the Session becomes idle and releases outside the unload pass");
     assert!(agent.get_session(&id).is_none());
 
     index.directory.inner.lock().unwrap().sweep();

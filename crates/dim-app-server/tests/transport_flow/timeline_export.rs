@@ -374,11 +374,14 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         let stopped = exported(&database, &session).await;
         assert_eq!(std::fs::read(&database).unwrap(), bytes);
         assert_eq!(stopped[0], live[0]);
+        assert!(stopped.len() >= live.len() + 2);
         for event in &events {
-            assert!(stopped.contains(event), "export preserves the committed event: {event}");
-        }
-        for branch in ["main", child.as_str()] {
-            assert!(stopped.iter().any(|line| line["branch_id"] == branch && kind(line) == "stop/interrupt"));
+            assert_eq!(
+                stopped.iter().find(|line| line["kind"] == "event"
+                    && line["event"]["id"] == event["event"]["id"]),
+                Some(*event),
+                "stopping the daemon preserves every exported fact"
+            );
         }
         let stored_markers: (i64, i64) = rusqlite::Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap()

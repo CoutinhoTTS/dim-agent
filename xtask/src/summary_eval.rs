@@ -2727,14 +2727,12 @@ mod tests {
                 "contextWindow": 128_000, "maxOutputTokens": 16_384}
         }))
         .unwrap();
+        let config = dim_agent_capabilities::context_model::adopted_config(Some(&snapshot), None);
         ModelSelection {
             provider_id: "fake".into(),
             model_id: "fake".into(),
             capability_snapshot: Some(snapshot),
-            config: Some(ModelConfig {
-                max_tokens: Some(16_384.),
-                ..Default::default()
-            }),
+            config,
             metadata: None,
         }
     }
