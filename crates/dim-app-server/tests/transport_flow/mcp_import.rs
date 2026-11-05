@@ -860,6 +860,158 @@ async fn mcp_import_that_loses_the_source_cas_leaves_the_entry_disabled() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A record write that fails after the source commits answers
+/// `mcp_import_partial`: the entries stay written and disabled with no
+/// withheld value, and replacing them again once the store accepts writes
+/// rewrites both stores.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_answers_partial_when_the_record_write_fails() {
+    let home = scratch("dm-import-partial");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let document = servers_document(json!({
+        "held": {"command":"echo","args":[ARG_VALUE]},
+        "plain": {"command":"echo"}
+    }));
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    // The native store holds the user documents. A trigger that refuses
+    // updates to the withheld-record row leaves every read working — the
+    // preview above read the store — and fails the withheld-record write
+    // alone; the enablement withdrawal before the source write is not it.
+    let native = std::fs::canonicalize(home.join("native")).unwrap();
+    let database = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
+    database
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER import_holds_records BEFORE UPDATE ON settings_documents
+             WHEN OLD.source = 'user/mcp-secrets'
+             BEGIN SELECT RAISE(ABORT, 'held for the test'); END;",
+        )
+        .unwrap();
+    let applied = client
+        .rpc(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":document,
+                "expectedVersion":preview["result"]["revision"],
+                "resolutions":[
+                    {"id":"held","action":"import"},
+                    {"id":"plain","action":"import"}
+                ]
+            }),
+        )
+        .await;
+    database
+        .execute_batch("DROP TRIGGER import_holds_records")
+        .unwrap();
+    assert_eq!(
+        applied["error"]["data"]["appError"], "mcp_import_partial",
+        "the source write committed and the record write did not: {applied}"
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    for id in ["held", "plain"] {
+        assert_eq!(
+            stored["mcpServers"][id],
+            json!({"command":"echo"}),
+            "the entry is written as its public skeleton: {id}"
+        );
+    }
+    assert!(
+        !stored.to_string().contains(ARG_VALUE),
+        "the withheld value never enters the workspace file: {stored}"
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    for id in ["held", "plain"] {
+        assert_eq!(catalog_entry(&catalog, id)["enabled"], false, "{id}");
+    }
+    // Restoring the store and replacing the entries writes both stores.
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    assert_eq!(
+        entry(&preview, "held")["status"],
+        "conflict",
+        "the written skeleton does not carry the document's withheld value"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":document,
+                    "expectedVersion":preview["result"]["revision"],
+                    "resolutions":[
+                        {"id":"held","action":"replace"},
+                        {"id":"plain","action":"replace"}
+                    ]
+                }),
+            )
+            .await,
+    );
+    let stored: String = database
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp-secrets'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let secrets: Value = serde_json::from_str(&stored).unwrap();
+    let workspace = project.to_str().unwrap();
+    assert_eq!(
+        secrets["entries"][workspace]["held"]["args"],
+        json!([ARG_VALUE]),
+        "the replacement writes the withheld value"
+    );
+    assert!(
+        secrets["entries"][workspace].get("plain").is_none(),
+        "an entry without a withheld part leaves no record: {secrets}"
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(stored["mcpServers"]["held"], json!({"command":"echo"}));
+    assert!(!stored.to_string().contains(ARG_VALUE));
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(catalog_entry(&catalog, "held")["enabled"], false);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Saves an entry in user scope and moves it into the project source, where a
 /// literal value becomes a withheld `mcp-secrets` record.
 async fn move_to_project(
