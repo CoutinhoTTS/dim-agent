@@ -639,6 +639,84 @@ async fn capabilities_and_configure_resolve_defaults_through_the_fixture_adapter
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The new Provider read exists for the media models execution rejects: when
+/// an adapter serves one, the operation offers it instead of reporting that
+/// no selectable model is served.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declared_media_model_served_by_the_adapter_is_an_option() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    fixture.serve(&[("image-media", &["generate"])]);
+    let (server, home) = start(Some(fixture), "dm-declared-adapter").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_provider_with(&mut client, vec![media("image-media", &["image.generate"])]).await;
+    let snapshot = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&snapshot);
+    let generate = operation(&snapshot, "generate");
+    assert_eq!(
+        generate["options"],
+        json!([{"providerId": PROVIDER, "modelId": "image-media", "available": true}]),
+        "a declared model the adapter serves is an option without execution selectability: {generate}"
+    );
+    assert_eq!(generate["available"], true);
+    assert_eq!(
+        generate["effective"],
+        json!({"providerId": PROVIDER, "modelId": "image-media", "source": "automatic"})
+    );
+    let understand = operation(&snapshot, "understand");
+    assert!(
+        understand["options"].as_array().unwrap().is_empty(),
+        "the model is not in the execution read understanding uses: {understand}"
+    );
+    let configured = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": snapshot["result"]["revision"], "category": "image", "operation": "generate", "model": model("image-media")}),
+        )
+        .await;
+    assert_ok(&configured);
+    assert_eq!(
+        operation(&configured, "generate")["effective"],
+        json!({"providerId": PROVIDER, "modelId": "image-media", "source": "default"})
+    );
+    let edit = operation(&snapshot, "edit");
+    assert_eq!(edit["available"], false);
+    assert_eq!(
+        edit["reasons"][0]["detail"], "No selectable model is served by an available adapter",
+        "the adapter narrows the candidates per operation"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// An adapter that serves no model either Provider read names is not the same
+/// as a build without an adapter: the operation says which case it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adapter_serving_no_provider_model_is_not_reported_as_missing() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    fixture.serve(&[("unknown-model", &["generate"])]);
+    let (server, home) = start(Some(fixture), "dm-adapter-idle").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_provider_with(&mut client, vec![media("image-media", &["image.generate"])]).await;
+    let snapshot = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&snapshot);
+    let generate = operation(&snapshot, "generate");
+    assert_eq!(generate["available"], false);
+    assert_eq!(generate["reasons"][0]["dimension"], "adapter");
+    assert_eq!(
+        generate["reasons"][0]["detail"], "The adapter serves no image model Provider lists",
+        "a collected adapter that serves no candidate is not a missing adapter: {generate}"
+    );
+    assert_eq!(
+        generate["options"],
+        json!([{"providerId": PROVIDER, "modelId": "image-media", "available": true}]),
+        "an operation no adapter serves falls back to the declared models"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_product_build_reports_image_operations_without_an_adapter() {
     let (server, home) = start(None, "dm-product").await;
@@ -1040,6 +1118,47 @@ async fn defaults_for_category_keyed_and_per_operation_keys_survive_a_restart() 
         "speech-a"
     );
     assert!(operation_in(&restored, "speech", "transcribe")["default"].is_null());
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A model that declares only a later operation of a category-keyed category
+/// is a valid default, so re-saving the category without `operation` keeps it
+/// even though the earlier rows carry the persisted default as unavailable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_category_wide_resave_accepts_the_default_of_its_last_operation() {
+    let (server, home) = start(None, "dm-category-resave").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_provider_with(&mut client, vec![media("video-edit", &["video.edit"])]).await;
+    let initial = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&initial);
+    let edited = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": initial["result"]["revision"], "category": "video", "operation": "edit", "model": model("video-edit")}),
+        )
+        .await;
+    assert_ok(&edited);
+    let resaved = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": edited["result"]["revision"], "category": "video", "model": model("video-edit")}),
+        )
+        .await;
+    assert_ok(&resaved);
+    for operation in ["generate", "edit", "enhance"] {
+        assert_eq!(
+            operation_in(&resaved, "video", operation)["default"]["modelId"],
+            "video-edit",
+            "the category-wide save keeps the stored default: {operation}"
+        );
+    }
+    let next = client.rpc("modality.capabilities", json!({})).await;
+    assert_eq!(
+        resaved["result"], next["result"],
+        "reply equals the next read"
+    );
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

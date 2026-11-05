@@ -62,6 +62,12 @@ struct OperationRow {
     operation: &'static str,
     key: Option<&'static str>,
 }
+impl OperationRow {
+    /// The `<category>.<operation>` id a client names.
+    fn id(&self, category: &str) -> String {
+        format!("{}.{}", category, self.operation)
+    }
+}
 
 /// One A.1 category. `category_key` says its operations share one Settings
 /// key and `configure` may omit the operation; image and speech key each
@@ -362,6 +368,11 @@ impl Evaluation {
             .as_ref()
             .is_some_and(|adapter| adapter.0.available())
     }
+    /// Whether a process adapter is collected at all, whatever it serves: a
+    /// collected adapter that serves no candidate model is not "no adapter".
+    fn has_adapter(&self) -> bool {
+        self.adapter.is_some()
+    }
     /// Whether the adapter serves this category for any model either read
     /// names; its `operations` then decides the category's options.
     fn adapter_serves(&self, category: &str) -> bool {
@@ -401,6 +412,14 @@ impl Evaluation {
             model.target.provider_id == provider_id && model.target.model_id == model_id
         })
     }
+    /// Whether either Provider read names this model.
+    fn known(&self, model: &ModelId) -> bool {
+        self.selectable(&model.provider_id, &model.model_id)
+            .is_some()
+            || self
+                .declared_for(&model.provider_id, &model.model_id)
+                .is_some()
+    }
     fn option(model: &ModelId) -> OptionSnapshot {
         OptionSnapshot {
             provider_id: model.provider_id.clone(),
@@ -409,10 +428,13 @@ impl Evaluation {
             reason: None,
         }
     }
-    /// Options for one operation: the adapter's served models when the
-    /// adapter serves the category, a selectable vision model for
+    /// Options for one operation: Provider's candidates narrowed by the
+    /// adapter when it serves the category, a selectable vision model for
     /// understanding, and otherwise the models Provider declares for the
-    /// operation id (Modality §9.2), in each read's order. The persisted
+    /// operation id (Modality §9.2), in each read's order. The candidates of
+    /// an adapter-served category are the deduplicated union of the two
+    /// Provider reads, selectable first, so a declared media model execution
+    /// rejects is still offered when the adapter serves it. The persisted
     /// default follows when it is no longer an option.
     fn options(&self, category: &str, row: &OperationRow) -> Vec<OptionSnapshot> {
         let mut options: Vec<OptionSnapshot> = if is_understand(category, row.operation) {
@@ -422,11 +444,23 @@ impl Evaluation {
                 .map(|model| Self::option(&model.target))
                 .collect()
         } else if self.adapter_serves(category) {
-            self.selectable
+            let mut served: Vec<OptionSnapshot> = Vec::new();
+            for model in self
+                .selectable
                 .iter()
-                .filter(|model| self.serves(&model.target, category, row.operation))
-                .map(|model| Self::option(&model.target))
-                .collect()
+                .map(|model| &model.target)
+                .chain(self.declared.iter().map(|model| &model.target))
+            {
+                let (provider_id, model_id) = (model.provider_id.as_str(), model.model_id.as_str());
+                if !served
+                    .iter()
+                    .any(|option| option.model() == (provider_id, model_id))
+                    && self.serves(model, category, row.operation)
+                {
+                    served.push(Self::option(model));
+                }
+            }
+            served
         } else {
             self.declared
                 .iter()
@@ -444,12 +478,27 @@ impl Evaluation {
                 provider_id: default.provider_id.clone(),
                 model_id: default.model_id.clone(),
                 available: false,
-                reason: Some(self.unavailable_reason(default, category, row.operation)),
+                reason: Some(self.unavailable_reason(
+                    default,
+                    category,
+                    row.operation,
+                    &row.id(category),
+                )),
             });
         }
         options
     }
-    fn unavailable_reason(&self, model: &ModelId, category: &str, operation: &str) -> Reason {
+    /// Why `model` is not an available option of the operation, naming it as
+    /// the client configured it: `name` is the operation id, or the category
+    /// when the write is category-wide. A persisted default and a refused
+    /// `configure` share this, so both speak one vocabulary (Modality §9.1).
+    fn unavailable_reason(
+        &self,
+        model: &ModelId,
+        category: &str,
+        operation: &str,
+        name: &str,
+    ) -> Reason {
         if is_understand(category, operation) {
             return match self.selectable(&model.provider_id, &model.model_id) {
                 None => reason("provider", "Model is no longer selectable"),
@@ -462,28 +511,19 @@ impl Evaluation {
                 ),
             };
         }
-        if self.adapter_serves(category) {
-            return match self.selectable(&model.provider_id, &model.model_id) {
-                None => reason("provider", "Model is no longer selectable"),
-                Some(_) => reason(
-                    "adapter",
-                    "No available adapter serves the configured model",
-                ),
-            };
+        if !self.known(model) {
+            return reason("provider", "Model is no longer selectable");
         }
-        if self
-            .selectable(&model.provider_id, &model.model_id)
-            .is_some()
-            || self
-                .declared_for(&model.provider_id, &model.model_id)
-                .is_some()
-        {
+        if self.adapter_serves(category) {
             reason(
-                "configuration",
-                format!("The model does not declare {category}.{operation}"),
+                "adapter",
+                "No available adapter serves the configured model",
             )
         } else {
-            reason("provider", "Model is no longer selectable")
+            reason(
+                "configuration",
+                format!("The model does not declare {name}"),
+            )
         }
     }
     fn operation(&self, category: &str, row: &OperationRow) -> OperationSnapshot {
@@ -511,10 +551,12 @@ impl Evaluation {
                 true => (true, vec![]),
             }
         } else if category == "image" {
-            (
-                false,
-                vec![reason("adapter", "No image adapter in this build")],
-            )
+            let detail = if self.has_adapter() {
+                "The adapter serves no image model Provider lists"
+            } else {
+                "No image adapter in this build"
+            };
+            (false, vec![reason("adapter", detail)])
         } else {
             (false, vec![reason("build", "Not in this build")])
         };
@@ -528,7 +570,12 @@ impl Evaluation {
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),
                     available: false,
-                    reason: Some(self.unavailable_reason(model, category, row.operation)),
+                    reason: Some(self.unavailable_reason(
+                        model,
+                        category,
+                        row.operation,
+                        &row.id(category),
+                    )),
                 })
         });
         let effective = match &default {
@@ -752,21 +799,25 @@ fn configured_operation(params: &Configure) -> Result<ConfiguredOperation, RpcEr
 }
 
 /// The refusal for a model that is not an available option of the configured
-/// operation, naming the reason the snapshot uses.
-fn selection_refusal(evaluation: &Evaluation, configured: &ConfiguredOperation) -> RpcError {
+/// operation: the detail is the reason the snapshot would carry for that
+/// model, so a client reads one vocabulary however it learns the refusal.
+fn selection_refusal(
+    evaluation: &Evaluation,
+    configured: &ConfiguredOperation,
+    model: &ModelId,
+) -> RpcError {
     let name = if configured.category_wide {
         configured.category.name.to_owned()
     } else {
-        format!("{}.{}", configured.category.name, configured.row.operation)
+        configured.row.id(configured.category.name)
     };
-    let detail = if is_understand(configured.category.name, configured.row.operation) {
-        "This model is not a selectable vision model".to_owned()
-    } else if evaluation.adapter_serves(configured.category.name) {
-        format!("No available adapter serves this model for {name}")
-    } else {
-        format!("The model does not declare {name}")
-    };
-    invalid_selection(detail)
+    let reason = evaluation.unavailable_reason(
+        model,
+        configured.category.name,
+        configured.row.operation,
+        &name,
+    );
+    invalid_selection(reason.detail)
 }
 
 /// Process owner of the `modality` Settings source and the `modality.*`
@@ -862,18 +913,22 @@ impl DynPlugin for ModalityPlugin {
                                     } else {
                                         evaluation.options(configured.category.name, configured.row)
                                     };
-                                    let selected = options
-                                        .iter()
-                                        .find(|option| {
-                                            option.model()
-                                                == (
-                                                    model.provider_id.as_str(),
-                                                    model.model_id.as_str(),
-                                                )
-                                        })
-                                        .filter(|option| option.available);
-                                    if selected.is_none() {
-                                        return Err(selection_refusal(&evaluation, &configured));
+                                    // A category-wide save flattens every row,
+                                    // and each row appends the persisted
+                                    // default when it is not an option, marked
+                                    // unavailable. The model is valid when any
+                                    // row offers it as available.
+                                    let selected = options.iter().any(|option| {
+                                        option.model()
+                                            == (model.provider_id.as_str(), model.model_id.as_str())
+                                            && option.available
+                                    });
+                                    if !selected {
+                                        return Err(selection_refusal(
+                                            &evaluation,
+                                            &configured,
+                                            model,
+                                        ));
                                     }
                                 }
                                 let mut document = ModalitySettings {
