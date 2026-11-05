@@ -36,6 +36,7 @@ mod skills_management;
 pub mod storage;
 mod transport;
 mod tree_protocol;
+pub mod ui_extensions;
 mod ui_host;
 mod ui_leaf;
 pub mod web;
@@ -890,6 +891,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }
         None => None,
     };
+    if let Some(home) = plugin_home {
+        let configuration = ui_extensions::Configuration::new(home.join("ui-cache"));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                Ok(Box::new(ui_extensions::UiExtensionsPlugin::new(
+                    names,
+                    configuration.clone(),
+                )?))
+            },
+        )?);
+    }
     let plugin_content = match &plugins {
         Some(state) => {
             let build = rutis_loader::resolve::Build::default();
@@ -1244,6 +1258,8 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ConnectionHub>(catalog, None);
     register::<ListenAddresses>(catalog, None);
     register::<ui_host::UiHost>(catalog, None);
+    register::<ui_extensions::UiExtensions>(catalog, None);
+    register::<ui_extensions::UiResources>(catalog, Some(SESSION_GROUP));
     register::<settings::SettingsService>(catalog, None);
     register::<managed_provider::ManagedProviders>(catalog, None);
     register::<dyn managed_provider::ManagedProvider>(catalog, None);

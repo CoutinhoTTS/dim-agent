@@ -10,6 +10,7 @@ import ComposerPanel from "./ComposerPanel.vue"
 import QueuedInputs from "./QueuedInputs.vue"
 import QuestionPrompt from "./QuestionPrompt.vue"
 import TimelineView from "./TimelineView.vue"
+import ExtensionMenu from "../extensions/ExtensionMenu.vue"
 import { MAIN_BRANCH, type ContextUsage, type DraftAttachments, type ModelId, type PermissionPreset } from "../../rpc/protocol"
 import { goalCall, goalObjective, parseGoalRequest, type Goal, type GoalStatus } from "../../goal"
 import { useChatStore } from "../../stores/chat"
@@ -262,6 +263,7 @@ async function fork(): Promise<void> {
           </template>
           <h1 data-route-heading tabindex="-1" :title="title">{{ title }}</h1>
         </div>
+        <ExtensionMenu :session-id="sessionId" />
         <button
           v-if="connection.supports('session.branch_end')"
           class="ui-button session-lines"

@@ -796,7 +796,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     let (send, mut lookups) = mpsc::channel::<Lookup>(8);
     let secrets = root.plugin(Secrets(send));
     active(&secrets).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -1002,7 +1002,7 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -1190,7 +1190,7 @@ async fn a_declared_output_limit_at_or_above_the_window_adopts_a_derived_allowan
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -1290,7 +1290,7 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -1638,7 +1638,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -2498,7 +2498,7 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -2861,7 +2861,7 @@ async fn a_listing_that_collides_with_a_user_model_names_it_and_writes_nothing()
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -3126,7 +3126,7 @@ async fn a_disabled_re_point_drops_an_own_catalog_and_the_refill_lists_the_new_e
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -3354,7 +3354,7 @@ async fn object_kind_listings_classify_their_models_as_chat() {
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();

@@ -12,6 +12,7 @@ use crate::hooks_settings::HooksService;
 use crate::mcp::McpService;
 use crate::methods::ManagementMethods;
 use crate::settings::{SettingsService, SourceDeclaration};
+use crate::ui_extensions::UiExtensions;
 use acquire::PluginsDir;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, Progress, RpcError};
 use dim_agent_capabilities::skills::{SkillIssue, SkillsCatalog};
@@ -586,16 +587,18 @@ pub(crate) struct Owners {
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
     hooks: Key<HooksService>,
+    ui: Key<UiExtensions>,
     /// Content refusals PluginManager made itself, by plugin id and kind
     /// (§3.7). In memory only.
     refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
 }
 
 /// The row names of the content owners and the kind each takes.
-const OWNERS: [(&str, Kind); 3] = [
+const OWNERS: [(&str, Kind); 4] = [
     ("SkillsCatalog", Kind::Skills),
     ("Mcp", Kind::Mcp),
     ("HooksSettings", Kind::Hooks),
+    ("UiExtensions", Kind::Ui),
 ];
 
 /// A content refusal: the kind and the error it came with (§3.7).
@@ -652,6 +655,7 @@ impl Owners {
             skills: names.key()?,
             mcp: names.key()?,
             hooks: names.key()?,
+            ui: names.key()?,
             refusals,
         })
     }
@@ -683,6 +687,11 @@ impl Owners {
                 Err(error) => tracing::warn!(%error, "Hooks plugin documents unreadable"),
             }
         }
+        if kinds.contains(&Kind::Ui)
+            && let Some(ui) = self.ctx.get_at(&self.ui)
+        {
+            held.extend(ui.plugins());
+        }
         held
     }
 
@@ -698,6 +707,20 @@ impl Owners {
         outcome: &mut Outcome,
     ) {
         let cancel = self.ctx.cancellation_token();
+        if kinds.contains(&Kind::Ui) {
+            match self.ctx.get_at(&self.ui) {
+                Some(ui) => {
+                    if let Err(error) = ui
+                        .register(plugin, &manifest.name, manifest.ui.as_ref())
+                        .await
+                    {
+                        outcome.refused.push(refused(Kind::Ui, error));
+                    }
+                }
+                None if manifest.ui.is_some() => outcome.skipped.push(Kind::Ui),
+                None => {}
+            }
+        }
         if kinds.contains(&Kind::Skills) {
             match (self.ctx.get_at(&self.skills), &manifest.skills) {
                 (None, Some(_)) => outcome.skipped.push(Kind::Skills),
@@ -790,6 +813,11 @@ impl Owners {
     /// Withdraws `plugin`'s content of `kinds` from each present owner, and
     /// the refusals that go with it.
     async fn withdraw(&self, plugin: &str, kinds: &[Kind]) {
+        if kinds.contains(&Kind::Ui)
+            && let Some(ui) = self.ctx.get_at(&self.ui)
+        {
+            ui.withdraw(plugin).await;
+        }
         for kind in kinds {
             self.clear_refusal(plugin, *kind);
         }
@@ -837,6 +865,11 @@ impl Owners {
     /// `register`: its content is not there to be refused.
     async fn refused(&self, plugin: &str, manifest: &Manifest) -> Vec<Refusal> {
         let mut found = Vec::new();
+        if let Some(ui) = self.ctx.get_at(&self.ui)
+            && let Some(error) = ui.plugin_refusal(plugin)
+        {
+            found.push(refused(Kind::Ui, error));
+        }
         if manifest.skills.is_some()
             && let Some(catalog) = self.ctx.get_at(&self.skills)
         {
@@ -1289,8 +1322,17 @@ impl Manager {
                     .expect("a used plugin has a directory")
             }
         };
-        let manifest = Manifest::read(&dir)?;
+        let manifest = match Manifest::read(&dir) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                let plugin = own_id(name, used.as_ref().expect("in use")).expect("not built in");
+                self.owners.withdraw(plugin, &[Kind::Ui]).await;
+                return Err(error);
+            }
+        };
         if manifest.name != name {
+            let plugin = own_id(name, used.as_ref().expect("in use")).expect("not built in");
+            self.owners.withdraw(plugin, &[Kind::Ui]).await;
             return Err(PluginError::new(
                 "name_changed",
                 format!(
@@ -1352,7 +1394,9 @@ impl Manager {
                 }
             }
         }
-        outcome.status = Some(self.status(&row));
+        if manifest.code.is_some() {
+            outcome.status = Some(self.status(&row));
+        }
         Ok(Value::Object(outcome.into_map()))
     }
 
@@ -1666,7 +1710,7 @@ fn object(value: Value) -> Map<String, Value> {
 }
 
 /// The content kinds PluginManager registers with owners.
-const CONTENT: [Kind; 3] = [Kind::Skills, Kind::Mcp, Kind::Hooks];
+const CONTENT: [Kind; 4] = [Kind::Skills, Kind::Mcp, Kind::Hooks, Kind::Ui];
 
 fn status_value(loader: &Loader, entry: &EntryInfo) -> Value {
     let pending = || {
@@ -1704,6 +1748,7 @@ pub(crate) struct PluginManagerPlugin {
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
     hooks: Key<HooksService>,
+    ui: Key<UiExtensions>,
     runtimes: Key<crate::runtime_manager::RuntimeService>,
     settings: Key<SettingsService>,
 }
@@ -1718,6 +1763,7 @@ impl PluginManagerPlugin {
             skills: names.key()?,
             mcp: names.key()?,
             hooks: names.key()?,
+            ui: names.key()?,
             runtimes: names.key()?,
             settings: names.key()?,
         })
@@ -1745,6 +1791,7 @@ impl DynPlugin for PluginManagerPlugin {
                     skills: self.skills.clone(),
                     mcp: self.mcp.clone(),
                     hooks: self.hooks.clone(),
+                    ui: self.ui.clone(),
                     refusals: self.state.refusals.clone(),
                 },
                 ctx: ctx.clone(),

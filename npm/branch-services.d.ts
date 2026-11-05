@@ -501,8 +501,42 @@ export interface WorkflowFiles {
   createDirectory(request: WorkflowDirectoryRequest): Promise<void>
 }
 
+export interface PublishFile {
+  /** Absolute host path inside an already authorized FileStorage root. */
+  path: string
+  mediaType: string
+}
+
+export interface ResourceRef {
+  sessionId: string
+  id: string
+}
+
+export interface ResourceError {
+  code: string
+  message: string
+}
+
+export interface UiResources {
+  /**
+   * Publishes a finalized regular file at a canonical absolute host path
+   * inside an already authorized FileStorage root; relative paths are invalid.
+   * The calling part owns the reference until withdrawal or unload.
+   * @throws {ResourceErrorThrown}
+   */
+  publishFile(request: PublishFile): Promise<ResourceRef>
+  /**
+   * Withdraws only a reference this calling part published; waits for reads to end.
+   * @throws {ResourceErrorThrown}
+   */
+  withdraw(reference: ResourceRef): Promise<void>
+}
+
 /** What a method returning `Err(AgentError)` throws. */
 export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "BranchEnded" | "Storage" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "Fault" | "Framework" | "Multiple", undefined>
+
+/** What a method returning `Err(ResourceError)` throws. */
+export type ResourceErrorThrown = RustError<"ResourceError", string, ResourceError>
 
 /** What a method returning `Err(SessionsError)` throws. */
 export type SessionsErrorThrown = RustError<"SessionsError", "rejected" | "agent_unknown" | "session_closed" | "branch_missing" | "branch_ended" | "reloading" | "future_sequence" | "ambiguous" | "publication_unknown" | "failed", SessionsError>
@@ -523,4 +557,5 @@ export interface Services {
   partRegistry: PartRegistry
   sessionPermissions: SessionPermissions
   workflowFiles: WorkflowFiles
+  uiResources: UiResources
 }

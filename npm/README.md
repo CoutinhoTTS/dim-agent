@@ -19,3 +19,11 @@ See the [plugin author's guide](https://github.com/arcships/dim/blob/main/docs/t
 The type-only entry adds no runtime code or plugin registration.
 
 Dim's original source uses MIT. See `NOTICE` for distribution attribution. Native platform packages include `licenses/RUST-THIRD-PARTY-NOTICES.txt`, terminal library licenses under `licenses/grok-build/` and Aimux's license under `licenses/aimux/`. The optional `dimcode-web` package includes `web/THIRD-PARTY-NOTICES.txt`, covering its JavaScript dependencies and Geist fonts under their own licenses. Bundled plugins retain the license files supplied by their npm packages.
+
+## Client UI extensions
+
+`dimcode/ui` exports browser types only. UI packages bundle their own runtime and
+export `mount(ShadowRoot, context)` with a cleanup function. The host supplies
+only declared capabilities and Session methods bound to the selected Session and
+branch. See the [contract](../docs/design/client-ui-extensions.md) and
+[HTML, CSS and JavaScript example](../examples/ui-extensions/README.md).

@@ -159,6 +159,8 @@ export const useChatStore = defineStore("chat", () => {
     if (channel.syncing) return
     const { view } = channel
     channel.syncing = true
+    channel.view.status = "loading"
+    channel.states.clear()
     channel.queued = []
     view.approvals = []
     channel.main.syncing = true
@@ -214,6 +216,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function receive(notification: Notification): void {
+    if (notification.method === "ui.extensions.changed") return
     const sessionId = notification.method === "session.model.progress"
       ? notification.progress.sessionId
       : notification.method === "approval.request" ? notification.request.sessionId : notification.sessionId
@@ -426,11 +429,8 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function anyRunning(channel: Channel): boolean {
-    if (stateOf(channel, MAIN_BRANCH).running) return true
-    for (const id of channel.branches.keys()) {
-      if (stateOf(channel, id).running) return true
-    }
-    return false
+    const ended = new Set(channel.lines.views().filter(line => line.state.kind.startsWith("ended") || line.state.kind === "creation-failed").map(line => line.id))
+    return [...channel.states].some(([id, state]) => !ended.has(id) && (state.running || state.stopping))
   }
 
   function changed(channel: Channel): void {

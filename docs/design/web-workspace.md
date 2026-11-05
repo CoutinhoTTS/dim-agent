@@ -102,8 +102,9 @@ For development against the repository checkout, and for a build that must carry
 | Item | Rule |
 | --- | --- |
 | Version | `hello` v3 with `clientKind: "web"`; v1/v2 → `protocol_version` |
-| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
+| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3 and read-only discovery methods below. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
 | Model list | The read-only management methods `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Managed Provider discovery follows §4.2. Switching uses the Session method `session.model.update` |
+| UI directory | UiExtensions contributes `ui.extensions.list`, which is explicitly allowlisted and advertised in `hello.features` while available. Connection forwards `ui.extensions.changed` over the reliable control channel; clients refetch the directory on this notice. No other contributed management method becomes reachable |
 
 Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` only in protected profiles). Execution Session methods become reachable from the web entry; this is the same widening RemoteGateway records as E3, limited here to loopback connections authenticated by the local user's token.
 
@@ -745,3 +746,53 @@ Legacy permission patterns and tracing behavior do not override the current
 the Permissions page follows
 [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds). A change to
 either contract requires separate design alignment.
+
+## Client UI extensions
+
+The [client UI contract](client-ui-extensions.md) owns the manifest, mount
+boundary, bound capabilities and resource semantics. The Web adapter adds the
+exact read method `ui.extensions.list` to its management allowlist and subscribes
+to `ui.extensions.changed` on the reliable control channel before hello completes.
+It reads the directory after hello and refreshes on each invalidation; reconnect
+clears stale directory and panel state before binding again.
+
+Authenticated resource routes share this listener:
+
+| Route | Owner |
+| --- | --- |
+| `/api/ui/extensions/{generation}/{path}` | UiExtensions snapshot |
+| `/api/ui/sessions/{sessionId}/resources/{id}` | Session UiResources |
+
+Both routes preserve Host checking and cookies, reject an explicit foreign
+Origin or cross-site fetch, and allow same-origin GET without an Origin header.
+There is no resource SPA fallback. MIME and `nosniff` remain explicit; CSP and
+CORS are unchanged. Snapshot replies use private revalidation and ETags; Session
+files use private no-store. GET supports a single byte range, including suffix
+and open-ended ranges. HEAD ignores Range. Unsatisfiable ranges return 416 and
+the total length; multiple ranges and unknown units return the full file.
+Bounded producers apply backpressure and release file reads on disconnect or
+owner withdrawal. Active content from Session files is downloaded as octet-stream.
+
+AppShell places the selected extension in the existing Lines detail region.
+The UI store persists only its stable selection and existing size. Each panel
+component owns its ShadowRoot and mount lifetime; the connection store owns
+catalog synchronization and the chat store owns Session activity. Compact mode
+uses a native modal dialog with a host-owned close button, Escape handling and
+focus restoration. Panel keyboard events stay within the panel.
+
+The extension menu checks placement, declared capabilities and discovered
+Session methods before selection. Unavailable entries stay visible with their
+reason and cannot be selected. Session methods are refreshed when the binding
+or directory changes and when the menu gains focus; mounting rechecks them.
+
+```text
+Extensions:
+  Activity
+  Preview — Unavailable method: session.preview.open [disabled]
+Wide:    [Conversation] | [Extension title] [Lines] [Close]
+                       | [Bound line selector]
+                       | [Plugin ShadowRoot]
+Compact: [Modal title] [Close]
+         [Bound line selector]
+         [Plugin ShadowRoot]
+```

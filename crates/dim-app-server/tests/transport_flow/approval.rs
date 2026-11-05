@@ -955,7 +955,7 @@ async fn settle_notices(client: &mut Client) {
     assert_ok(&client.rpc("daemon.ping", json!({})).await);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn attach_replay_and_cancellation_leave_no_pending_approval_on_both_transports() {
     for ws in [false, true] {
         let probe = Arc::new(Probe::default());

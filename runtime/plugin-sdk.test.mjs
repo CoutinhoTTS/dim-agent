@@ -231,6 +231,31 @@ void branch.treeCommands.create('main', 0, { prompt: 'child', source: { kind: 'h
 // @ts-expect-error sequence values must retain their number | bigint type.
 const lossyCut: number = cutoff;
 `);
+  const uiFixture = path.join(directory, 'ui.mts');
+  writeFileSync(uiFixture, `
+import type { PanelError, PanelModule, PanelServices, TimelinePage } from 'dimcode/ui';
+const isClosedBinding = (error: PanelError): boolean => error.name === 'PanelError' && error.code === 'binding_closed';
+void isClosedBinding;
+import type { UiResources, PublishFile, ResourceRef } from 'dimcode/plugin';
+declare const resources: UiResources;
+const input: PublishFile = { path: '/workspace/report.txt', mediaType: 'text/plain' };
+const reference: ResourceRef = await resources.publishFile(input);
+await resources.withdraw(reference);
+const panel: PanelModule<Required<PanelServices>> = {
+  mount(root, context) {
+    const link = document.createElement('a');
+    link.href = context.services.resources.url(reference);
+    root.append(link);
+    void context.services.session.history?.read({ limit: 10 }).then((page: TimelinePage) => page.events[0]?.data);
+    // @ts-expect-error panels cannot access a transport or arbitrary RPC.
+    context.call('session.close', {});
+    // @ts-expect-error panels cannot publish server files.
+    context.services.resources.publishFile(input);
+    return () => link.remove();
+  },
+};
+void panel;
+`);
   const compiler = path.join(root, 'runtime/node_modules/typescript/bin/tsc');
   const declarations = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
@@ -238,6 +263,6 @@ const lossyCut: number = cutoff;
   assert.equal(declarations.status, 0, declarations.stdout + declarations.stderr);
   const checked = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
-    ...files, calls, branchFixture, partRow, permissionsFixture, workflowFixture], { encoding: 'utf8' });
+    ...files, calls, branchFixture, partRow, permissionsFixture, workflowFixture, uiFixture], { encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
 });

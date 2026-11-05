@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
     fs::{File, Permissions, TryLockError},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -103,6 +103,7 @@ struct State {
     roots: Vec<File>,
     active: usize,
     leases: HashMap<Uuid, Weak<Lease>>,
+    readers: HashMap<Uuid, Weak<ReadFile>>,
     cleanup_errors: Vec<io::Error>,
 }
 
@@ -144,6 +145,66 @@ impl Drop for Lease {
 /// Owns one physical file lock across a business read-modify-write operation.
 /// Mutable methods prevent concurrent operations through the same lease.
 pub struct FileLease(Option<Arc<Lease>>);
+
+struct ReadFile {
+    id: Uuid,
+    owner: Weak<FileStorage>,
+    file: Mutex<Option<File>>,
+    len: u64,
+}
+
+impl Drop for ReadFile {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.upgrade() {
+            owner.state.lock().unwrap().readers.remove(&self.id);
+        }
+    }
+}
+
+/// A pinned regular file. Reads have independent offsets and return at most 64 KiB.
+/// Storage closure releases even retained readers; subsequent reads fail Closed.
+#[derive(Clone)]
+pub struct FileReader(Arc<ReadFile>);
+
+impl FileReader {
+    pub fn len(&self) -> u64 {
+        self.0.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.len == 0
+    }
+
+    pub async fn read_at(
+        &self,
+        offset: u64,
+        limit: usize,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>> {
+        let owner = self.0.owner.upgrade().ok_or(FileStorageError::Closed)?;
+        let operation = {
+            let mut state = owner.state.lock().unwrap();
+            owner.check(cancel)?;
+            state.active += 1;
+            Operation(owner.clone())
+        };
+        let reader = self.0.clone();
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            let _operation = operation;
+            owner.check(&cancel)?;
+            let mut guard = reader.file.lock().unwrap();
+            let file = guard.as_mut().ok_or(FileStorageError::Closed)?;
+            let limit = (limit.min(64 * 1024) as u64).min(reader.len.saturating_sub(offset));
+            let mut bytes = vec![0; limit as usize];
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(&mut bytes)?;
+            owner.check(&cancel)?;
+            Ok(bytes)
+        })
+        .await?
+    }
+}
 impl Drop for FileLease {
     fn drop(&mut self) {
         let Some(lease) = self.0.take() else { return };
@@ -174,6 +235,7 @@ impl FileStorage {
                 roots: handles,
                 active: 0,
                 leases: HashMap::new(),
+                readers: HashMap::new(),
                 cleanup_errors: Vec::new(),
             }),
             stopping: CancellationToken::new(),
@@ -269,6 +331,55 @@ impl FileStorage {
             root,
             relative: path,
         })
+    }
+
+    /// Resolves a trusted caller's absolute path inside an already authorized root.
+    /// Does not follow links or add roots; opening retains the root-handle boundary.
+    pub fn resolve(&self, absolute: &Path) -> Result<FilePath> {
+        let found = self
+            .roots
+            .lock()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, root)| {
+                absolute
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|relative| (index, root.components().count(), relative.to_path_buf()))
+            })
+            .max_by_key(|(_, depth, _)| *depth);
+        let (index, _, relative) = found.ok_or(FileStorageError::InvalidPath(
+            "path is outside authorized roots",
+        ))?;
+        self.path(index, relative)
+    }
+
+    /// Pins a regular file through the authorized directory handle.
+    /// The producer must keep its bytes immutable until all readers are released.
+    pub async fn open_read(
+        self: &Arc<Self>,
+        path: &FilePath,
+        cancel: &CancellationToken,
+    ) -> Result<FileReader> {
+        let relative = path.relative.clone();
+        self.run(path, cancel, move |root, owner, cancel| {
+            let (parent, name) = native::parent(root, &relative)?;
+            let file = native::read_user_file(&parent, &name)?;
+            let len = file.metadata()?.len();
+            let reader = Arc::new(ReadFile {
+                id: Uuid::new_v4(),
+                owner: Arc::downgrade(&owner),
+                file: Mutex::new(Some(file)),
+                len,
+            });
+            let mut state = owner.state.lock().unwrap();
+            owner.check(&cancel)?;
+            state.readers.insert(reader.id, Arc::downgrade(&reader));
+            drop(state);
+            Ok(FileReader(reader))
+        })
+        .await
     }
 
     fn check(&self, cancel: &CancellationToken) -> Result<()> {
@@ -472,24 +583,32 @@ impl FileStorage {
         self.stopping.cancel();
         loop {
             let changed = self.drained.notified();
-            let leases = {
+            let resources = {
                 let mut state = self.state.lock().unwrap();
                 if state.active == 0 {
                     state.roots.clear();
-                    Some(
+                    Some((
                         state
                             .leases
                             .drain()
                             .filter_map(|(_, lease)| lease.upgrade())
                             .collect::<Vec<_>>(),
-                    )
+                        state
+                            .readers
+                            .drain()
+                            .filter_map(|(_, reader)| reader.upgrade())
+                            .collect::<Vec<_>>(),
+                    ))
                 } else {
                     None
                 }
             };
-            if let Some(leases) = leases {
+            if let Some((leases, readers)) = resources {
                 for lease in leases {
                     lease.resources.lock().unwrap().take();
+                }
+                for reader in readers {
+                    reader.file.lock().unwrap().take();
                 }
                 let errors = std::mem::take(&mut self.state.lock().unwrap().cleanup_errors);
                 return if errors.is_empty() {
