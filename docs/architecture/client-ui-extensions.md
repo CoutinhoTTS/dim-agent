@@ -6,6 +6,11 @@ They emit no Timeline events and do not alter agent execution. The generated
 [App Server assembly](rust-agent/generated/app-server/services.md) records their
 current bindings.
 
+UiExtensions is an independently enabled process row that registers its Session
+part. It lives in the App Server crate because its owners serve every connected
+client; it does not depend on the CLI or a renderer. WebEntry adapts authenticated
+HTTP to these owners, while the Web client owns mounting and selection.
+
 | Part | Scope | Dependencies | Provides |
 | --- | --- | --- | --- |
 | UiExtensions | process | managementMethods, partRegistry, fileStorage | uiExtensions |
@@ -19,6 +24,14 @@ reloads. Snapshot bytes and file handles belong to each generation. Failed
 preparation withdraws the old entry and exposes an unavailable declaration.
 Withdrawal cancels admitted reads, waits for their producers, then removes the
 snapshot. The registration sources contain no runtime handles.
+
+FileStorage registers the stable `ui-cache` root once, reusing its root handle
+across UiExtensions generations. Each generation owns a child directory and
+removes it on close. Before activation, UiExtensions removes abandoned UUID
+directories left by a crash. Source roots are deduplicated by FileStorage.
+Registrations without UI content only withdraw an existing entry; they do not
+change the revision when the public directory is unchanged. Source maps are
+excluded from snapshots.
 
 UiExtensions registers the UiResources Session part. `publishFile` uses the
 calling rutis context as the publication owner, registers cleanup there, and

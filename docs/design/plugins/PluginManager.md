@@ -99,6 +99,13 @@ and invalid UI declarations appear as content refusals without stopping the
 package's backend code or other content. When UiExtensions is absent, `ui` is
 reported as skipped. Withdrawals use the installed id, as for other content.
 
+This behavior requires a Dim manifest reader that recognizes `ui`. Older readers
+reject that unknown top-level member with `invalid_manifest`, so the whole
+package is unreadable: its code and other content do not remain enabled. A
+backend that must support older Dim needs a package version without `ui`, or a
+separate UI-only package. Restoring a v1 installation record does not make a
+new manifest readable by an old binary.
+
 
 ### 2.2 `plugins.json`
 

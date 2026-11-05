@@ -1,4 +1,6 @@
 import type { TimelinePage, HistoryQuery, SubmitResult, InterruptResult, StateNotice, SubmitInput } from "./client-protocol.js"
+import type { ResourceRef } from "./branch-services.js"
+export type { ResourceRef } from "./branch-services.js"
 export type { TimelinePage, HistoryQuery, SubmitResult, InterruptResult, StateNotice, SubmitInput, UserInput } from "./client-protocol.js"
 
 export type Dispose = () => void
@@ -22,7 +24,6 @@ export interface PanelContext<Services = PanelServices, Methods = Record<string,
 export interface PanelModule<Services = PanelServices, Methods = Record<string, (input: Record<string, unknown>) => Promise<unknown>>> {
   mount(root: ShadowRoot, context: PanelContext<Services, Methods>): Dispose
 }
-export interface ResourceRef { readonly sessionId: string; readonly id: string }
 export interface PanelServices {
   session?: {
     state?: { observe(listener: (value: PanelActivity) => void): Dispose }

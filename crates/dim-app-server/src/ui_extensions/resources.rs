@@ -95,6 +95,7 @@ pub struct ResourceRef {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishFile {
+    /// Absolute host path inside an already authorized FileStorage root.
     pub path: String,
     pub media_type: String,
 }
@@ -115,13 +116,19 @@ impl PublicService for UiResources {}
 
 #[rutis::service]
 impl UiResources {
-    /// Publishes a finalized regular file inside an authorized FileStorage root.
+    /// Publishes a finalized regular file at a canonical absolute host path
+    /// inside an already authorized FileStorage root; relative paths are invalid.
     /// The calling part owns the reference until withdrawal or unload.
     pub async fn publish_file(
         &self,
         caller: &Ctx,
         request: PublishFile,
     ) -> Result<ResourceRef, ResourceError> {
+        if !Path::new(&request.path).is_absolute() {
+            return Err(ResourceError::invalid(
+                "Expected an absolute host file path",
+            ));
+        }
         let _operation = self.reads.enter()?;
         if self.lifecycle.phase() >= SessionPhase::Closing {
             return Err(gone());

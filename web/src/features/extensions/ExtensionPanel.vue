@@ -8,7 +8,7 @@ import { useChatStore } from "../../stores/chat"
 import { useConnectionStore } from "../../stores/connection"
 import { useExtensionsStore } from "../../stores/extensions"
 import { useUiStore } from "../../stores/ui"
-import { capabilities, createPanelContext, panelTitle, resourceUrl } from "./context"
+import { createPanelContext, panelTitle, panelUnavailable, resourceUrl } from "./context"
 import { messages } from "./messages"
 
 const props = defineProps<{ sessionId: string }>()
@@ -71,15 +71,10 @@ watch([container, () => extension.value?.generation, () => panel.value?.id, () =
   dispose = () => { valid = false; cleanup?.() }
   loading.value = true
   try {
-    if (declaration.placement !== "session-panel") throw new Error(`Unsupported placement: ${declaration.placement}`)
-    for (const capability of declaration.requires) {
-      if (!capabilities.includes(capability)) throw new Error(`Unsupported capability: ${capability}`)
-      const method = { "session.history": "session.history", "session.submit": "session.submit", "session.interrupt": "session.stop" }[capability]
-      if (method && !connection.supports(method)) throw new Error(`Unavailable capability: ${capability}`)
-    }
     const methods = declaration.methods.length === 0 ? [] : await connection.client.call("session.methods", { sessionId }, readSessionMethods)
     if (!valid) return
-    for (const method of declaration.methods) if (!methods.includes(method.name)) throw new Error(`Unavailable method: ${method.name}`)
+    const unavailable = panelUnavailable(declaration, connection.supports, methods)
+    if (unavailable) throw new Error(unavailable)
     const module: PanelModule = await import(/* @vite-ignore */ resourceUrl(current.generation, declaration.entry))
     if (!valid) return
     if (typeof module.mount !== "function") throw new Error("The extension does not export mount")

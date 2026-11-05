@@ -1,35 +1,42 @@
-# Client UI examples
+# Client UI example
 
-The [client UI contract](../../docs/design/client-ui-extensions.md) defines the
-mount lifecycle and available capabilities. These packages run in a trusted
-browser realm and bundle their own runtime dependencies.
+A UI-only plugin written in plain HTML, CSS and JavaScript. No package manager,
+framework or build step is needed.
 
-- `dom` is a UI-only package. It needs no build and reads the bound branch's
-  activity and history through its declared capabilities.
-- `vue` builds an independent ES module containing Vue. Run `npm install` and
-  `npm run build` in that directory before installing the package. Its build has
-  no external runtime imports and uses no host framework objects.
-
-Install the absolute package directory with `plugin.install`:
-
-```json
-{"source":{"path":"/absolute/path/to/examples/ui-extensions/dom"}}
+```text
+ui-extensions/
+  dim-plugin.json   panel declaration and required capabilities
+  ui/
+    panel.html      markup
+    panel.css       styles using the host's semantic theme variables
+    panel.js        mount, data access and cleanup
 ```
 
-Open a conversation in the Web workspace, then select the panel from Extensions.
-Use `plugin.reload {"name":"conversation-inspector"}` after changing the DOM
-example's files. Each successful reload publishes a new immutable resource
-snapshot. Disable or remove the package through the existing plugin commands.
+Install this directory with `plugin.install`:
 
-TypeScript authors use `import type { PanelModule } from 'dimcode/ui'`. The
-package exports declarations only; there is no browser runtime to initialize.
-Keep module top-level code free of side effects. Use the binding's abort signal
-for listeners and fetches, and return the framework's unmount operation.
+```json
+{"source":{"path":"/absolute/path/to/examples/ui-extensions"}}
+```
 
-Backend parts publish finite, finalized files through the Session-scoped
-`uiResources` service. `publishFile({path, mediaType})` returns `{sessionId, id}`;
-return that reference from a declared Session method and render the address
-from `context.services.resources.url(reference)`. The part keeps the file
-unchanged while published and calls `withdraw(reference)` when it is no longer
-needed. Caller unload and Session closing also withdraw it. The browser receives
-neither the file path nor publication authority.
+Open a Web conversation and choose **Activity** from **Extensions**. The panel
+observes the bound branch and Session activity. **Read recent history** reads
+that branch's public events.
+
+`panel.js` exports `mount(root, context)`, loads its HTML and CSS relative to
+`import.meta.url`, and returns cleanup synchronously. The host aborts
+`context.signal` before cleanup, stopping the HTML fetch, listeners and stale
+result rendering. The files run as trusted plugin code in a ShadowRoot.
+
+After editing any file, run `plugin.reload {"name":"conversation-inspector"}`.
+The host publishes a fresh resource snapshot; no build or daemon restart is
+needed. Disable or remove it through the existing plugin commands.
+
+See the [client UI contract](../../docs/design/client-ui-extensions.md) for the
+available capabilities and `import type { PanelModule } from 'dimcode/ui'` for
+TypeScript declarations. The example does not publish backend files. Backend
+parts can use `uiResources.publishFile({path, mediaType})` with a canonical
+absolute host path inside an already authorized FileStorage root. The returned
+`{sessionId, id}` may be returned by a declared Session method and converted by
+`context.services.resources.url(reference)`. Relative `pluginFiles` paths cannot
+be passed directly. See the [resource contract](../../docs/design/client-ui-extensions.md#62-session-文件资源)
+for ownership, path sources and withdrawal.

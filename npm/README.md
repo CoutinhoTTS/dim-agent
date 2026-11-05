@@ -26,4 +26,4 @@ Dim's original source uses MIT. See `NOTICE` for distribution attribution. Nativ
 export `mount(ShadowRoot, context)` with a cleanup function. The host supplies
 only declared capabilities and Session methods bound to the selected Session and
 branch. See the [contract](../docs/design/client-ui-extensions.md) and
-[DOM and Vue examples](../examples/ui-extensions/README.md).
+[HTML, CSS and JavaScript example](../examples/ui-extensions/README.md).

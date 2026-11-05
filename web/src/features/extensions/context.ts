@@ -3,6 +3,15 @@ import { RpcError, type RpcClient } from "../../rpc/client"
 import { readInterrupt, readSubmit, readTimelinePage } from "../../rpc/read"
 
 export const capabilities = ["session.state", "session.history", "session.submit", "session.interrupt", "resources"]
+export function panelUnavailable(panel: PanelDeclaration, supports: (method: string) => boolean, methods: readonly string[]): string | undefined {
+  if (panel.placement !== "session-panel") return `Unsupported placement: ${panel.placement}`
+  for (const capability of panel.requires) {
+    if (!capabilities.includes(capability)) return `Unsupported capability: ${capability}`
+    const method = { "session.history": "session.history", "session.submit": "session.submit", "session.interrupt": "session.stop" }[capability]
+    if (method && !supports(method)) return `Unavailable capability: ${capability}`
+  }
+  for (const method of panel.methods) if (!methods.includes(method.name)) return `Unavailable method: ${method.name}`
+}
 export class PanelError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "PanelError" }
 }

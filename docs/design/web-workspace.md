@@ -102,8 +102,9 @@ For development against the repository checkout, and for a build that must carry
 | Item | Rule |
 | --- | --- |
 | Version | `hello` v3 with `clientKind: "web"`; v1/v2 → `protocol_version` |
-| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
+| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3 and read-only discovery methods below. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
 | Model list | The read-only management methods `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Managed Provider discovery follows §4.2. Switching uses the Session method `session.model.update` |
+| UI directory | UiExtensions contributes `ui.extensions.list`, which is explicitly allowlisted and advertised in `hello.features` while available. Connection forwards `ui.extensions.changed` over the reliable control channel; clients refetch the directory on this notice. No other contributed management method becomes reachable |
 
 Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` only in protected profiles). Execution Session methods become reachable from the web entry; this is the same widening RemoteGateway records as E3, limited here to loopback connections authenticated by the local user's token.
 
@@ -721,7 +722,15 @@ catalog synchronization and the chat store owns Session activity. Compact mode
 uses a native modal dialog with a host-owned close button, Escape handling and
 focus restoration. Panel keyboard events stay within the panel.
 
+The extension menu checks placement, declared capabilities and discovered
+Session methods before selection. Unavailable entries stay visible with their
+reason and cannot be selected. Session methods are refreshed when the binding
+or directory changes and when the menu gains focus; mounting rechecks them.
+
 ```text
+Extensions:
+  Activity
+  Preview — Unavailable method: session.preview.open [disabled]
 Wide:    [Conversation] | [Extension title] [Lines] [Close]
                        | [Bound line selector]
                        | [Plugin ShadowRoot]

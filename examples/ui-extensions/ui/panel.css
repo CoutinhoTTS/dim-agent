@@ -1,0 +1,9 @@
+.activity {
+  padding: 16px;
+  color: var(--dim-ui-foreground);
+  background: var(--dim-ui-background);
+  font-family: var(--dim-ui-font-family);
+}
+p, pre { overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; }
+button { font: inherit; }

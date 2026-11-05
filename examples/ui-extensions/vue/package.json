@@ -1,8 +1,0 @@
-{
-  "name": "dim-ui-vue-example",
-  "private": true,
-  "type": "module",
-  "scripts": { "build": "vite build" },
-  "dependencies": { "vue": "3.5.35" },
-  "devDependencies": { "vite": "^6.4.3" }
-}

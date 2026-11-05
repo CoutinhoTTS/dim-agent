@@ -176,7 +176,7 @@ Documents that disagree with the code or with each other:
 | Only scrollback is designed; fullscreen-only items (rollback, mouse, `/stats`) are out of scope | [overview](overview.md) line 15, App. A | The fullscreen terminal UI, its mouse mode and `/tui` are implemented and documented in the [native CLI contract](../../crates/dim-cli/README.md); rollback and `/stats` are not |
 | F6 does not implement a fullscreen interface | [CLI commands](cli-commands.md) | Same as above |
 | `/web` is new work for RemoteGateway | [overview](overview.md) App. A | Delivered by the phase-1 web entry |
-| Remote entries never get management methods; no web entry in the entries table | [Session boundary](contracts/session-boundary.md) A.3, [RemoteGateway](plugins/RemoteGateway.md) | The web entry serves the read-only model discovery methods defined in [web workspace §2.5](web-workspace.md#25-protocol-on-the-entry) |
+| Remote entries never get management methods; no web entry in the entries table | [Session boundary](contracts/session-boundary.md) A.3, [RemoteGateway](plugins/RemoteGateway.md) | The web entry serves the explicit read-only model and UI discovery methods defined in [web workspace §2.5](web-workspace.md#25-protocol-on-the-entry), including `ui.extensions.list` and reliable `ui.extensions.changed` notices |
 | RemoteGateway does not reference the web entry that implements part of it | [RemoteGateway](plugins/RemoteGateway.md) | [Web workspace](web-workspace.md) §2.6 lists the differences |
 
 ## 5. This repository and Desktop

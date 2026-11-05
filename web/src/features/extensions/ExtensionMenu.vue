@@ -1,20 +1,43 @@
 <script setup lang="ts">
-import { computed } from "vue"
+import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
 import { useExtensionsStore } from "../../stores/extensions"
 import { useUiStore } from "../../stores/ui"
-import { panelTitle } from "./context"
+import { useConnectionStore } from "../../stores/connection"
+import { readSessionMethods } from "../../rpc/read"
+import { panelTitle, panelUnavailable } from "./context"
 import { messages } from "./messages"
 
-defineProps<{ sessionId?: string }>()
+const props = defineProps<{ sessionId?: string }>()
 const { t, locale } = useI18n({ messages })
 const extensions = useExtensionsStore()
 const ui = useUiStore()
-const panels = computed(() => (extensions.directory?.extensions ?? []).flatMap(extension => extension.panels.map(panel => ({ extension, panel }))).sort((a, b) => a.extension.pluginName.localeCompare(b.extension.pluginName) || a.panel.id.localeCompare(b.panel.id)))
+const connection = useConnectionStore()
+const methods = ref<string[]>()
+const error = ref("")
+let request = 0
+const panels = computed(() => (extensions.directory?.extensions ?? []).flatMap(extension => extension.panels.map(panel => ({
+  extension, panel,
+  reason: connection.phase !== "connected" ? t("disconnected")
+    : panel.methods.length && methods.value === undefined ? error.value || t("checking")
+    : panelUnavailable(panel, connection.supports, methods.value ?? []),
+}))).sort((a, b) => a.extension.pluginName.localeCompare(b.extension.pluginName) || a.panel.id.localeCompare(b.panel.id)))
+async function refresh(): Promise<void> {
+  const current = ++request
+  methods.value = undefined
+  error.value = ""
+  if (!props.sessionId || connection.phase !== "connected" || !panels.value.some(({ panel }) => panel.methods.length)) return
+  try {
+    const result = await connection.client.call("session.methods", { sessionId: props.sessionId }, readSessionMethods)
+    if (current === request) methods.value = result
+  } catch (reason) { if (current === request) error.value = reason instanceof Error ? reason.message : String(reason) }
+}
+watch([() => props.sessionId, () => connection.phase, () => extensions.directory?.revision], refresh, { immediate: true })
+onBeforeUnmount(() => { request++ })
 function select(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
   const entry = panels.value.find(entry => JSON.stringify([entry.extension.pluginName, entry.panel.id]) === value)
-  if (entry === undefined) return
+  if (entry === undefined || entry.reason) return
   ui.extension = { pluginName: entry.extension.pluginName, panelId: entry.panel.id }
   ui.detailExpanded = false
   ui.detailOpen = true
@@ -25,9 +48,9 @@ function select(event: Event): void {
 <template>
   <label class="extension-picker">
     <span class="sr-only">{{ t("extensions") }}</span>
-    <select data-extension-trigger :aria-label="t('extensions')" :title="sessionId ? t('choose') : t('session')" :disabled="!sessionId" :value="ui.extension && ui.detailOpen ? JSON.stringify([ui.extension.pluginName, ui.extension.panelId]) : ''" @change="select">
+    <select data-extension-trigger :aria-label="t('extensions')" :title="sessionId ? t('choose') : t('session')" :disabled="!sessionId" :value="ui.extension && ui.detailOpen ? JSON.stringify([ui.extension.pluginName, ui.extension.panelId]) : ''" @focus="refresh" @change="select">
       <option value="">{{ panels.length ? t("choose") : t("empty") }}</option>
-      <option v-for="{ extension, panel } in panels" :key="JSON.stringify([extension.pluginName, panel.id])" :value="JSON.stringify([extension.pluginName, panel.id])" :disabled="panel.placement !== 'session-panel'">{{ panelTitle(panel, locale) }} · {{ extension.pluginName }}</option>
+      <option v-for="{ extension, panel, reason } in panels" :key="JSON.stringify([extension.pluginName, panel.id])" :value="JSON.stringify([extension.pluginName, panel.id])" :disabled="Boolean(reason)">{{ panelTitle(panel, locale) }} · {{ extension.pluginName }}{{ reason ? ` — ${reason}` : '' }}</option>
       <option v-for="error in extensions.directory?.errors" :key="error.pluginName" disabled>{{ error.pluginName }}: {{ error.message }}</option>
     </select>
     <span v-if="extensions.error" role="status">{{ extensions.error }}</span>

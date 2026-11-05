@@ -1,5 +1,7 @@
 # 客户端 UI 扩展
 
+Status: Ready.
+
 范围：App Server 的 UI 内容目录、Session 的展示资源、客户端视图中的面板实例。
 问题：[#1136](https://github.com/arcships/dim/issues/1136)。
 规则：[插件契约](plugin-contract.md)、[rutis 使用](rutis-usage.md)、[设计原则](../architecture/rust-agent/principles.md)、[ADR 002](../adr/002-plugin-scope.md)。
@@ -20,7 +22,7 @@
 | 一个面板位置 | 满足预览、播放器、图表等用途；不建设任意 slot、页面路由、菜单和布局组合系统 |
 | 独立的二进制资源读取 | 图片与视频不经 JSON/base64 搬运；首期支持有限长度的文件，不提供网络代理和实时转码服务 |
 
-不新增 Agent Capability、Timeline 事件、模型上下文输入路径或插件安装系统。TUI 不渲染 HTML；MCP 工具携带的文档继续遵循 [MCP Apps](appserver/mcp-apps.md)，整个 UI 进程继续遵循 [Clients](clients.md)，不由面板生命周期管理。
+不新增 Agent Capability、Timeline 事件、模型上下文输入路径或插件安装系统。此扩展不属于终端 UI registry / UiLeaf（见 [TUI §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)）；CLI 不持有网页面板或展示资源。TUI 不渲染 HTML；MCP 工具携带的文档继续遵循 [MCP Apps](appserver/mcp-apps.md)，整个 UI 进程继续遵循 [Clients](clients.md)，不由面板生命周期管理。
 
 ### 1.1 信任边界
 
@@ -39,7 +41,7 @@
 | 面板宿主 | 每个客户端视图；选中面板、挂载实例、观察者、当前连接与视图绑定 | 校验兼容性、加载模块、提供公开能力、挂载和清理 |
 | 插件 UI 模块 | 一个挂载实例；播放器、框架实例等展示状态 | 渲染容器内的内容，消费注入的接口，释放自己的资源 |
 
-UiExtensions 是拥有内容状态的 App Server 插件，不是把错误作用域接回 Session 的接线模块。UiResources 的资源属于 Session，不能只在进程表里存一个 Session ID，再另建 Session 关闭观察系统。两者都不读写分支 Timeline，不是 Capability。
+UiExtensions 是拥有内容状态的 App Server 插件，不是把错误作用域接回 Session 的接线模块。UiResources 的资源属于 Session，不能只在进程表里存一个 Session ID，再另建 Session 关闭观察系统。两者都不读写分支 Timeline，不是 Capability。两者由独立的 UiExtensions 插件装配并可停用；位于 App Server crate 不代表属于协议内核。App Server 负责装配与受保护传输，Web/Desktop 负责界面。将内容与文件 owner 放入 CLI 会让直连 daemon 的客户端依赖另一个常驻客户端，因此不这样放置。
 
 复用 [PluginManager](plugins/PluginManager.md) 的安装、选择、启停、重载与内容分发。PluginManager 将已经验证的 UI 声明交给内容 owner，不保存客户端面板状态，不复制 UI 目录和资源读取任务。使用 [贡献注册规则](rutis-usage.md#r6-contributions-register-with-their-owner) 管理注册与撤下，不增加插件运行时、依赖图或第二套服务总线。
 
@@ -49,11 +51,13 @@ UiExtensions 是拥有内容状态的 App Server 插件，不是把错误作用�
 
 ### 3.1 UI 内容声明
 
+携带顶层 `ui` 的插件包要求支持此内容项的 Dim。旧版 manifest 读取器拒绝未知字段，会以 `invalid_manifest` 拒绝整个包，包括其中的 code、skills、MCP 和 hooks；它不会只忽略 UI。需要兼容旧版的后端应保持不含 `ui` 的包版本，或把 UI 发布为单独包。恢复 v1 安装记录不能修复新 manifest 的兼容性。
+
 插件 manifest 增加可选的 UI 内容项。它声明契约主版本、资源根目录和面板列表。每个面板声明插件内稳定 ID、标题、可选图标、入口模块、语义位置、所需客户端能力及所用的插件 Session 方法。
 
 - 面板的完整身份是插件名与面板 ID 的组合。安装副本 ID 不成为跨更新的面板身份；选择同名插件的另一个安装副本是替换。
 - 标题有必填默认文本，可带语言到文本的映射。宿主按当前语言、基础语言、默认文本选择；缺少翻译不会隐藏入口。图标是资源根内的文件，缺失时使用宿主通用图标，不接收可执行 HTML。
-- UI 根是专用的构建输出目录。入口、相对模块导入、样式和图标都在此根内。包根、源码、配置、凭据和 source map 不自动公开。
+- UI 根是专用的浏览器资源目录，可以直接放置 HTML、CSS、JS，也可以使用构建产物。根内普通资源会公开，因此不得放置后端源码、配置或凭据；`.map` 文件明确排除在快照外。入口、相对模块导入、样式和图标都在此根内，包根不自动公开。
 - 运行依赖随插件产物打包。没有裸模块名解析、远端 CDN 依赖、宿主框架 external 或加载时安装步骤。
 - UI 可以单独存在，不要求一个空的后端代码 row。业务后端存在时仍按原来的插件结构提供服务。
 - 所需能力和方法均为必需依赖。首期不增加可选依赖与分级降级逻辑；缺失时明确说明不可用。
@@ -108,7 +112,7 @@ UiExtensions 公开目录只包含当前被选择并启用的内容，不包含�
 | 分支历史读取 | 有界读取，返回既有公开历史类型；不返回宿主渲染树或组件状态 | 已有 history 协议 |
 | 用户输入与中断 | 向当前绑定提交既有用户输入或请求中断，返回原协议结果 | 既有输入和中断入口 |
 | 声明过的插件方法 | 每个声明名称对应一个固定的可调用函数 | 该 Session 的 `session.methods` 与 `sessionMethods` |
-| 展示资源定位 | 将本 Session 的资源引用转换为客户端可加载地址 | UiResources 与客户端传输适配 |
+| 展示资源定位 | 将本 Session 的资源引用转换为客户端可加载地址；不同 Session 的引用以 `invalid_binding` 拒绝 | UiResources 与客户端传输适配 |
 
 既有数据类型只保留一份定义；客户端类型声明从公共协议复用或生成，不复制 Pinia 类型，也不为每个面板重新设计 DTO。依赖既有接口不表示可以导出整个 RpcClient。浏览器公开声明必须能以类型依赖使用，不能导入 Node/rutis 运行时代码。
 
@@ -116,7 +120,7 @@ UiExtensions 公开目录只包含当前被选择并启用的内容，不包含�
 
 ### 4.3 有限的方法绑定
 
-宿主根据面板声明及当前 Session 的方法发现结果，构造只包含这些名称的函数表。调用时由宿主填入固定的 Session 身份；声明为 branch 操作时再填入固定 branch 身份。插件参数不能覆盖这两个字段，冲突在调用边界拒绝。是否为 branch 操作在 UI 声明中明确，与业务方法契约一致。
+方法声明是显式的公开接口依赖，可以由本包或其他已启用插件提供，不按包所有权划分权限。宿主根据面板声明及当前 Session 的方法发现结果，构造只包含这些名称的函数表。调用时由宿主填入固定的 Session 身份；声明为 branch 操作时再填入固定 branch 身份。插件参数不能覆盖这两个字段，冲突在调用边界拒绝。是否为 branch 操作在 UI 声明中明确，与业务方法契约一致。
 
 函数表不接受待转发的 method/channel/service 字符串。没有通配符、管理方法绑定、任意 IPC 或后端服务目录浏览。声明一个方法不能使原本不对该连接开放的方法变得可调用；每次调用仍经过 App Server 的现有入口授权。依赖发现发生在挂载和显式重试时，运行中的 provider 不可用由调用错误暴露，不增加实时方法依赖图。
 
@@ -186,7 +190,7 @@ Web 使用当前已授权服务入口下的资源地址与原生动态 import，
 UiResources 提供通用的**已完成文件发布**：受信任的后端 Session part 把自己决定可以向该 Session 客户端展示的普通文件交给资源 owner，取得不含路径的资源引用，作为其业务方法结果的一部分返回。UI 根据该引用设置图片或视频地址。
 
 - 发布只接受 App Server 所在文件系统可读的有限长度普通文件，不接受目录、设备、socket 或网络 URL。远端浏览器不需要访问该文件系统；不共享文件系统的后端执行节点不是首期文件发布来源。
-- 源文件仍须位于 FileStorage 的宿主授权根内；绝对路径只存在于可信后端的发布边界，在此解析成 owner 的根相对路径。未知根或越界失败，不因 UI 请求自动扩大授权。所需的原生文件读取能力见 R5。
+- 发布参数 `path` 是 App Server 文件系统上的 canonical 绝对路径，且须位于 FileStorage 的既有授权根内。相对路径以 `invalid_params` 拒绝；绝对路径没有匹配的授权根、越界或指向链接时以 `resource_unavailable` 拒绝。UiResources 在可信后端发布边界解析到根相对路径，不因 UI 请求扩大授权。所需的原生文件读取能力见 R5。
 - 发布调用是后端命名服务，不是浏览器 Session RPC。浏览器没有“路径换 URL”、任意文件读取、上传或 URL 代理方法。业务 owner 在自己的外部输入边界决定哪些文件可以发布，不能直接把客户端传来的路径当成发布许可。
 - 生产者必须在文件完成后发布，并保证发布期间字节不变。UiResources 打开文件，记录长度和 MIME，持有读取资源；它不复制业务缓存、不接管下载或转码。替换内容要发布新引用，不能修改已发布文件。
 - 引用绑定 Session、发布者的本次注册与资源 ID。它不是 bearer 凭据，也不是持久业务 ID。一个资源可被同一 Session 的多个面板读取；每个客户端仍需通过服务入口和 Session 访问授权。
@@ -198,6 +202,10 @@ UiResources 提供通用的**已完成文件发布**：受信任的后端 Sessio
 动态资源只内联栅格图片、音视频、纯文本与 PDF；HTML、SVG、JavaScript 等主动内容和未支持类型以 `application/octet-stream`、`Content-Disposition: attachment` 返回，并带 `nosniff`。插件程序与打包图标只从 §6.1 的可信内容入口加载。
 
 读取按传输背压拉取有界字节块，内存不随文件大小增长；客户端关闭连接、取消、Session closing 或资源撤下均停止文件读取。头部发出前失败返回结构化资源错误；发出后失败终止流，不能在媒体 body 后追加 JSON。文件字节不经过 Session JSON RPC，也不通过 TypeScript 回调逐块传输。
+
+Rust 和 TypeScript Session part 均可使用此服务。路径由已持有文件位置的业务 owner 提供，例如后端插件使用 Node 文件 I/O 在已授权工作目录生成文件，或由现有业务服务返回绝对路径。`pluginFiles` 只提供相对文本文件接口，不提供绝对路径，因此它的相对路径不能直接传给发布服务，也不能通过猜测产品 home 拼接。
+
+[sessionFiles](appserver/session-files.md) 负责持久化不可变文件及 Session 所有权记录、fork 和删除；UiResources 只持有已有文件的临时展示引用与读取句柄，不写入该存储、不复制文件、不增加持久化所有权行。关闭展示引用不等于删除 Session 文件，故不把传输生命周期加入 sessionFiles。
 
 此服务不复用文本型 [pluginFiles](process-typescript.md#52-public-pluginfiles-binding) 的编码或事务格式。图片生成、网络抓取、媒体解密、转码与缓存策略属于发布资源的业务插件。
 
@@ -276,7 +284,7 @@ UiResources 提供通用的**已完成文件发布**：受信任的后端 Sessio
 | 目录与静态资源 | 精确的目录协议、通知和受保护资源入口；不可变内容快照 | 多客户端能发现同一内容并独立更新；未认证、越界和旧版本读取失败 |
 | Web 面板宿主 | 在 `web/` 增加加载/清理、固定公开接口和一个面板位置 | 安装即可出现入口；切换、断线、失败和重载不影响会话 |
 | Session 文件资源 | FileStorage 原生只读流、UiResources 的发布/撤下与读取、Web 的流式资源响应 | 大文件、seek、背压、取消和关闭时句柄释放成立 |
-| 示例与真实场景 | 一个无业务 DOM 示例；一个使用不同框架的验证包；播放器接自己的 Session 方法与文件发布 | 同一套契约覆盖多种渲染技术，业务逻辑不进入核心 |
+| 示例与真实场景 | 一个零构建的 HTML + CSS + JS 示例，演示挂载、公开数据访问与清理 | 同一套契约覆盖多种渲染技术，业务逻辑不进入核心 |
 | Desktop | 在其仓库实现相同浏览器绑定、公开能力和资源适配 | 同一个插件包和构建产物无需重建；没有能力时明确不可用 |
 
 实际实现位置集中在 `crates/dim-app-server/`、`web/`、`npm/` 及相关传输流程测试；FileStorage 在 `crates/dim-agent-capabilities/` 内补充 R5 的 I/O 能力。UI 原型不要求调整 AgentLoop、Timeline、Dispatcher、事件 fixture 或 native Session 存储格式。新增服务和装配时才更新对应实现架构页，并按仓库规则生成 catalog/graph/types；设计阶段不手写当前架构图，也不修改生成文件。
@@ -349,7 +357,7 @@ UiExtensions、UiResources 和客户端面板都不是 Capability：没有分支
 
 `version` 是必填正整数；首个版本为 1。`root` 是插件目录内的相对目录；其余文件路径均相对于该根。面板 `id` 匹配 `[a-z0-9][a-z0-9_-]{0,63}`，同一插件内唯一。标题默认文本非空；`translations` 与 `icon` 可省略，省略的含义见 §3.1。`panels` 非空；`requires`、`methods` 必填且可以是空数组，名称不得重复。未知主版本保留为不支持的 UI 内容，不执行其中模块；版本 1 的未知字段与非法路径报内容声明错误。
 
-`methods` 只声明插件提供的 Session 方法。内置能力使用 `requires` 中的固定名称：`session.state`、`session.history`、`session.submit`、`session.interrupt`、`resources`。上下文与结束信号始终提供。声明不能增加新的宿主能力名称。
+`methods` 只声明面板依赖的公开 Session 方法，不要求其 provider 与面板属于同一个包。内置能力使用 `requires` 中的固定名称：`session.state`、`session.history`、`session.submit`、`session.interrupt`、`resources`。上下文与结束信号始终提供。声明不能增加新的宿主能力名称。
 
 ## 附录 B：浏览器绑定
 

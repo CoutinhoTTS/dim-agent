@@ -20,9 +20,17 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
     std::fs::write(source.join("dim-plugin.json"), manifest().to_string()).unwrap();
     std::fs::write(source.join("ui/panel.js"), "export const revision = 1").unwrap();
     std::fs::write(source.join("ui/lazy.js"), "export const lazy = 1").unwrap();
+    std::fs::write(source.join("ui/panel.js.map"), "private source map").unwrap();
+    let stale = home.join("ui-cache").join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("abandoned.js"), "old generation").unwrap();
     let v1 = br#"{"version":1,"installed":[],"names":{"unused":{"off":true}}}"#;
     std::fs::write(home.join("plugins.json"), v1).unwrap();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    assert!(
+        !stale.exists(),
+        "abandoned cache generations must be removed at startup"
+    );
     let mut local = Client::new_version(&server, false, 3).await;
     let opened = local.rpc("web.open", json!({"port":0})).await["result"].clone();
     let address = opened["address"].as_str().unwrap();
@@ -84,6 +92,19 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
         "{directory}; {installed}"
     );
     assert!(!directory.to_string().contains(home.to_str().unwrap()));
+    let plain = home.join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    std::fs::write(plain.join("dim-plugin.json"), r#"{"name":"plain"}"#).unwrap();
+    let installed_plain = local
+        .rpc("plugin.install", json!({"source":{"path":plain}}))
+        .await;
+    assert!(installed_plain.get("error").is_none(), "{installed_plain}");
+    local.rpc("plugin.reload", json!({"name":"plain"})).await;
+    assert_eq!(
+        browser.rpc("ui.extensions.list", json!({})).await["result"]["revision"],
+        directory["revision"],
+        "a package without UI must not invalidate the directory"
+    );
     let generation = directory["extensions"][0]["generation"].as_str().unwrap();
     let path = format!("/api/ui/extensions/{generation}/panel.js");
     let (status, headers, body) = http(address, request("GET", &path, "")).await;
@@ -133,6 +154,7 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
     );
     for suffix in [
         "missing.js",
+        "panel.js.map",
         "%2e%2e/dim-plugin.json",
         "%2fetc/passwd",
         "ui%5c..%5csecret",
@@ -218,6 +240,17 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
     let resources = session.session_service::<UiResources>().unwrap();
     let publisher = rutis::Ctx::root().unwrap();
     let stranger = rutis::Ctx::root().unwrap();
+    let relative = resources
+        .publish_file(
+            &publisher,
+            PublishFile {
+                path: "media.txt".into(),
+                media_type: "text/plain".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(relative.code, "invalid_params");
     let file = home.canonicalize().unwrap().join("media.txt");
     std::fs::write(&file, "0123456789").unwrap();
     let reference = resources

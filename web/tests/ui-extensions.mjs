@@ -15,7 +15,7 @@ registerHooks({
     return next(url, context)
   },
 })
-const { createPanelContext, panelTitle, resourceUrl } = await import("../src/features/extensions/context.ts")
+const { createPanelContext, panelTitle, panelUnavailable, resourceUrl } = await import("../src/features/extensions/context.ts")
 const { readExtensions, readNotification } = await import("../src/rpc/read.ts")
 const { RpcError } = await import("../src/rpc/client.ts")
 const panel = {
@@ -106,6 +106,10 @@ test("directory parsing, localization and capability selection keep the browser 
   assert.deepEqual(readNotification("ui.extensions.changed", { revision: 4 }), { method: "ui.extensions.changed", revision: 4 })
   assert.throws(() => readExtensions({ ...directory, revision: "3" }))
   assert.equal(panelTitle(panel, "zh-CN"), "预览")
+  assert.equal(panelUnavailable(panel, () => true, panel.methods.map(method => method.name)), undefined)
+  assert.equal(panelUnavailable({ ...panel, requires: ["future.api"] }, () => true, []), "Unsupported capability: future.api")
+  assert.equal(panelUnavailable(panel, () => false, []), "Unavailable capability: session.history")
+  assert.equal(panelUnavailable(panel, () => true, []), "Unavailable method: session.preview.list")
   assert.equal(resourceUrl("snapshot", "assets/with spaces.js"), "/api/ui/extensions/snapshot/assets/with%20spaces.js")
   const minimal = createPanelContext({ ...panel, requires: [], methods: [] }, { environment })
   assert.deepEqual(minimal.context.services, {})

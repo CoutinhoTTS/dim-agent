@@ -126,38 +126,30 @@ impl UiExtensions {
         name: &str,
         package: Option<&Package>,
     ) -> Result<(), String> {
+        let Some(package) = package else {
+            self.withdraw(plugin).await;
+            return Ok(());
+        };
         let _update = self.updating.lock().await;
         let _operation = self.reads.enter().map_err(|error| error.message)?;
-        {
-            let mut sources = self.configuration.sources.lock().unwrap();
-            match package {
-                Some(package) => {
-                    sources.insert(plugin.into(), (name.into(), package.clone()));
-                }
-                None => {
-                    sources.remove(plugin);
-                }
-            }
-        }
+        self.configuration
+            .sources
+            .lock()
+            .unwrap()
+            .insert(plugin.into(), (name.into(), package.clone()));
         let prepared = match package {
-            Some(Package::Supported { root, panels }) => {
-                self.prepare(name, root, panels).await.map(Some)
-            }
-            Some(Package::Unsupported { version }) => {
-                Err(format!("Unsupported UI version {version}"))
-            }
-            Some(Package::Rejected { message }) => Err(message.clone()),
-            None => Ok(None),
+            Package::Supported { root, panels } => self.prepare(name, root, panels).await,
+            Package::Unsupported { version } => Err(format!("Unsupported UI version {version}")),
+            Package::Rejected { message } => Err(message.clone()),
         };
         let old = {
             let mut catalog = self.catalog.lock().unwrap();
             let old = catalog.entries.remove(plugin);
             catalog.errors.remove(plugin);
             match &prepared {
-                Ok(Some(snapshot)) => {
+                Ok(snapshot) => {
                     catalog.entries.insert(plugin.into(), snapshot.clone());
                 }
-                Ok(None) => {}
                 Err(message) => {
                     catalog.errors.insert(
                         plugin.into(),
@@ -263,6 +255,12 @@ impl UiExtensions {
                         pending.push(relative);
                     }
                     EntryKind::File => {
+                        if target
+                            .extension()
+                            .is_some_and(|extension| extension == "map")
+                        {
+                            continue;
+                        }
                         let path = self
                             .files
                             .path(source, &relative)
@@ -372,7 +370,7 @@ fn mime(path: &str) -> (&'static str, bool) {
     match Path::new(path).extension().and_then(|part| part.to_str()) {
         Some("js" | "mjs") => ("text/javascript", false),
         Some("css") => ("text/css", false),
-        Some("json" | "map") => ("application/json", false),
+        Some("json") => ("application/json", false),
         Some("wasm") => ("application/wasm", false),
         Some("png") => ("image/png", false),
         Some("jpg" | "jpeg") => ("image/jpeg", false),
@@ -413,6 +411,26 @@ impl DynPlugin for UiExtensionsPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let files = ctx.require_at(&self.files)?;
+            crate::create_private_directory(&self.configuration.cache)
+                .map_err(|error| ErrorKind::PluginFailed(error.into()))?;
+            let mut stale = tokio::fs::read_dir(&self.configuration.cache)
+                .await
+                .map_err(|error| ErrorKind::PluginFailed(error.into()))?;
+            while let Some(entry) = stale
+                .next_entry()
+                .await
+                .map_err(|error| ErrorKind::PluginFailed(error.into()))?
+            {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| uuid::Uuid::parse_str(name).is_ok())
+                {
+                    tokio::fs::remove_dir_all(entry.path())
+                        .await
+                        .map_err(|error| ErrorKind::PluginFailed(error.into()))?;
+                }
+            }
             let cache = self
                 .configuration
                 .cache
@@ -435,7 +453,7 @@ impl DynPlugin for UiExtensionsPlugin {
             })?;
             service
                 .files
-                .register_root(service.cache.clone(), &ctx.cancellation_token())
+                .register_root(self.configuration.cache.clone(), &ctx.cancellation_token())
                 .await
                 .map_err(|error| ErrorKind::PluginFailed(error.into()))?;
             let sources = self.configuration.sources.lock().unwrap().clone();

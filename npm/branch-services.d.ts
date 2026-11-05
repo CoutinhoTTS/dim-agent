@@ -502,6 +502,7 @@ export interface WorkflowFiles {
 }
 
 export interface PublishFile {
+  /** Absolute host path inside an already authorized FileStorage root. */
   path: string
   mediaType: string
 }
@@ -518,7 +519,8 @@ export interface ResourceError {
 
 export interface UiResources {
   /**
-   * Publishes a finalized regular file inside an authorized FileStorage root.
+   * Publishes a finalized regular file at a canonical absolute host path
+   * inside an already authorized FileStorage root; relative paths are invalid.
    * The calling part owns the reference until withdrawal or unload.
    * @throws {ResourceErrorThrown}
    */
