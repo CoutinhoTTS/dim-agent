@@ -427,16 +427,22 @@ fn set_enabled(entry: &mut McpServerSettings, enabled: Option<bool>) {
     }
 }
 
-/// Whether two entries hold the same configuration. Enablement is the user's
-/// state, not the entry's configuration: a source that already holds this
-/// configuration is `identical` however it is enabled, and an `import` of it
-/// writes nothing.
+/// Whether two entries hold the same configuration. Extension members are not
+/// configuration: the decoder keeps them unused, they do not change what
+/// runs, and only one side may hold one, so they compare out. Enablement is
+/// the user's state, not the entry's configuration either: a source that
+/// already holds this configuration is `identical` however it is enabled, and
+/// an `import` of it writes nothing.
 fn same_configuration(left: &McpServerSettings, right: &McpServerSettings) -> bool {
-    let mut left = left.clone();
-    let mut right = right.clone();
-    set_enabled(&mut left, None);
-    set_enabled(&mut right, None);
-    left == right
+    configuration(left) == configuration(right)
+}
+
+/// The declared members a comparison sees, without enablement or extension
+/// members.
+fn configuration(entry: &McpServerSettings) -> Map<String, Value> {
+    let mut members = members(entry);
+    members.retain(|name, _| declared(name) && name != "enabled");
+    members
 }
 
 /// Compares the declared members of the normalized entry, so an enablement the

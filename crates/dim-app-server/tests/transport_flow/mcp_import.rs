@@ -1012,6 +1012,116 @@ async fn mcp_import_answers_partial_when_the_record_write_fails() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// Extension members are not configuration: an entry whose declared members
+/// match is `identical` whatever extension members either side holds, so an
+/// import writes nothing, and a replace writes the document's entry as it
+/// stands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_ignores_extension_members_in_the_comparison() {
+    let home = scratch("dm-import-extension");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let stored = json!({"mcpServers":{
+        "kept": {"command":"echo","x-note":"a"},
+        "gained": {"command":"echo"}
+    }});
+    std::fs::write(project.join(".mcp.json"), stored.to_string()).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let document = servers_document(json!({
+        "kept": {"command":"echo"},
+        "gained": {"command":"echo","x-note":"b"}
+    }));
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    // The target's extension member is not compared, and the document's is
+    // reported as unsupported rather than as a change.
+    let kept = entry(&preview, "kept");
+    assert_eq!(kept["status"], "identical");
+    assert_eq!(fields(kept), Vec::<&str>::new());
+    assert_eq!(unsupported(kept), Vec::new());
+    let gained = entry(&preview, "gained");
+    assert_eq!(gained["status"], "identical");
+    assert_eq!(fields(gained), Vec::<&str>::new());
+    assert_eq!(unsupported(gained), [("x-note", "kept-unused")]);
+    // An import of identical entries writes nothing.
+    let before = std::fs::read(project.join(".mcp.json")).unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":document,
+                    "expectedVersion":preview["result"]["revision"],
+                    "resolutions":[
+                        {"id":"kept","action":"import"},
+                        {"id":"gained","action":"import"}
+                    ]
+                }),
+            )
+            .await,
+    );
+    assert_eq!(
+        std::fs::read(project.join(".mcp.json")).unwrap(),
+        before,
+        "an import of identical entries leaves the source untouched"
+    );
+    // A replace writes the document's entry as it stands: the extension
+    // member only the target held is not kept.
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":document,
+                    "expectedVersion":preview["result"]["revision"],
+                    "resolutions":[{"id":"kept","action":"replace"}]
+                }),
+            )
+            .await,
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["mcpServers"]["kept"],
+        json!({"command":"echo"}),
+        "the replace writes the document's entry: {stored}"
+    );
+    assert_eq!(
+        stored["mcpServers"]["gained"],
+        json!({"command":"echo"}),
+        "an untouched entry stays as written: {stored}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Saves an entry in user scope and moves it into the project source, where a
 /// literal value becomes a withheld `mcp-secrets` record.
 async fn move_to_project(

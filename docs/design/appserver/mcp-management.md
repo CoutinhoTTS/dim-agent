@@ -508,7 +508,12 @@ contacts no endpoint. It reports each entry's `id`, transport, status (`identica
 keeps unused or drops, the entry's own decode error, the document's unknown top-level names and
 the target revision. A project target is compared as it would serve the entry: the declared entry
 with its withheld record merged (D25). Enablement is not part of the comparison: an entry whose
-configuration matches is `identical` however it is enabled. A user `identical` entry's `changes`
+configuration matches is `identical` however it is enabled. Extension members are not part of it
+either: the decoder keeps them unused, they do not change what runs, and only one side may hold
+one, so an entry whose declared members match is `identical` whatever extension members either
+side carries. A `replace` writes the document's entry as it stands, so an extension member only
+the target holds is not kept, and one only the document holds is written, into the withheld record
+for a project entry. A user `identical` entry's `changes`
 is empty except `enabled`, which it names when the entry is enabled, because a replace would write
 `enabled: false`; a project entry's own `enabled` member is never reported, because the import
 writes none. No value from the document or a record appears in the reply (D3), and an entry's
@@ -1006,8 +1011,8 @@ An `ImportEntry` is:
 | --- | --- | --- |
 | `id` | string | The document's entry id |
 | `transport` | `"stdio"` \| `"http"` \| `"sse"`, absent when the entry does not decode | The transport the entry would run |
-| `status` | `"identical"` \| `"changed"` \| `"conflict"` \| `"invalid"` | What importing the entry would do |
-| `changes` | `[{field, kind}]` | The declared field names and the JSON kind each holds (`string`, `number`, `boolean`, `array`, `object`, `null`). Extension members stay in `unsupported`, never here. Never a value. `conflict` lists the fields that differ from the target entry; `changed` lists every field of the entry the write would add; `identical` is empty except `enabled` on a user entry that is enabled, which a replace would set to `false` |
+| `status` | `"identical"` \| `"changed"` \| `"conflict"` \| `"invalid"` | What importing the entry would do. Extension members are not configuration and never change it |
+| `changes` | `[{field, kind}]` | The declared field names and the JSON kind each holds (`string`, `number`, `boolean`, `array`, `object`, `null`). Extension members stay in `unsupported`, never here, and they never make an entry `conflict`. Never a value. `conflict` lists the fields that differ from the target entry; `changed` lists every field of the entry the write would add; `identical` is empty except `enabled` on a user entry that is enabled, which a replace would set to `false` |
 | `unsupported` | `[{field, effect}]` | Members the decoder does not act on, by name. `effect` is `kept-unused` for an entry's or its `oauth` object's extension member, preserved in the document and unused, or `dropped` for an unknown `auth` member, which the decoder discards |
 | `omitted` | number | How many distinct names the 32-name caps left out of `changes` and `unsupported`; the reported lists are then partial |
 | `error` | string, optional | The entry's decode error, with `invalid`, or a project destination whose stored record does not merge into its declared entry, with `conflict`; it names the field and the expected kind and never a value, and it does not repeat the entry's id, which `id` states |
@@ -1018,8 +1023,10 @@ is the user's state: a project entry is the declared entry with its `mcp-secrets
 (D25), so a skeleton and its record read as the document's entry. `identical` means the source
 already serves the same configuration, `conflict` means it holds the id with different content, as
 an entry that does not decode, or with a record that does not merge, and `changed` means the id is
-free. A preview reads the target source and, for a project target, the workspace's records; it
-writes nothing, executes nothing and contacts nothing (D22).
+free. Extension members take no part in this comparison (D22), and a `replace` writes the
+document's entry as it stands, so an extension member only the target holds is not kept. A preview
+reads the target source and, for a project target, the workspace's records; it writes nothing,
+executes nothing and contacts nothing (D22).
 
 `mcp.import.apply` takes the same `document` and `source`, the preview's `revision` as
 `expectedVersion`, and `resolutions`:
