@@ -1957,7 +1957,7 @@ async fn a_hook_sees_its_environment_and_no_plugin_root() {
 }
 
 /// A.3: the common payload names the Session's collaboration role, so a hook
-/// can tell a member Session from a client Session (#1183).
+/// can tell a member Session from every other Session (#1183).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn member_session_payloads_carry_collaboration_role() {
     let env = Env::new().await;
@@ -1994,17 +1994,25 @@ async fn member_session_payloads_carry_collaboration_role() {
     let leader = env.session().await;
     turn(&member, "go").await;
     turn(&leader, "go").await;
+    // A hook appends its payload and the separator in two writes, so the
+    // fragment still being written does not parse yet: it is left for the
+    // next read.
     let read = || -> Vec<serde_json::Value> {
         let text = std::fs::read_to_string(&payloads).unwrap_or_default();
-        text.split("\n---\n")
-            .filter_map(|part| {
-                let part = part.trim();
-                if part.is_empty() {
-                    return None;
-                }
-                Some(serde_json::from_str::<serde_json::Value>(part).unwrap())
-            })
-            .collect()
+        let mut parts = text.split("\n---\n").peekable();
+        let mut entries = Vec::new();
+        while let Some(part) = parts.next() {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<serde_json::Value>(part) {
+                Ok(entry) => entries.push(entry),
+                Err(_) if parts.peek().is_none() => break,
+                Err(error) => panic!("{error}: {part}"),
+            }
+        }
+        entries
     };
     // Both Sessions' SessionStart and Stop hooks ran and wrote their payloads.
     for _ in 0..500 {
