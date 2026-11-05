@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -38,6 +38,9 @@ function fixture(t, version = '1.2.3', shipped = platforms) {
       metadata.cpu = [cpu];
     }
     writeFileSync(path.join(directory, 'package/package.json'), JSON.stringify(metadata));
+    if (name !== wrapper) writeFileSync(path.join(directory, 'package/release-manifest.json'), JSON.stringify({
+      version, sourceCommit, platform: name.slice('dimcode-'.length), account: true,
+    }));
     const file = `${name}-${version}.tgz`;
     const packed = spawnSync('tar', ['-czf', path.join(root, file), '-C', directory, 'package']);
     assert.equal(packed.status, 0);
@@ -50,6 +53,7 @@ function fixture(t, version = '1.2.3', shipped = platforms) {
 if [ "$1" = view ]; then
   if [ "$2" = dimcode ] && [ "$3" = versions ]; then printf '%s' "$REGISTRY_VERSIONS"; exit 0; fi
   if [ "$REGISTRY_MODE" = newer ] && [ "$2" = dimcode-web@alpha ]; then printf '"1.2.3-alpha.10"'; exit 0; fi
+  if [ "$REGISTRY_MODE" = newer-latest ] && [ "$2" = dimcode-alpha@latest ]; then printf '"1.2.3-alpha.10"'; exit 0; fi
   if [ "$REGISTRY_MODE" = fail ]; then printf '{"error":{"code":"E401"}}'; exit 1; fi
   if [ "$REGISTRY_MODE" = mismatch ]; then printf '{"integrity":"sha512-wrong"}'; exit 0; fi
   if [ "$REGISTRY_MODE" = existing ] && [ "$2" = dimcode-darwin-arm64@1.2.3 ]; then
@@ -79,6 +83,7 @@ test('validates Release and registry state without publishing', (t) => {
   const { release, manifest, log, run } = fixture(t, '1.2.3-alpha.2');
   assert.equal(run({ checkRelease: true }).status, 0);
   assert.notEqual(run({ publish: true, registry: 'newer' }).status, 0);
+  assert.notEqual(run({ publish: true, registry: 'newer-latest' }).status, 0);
   for (const registry of ['fail', 'mismatch']) assert.notEqual(run({ checkRelease: true, registry }).status, 0);
   assert.notEqual(run({ checkRelease: true, versions: ['1.2.2-beta.0'] }).status, 0);
   manifest.account = false;
@@ -221,45 +226,186 @@ test('rejects an alpha that would outrank the newest beta before registry writes
   assert.equal(readFileSync(release.log,'utf8'),'');
 });
 
-test('verifies the registry wrapper and syncs each published alpha package to the mirror', (t) => {
-  const { root, manifest, names } = fixture(t, '1.2.3-alpha.1');
+function nightlyRegistry(t) {
+  const { root, manifest, names } = fixture(t, '1.2.3-alpha.10');
   const receipt = path.join(root, 'npm-publication.json');
-  writeFileSync(receipt, JSON.stringify({ ...manifest, legacyTags: { latest: '1.2.2' } }));
+  writeFileSync(receipt, JSON.stringify(manifest));
+  const remote = path.join(root, 'registry.json');
+  const initialTags = Object.fromEntries(['dimcode', ...names].map(name => [name, name === 'dimcode-alpha'
+    ? { latest: '1.2.3-alpha.9', alpha: manifest.version, canary: '1.2.3-alpha.8' }
+    : { latest: '1.2.2', beta: '1.2.3-beta.1', alpha: manifest.version }]));
+  writeFileSync(remote, JSON.stringify({ tags: initialTags, installs: [], syncs: [] }));
   const preload = path.join(root, 'registry.mjs');
   writeFileSync(preload, `
     import assert from 'node:assert/strict';
-    const [mode, failure] = [process.env.REGISTRY, process.env.FAILURE];
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { createHash } from 'node:crypto';
+    import path from 'node:path';
+    const failure = process.env.FAILURE;
+    const root = ${JSON.stringify(root)};
+    const remote = ${JSON.stringify(remote)};
     const names = ${JSON.stringify(names)};
     const version = ${JSON.stringify(manifest.version)};
-    const requests = [];
-    globalThis.fetch = async (url, options) => {
+    let wrapperReads = 0;
+    globalThis.fetch = async (url, options = {}) => {
       const { hostname, pathname } = new URL(url);
-      assert.equal(hostname, mode === 'npm' ? 'registry.npmjs.org' : 'registry.npmmirror.com');
+      assert(['registry.npmjs.org', 'registry.npmmirror.com'].includes(hostname));
+      const state = JSON.parse(readFileSync(remote));
       if (options.method === 'PUT') {
-        assert.equal(mode, 'mirror');
-        requests.push(pathname);
+        assert.equal(hostname, 'registry.npmmirror.com');
+        state.syncs.push(pathname);
+        writeFileSync(remote, JSON.stringify(state));
         return Response.json({ ok: failure !== 'sync' });
       }
-      if (pathname === '/-/package/dimcode/dist-tags') return Response.json({ latest: failure === 'tags' ? '1.2.3' : '1.2.2' });
-      const [, name, tag] = pathname.split('/');
+      if (pathname.startsWith('/-/package/')) {
+        const name = pathname.split('/')[3];
+        if (failure === 'race' && name === 'dimcode-alpha' && ++wrapperReads === 3) {
+          state.tags[name].latest = '1.2.3-alpha.11';
+          writeFileSync(remote, JSON.stringify(state));
+        }
+        const tags = { ...state.tags[name] };
+        if (failure === 'tags' && name === 'dimcode-web') tags.beta = '2.0.0-beta.1';
+        return Response.json(tags);
+      }
+      const [, name, ref] = pathname.split('/');
       assert(names.includes(name));
-      assert.equal(tag, mode === 'mirror' && name !== 'dimcode-alpha' ? version : 'alpha');
-      const metadata = { name, version };
+      if (failure === 'auth') return new Response('', { status: 401 });
+      if (failure === 'network') throw new Error('network failure');
+      if (failure === 'server') return new Response('', { status: 503 });
+      if (failure === 'missing' && name === 'dimcode-windows-x64') return new Response('', { status: 404 });
+      if (ref === '-') return new Response(readFileSync(path.join(root, name + '-' + version + '.tgz')));
+      if (ref !== version && !['latest', 'alpha'].includes(ref)) return new Response('', { status: 404 });
+      const metadata = JSON.parse(readFileSync(path.join(root, name, 'package/package.json')));
+      if (ref === 'latest') metadata.version = failure === 'stale' ? '1.2.3-alpha.9' : state.tags[name].latest;
       if (name === 'dimcode-alpha') {
-        metadata.bin = { [failure === 'bin' ? 'dim' : 'dima']: 'bin/dim.mjs' };
-        metadata.optionalDependencies = Object.fromEntries(names.slice(0, -1).map(n => [n, version]));
+        if (failure === 'bin') metadata.bin = { dim: 'bin/dim.mjs' };
+        if (failure === 'dependencies') metadata.optionalDependencies['dimcode-web'] = '1.2.3-alpha.9';
+      } else {
+        const bytes = readFileSync(path.join(root, name + '-' + version + '.tgz'));
+        metadata.dist = { tarball: 'https://registry.npmjs.org/' + name + '/-/' + name + '-' + version + '.tgz',
+          integrity: 'sha512-' + createHash('sha512').update(bytes).digest('base64') };
+        if (failure === 'integrity') metadata.dist.integrity = 'sha512-corrupt';
       }
       return Response.json(metadata);
     };
-    process.on('beforeExit', () => {
-      if (!failure && mode === 'mirror') assert.deepEqual(requests, names.map(name => '/-/package/' + name + '/syncs'));
-    });
   `);
+  writeFileSync(path.join(root, 'bin/npm'), `#!${process.execPath}
+    const { mkdirSync, readFileSync, writeFileSync } = require('node:fs');
+    const path = require('node:path');
+    const args = process.argv.slice(2);
+    const remote = ${JSON.stringify(remote)};
+    const state = JSON.parse(readFileSync(remote));
+    if (args[0] === 'dist-tag') {
+      if (args[1] !== 'add' || args[2] !== 'dimcode-alpha@1.2.3-alpha.10' || !['latest', 'alpha'].includes(args[3])) process.exit(1);
+      state.tags['dimcode-alpha'][args[3]] = '1.2.3-alpha.10';
+    } else if (args[0] === 'install') {
+      const prefix = args[args.indexOf('--prefix') + 1];
+      const cache = args[args.indexOf('--cache') + 1];
+      const registry = args[args.indexOf('--registry') + 1];
+      const spec = args.at(-1);
+      const version = process.env.FAILURE === 'old-install' ? '1.2.3-alpha.9' : '1.2.3-alpha.10';
+      const directory = path.join(prefix, 'lib/node_modules/dimcode-alpha');
+      mkdirSync(directory, { recursive: true });
+      mkdirSync(path.join(prefix, 'bin'), { recursive: true });
+      const metadata = JSON.parse(readFileSync(${JSON.stringify(path.join(root, 'dimcode-alpha/package/package.json'))}));
+      metadata.version = version;
+      writeFileSync(path.join(directory, 'package.json'), JSON.stringify(metadata));
+      writeFileSync(path.join(prefix, 'bin/dima'), '#!/bin/sh\\necho dimcode ' + version + '\\n', { mode: 0o755 });
+      state.installs.push({ spec, prefix, cache, registry });
+    } else process.exit(1);
+    writeFileSync(remote, JSON.stringify(state));
+  `, { mode: 0o755 });
   const check = fileURLToPath(new URL('./check-alpha-registry.mjs', import.meta.url));
-  for (const [mode, failure] of [['npm', ''], ['mirror', ''], ['npm', 'tags'], ['npm', 'bin'], ['mirror', 'sync']]) {
-    const result = spawnSync(process.execPath, ['--import', preload, check, receipt, mode], {
-      encoding: 'utf8', env: { ...process.env, REGISTRY: mode, FAILURE: failure },
-    });
-    assert.equal(result.status === 0, !failure, result.stderr);
+  return { receipt, remote, initialTags,
+    run(mode, flag = '--dry-run', failure = '') {
+      return spawnSync(process.execPath, ['--import', preload, check, receipt, mode, flag], {
+        encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, PATH: `${path.join(root, 'bin')}${path.delimiter}${process.env.PATH}`, FAILURE: failure },
+      });
+    },
+    read() { return JSON.parse(readFileSync(remote)); },
+  };
+}
+
+test('reuses a complete nightly, repairs only its wrapper tags and verifies both installations on both registries', (t) => {
+  const registry = nightlyRegistry(t);
+  for (const [mode, flag] of [['source', '--dry-run'], ['promote', '--dry-run']]) {
+    const result = registry.run(mode, flag);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(registry.read().tags, registry.initialTags);
   }
+  assert.equal(JSON.parse(readFileSync(registry.receipt)).version, '1.2.3-alpha.10');
+  const promoted = registry.run('promote', '--apply');
+  assert.equal(promoted.status, 0, promoted.stderr);
+  const expected = structuredClone(registry.initialTags);
+  expected['dimcode-alpha'].latest = '1.2.3-alpha.10';
+  assert.deepEqual(registry.read().tags, expected);
+  for (const mode of ['npm', 'mirror']) {
+    const result = registry.run(mode);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const { installs, syncs } = registry.read();
+  assert.deepEqual(syncs, []);
+  assert.deepEqual(installs.map(({ spec }) => spec), ['dimcode-alpha', 'dimcode-alpha@alpha', 'dimcode-alpha', 'dimcode-alpha@alpha']);
+  assert.equal(new Set(installs.map(({ cache }) => cache)).size, 4);
+  for (const { prefix, cache } of installs) {
+    assert.equal(existsSync(prefix), false);
+    assert.equal(existsSync(cache), false);
+  }
+  const synced = registry.run('mirror', '--apply');
+  assert.equal(synced.status, 0, synced.stderr);
+  assert.equal(registry.read().syncs.length, 8);
+  assert.deepEqual(registry.read().tags, expected);
+  const lostAlpha = registry.read();
+  lostAlpha.tags['dimcode-alpha'].alpha = '1.2.3-alpha.9';
+  writeFileSync(registry.remote, JSON.stringify(lostAlpha));
+  assert.equal(registry.run('source').status, 0);
+  const repairedAlpha = registry.run('promote', '--apply');
+  assert.equal(repairedAlpha.status, 0, repairedAlpha.stderr);
+  assert.deepEqual(registry.read().tags, expected);
+});
+
+test('fails closed on registry errors, incomplete builds, concurrent promotion and stale installations', (t) => {
+  const registry = nightlyRegistry(t);
+  assert.equal(registry.run('snapshot').status, 0);
+  for (const failure of ['auth', 'network', 'server', 'integrity', 'bin', 'dependencies']) {
+    const result = registry.run('source', '--dry-run', failure);
+    assert.notEqual(result.status, 0, failure);
+    assert.equal(result.error, undefined, `${failure}: should fail, not hang`);
+  }
+  const incomplete = registry.run('source', '--dry-run', 'missing');
+  assert.equal(incomplete.status, 0, incomplete.stderr);
+  assert.equal(JSON.parse(readFileSync(registry.receipt)).version, null);
+  assert.equal(registry.run('source').status, 0);
+  for (const failure of ['tags', 'race']) {
+    const result = registry.run('promote', '--apply', failure);
+    assert.notEqual(result.status, 0, failure);
+  }
+  assert.equal(registry.read().tags['dimcode-alpha'].latest, '1.2.3-alpha.11');
+  assert.notEqual(registry.run('promote', '--apply').status, 0, 'never roll a newer tag back');
+  const remote = registry.read();
+  remote.tags['dimcode-alpha'].latest = '1.2.3-alpha.10';
+  writeFileSync(registry.remote, JSON.stringify(remote));
+  for (const [mode, failure] of [['npm', 'old-install'], ['npm', 'stale'], ['mirror', 'stale'], ['mirror', 'sync']]) {
+    const result = registry.run(mode, failure === 'sync' ? '--apply' : '--dry-run', failure);
+    assert.notEqual(result.status, 0, `${mode}: ${failure}`);
+    assert.equal(result.error, undefined, `${mode}: ${failure} should fail, not hang`);
+  }
+  for (const { prefix } of registry.read().installs) assert.equal(existsSync(prefix), false);
+});
+
+test('does not reuse a nightly when a native manifest comes from another commit', (t) => {
+  const registry = nightlyRegistry(t);
+  const root = path.dirname(registry.receipt);
+  const name = 'dimcode-linux-x64';
+  const directory = path.join(root, name);
+  const manifestPath = path.join(directory, 'package/release-manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath));
+  manifest.sourceCommit = 'b'.repeat(40);
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+  assert.equal(spawnSync('tar', ['-czf', path.join(root, `${name}-1.2.3-alpha.10.tgz`), '-C', directory, 'package']).status, 0);
+  const result = registry.run('source');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(readFileSync(registry.receipt)).version, null);
+  assert.deepEqual(registry.read().tags, registry.initialTags);
 });

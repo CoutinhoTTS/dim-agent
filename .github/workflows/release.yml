@@ -8,6 +8,10 @@ on:
         description: Existing alpha tag (required for a build-only run on a feature branch)
         required: false
         type: string
+      repair_nightly:
+        description: Allow npm tag repair and mirror sync when main already has a complete nightly
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -24,6 +28,7 @@ jobs:
       sha: ${{ steps.release.outputs.sha || github.sha }}
       version: ${{ steps.release.outputs.version || steps.main.outputs.version }}
       stamp: ${{ steps.main.outputs.version != '' || steps.release.outputs.stamp == 'true' }}
+      reused: ${{ steps.main.outputs.reused }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -40,23 +45,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+          REPAIR_NIGHTLY: ${{ inputs.repair_nightly }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" == "$GITHUB_SHA" ]] || { echo 'Dispatch again from the current main commit.' >&2; exit 1; }
-          existing=$(git tag --points-at "$GITHUB_SHA" --list 'v*-alpha.*')
-          if [[ -n "$existing" ]]; then
-            echo "Skipped: inspect the existing alpha tag(s) for $GITHUB_SHA: $existing" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          previous=$(npm view dimcode-alpha dist-tags.alpha)
-          [[ "$previous" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
-          url=$(npm view "dimcode-web@$previous" dist.tarball)
-          [[ "$url" == https://registry.npmjs.org/dimcode-web/-/* ]]
-          commit=$(curl -fsSL --retry 2 "$url" | tar -xzO package/release-manifest.json | jq -er --arg v "$previous" 'select(.version == $v and .platform == "web") | .sourceCommit')
-          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$commit" == "$GITHUB_SHA" ]]; then
-            echo "Skipped: main $GITHUB_SHA already ships as $previous." >> "$GITHUB_STEP_SUMMARY"
+          jq -n --arg sourceCommit "$GITHUB_SHA" '{sourceCommit: $sourceCommit}' > nightly-source.json
+          node scripts/check-alpha-registry.mjs nightly-source.json source
+          previous=$(jq -r '.version // empty' nightly-source.json)
+          if [[ -n "$previous" ]]; then
+            [[ "$REPAIR_NIGHTLY" == true ]] || { echo 'A complete nightly exists. Dispatch with repair_nightly=true to authorize tag repair and full acceptance; this build-only run cannot report a verified skip.' >&2; exit 1; }
+            echo "reused=$previous" >> "$GITHUB_OUTPUT"
           else
             version=$(node scripts/alpha-version.mjs)
             echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -118,6 +117,16 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           overwrite: true
+  repair:
+    needs: preflight
+    if: needs.preflight.outputs.reused != ''
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/npm-publish.yml
+    with:
+      source_commit: ${{ github.sha }}
+      publish: true
   build:
     needs: preflight
     if: needs.preflight.outputs.version != ''
