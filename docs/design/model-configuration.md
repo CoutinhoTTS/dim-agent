@@ -167,6 +167,15 @@ default never fails an adoption.
 `none` needs that declaration or an advertised native `none`. Unsupported values
 fail without adoption; no value is guessed from a model name.
 
+The adopted configuration's output allowance is not a preference: Provider derives
+`maxTokens` from the model's declared pair as `max(1, min(declared maxOutputTokens,
+131,072, contextWindow / 2))`, so the input budget that compaction uses is at least
+half the window even when a source declares an output at or above it; the declared
+maximum stays in the capability snapshot
+([ContextCompaction §5.1](plugins/ContextCompaction.md#51-productcontextmodel)).
+A Session that stored another value reads it back through the same rule when a
+request is prepared, and the stored fact is left unchanged.
+
 `/fast on` sends `serviceTier: "priority"`; `/fast off` sends
 `serviceTier: "default"`. The shortcut requires both advertised values and a
 protocol supporting this preference. Other tier names do not implicitly mean fast

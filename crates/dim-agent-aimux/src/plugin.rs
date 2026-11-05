@@ -268,13 +268,9 @@ impl PrepareModel for Prepare {
         let mut settings =
             ModelSettings::new(&self.config.model.provider_id, &self.config.model.model_id);
         settings.capability_snapshot = self.config.model.capability_snapshot.clone();
-        settings.config = Some(
-            self.config
-                .model
-                .config
-                .as_ref()
-                .unwrap_or(&self.defaults)
-                .clone(),
+        settings.config = dim_agent_capabilities::context_model::adopted_config(
+            settings.capability_snapshot.as_ref(),
+            Some(self.config.model.config.as_ref().unwrap_or(&self.defaults)),
         );
         settings.system = (!self.config.system_prompt.is_empty())
             .then(|| SystemPrompt::Text(self.config.system_prompt.clone()));

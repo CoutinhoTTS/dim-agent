@@ -6668,7 +6668,9 @@
       "from": "dim_agent_aimux::models",
       "to": "dim_agent_capabilities::context_model",
       "references": [
+        "path output_allowance",
         "path window_facts",
+        "use dim_agent_capabilities::context_model::output_allowance",
         "use dim_agent_capabilities::context_model::window_facts"
       ]
     },
@@ -6755,6 +6757,13 @@
       "to": "dim_agent_capabilities::auxiliary_model",
       "references": [
         "path dim_agent_capabilities::auxiliary_model::provide"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::plugin",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path dim_agent_capabilities::context_model::adopted_config"
       ]
     },
     {
@@ -7747,6 +7756,13 @@
     },
     {
       "from": "dim_agent_capabilities::adapters",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path crate::context_model::adopted_config"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::adapters",
       "to": "dim_agent_capabilities::context_policy",
       "references": [
         "path crate::context_policy::check_cancel"
@@ -7841,6 +7857,13 @@
         "path ToolResult",
         "path ToolResult::error",
         "path ToolResult::text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path crate::context_model::adopted_config"
       ]
     },
     {
@@ -8404,7 +8427,16 @@
       "from": "dim_agent_capabilities::context_model",
       "to": "dim_agent_types::model",
       "references": [
+        "path ModelCapabilitySnapshot",
+        "path ModelConfig",
         "path ModelRequest"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path crate::context_model::adopted_config"
       ]
     },
     {
@@ -23913,6 +23945,14 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path output_allowance",
+        "use dim_agent_capabilities::context_model::output_allowance"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path AwsCredentials",
@@ -24104,7 +24144,6 @@
         "path limits_valid",
         "use crate::model_catalog::BundledCatalog",
         "use crate::model_catalog::CatalogProvider",
-        "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEdit",
         "use crate::model_catalog::ModelEntry",
         "use crate::model_catalog::ModelMetadata",
@@ -24117,6 +24156,7 @@
         "use crate::model_catalog::declared_limit_values",
         "use crate::model_catalog::drop_undeclared_limits",
         "use crate::model_catalog::inherit_limits",
+        "use crate::model_catalog::limit_valid",
         "use crate::model_catalog::limits_valid"
       ]
     },
@@ -24644,10 +24684,10 @@
         "path FieldUpdate",
         "path FieldUpdate::Clear",
         "path FieldUpdate::Set",
-        "path MAX_MODEL_TOKENS",
         "path ModelEdit",
         "path ModelEntry",
         "path declare",
+        "path limit_valid",
         "use crate::model_catalog::FieldUpdate"
       ]
     },
@@ -24792,12 +24832,12 @@
       "to": "dim_app_server::model_catalog",
       "references": [
         "path BundledCatalog",
-        "path MAX_MODEL_TOKENS",
         "path ModelEntry",
         "path ModelSource::Builtin",
         "path ModelSource::Custom",
         "path ProviderProjection",
-        "path declared_limit_values"
+        "path declared_limit_values",
+        "path limit_valid"
       ]
     },
     {
@@ -24875,6 +24915,13 @@
     },
     {
       "from": "dim_app_server::provider::startup",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path output_allowance"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::startup",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -24945,8 +24992,8 @@
       "from": "dim_app_server::provider::startup",
       "to": "dim_app_server::model_catalog",
       "references": [
-        "path MAX_MODEL_TOKENS",
-        "path ProviderProjection"
+        "path ProviderProjection",
+        "path limit_valid"
       ]
     },
     {

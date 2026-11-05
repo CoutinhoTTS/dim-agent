@@ -706,7 +706,10 @@ impl AgentLoop {
                                 .map_err(AgentError::InvalidInput)?,
                         }),
                         system: data.system.clone(),
-                        config: data.settings.config.clone(),
+                        config: crate::context_model::adopted_config(
+                            data.settings.capability_snapshot.as_ref(),
+                            data.settings.config.as_ref(),
+                        ),
                         metadata: data.settings.metadata.clone(),
                     },
                     None => {

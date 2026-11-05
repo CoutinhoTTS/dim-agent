@@ -331,10 +331,10 @@ impl ProviderService {
             [edit.context_window, edit.max_output_tokens]
                 .into_iter()
                 .flatten()
-                .any(|limit| limit.get() > MAX_MODEL_TOKENS)
+                .any(|limit| !limit_valid(limit.get()))
         }) {
             return Err(ProviderError::InvalidConfig(
-                "Model limits must be safe JSON integers".into(),
+                "Model limits must be positive safe JSON integers".into(),
             ));
         }
         if edit
