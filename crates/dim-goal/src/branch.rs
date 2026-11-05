@@ -67,22 +67,6 @@ where
     u64::deserialize(deserializer).map(Some)
 }
 
-/// The continuation limit a read document states.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Limit {
-    Unlimited,
-    At(u64),
-}
-
-impl Limit {
-    fn value(self) -> Option<u64> {
-        match self {
-            Self::Unlimited => None,
-            Self::At(limit) => Some(limit),
-        }
-    }
-}
-
 pub struct GoalBranch {
     dispatcher: Key<Dispatcher>,
     timeline: Key<Timeline>,
@@ -299,29 +283,26 @@ impl Owner {
         });
     }
 
-    /// The continuation limit. A refused or unreadable document is logged and
-    /// leaves the turn without a decision; an absent field means no limit.
-    async fn limit(&self) -> Option<Limit> {
-        match self
+    /// The continuation limit, `Ok(None)` when no limit is set. A refused or
+    /// unreadable document is logged and `Err(())`: the decision stops without
+    /// an automatic input.
+    async fn limit(&self) -> Result<Option<u64>, ()> {
+        let snapshot = match self
             .settings
             .read_declared(SOURCE, SettingsScope::User, &self.stop)
             .await
         {
-            Ok(snapshot) => match serde_json::from_value::<Document>(snapshot.document) {
-                Ok(document) => Some(
-                    document
-                        .max_continuations
-                        .map(Limit::At)
-                        .unwrap_or(Limit::Unlimited),
-                ),
-                Err(error) => {
-                    tracing::warn!(%error, "Goal settings document is invalid");
-                    None
-                }
-            },
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 tracing::warn!(%error, "Goal settings read failed");
-                None
+                return Err(());
+            }
+        };
+        match serde_json::from_value::<Document>(snapshot.document) {
+            Ok(document) => Ok(document.max_continuations),
+            Err(error) => {
+                tracing::warn!(%error, "Goal settings document is invalid");
+                Err(())
             }
         }
     }
@@ -597,7 +578,7 @@ impl Owner {
             self.settle();
             return Ok(());
         }
-        let Some(limit) = self.limit().await else {
+        let Ok(limit) = self.limit().await else {
             return Ok(());
         };
         if self.stopped() {
@@ -637,7 +618,7 @@ impl Owner {
             if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
                 return Ok(());
             }
-            fold::decide_turn_end(&state.fold, limit.value(), progress)
+            fold::decide_turn_end(&state.fold, limit, progress)
         };
         let Some(decision) = decision else {
             return Ok(());
@@ -646,7 +627,7 @@ impl Owner {
             Decision::Continuation { count, idle } => text::continuation(
                 &self.branch_id,
                 count,
-                limit.value(),
+                limit,
                 idle,
                 after,
                 &self.texts,
@@ -903,7 +884,7 @@ impl Owner {
                             .await?;
                     }
                     ConclusionAction::Continue => {
-                        let Some(limit) = owner.limit().await else {
+                        let Ok(limit) = owner.limit().await else {
                             return Ok(());
                         };
                         if owner.stopped() {
@@ -948,7 +929,7 @@ impl Owner {
                             }
                             fold::decide_evaluated_continuation(
                                 &state.fold,
-                                limit.value(),
+                                limit,
                                 progress,
                             )
                         };
@@ -959,7 +940,7 @@ impl Owner {
                             Decision::Continuation { count, idle } => text::evaluated_continuation(
                                 &owner.branch_id,
                                 count,
-                                limit.value(),
+                                limit,
                                 idle,
                                 evaluation,
                                 &named,
