@@ -1347,3 +1347,132 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
     );
     agent.close().await.unwrap();
 }
+
+/// A declared output limit at or above the context window leaves no input
+/// budget: every turn takes `provider_output_budget_exhausted` recovery, the
+/// summarizer's fit check has no room, and the turn fails before any model
+/// call (#1130). This reproduces the failure; it does not pin a fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_output_limit_at_or_above_the_window_leaves_no_input_budget() {
+    for output in [WINDOW, WINDOW + 1_000] {
+        let recorder = Arc::new(Recorder::default());
+        let (agent, session) = product_session_on(
+            WINDOW,
+            Arc::new(MockTools),
+            recorder.clone(),
+            output,
+            ProductSummaryStrategyConfig::default(),
+            SessionConfig::default(),
+            Arc::new(Local),
+            None,
+        )
+        .await;
+        session
+            .submit("hello".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+
+        let budget = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextBudget(data) => Some(data),
+                _ => None,
+            })
+            .expect("the preparation writes its budget");
+        assert_eq!(budget.context_window, WINDOW as f64);
+        assert_eq!(budget.output_tokens, output as f64);
+        assert!(budget.estimated_input_tokens > 0.);
+
+        let start = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextCompactionStart(data) => Some(data),
+                _ => None,
+            })
+            .expect("an exhausted budget starts a recovery compaction");
+        assert_eq!(
+            start.trigger,
+            CompactionTrigger::ProviderOutputBudgetExhausted
+        );
+
+        let compaction = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextCompaction(data) => Some(data),
+                _ => None,
+            })
+            .expect("the recovery compaction commits its result");
+        let ContextCompactionResult::Failed { error, diagnostics } = &compaction.outcome else {
+            panic!(
+                "expected the summarizer's fit check to fail, got {:?}",
+                compaction.outcome
+            );
+        };
+        assert_eq!(
+            error,
+            "The summarizer request does not fit the model window"
+        );
+        assert_eq!(
+            diagnostics
+                .as_ref()
+                .expect("the failure carries its diagnostics")
+                .model_call_count,
+            0
+        );
+
+        let end = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::TurnEnd(data) => Some(data),
+                _ => None,
+            })
+            .expect("the turn ends");
+        assert_eq!(
+            end.outcome,
+            TurnOutcome::Failed {
+                error: "The summarizer request does not fit the model window".into()
+            }
+        );
+        assert!(
+            recorder.requests.lock().unwrap().is_empty(),
+            "no summarizer request was sent"
+        );
+
+        // A second input leaves a kept entry behind the latest turn's start,
+        // which is the manual step's candidate.
+        session
+            .submit("again".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let (command, events) = compact_now(&session).await;
+        let manual = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextCompaction(data) if data.command == Some(command) => Some(data),
+                _ => None,
+            })
+            .expect("the manual step commits its result");
+        let ContextCompactionResult::Failed { error, diagnostics } = &manual.outcome else {
+            panic!(
+                "expected the manual step to fail the same way, got {:?}",
+                manual.outcome
+            );
+        };
+        assert_eq!(
+            error,
+            "The summarizer request does not fit the model window"
+        );
+        assert_eq!(
+            diagnostics
+                .as_ref()
+                .expect("the failure carries its diagnostics")
+                .model_call_count,
+            0
+        );
+        assert!(recorder.requests.lock().unwrap().is_empty());
+        agent.close().await.unwrap();
+    }
+}
