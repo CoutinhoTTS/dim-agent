@@ -278,13 +278,14 @@ The rest is protocol, carried by the tool line's identity and by the tool descri
 - A line tells `main` before it changes any file outside its area.
 - On `file_modified_since_read`, the line reads the file again and tells `main` before it continues.
 
-Only tool-declared `fileWritten` facts exist: a successful `edit` or `write`
-declares one in its result's `effects`, with the path it wrote
+The only file-change fact a tool declares is `fileWritten`: a successful
+`edit` or `write`, or a `write` that failed after it may have modified the
+file, declares one in its result's `effects`, with the path it wrote
 ([Session boundary A.6](contracts/session-boundary.md#a6-tool-effects)). A
 client that folds those declarations gets a partial set by construction — it
 misses files changed by `exec`, by an MCP tool, or outside Dim — so the fold
 describes tool-declared writes, not the workspace's changes. No method promises
-a complete per-run change set.
+a complete change set for a turn or a line.
 
 WorkspaceTools is unchanged.
 
