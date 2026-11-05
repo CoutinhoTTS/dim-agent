@@ -776,11 +776,17 @@ async fn a_suggestion_reuses_the_turn_request_and_changes_nothing() {
         }),
         "the suggestion never entered history"
     );
-    assert_eq!(
-        last.messages.len(),
-        prefix + 2,
-        "assistant and the new input"
-    );
+    let next_inputs = last.messages[prefix + 1..]
+        .iter()
+        .filter(|message| {
+            !matches!(&message.content, MessageContent::Text(text)
+                if message.role == Role::User
+                    && text.starts_with("<dim-state ")
+                    && text.ends_with("</dim-state>"))
+        })
+        .count();
+    assert_eq!(next_inputs, 1, "only the new input follows the assistant");
+    assert_eq!(last_text(&last).as_deref(), Some("and the next one"));
     assert_eq!(
         serialized(&last.messages[prefix]),
         serialized(&suggestion.messages[prefix]),
