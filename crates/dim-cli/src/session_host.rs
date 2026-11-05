@@ -491,6 +491,23 @@ async fn run(
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
+                if worker.session_id.is_empty()
+                    && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
+                    && let Err(error) = worker.start_session().await
+                {
+                    if !worker.session_id.is_empty() {
+                        worker.send(Update::StartupFailed(error.to_string()));
+                        break;
+                    }
+                    worker.send(Update::Notice(
+                        if worker.options.startup.is_some() || worker.model_session.is_some() {
+                            error.to_string()
+                        } else {
+                            no_session(&error)
+                        },
+                    ));
+                    continue;
+                }
                 if let Err(error) = worker.command(command).await {
                     let _ = updates.send(Update::Failed(error.to_string()));
                     break;
@@ -1063,23 +1080,6 @@ impl Worker {
     }
 
     async fn command(&mut self, command: Command) -> crate::Result<()> {
-        if self.session_id.is_empty()
-            && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
-            && let Err(error) = self.start_session().await
-        {
-            if !self.session_id.is_empty() {
-                self.send(Update::StartupFailed(error.to_string()));
-                return Ok(());
-            }
-            self.send(Update::Notice(
-                if self.options.startup.is_some() || self.model_session.is_some() {
-                    error.to_string()
-                } else {
-                    no_session(&error)
-                },
-            ));
-            return Ok(());
-        }
         match command {
             Command::Submit(text, mode) => self.submit(text, mode.as_str()).await,
             Command::SubmitDraft(parts, mode) => self.submit_draft(parts, mode.as_str()).await,
@@ -2189,7 +2189,11 @@ impl Worker {
                 "peer": leaf.peer,
                 "address": leaf.address,
             });
-            let node = self.ctx.plugin(leaf.node(self.leaf_end.take().unwrap()));
+            let end = self
+                .leaf_end
+                .take()
+                .ok_or("UI leaf has already been started")?;
+            let node = self.ctx.plugin(leaf.node(end));
             (&node).await.map_err(crate::plugin_error)?;
             match self.client.typed("ui.open", params).await {
                 Ok(opened) => self.ui_identity = Some(opened),

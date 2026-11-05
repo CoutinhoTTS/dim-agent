@@ -144,31 +144,43 @@ fn first_text_or_draft_creates_once_with_startup_options_in_both_tui_modes() {
 #[test]
 fn a_refused_leaf_start_shows_the_error_restores_the_terminal_and_exits() {
     for fullscreen in [false, true] {
-        let home = Home::new();
-        let daemon = home.daemon(|wire| {
-            wire.hello(&["ui.leaf.2"]);
-            let providers = wire.read("account.providers");
-            wire.reply(&providers, json!([]));
-            wire.created();
-            let attach = wire.read("session.attach");
-            wire.reply(&attach, attach_record(&attach));
-            let open = wire.read("ui.open");
-            wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{
-                "code":-32000,"message":"UI startup refused","data":{"appError":"ui_leaf_failed"}}}));
-            assert_eq!(wire.trailing_request(), None, "a failed UI must not submit input");
-        });
-        let mut command = command(&home);
-        if fullscreen {
-            command.arg("--fullscreen");
+        for queued in ["", "second message\r", "/new\rqueued after new\r"] {
+            let home = Home::new();
+            let (opening, opened) = std::sync::mpsc::channel();
+            let (reject, rejected) = std::sync::mpsc::channel();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&["ui.leaf.2"]);
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                wire.created();
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let open = wire.read("ui.open");
+                opening.send(()).unwrap();
+                rejected.recv_timeout(PATIENCE).unwrap();
+                wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{
+                    "code":-32000,"message":"UI startup refused","data":{"appError":"ui_leaf_failed"}}}));
+                assert_eq!(wire.trailing_request(), None, "a failed UI must not execute queued commands");
+            });
+            let mut command = command(&home);
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until("Welcome to DIM");
+            terminal.write(b"first message\r");
+            opened.recv_timeout(PATIENCE).unwrap();
+            terminal.write(queued.as_bytes());
+            terminal.write(b"/permissions\r");
+            terminal.until("Full access");
+            reject.send(()).unwrap();
+            terminal.until("UI startup refused");
+            assert!(!terminal.wait().success());
+            assert_ne!(terminal.local_mode() & libc::ICANON, 0);
+            assert_ne!(terminal.local_mode() & libc::ECHO, 0);
+            assert!(!terminal.transcript.contains("panicked"));
+            daemon.join().unwrap();
         }
-        let mut terminal = Terminal::launch_tui(command);
-        terminal.until("Welcome to DIM");
-        terminal.write(b"first message\r");
-        terminal.until("UI startup refused");
-        assert!(!terminal.wait().success());
-        assert_ne!(terminal.local_mode() & libc::ICANON, 0);
-        assert_ne!(terminal.local_mode() & libc::ECHO, 0);
-        daemon.join().unwrap();
     }
 }
 

@@ -281,7 +281,10 @@ same `DaemonLink` and RPC connection throughout Home and attachment; no
 second TUI or connection is started. A `Tui` that
 fails to load or ends with an error disposes the client tree as below: the
 leaf exits nonzero, its session ends, and the daemon removes the
-registration.
+registration. Failure while opening the UI on the first attachment stops
+the client worker; queued commands are discarded, not submitted to the
+partially attached Session. A creation failure before attachment leaves
+Home available for retry.
 
 **Leaving.** The session is the leaf's lifetime. Mounting the session gives
 its fiber on each side; its end (Disposed or Failed) is the fact, and no
@@ -324,9 +327,10 @@ session's. A TUI that hangs while its process lives stays `online`;
 `ui.close` still closes its session.
 
 **Ownership.** The session is the owner: a leaf lives as long as its
-session. The connection that called `ui.open` has no further role. Daemon
-shutdown disposes `UiHostPlugin`, which waits for every `UiLeaf` to be
-disposed.
+session. The connection that called `ui.open` remains the leaf's RPC
+connection for `ui.attach` and Session operations; it does not own the leaf
+registration. Daemon shutdown disposes `UiHostPlugin`, which waits for every
+`UiLeaf` to be disposed.
 
 **Generations** are monotonic per daemon. `ui.open` returns one,
 `ui.status` lists them, and replacements check the one the caller observed.

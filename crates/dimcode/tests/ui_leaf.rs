@@ -268,7 +268,7 @@ impl Home {
     }
 
     /// Runs `dimcode` on `pty` through a shell that prints its exit code.
-    fn dimcode(&self, pty: &Pty) -> Child {
+    fn dimcode(&self, pty: &Pty, args: &[&str]) -> Child {
         let binary = Path::new(env!("CARGO_BIN_EXE_dimcode"));
         let model_config =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../dim-agent-aimux/examples/offline.json");
@@ -277,7 +277,7 @@ impl Home {
             assert!(fd >= 0, "dup terminal");
             Stdio::from(unsafe { OwnedFd::from_raw_fd(fd) })
         };
-        let script = "\"$0\" --model-config \"$1\"; code=$?; printf 'SHELL-RETURNED:%s\\n' \"$code\"; exit \"$code\"";
+        let script = "model_config=$1; shift; \"$0\" --model-config \"$model_config\" \"$@\"; code=$?; printf 'SHELL-RETURNED:%s\\n' \"$code\"; exit \"$code\"";
         Command::new("sh")
             .args([
                 "-c",
@@ -285,6 +285,7 @@ impl Home {
                 binary.to_str().unwrap(),
                 model_config.to_str().unwrap(),
             ])
+            .args(args)
             .env("DIMCODE_HOME", &self.home)
             .env("DIMCODE_WEB_ASSETS", &self.assets)
             .env("DIMCODE_OAUTH_MANUAL", "1")
@@ -389,7 +390,7 @@ fn assert_raw(pty: &Pty) {
 fn normal_dimcode_is_the_leaf_until_it_leaves() {
     let home = Home::new("normal-leaf");
     let pty = Pty::new();
-    let mut child = home.dimcode(&pty);
+    let mut child = home.dimcode(&pty, &[]);
     let welcome = pty.read_until("Welcome to DIM");
     assert!(
         !welcome.contains("SHELL-RETURNED"),
@@ -447,6 +448,28 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
     assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
     assert_restored(&pty);
     wait_unregistered(&mut rpc, &pty, &ui_id);
+
+    let sessions = rpc.ok("session.summaries", json!({}));
+    let resumed_pty = Pty::new();
+    let mut resumed = home.dimcode(&resumed_pty, &["--resume", &first_session]);
+    let leaf = wait_new_online(&mut rpc, &resumed_pty, &[]);
+    let resumed_id = leaf["uiId"].as_str().unwrap();
+    assert_eq!(leaf["sessionId"], first_session);
+    assert_eq!(instances(&mut rpc).len(), 1);
+    assert_eq!(
+        rpc.ok("session.summaries", json!({}))
+            .as_array()
+            .unwrap()
+            .len(),
+        sessions.as_array().unwrap().len(),
+        "resume must attach eagerly without creating another Session"
+    );
+    assert_raw(&resumed_pty);
+    resumed_pty.write(b"/exit\r");
+    let shown = wait_exit(&mut resumed, &resumed_pty);
+    assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
+    assert_restored(&resumed_pty);
+    wait_unregistered(&mut rpc, &resumed_pty, resumed_id);
     let _ = rpc.call("daemon.shutdown", json!({}));
 }
 
@@ -455,7 +478,7 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     let home = Home::new("ui-leaf");
 
     let first_pty = Pty::new();
-    let mut first = home.dimcode(&first_pty);
+    let mut first = home.dimcode(&first_pty, &[]);
     first_pty.read_until("Welcome to DIM");
     let mut rpc = home.rpc();
     first_pty.write(b"first leaf message\r");
@@ -474,7 +497,7 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     assert!(instances(&mut rpc).is_empty());
 
     let second_pty = Pty::new();
-    let mut second = home.dimcode(&second_pty);
+    let mut second = home.dimcode(&second_pty, &[]);
     second_pty.read_until("Welcome to DIM");
     second_pty.write(b"second leaf message\r");
     let second_id = wait_new_online(&mut rpc, &second_pty, std::slice::from_ref(&first_id))["uiId"]
@@ -498,7 +521,7 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     assert_restored(&second_pty);
 
     let third_pty = Pty::new();
-    let mut third = home.dimcode(&third_pty);
+    let mut third = home.dimcode(&third_pty, &[]);
     third_pty.read_until("Welcome to DIM");
     let mut rpc = home.rpc();
     third_pty.write(b"third leaf message\r");
@@ -516,7 +539,7 @@ fn a_home_the_daemon_fits_also_fits_its_leaf() {
         - 1;
     let home = Home::with_socket_length(limit);
     let pty = Pty::new();
-    let mut child = home.dimcode(&pty);
+    let mut child = home.dimcode(&pty, &[]);
     pty.read_until("Welcome to DIM");
     let mut rpc = home.rpc();
     pty.write(b"long path leaf message\r");
@@ -540,7 +563,7 @@ fn exiting_home_leaves_no_session_or_ui_registration() {
         )
         .unwrap();
         let pty = Pty::new();
-        let mut child = home.dimcode(&pty);
+        let mut child = home.dimcode(&pty, &[]);
         pty.read_until("Welcome to DIM");
         let mut rpc = home.rpc();
         assert_eq!(rpc.ok("session.summaries", json!({})), json!([]));
