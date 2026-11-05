@@ -417,16 +417,17 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     )
     .await;
     assert_ok(&initial);
-    let loading: Vec<Value> = branch_events(&first_session, "main", ..=first_after)
+    let initial_records = initial["result"]["records"].as_array().unwrap();
+    let initial_through = initial_records
+        .last()
+        .map_or(0, |record| record["event"]["sequence"].as_u64().unwrap());
+    let loading: Vec<Value> = branch_events(&first_session, "main", ..=initial_through)
         .await
         .unwrap()
         .iter()
         .map(|event| json!({"sessionId":first,"branchId":"main","event":event}))
         .collect();
-    assert!(
-        loading.ends_with(initial["result"]["records"].as_array().unwrap()),
-        "{initial}"
-    );
+    assert!(loading.ends_with(initial_records), "{initial}");
     assert_eq!(initial["result"]["binding"]["sessionId"], first);
     assert!(
         initial["result"]["binding"]["config"]
@@ -665,17 +666,18 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         other["result"]["generation"]
     );
     let restored_session = server.agent().unwrap().get_session(&second).unwrap();
-    let restoring: Vec<Value> = branch_events(&restored_session, "main", ..)
+    let restored_records = restored["result"]["records"].as_array().unwrap();
+    let restored_through = restored_records
+        .last()
+        .map_or(0, |record| record["event"]["sequence"].as_u64().unwrap());
+    submit(&mut client, &second, "restored channel receives new facts").await;
+    let restoring: Vec<Value> = branch_events(&restored_session, "main", ..=restored_through)
         .await
         .unwrap()
         .iter()
         .map(|event| json!({"sessionId":second,"branchId":"main","event":event}))
         .collect();
-    assert!(
-        restoring.ends_with(restored["result"]["records"].as_array().unwrap()),
-        "{restored}"
-    );
-    submit(&mut client, &second, "restored channel receives new facts").await;
+    assert!(restoring.ends_with(restored_records), "{restored}");
     let current = server.agent().unwrap().get_session(&second).unwrap();
     assert_ok(
         &client
