@@ -427,9 +427,11 @@ and a path source's preview write nothing outside the expected places; the stagi
 abnormal end leaves behind is gone after a restart; `skills.json` keeps unrelated fields and a
 document written before this field existed still loads.
 
-Rendered verification follows the Web workspace's acceptance for the Skills page: desktop and
-compact layouts, preview with conflicts and shadows, cancelled and accepted overwrite, a failed
-acquisition with retry, stale preview, update and confirmed removal, and a draft kept on failure.
+Rendered verification follows the [Web workspace's Skills interaction](../web-workspace.md#skills-interaction):
+desktop and compact layouts, installed catalog, search, scope, collapsed details, enablement,
+shadowed entries, reload, empty lists and failure recovery. Source preview, selective installation,
+overwrite, update and removal are verified through the owner and App Server flows above, not
+through installation forms on the Skills page.
 
 ## 9. References load with the operator's input
 
