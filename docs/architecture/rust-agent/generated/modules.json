@@ -41731,7 +41731,9 @@
       "from": "dim_modality",
       "to": "dim_agent_types::model",
       "references": [
+        "path ModalityModelSnapshot",
         "path ModelCapabilitySnapshot",
+        "use dim_agent_types::ModalityModelSnapshot",
         "use dim_agent_types::ModelCapabilitySnapshot"
       ]
     },
