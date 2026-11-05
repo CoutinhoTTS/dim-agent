@@ -78,6 +78,7 @@ pub struct McpSettings {
     dirty: BTreeSet<String>,
     pub extra: BTreeMap<String, Value>,
 }
+
 /// A document with a server entry whose id is empty: it names no entry a
 /// management call could address, so the whole document is refused.
 pub(crate) const EMPTY_ENTRY_ID: SettingsError =
