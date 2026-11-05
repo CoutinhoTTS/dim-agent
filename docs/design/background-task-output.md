@@ -139,8 +139,16 @@ The table also retains ended/replayed tasks, so table membership does not imply
 live output. The handle is released after the supervisor's terminal append attempt
 settles, including on write failure; do not release it between process settlement
 and that append. The read must not extend the existing resource cleanup lifetime.
-Use the capture's existing synchronization, with no new lock or second output
-buffer. Release the task-table guard before awaiting the capture read.
+The tail read uses the capture's existing synchronization, with no new lock or
+second output buffer. The page read takes no capture lock on purpose: it opens
+the registered file itself and reads from the cursor, so a running command's
+pump is never blocked by a page. That is safe because the file is append-only —
+a page only reads bytes at or past its cursor — and a task is registered only
+after its file exists (`ensure_file` runs before `exec/started`), so a known
+task's `exec/started` always names its own file; a concurrent write can only
+extend the file past the cursor, and a file removed later answers
+`exec_output_unavailable`. Release the task-table guard before awaiting either
+read.
 
 Register the method on WorkspaceTools' original context after its cleanup is
 registered. C1 owns method admission and unload settlement. The read is finite,
