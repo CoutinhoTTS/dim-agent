@@ -50,6 +50,7 @@ export function observer(namespace: string, declaration: Record<string, Record<s
         work ??= ended.then(() => { settled = true })
         records.push(record); notify()
         if (hold && record.event.type === 'input' && record.event.name === 'applied') {
+          hold = false
           entered = true; notify()
           await new Promise<void>(resolve => { release = resolve })
         }

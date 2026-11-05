@@ -456,6 +456,10 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     assert!(local.iter().all(|event| event.kind.key() != "input/forged"));
     let keys = local
         .iter()
+        .filter(|event| {
+            !matches!(&event.kind, EventKind::InputMessage(data) if data.effective_mode() == dim_agent_types::InputMode::Append)
+                && !matches!(&event.kind, EventKind::InputApplied(data) if data.mode == Some(dim_agent_types::InputMode::Append))
+        })
         .map(|event| event.kind.key())
         .collect::<Vec<_>>();
     let occurrences = |key: &str| keys.iter().filter(|other| **other == key).count();

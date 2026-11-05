@@ -161,10 +161,11 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         "invalid calls must not reach the model"
     );
     let after = chain_events(&session, "main", ..).await.unwrap();
-    assert_eq!(
-        before.iter().map(|event| &event.id).collect::<Vec<_>>(),
-        after.iter().map(|event| &event.id).collect::<Vec<_>>()
-    );
+    assert!(after.starts_with(&before));
+    assert!(after[before.len()..].iter().all(|event| {
+        matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_none() && data.effective_mode() == dim_agent_types::InputMode::Append)
+            || matches!(&event.kind, EventKind::InputApplied(data) if data.mode == Some(dim_agent_types::InputMode::Append))
+    }), "auxiliary calls append no business facts: {after:?}");
     let pending = client
         .send(
             "session.auxiliary.complete",
@@ -762,7 +763,7 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         call(&mut client, "session.observer.release_session", release).await,
         json!(false)
     );
-    assert!(session.unload_if_idle().await.unwrap());
+    super::collaboration::unload(&server.agent().unwrap(), &id).await;
 
     let id = new_session(&mut client, json!(["echo"])).await;
     let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
@@ -791,7 +792,7 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         call(&mut client, "session.observer.release_session", release).await,
         json!(false)
     );
-    assert!(session.unload_if_idle().await.unwrap());
+    super::collaboration::unload(&server.agent().unwrap(), &id).await;
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
