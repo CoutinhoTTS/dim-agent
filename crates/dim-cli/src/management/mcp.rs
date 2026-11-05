@@ -539,6 +539,209 @@ pub enum Answer {
     Detail(ManagementDetail),
 }
 
+/// What an import does with one entry of the document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportAction {
+    Import,
+    Skip,
+    Replace,
+    Rename,
+}
+
+impl ImportAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Skip => "skip",
+            Self::Replace => "replace",
+            Self::Rename => "rename",
+        }
+    }
+}
+
+/// One entry's resolution in `mcp.import.apply`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportResolution {
+    pub id: String,
+    pub action: ImportAction,
+    /// The id a rename writes under; absent for every other action.
+    pub new_id: Option<String>,
+}
+
+impl ImportResolution {
+    fn value(&self) -> Value {
+        let mut value = json!({"id": self.id, "action": self.action.as_str()});
+        if let Some(new_id) = &self.new_id {
+            value["newId"] = json!(new_id);
+        }
+        value
+    }
+}
+
+/// The preview `mcp.import.preview` reports: what importing the document
+/// would do to one source, read at `revision`. It names fields and kinds,
+/// never a value.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub revision: String,
+    pub entries: Vec<ImportEntryPreview>,
+    /// Top-level members other than `mcpServers`; an import does not carry
+    /// them.
+    #[serde(default)]
+    pub unknown_top_level: Vec<String>,
+}
+
+/// One entry's place in the preview.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportEntryPreview {
+    pub id: String,
+    #[serde(default)]
+    pub transport: Option<String>,
+    pub status: ImportStatus,
+    /// The fields a write would change, with the kind each holds.
+    #[serde(default)]
+    pub changes: Vec<ImportField>,
+    /// Members the decoder keeps unused or drops.
+    #[serde(default)]
+    pub unsupported: Vec<ImportUnsupported>,
+    /// How many field names the owner's cap left out of `changes` and
+    /// `unsupported`.
+    #[serde(default)]
+    pub omitted: usize,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// What an import would do with one entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportStatus {
+    /// The source already holds this entry and equal content.
+    Identical,
+    /// The source would gain this entry.
+    Changed,
+    /// The source holds this id with different content.
+    Conflict,
+    /// The entry does not decode.
+    Invalid,
+}
+
+impl ImportStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Identical => "identical",
+            Self::Changed => "changed",
+            Self::Conflict => "conflict",
+            Self::Invalid => "invalid",
+        }
+    }
+
+    /// Whether an entry with this status is accepted without a flag. A
+    /// conflict or an invalid entry is skipped until a flag names it.
+    pub fn imports(self) -> bool {
+        matches!(self, Self::Identical | Self::Changed)
+    }
+}
+
+/// One field a write would change, with the kind of value it holds.
+#[derive(Debug, Deserialize)]
+pub struct ImportField {
+    pub field: String,
+    pub kind: String,
+}
+
+/// One entry member the decoder does not act on.
+#[derive(Debug, Deserialize)]
+pub struct ImportUnsupported {
+    pub field: String,
+    pub effect: UnsupportedEffect,
+}
+
+/// What the decoder does with a member it does not act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnsupportedEffect {
+    /// Kept in the entry's extension members and not acted on.
+    KeptUnused,
+    /// Dropped by the decoder.
+    Dropped,
+}
+
+impl UnsupportedEffect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::KeptUnused => "kept-unused",
+            Self::Dropped => "dropped",
+        }
+    }
+}
+
+/// The apply's reply: the source revision the import wrote.
+#[derive(Debug, Deserialize)]
+pub struct ImportApplied {
+    pub revision: String,
+}
+
+/// The entries `document` holds, previewed against the source `source` names.
+/// It writes and executes nothing.
+pub async fn preview_import(
+    client: &mut Client,
+    cwd: &str,
+    source: &str,
+    document: &str,
+) -> crate::Result<ImportPreview> {
+    client
+        .typed(
+            "mcp.import.preview",
+            json!({"cwd": cwd, "source": source, "document": document}),
+        )
+        .await
+}
+
+/// Writes the entries `resolutions` accept into `source`, all or nothing, at
+/// the revision the preview read (`expected`). It answers the new revision.
+pub async fn apply_import(
+    client: &mut Client,
+    cwd: &str,
+    source: &str,
+    document: &str,
+    expected: &str,
+    resolutions: &[ImportResolution],
+) -> crate::Result<String> {
+    let applied: ImportApplied = client
+        .typed(
+            "mcp.import.apply",
+            json!({
+                "cwd": cwd,
+                "source": source,
+                "document": document,
+                "expectedVersion": expected,
+                "resolutions": resolutions.iter().map(ImportResolution::value).collect::<Vec<_>>(),
+            }),
+        )
+        .await?;
+    Ok(applied.revision)
+}
+
+/// Why an import did not happen, in the CLI's words. A refused entry or
+/// document keeps the owner's sentence, which names the entry and the next
+/// step; the other codes say what the caller must do differently.
+pub fn import_failure(error: crate::Error) -> crate::Error {
+    match crate::client::app_error(&error) {
+        Some("mcp_settings_conflict") => t(
+            "The MCP source changed since the preview; no entry was imported, and an entry it would have replaced may now be disabled. Preview again.",
+        )
+        .into(),
+        Some("mcp_import_partial") => t(
+            "The project entries were written and their withheld values were not; replace them again to retry.",
+        )
+        .into(),
+        _ => error,
+    }
+}
+
 /// The catalog as its owner reports it.
 pub async fn catalog(client: &mut Client, cwd: &str) -> Result<Catalog, String> {
     client

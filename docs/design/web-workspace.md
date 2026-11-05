@@ -384,7 +384,7 @@ optional account feature must not prevent identity or usage from loading.
 | Appearance | Language, system/light/dark theme and text size, applied immediately |
 | Agent defaults | Persisted model and supported execution defaults; no accidental mutation of an active Session |
 | Modality | Operation defaults for image generation, editing, enhancement and understanding from `modality.capabilities`, written with `modality.configure` and its snapshot revision; understanding's Session consumer is a requirement on Agent/Prompt |
-| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal and user↔project scope migration; secret fields stay omitted from edits and a move never writes them into `.mcp.json` |
+| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal, user↔project scope migration and import of a standard `mcpServers` file through the owner's confirmed preview; secret fields stay omitted from edits, a move never writes them into `.mcp.json`, and no import value is rendered |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
 | Skills | Manage already installed skills: search, inspect details, enable/disable and reload discovery; choose user scope or an existing workspace without entering filesystem paths. Source installation and plugin-package controls are not part of this page |
 | Permissions | Process isolation and user-scope command-rule management (exact/prefix allow/deny; project scope, patterns and per-rule ask are rejected, [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds)), with confirmation for privilege increases. The isolation card follows [the CLI isolation choices](cli-commands.md#process-isolation-settings), reads `host.execution.backend` and shows the owner's reason when the host has none; the browser never infers the platform |
@@ -511,8 +511,50 @@ the move blindly because the destination id would answer `mcp_move_conflict`.
 └──────────────────────────────────────────────────────────┘
 ```
 
-Only `mcp.move` is added to the MCP page's admitted methods; no secret value is
-read from the owner or stored in the browser.
+Beyond the catalog and entry methods, `mcp.move`, `mcp.import.preview` and
+`mcp.import.apply` are the MCP page's added methods; no secret value is read
+from the owner or stored in the browser.
+
+#### MCP import
+
+The MCP page imports a standard `mcpServers` document, the shape other MCP
+clients write, from a local file. The browser reads the file's text and sends it
+with `mcp.import.preview` for the selected scope — the user source, or the
+workspace's project source when the scope selector names one (`cwd` included).
+The page decodes nothing itself: the owner's preview supplies each entry's id,
+status (`identical`, `changed`, `conflict` or `invalid`), transport, changed
+field names with their JSON kinds, members the decoder keeps unused or drops,
+and the entry's error. The owner caps each entry's field-name lists, so the page
+states how many names the cap left out rather than showing a partial list as
+complete. The page shows the unknown top-level members and never renders a
+value, because the reply carries none. For a project preview it states that the
+workspace file receives each entry's public skeleton, while arguments,
+environment and header values, the bearer token, a URL with userinfo, path,
+query or fragment, hidden OAuth fields and unknown members go to the user-scope
+`mcp-secrets` record, as a move into project does.
+
+Each previewed entry that decodes has an action: Import, Skip, Replace the
+existing entry, or Import under a new id with a new-id field. The defaults match
+the CLI: `changed` and `identical` import, `conflict` and `invalid` skip.
+`--only` restricts the default selection, and `--replace` or `--rename` — or
+this page's explicit action — selects the id it names whether or not `--only`
+lists it; a `conflict` or `invalid` entry only comes in through such an action.
+An `invalid` entry shows no action control, because the owner refuses every
+resolution but Skip for it, and says in its row that it cannot decode and can
+only be skipped. Rename needs a nonempty new id before Apply is enabled.
+
+Apply sends `mcp.import.apply` with the previewed document, its `revision` as
+`expectedVersion`, and one resolution per entry. On success the page drops the
+preview, rereads `mcp.catalog` and states that imported and replaced entries
+start disabled: a user entry is written with `enabled: false`, and a project
+entry's enablement record is withdrawn before the write. On
+`mcp_settings_conflict` the page says the source changed, that no entry was imported and that an
+entry the import would have replaced may now be disabled; it keeps the preview and offers Preview
+again, which re-previews the same document; it never retries the apply. The owner codes
+(`mcp_import_conflict`, `mcp_import_partial`, `mcp_invalid_config`) are shown as the owner's
+message, and the preview stays open for a different selection; after a partial import a new
+preview reports the written ids as conflicts, which a Replace rewrites together with their
+records.
 
 #### Diagnostics: the legacy logging controls
 

@@ -3,7 +3,7 @@
 Status: Draft.
 
 Scope: process.
-Issues: [#453](https://github.com/arcships/dim/issues/453), [#738](https://github.com/arcships/dim/issues/738), [#452](https://github.com/arcships/dim/issues/452), [#953](https://github.com/arcships/dim/issues/953).
+Issues: [#453](https://github.com/arcships/dim/issues/453), [#738](https://github.com/arcships/dim/issues/738), [#452](https://github.com/arcships/dim/issues/452), [#953](https://github.com/arcships/dim/issues/953), [#1146](https://github.com/arcships/dim/issues/1146).
 Rules: [design rules](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md).
 
 ## 1. Scope
@@ -11,8 +11,9 @@ Rules: [design rules](../../architecture/rust-agent/principles.md), [ADR 002](..
 This document owns the configuration surface of the `mcp` management namespace: how a client
 reads one entry in order to edit it, writes the result, and exercises a configuration before
 saving one. It owns those methods' requests and replies, the values they redact, and how a source
-revision orders an edit. It also owns the user↔project migration (`mcp.move`) and the user-local
-secret overlay that migration uses.
+revision orders an edit. It also owns the user↔project migration (`mcp.move`), the user-local
+secret overlay that migration uses, and the import of a standard `mcpServers` document into one
+source (`mcp.import.preview`, `mcp.import.apply`).
 
 It does not own:
 
@@ -489,6 +490,99 @@ to extend the limit is a second contract; and a separate `mcp tool-call-timeout`
 value belongs to the entry's own document where `mcp.save`, `mcp.update` and the legacy import
 already carry it.
 
+### D21. An import takes the document text a client read
+
+The client locates and reads a file; it sends the text and the target source. The owner never
+reads a path, never scans a directory and names no other client's file. It accepts only the
+standard `mcpServers` object, decodes it with the one entry decoder, imports nothing outside it,
+and reports other top-level members as `unknownTopLevel`. There is no second envelope, no format
+sniffing and no per-client parser: discovery, including a format another client writes in
+another syntax, is the client's step.
+
+### D22. Preview is a pure report of names, never values
+
+`mcp.import.preview` is a function of the document text, the target source snapshot and, for a
+project target, the workspace's `mcp-secrets` records. It writes nothing, executes nothing and
+contacts no endpoint. It reports each entry's `id`, transport, status (`identical`, `changed`,
+`conflict` or `invalid`), the changed field names with their JSON kinds, the members the decoder
+keeps unused or drops, the entry's own decode error, the document's unknown top-level names and
+the target revision. A project target is compared as it would serve the entry: the declared entry
+with its withheld record merged (D25). Enablement is not part of the comparison: an entry whose
+configuration matches is `identical` however it is enabled. Extension members, including those
+inside `oauth`, are not part of it either: the decoder keeps them unused, they do not change what
+runs, and only one side may hold one, so an entry whose declared members match is `identical`
+whatever extension members either side carries. A `replace` writes the document's entry as it
+stands, so an extension member only the target holds is not kept, and one only the document holds
+is written, into the withheld record for a project entry. A user `identical` entry's `changes`
+is empty except `enabled`, which it names when the entry is enabled, because a replace would write
+`enabled: false`; a project entry's own `enabled` member is never reported, because the import
+writes none. No value from the document or a record appears in the reply (D3), and an entry's
+error names its field and expected kind but not its id, which `id` states. Every name the reply
+carries comes from the document and is reported once: `changes` names declared members and
+`unsupported` the rest, so a document at its 8 MiB cap yields a reply of about one document
+length, well inside the 16 MiB transport frame. Each entry reports at most 32 names in `changes`
+and 32 in `unsupported`, and `omitted` counts the distinct names those caps left out.
+
+### D23. One compare-and-set covers the accepted selection
+
+`mcp.import.apply` takes the document, the preview's revision and one resolution per entry
+(`import`, `skip`, `replace` or `rename` with a new id), with `skip` as the default. It re-parses
+the document and re-checks every resolution against the source it reads at `expectedVersion`; it
+never trusts a preview result sent back. Every accepted entry enters that one snapshot and is
+committed by one source update: one revision check, one source write, and no entry visible before
+the commit. A project import withdraws the enablement record of every entry it writes before the
+source update and writes its withheld records after it (D24, D25).
+A refused resolution answers before either write, so the request changes nothing; a stale revision
+answers `mcp_settings_conflict` and leaves the source as it was, though an entry the import would
+have replaced may be left disabled (D24); a request that accepts no entry writes nothing. Entries
+it does not touch keep their stored value, broken entries included (D18).
+
+### D24. An import never enables anything
+
+The document's `enabled` member is not carried as enablement. A user entry is written with
+`enabled: false`; a project entry is written without the member and gets no `mcp-projects`
+record, so only `mcp.set_enabled` can enable it (ADR 003 D3). An entry whose configuration is
+identical is not rewritten, so an enabled user entry keeps its enablement. Every id a project
+import writes, imported or replaced, has its `mcp-projects` record withdrawn before the source
+write, so a replace starts disabled like an import and an imported configuration never runs
+enabled; this includes a destination whose entry an external edit removed and whose record
+stayed. Withdrawing first makes an import fail closed: one that answers `mcp_settings_conflict`,
+or fails before or during the source write, writes no entry, but an entry it would have replaced
+may be left disabled, and `mcp.set_enabled` enables it again. The withdrawn records are not
+restored after a failed write, because two imports that replace one entry can interleave so that
+the failed one re-enables the entry the successful one wrote. The record is inert while no entry
+holds the id, so withdrawing one changes nothing else, and the same write is what `mcp.remove`
+would do if the entry were still there.
+
+### D25. A project import writes through the withheld split
+
+A project import writes what a move into project writes (D13): `.mcp.json` receives the public
+skeleton, and the user-scope `mcp-secrets` record for the canonical workspace and id receives
+every withheld member — arguments, environment and header values, the bearer token, a URL with
+userinfo, path, query or fragment, hidden OAuth fields and unknown members. None of those values
+enters a file commonly committed, a `${NAME:-literal}` default among them included, and no
+confirmation is asked: the preview never shows a value, so a user could not verify the one a
+confirmation would name. The preview compares the configuration the target would serve, the
+declared entry with its record merged, so an entry already stored as a skeleton and a record
+reads `identical`.
+
+The destination's record is written from the import rather than merged with what was there. An
+entry with a withheld part replaces the record with a fresh generation (D15); an entry without
+one removes it. A leftover record whose entry an external edit deleted therefore neither refuses
+the import nor leaks into the imported entry: the import carries the withheld values itself, so
+the hazard `mcp.save` refuses (D17) does not arise here. `replace` and `rename` write the same
+pair as `import`.
+
+The two stores cannot commit together. Every written id has its enablement record withdrawn
+before the source write (D24), so the entry cannot run while it reads its new skeleton with its
+old record, which it does until the `mcp-secrets` update commits; a withdrawal that fails answers
+before the source write, leaving `.mcp.json` as it was. The source update commits next and the
+withheld records last. A record write that fails after the source commit answers
+`mcp_import_partial`: the entries are written with their skeletons, their withheld values are
+missing or old, and replacing the entries again rewrites both. The reverse order is not used: it
+would write a record whose source entry does not exist yet, and a failed source write would leave
+the old entry running with the new import's credentials.
+
 ## 4. Contract
 
 Namespace `mcp`, process scope, served on local connections
@@ -496,7 +590,8 @@ Namespace `mcp`, process scope, served on local connections
 `source` is `"user"`, `"project"` or `"plugin"`; `cwd` is required for a project source and is
 the workspace whose `.mcp.json` is read, authorized as today.
 
-These are the methods that read or write one entry's configuration, or exercise it:
+These are the methods that read or write an entry's configuration, exercise it, or import a
+document into a source:
 
 | Method | Request | Reply | Writes |
 | --- | --- | --- | --- |
@@ -504,6 +599,8 @@ These are the methods that read or write one entry's configuration, or exercise 
 | `mcp.save` | `{cwd?, id, source, expectedVersion, configuration}` | `{}` | the source |
 | `mcp.update` | `{cwd?, id, source, expectedVersion, patch}` | `{}` | the source |
 | `mcp.move` | `{cwd?, id, from, to, expectedFromVersion, expectedToVersion}` | `{}` | the source and destination |
+| `mcp.import.preview` | `{cwd?, source, document}` | `ImportPreview` (§4.8) | no |
+| `mcp.import.apply` | `{cwd?, source, document, expectedVersion, resolutions}` | `{revision}` | the source |
 | `mcp.test` | `{cwd?, id, source, configuration?, patch?}` | `Probe` (§4.5) | no configuration; the credential authority's, as for any connection |
 
 `mcp.save` takes a complete stdio, HTTP or SSE definition in the existing `mcpServers` format and
@@ -518,7 +615,9 @@ revision every write takes.
 `mcp.catalog` returns `invalid: [{id, source, error}]` beside `servers` (D18). `mcp.configuration`,
 `mcp.inspect`, `mcp.test` and `mcp.set_enabled` answer a broken entry with its error and
 `mcp_invalid_config`; `mcp.save` replaces it, and `mcp.remove` deletes it. Each server row also
-carries the entry's `referencedVariables` and `unsetVariables` (D19).
+carries the entry's `referencedVariables` and `unsetVariables` (D19). The import pair reads one
+standard `mcpServers` document the client supplies and writes the entries a selection accepts
+(§4.8); against a broken entry it reports the entry's own error and can replace it (§4.8).
 
 ### 4.1 Entry read (`mcp.configuration`)
 
@@ -621,14 +720,16 @@ skeleton only; the overlay-held fields stay in `mcp-secrets` and are never copie
 | `appError` | When |
 | --- | --- |
 | `mcp_unknown_server` | The target source holds no entry with that id, for a read or a write; a move whose source lacks the id. A broken entry answers its own error instead |
-| `mcp_invalid_config` | The patched or saved document, an empty `id`, an unauthorized workspace, or an operation on a broken entry is refused; a broken entry's error names its id and field |
+| `mcp_invalid_config` | The patched or saved document, an import document that is not JSON or exceeds the size, entry or id limits, an empty `id`, an unauthorized workspace, or an operation on a broken entry is refused; a broken entry's error names its id and field |
 | `mcp_settings_conflict` | `expectedVersion` is not the source's current revision (D5), or an overlay/enablement compare-and-set lost |
 | `mcp_settings_read` | The source could not be read |
 | `mcp_move_conflict` | The destination source already holds an entry with that id; nothing is written |
 | `mcp_move_partial` | A destination-side write committed and the source removal did not; the client rereads and follows the direction's recovery: into project remove the destination and retry, into user remove the project source (D11, §4.6) |
 | `mcp_credentials_are_user_scoped` | A patch on a moved project entry sets a field held in `mcp-secrets`, or a save targets that entry; move the entry back to user scope (D14) |
-| `mcp_stale_secret_record` | A project save finds a withheld record whose project entry is absent; call `mcp.remove` with that id and the project revision to delete it, then save again (D17) |
-| `invalid_params` (`-32602`) | A field of the wrong transport, a project target without `cwd`, a plugin source, the same `from` and `to`, or a write to a plugin entry, which answers `plugin MCP entries change through their plugin` |
+| `mcp_stale_secret_record` | A project save finds a withheld record whose project entry is absent; call `mcp.remove` with that id and the project revision to delete it, then retry (D17) |
+| `mcp_import_conflict` | An import resolution cannot apply to the source read at `expectedVersion`: `import` on an id the source holds with different content or as a broken entry, `replace` on an id it does not hold, a `rename` destination already taken, or a non-skip resolution on an invalid entry; no entry is written and no record changes (§4.8) |
+| `mcp_import_partial` | A project import's source write committed and its withheld records did not; the source entries stay as written and their `mcp-secrets` records are missing or old, so the entries run without the document's withheld values until they are replaced again (D25, §4.8) |
+| `invalid_params` (`-32602`) | A field of the wrong transport, a project target without `cwd`, a plugin source, the same `from` and `to`, an import resolution naming an entry the document does not contain, a `newId` on another action, or a write to a plugin entry, which answers `plugin MCP entries change through their plugin` |
 | `local_transport_required` | The connection is not local |
 | `service_reloading` / `service_unavailable` | Mcp or its row is not serving; from [management methods](management-methods.md#dispatch-and-lifecycle) |
 
@@ -820,8 +921,8 @@ deletes the overlay in the same operation.
 ### 4.7 The `mcp-secrets` document
 
 `mcp-secrets` is a user-scope-only Settings source (`mcp-secrets.json`; no project file) owned by
-Mcp. It is a `BusinessDocument` with one opaque revision for the whole document; every move or
-remove that changes it takes that revision as CAS. The client never supplies it
+Mcp. It is a `BusinessDocument` with one opaque revision for the whole document; every move,
+remove or project import that changes it takes that revision as CAS. The client never supplies it
 and no client method reads the document; as a Rust source, `settings.read` answers
 `settings_unknown_source`, and the MCP methods return only redacted projections. Settings'
 user-scope storage and access rules apply (0600 file on Unix or the native row), so the overlay
@@ -875,6 +976,98 @@ record while the workspace is still reachable.
 No format version is added: this is a new Settings document validated at its boundary, not a
 binary store. A missing file reads as empty, and a future incompatible shape changes the source
 name or adds a version rather than silently reusing this one.
+
+### 4.8 Import (`mcp.import.preview`, `mcp.import.apply`)
+
+The client reads a file and sends its text; the owner decodes it and imports selected entries
+into one source (D21). Only the standard `mcpServers` object is read, with the one entry decoder
+(D18). A document larger than 8 MiB or holding more than 1,000 entries is `mcp_invalid_config`;
+the size is checked before parsing and the count after, and neither writes anything. A file that
+is not JSON, a non-object `mcpServers` and an empty id fail the whole document; an entry's own
+error makes that entry invalid and leaves the rest usable. The reply names only ids and field
+names taken from the document. Each entry reports at most 32 names in `changes` and 32 in
+`unsupported` and counts the rest in `omitted`, so a 1,000-entry document stays well under the
+16 MiB transport frame.
+
+`mcp.import.preview` takes:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `cwd` | string, required for `source: "project"` | Authorized workspace whose `.mcp.json` is the target |
+| `source` | `"user"` or `"project"` | Target source |
+| `document` | string | The file's text |
+
+It replies:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `revision` | string | The target source revision, the token `mcp.import.apply` takes as `expectedVersion`; `missing` when the source has no document |
+| `entries` | `ImportEntry[]` | One row per entry in the document's order |
+| `unknownTopLevel` | string[] | Top-level members other than `mcpServers`, ascending; an import does not carry them |
+
+An `ImportEntry` is:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The document's entry id |
+| `transport` | `"stdio"` \| `"http"` \| `"sse"`, absent when the entry does not decode | The transport the entry would run |
+| `status` | `"identical"` \| `"changed"` \| `"conflict"` \| `"invalid"` | What importing the entry would do. Extension members, including those inside `oauth`, are not configuration and never change it |
+| `changes` | `[{field, kind}]` | The declared field names and the JSON kind each holds (`string`, `number`, `boolean`, `array`, `object`, `null`). Extension members, those inside `oauth` included, stay in `unsupported`, never here, and they never make an entry `conflict`. Never a value. `conflict` lists the fields that differ from the target entry; `changed` lists every field of the entry the write would add; `identical` is empty except `enabled` on a user entry that is enabled, which a replace would set to `false` |
+| `unsupported` | `[{field, effect}]` | Members the decoder does not act on, by name. `effect` is `kept-unused` for an entry's or its `oauth` object's extension member, preserved in the document and unused, or `dropped` for an unknown `auth` member, which the decoder discards |
+| `omitted` | number | How many distinct names the 32-name caps left out of `changes` and `unsupported`; the reported lists are then partial |
+| `error` | string, optional | The entry's decode error, with `invalid`, or a project destination whose stored record does not merge into its declared entry, with `conflict`; it names the field and the expected kind and never a value, and it does not repeat the entry's id, which `id` states |
+
+`status` compares the entry, normalized for the target scope (D24), with the configuration the
+target source read at `revision` would serve, ignoring `enabled` on both sides because enablement
+is the user's state: a project entry is the declared entry with its `mcp-secrets` record merged
+(D25), so a skeleton and its record read as the document's entry. `identical` means the source
+already serves the same configuration, `conflict` means it holds the id with different content, as
+an entry that does not decode, or with a record that does not merge, and `changed` means the id is
+free. Extension members, including those inside `oauth`, take no part in this comparison (D22), and
+a `replace` writes the document's entry as it stands, so an extension member only the target holds
+is not kept. A preview reads the target source and, for a project target, the workspace's records;
+it writes nothing, executes nothing and contacts nothing (D22).
+
+`mcp.import.apply` takes the same `document` and `source`, the preview's `revision` as
+`expectedVersion`, and `resolutions`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The document entry the resolution applies to; at most one resolution per entry, and an entry without one is skipped |
+| `action` | `"import"` \| `"skip"` \| `"replace"` \| `"rename"` | What to do with the entry |
+| `newId` | string, with `rename` | The destination id; non-empty |
+
+`import` accepts a free id and an `identical` entry; an id the source holds with different
+content or as a broken entry is `mcp_import_conflict`. `import` checks
+the id it writes and `rename` its `newId`, after the source's own ids have answered, so a taken
+id stays `mcp_import_conflict`. `replace` accepts an id the source holds, decoded or broken,
+whether or not a record is stored for it. `replace` writes the entry as an import writes it
+(D24): a user entry is written with `enabled: false` and a project entry without the member, so
+replacing an enabled user entry disables it; the preview's `changes` names `enabled` when a
+replace would do that (D22). `rename` writes the entry under `newId`, which must be free in the
+target source and not another resolution's destination. An `invalid` entry can only be skipped.
+An `id` the document does not contain and a `newId` on another action are `invalid_params`.
+
+The apply re-parses the document and re-checks every resolution against the source it reads at
+`expectedVersion`; it uses no preview result (D23). Every accepted entry enters that one snapshot
+and is committed by one source update, so one compare-and-set and one settings write cover the
+whole selection. A `mcp_import_conflict` refusal answers before any write, so nothing changes. A
+stale revision answers `mcp_settings_conflict` and leaves the source's entries as they were,
+though an entry the import would have replaced may be left disabled (D24). Entries it does not
+touch keep their stored value, broken entries included (D18).
+A request that accepts no entry writes nothing and answers the source's current revision.
+
+An import never enables anything (D24): the document's `enabled` member is not carried as
+enablement, a user entry is written with `enabled: false`, and a project entry is written without
+the member and gets no `mcp-projects` record. Every id a project import writes, replaced ones
+included, has its enablement record withdrawn before the source write, so an imported
+configuration never runs enabled and a failed compare-and-set writes no entry but leaves an entry
+the import would have replaced disabled; `mcp.set_enabled` enables it again. A project import
+writes through the withheld split (D25): each accepted entry enters the source as its public
+skeleton, and the workspace's `mcp-secrets` record receives the withheld members, replacing or
+removing the destination's record. The records are written in one update after the source commit;
+if that write fails, the reply is `mcp_import_partial` and replacing the entries again rewrites
+both stores.
 
 ## 5. What changes for a client
 
@@ -932,6 +1125,21 @@ name or adds a version rather than silently reusing this one.
   destination and retry, into user remove the project source; it never removes the source while
   the destination may be incomplete. On success it reloads the catalog and opens the destination
   entry. The client never displays a moved withheld value.
+- The import flow is: the client reads the file (the daemon reads no path for it), calls
+  `mcp.import.preview` with its text and the target source, and renders each entry's `status`,
+  `changes`, `unsupported` and `error`. It shows field names and kinds, never values, and offers
+  no per-entry confirmation: a project import writes through the withheld split (D25), so the
+  page states that the workspace file receives the public skeleton and the withheld values go to
+  the user-scope record. It then calls `mcp.import.apply` with the preview's `revision` and one
+  resolution per entry; an entry without a resolution is skipped. On `mcp_settings_conflict` it
+  previews again; on `mcp_import_conflict` it keeps the form and resends with the same revision,
+  because the refusal wrote nothing. `mcp_import_partial` says the source was written and the
+  records were not, so the client offers a replace of the same entries rather than a plain
+  import. On success it reloads the catalog.
+- The client states that an import starts every entry disabled: a user entry is written with
+  `enabled: false`, and a project entry needs the user's local enablement. Locating and reading
+  another client's file, and converting a non-JSON format, are the client's own steps; the
+  management surface receives only the standard document text and the target source (D21).
 - A client must not write back `mcp.inspect` values (D1).
 - A client shows a probe's `status`, `latencyMs` and tools, offers sign-in on `authRequired` (with
   `expired` and `missingScopes` when present), and shows `reason` and `message` on `failed`. It
@@ -954,11 +1162,15 @@ name or adds a version rather than silently reusing this one.
 - The MCP request loop keeps one limit per request kind: `timeout` changes only a `tools/call`
   request's, so starting a server and every other request behave as before (D20). The
   cancellation notice a timeout sends is the one an interrupted request already sent.
-- The namespace gains one method, `mcp.move`; `hello.features` advertises it and a client checks
-  support before offering the control.
-- The probe adds no error code. The move and the overlay add four: `mcp_move_conflict`,
-  `mcp_move_partial`, `mcp_credentials_are_user_scoped` and `mcp_stale_secret_record`. Existing
-  codes keep their meanings.
+- The namespace gains three methods, `mcp.move`, `mcp.import.preview` and `mcp.import.apply`;
+  `hello.features` advertises them and a client checks support before offering the control.
+- The probe adds no error code. The move, the overlay and the import add six:
+  `mcp_move_conflict`, `mcp_move_partial`, `mcp_credentials_are_user_scoped`,
+  `mcp_stale_secret_record`, `mcp_import_conflict` and `mcp_import_partial`. Existing codes
+  keep their meanings.
+- No new persisted document: an import writes the existing source document and, for a project,
+  the existing `mcp-secrets` record of every entry it writes; it writes no enablement record and
+  withdraws the one an entry already had (D24, D25).
 - The `mcp` and `mcp-projects` business documents, their file names, source precedence, project
   enablement record, plugin registration and the `mcp-oauth.json` credential store keep their
   formats. A new user-scope `mcp-secrets` source holds the migration overlay; it has no prior
@@ -1008,7 +1220,8 @@ Flow level, reusing the existing MCP flows:
 | File | What it protects |
 | --- | --- |
 | `crates/dim-app-server/tests/transport_flow/product_protocol.rs` | The wire contract on local v3: the read returns the revision the catalog reports for the same source; creating an entry with the catalog's source revision succeeds and a stale revision is `mcp_settings_conflict`; a plugin entry's read has no revision and a write to it is `invalid_params`; a project entry patched on one unrelated field leaves `.mcp.json` without a resolved `cwd` and without an `enabled` key (`project_entry_edits_keep_the_declared_configuration`); no withheld value appears in the read, including after an edit (`mcp_editor_preserves_redacts_and_removes_credentials_with_source_cas`); `mcp_scope_move_preserves_withheld_values_and_enablement` moves one entry in each direction, keeps its withheld values out of `.mcp.json`, refuses `mcp.save` and withheld patches with `mcp_credentials_are_user_scoped`, and leaves a removed entry saved clean; `mcp_save_refuses_a_leftover_overlay_and_remove_cleans_it` refuses a save over a withheld record whose entry an external edit deleted with `mcp_stale_secret_record`, proves `mcp.remove` deletes the record, and saves again into a working workspace catalog across transports; `mcp_update_refuses_oauth_over_an_overlay_static_credential` refuses both OAuth actions while the overlay holds the token and completes the move-to-user recovery; and a probe reports `connected` with a latency and every tool, or `failed` with `reason`/`message` and no tools, without changing the source revision or creating a Session connection |
-| `crates/dim-app-server/tests/transport_flow/web_entry.rs` | The authenticated Web entry advertises and reaches the MCP namespace including `mcp.move`, and a bare connection is refused |
+| `crates/dim-app-server/tests/transport_flow/mcp_import.rs` | The import wire contract: a preview of a multi-entry document reports each status, the changed field names and kinds, the unsupported members and their effects, the unknown top-level names and the target revision, and writes nothing; apply imports, replaces, renames and skips entries with one revision, keeps a skipped target as written and a re-import of unchanged entries writing nothing with no duplicate; an enabled user target with the same configuration previews `identical` and an `import` leaves it enabled, while a `replace` over an enabled entry names `enabled` in its changes and writes it disabled; a user import writes `enabled: false`, while a project import writes each entry as its public skeleton and puts argument, environment and header values, the bearer token, a URL with userinfo or a query, hidden OAuth fields, unknown members and a reference carrying a literal `${NAME:-default}` in the workspace's `mcp-secrets` record, so `.mcp.json` carries none of them and the contract has no confirmation; the same document then previews `identical`, and an identical entry is replaceable and renamable; a leftover record whose entry an external edit deleted is replaced or removed by the import instead of refusing it, and a stale enablement record is withdrawn so the entry starts disabled; a replace of an enabled entry starts disabled; untouched broken entries survive; a stale revision is `mcp_settings_conflict` and an unknown resolution id is `invalid_params`; a malformed, oversize or over-count document is `mcp_invalid_config` |
+| `crates/dim-app-server/tests/transport_flow/web_entry.rs` | The authenticated Web entry advertises and reaches the MCP namespace including `mcp.move` and the import pair, and a bare connection is refused |
 | `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd` (`editing_reads_the_declared_entry_while_running_resolves_it`); `scope_move_partial_is_recoverable_and_remove_cleans_the_overlay` and `scope_move_back_to_user_keeps_the_merged_entry_and_its_enablement` cover a move in each direction, the withheld part, the destination's enablement, the overlay deletion and the cleared record; `scope_move_checks_the_destination_id_and_both_revisions` covers `mcp_move_conflict` and a stale revision on either side; `a_conflicting_remove_keeps_the_project_entry_and_its_overlay` covers the same-revision race and the removal order; `remove_keeps_a_replacement_moves_overlay` captures a removal's record, commits the removal, lets a replacement move with the same id and identical withheld values write a new generation, and proves the earlier cleanup keeps the replacement's record while a later removal deletes it; `a_save_racing_a_move_keeps_the_moves_overlay` walks the reads a racing save makes — the id absent with no record, a move into the project, the record read returning the move's record, and the entry read returning the entry with `secretsInUserScope`, the state D17 requires `mcp_credentials_are_user_scoped` for rather than the stale refusal — and asserts the move's overlay and credential survive and the racing save's revision-checked write loses; the handler's re-read itself has no injection point in a flow test, and the scoped answer is asserted through `mcp.save` on an overlay entry in `mcp_scope_move_preserves_withheld_values_and_enablement`; `an_into_project_partial_is_finished_after_a_restart` restarts on the same home after an injected overlay write failure and finishes the move by the documented recovery without credential loss; `a_stored_plugin_document_decodes_entry_by_entry` keeps a broken stored plugin entry invalid on its own, answers its own error on a path that contacts the server, and heals it on re-registration; and `a_plugin_document_cannot_set_the_wrappers_members` registers a document with a top-level `dir` and another extension member, reads the stored file back with one `dir` and its entries intact, and registers a second plugin |
 | `crates/dim-app-server/tests/mcp_oauth_flow.rs` | `scope_moves_keep_the_oauth_record_and_the_sign_in_state` moves a signed-in OAuth entry in each direction: the `mcp-oauth.json` record and the `authorized` state survive, no token appears in `.mcp.json`, and `mcp.configuration`, `mcp.inspect` and `mcp.update` keep their replies for the moved entry; a probe of an unauthorized entry reports `authRequired`, with `expired` where Dim's stored credential was rejected and `missingScopes` where the server answered `403 insufficient_scope` |
 | `crates/dim-app-server/tests/mcp_http_flow.rs` | A tool call under an entry's `timeout` fails after about that long with an error naming the millisecond limit and the entry, and the fixture receives `notifications/cancelled` for that call's id with the same sentence; the same tool without a `timeout` answers after two seconds under the ten-minute default; a call whose limit passes while the connection is starting fails with the same error and sends neither the call nor a cancellation; an interrupt sends the same notice. |
@@ -1071,13 +1284,16 @@ for the same reason: reaching it costs sixty seconds of real time for one assert
 | ADR 002 D3 (dependencies point to the core) | `McpPublication` and `McpPlugin` declare the capabilities host `CredentialVariablesHost`; it points to the core, and Settings is already declared |
 | ADR 002 D4 (structural versus business configuration) | Business configuration stays in its source, read on use; the `mcp-secrets` overlay is user-scope business configuration and reloads nothing |
 | ADR 002 D5 (language-neutral contracts) | The request, reply and error shapes are JSON data; the revision is an opaque string |
-| ADR 003 D3 (project entries start disabled) | A move into project clears the user's enablement record before the project entry exists and never writes `enabled` into `.mcp.json`; project content cannot enable itself. A move into user preserves only the user's existing enablement choice |
+| ADR 003 D3 (project entries start disabled) | A move into project clears the user's enablement record before the project entry exists and never writes `enabled` into `.mcp.json`; project content cannot enable itself. A move into user preserves only the user's existing enablement choice. An import writes `enabled: false` into a user entry, no `enabled` member into a project entry, and withdraws the enablement record of every project id it writes (D24) |
 
 Scope migration adds no new rule answer: it writes MCP-owned Settings documents through the
 owner's typed writes, uses the public Settings and OAuth contracts, and starts a project
 destination disabled. It is explicitly not a cross-source transaction; §4.6 is the recovery
 contract. Environment expansion (D19) adds the two answers above: the capabilities port and the
-dependency on it.
+dependency on it. Import adds no new rule answer: it is one method pair on the existing MCP row,
+reads the source snapshot and writes that source's document and the workspace's `mcp-secrets`
+record through the owner's typed Settings writes, and starts every project entry disabled
+(D24, D25).
 
 ## 12. Alternatives considered
 
@@ -1110,3 +1326,9 @@ dependency on it.
 | Expand a plugin entry's `cwd` | It is confined to the plugin directory at registration by refusing an absolute path, `..` or a symlink escape. Expanding it would let the plugin's document name a directory outside that confinement |
 | A `$NAME` form without braces, or nesting | An ordinary `$` already occurs in command lines and defaults, so the braced form is the one users of npm and systemd expect; refusing nesting keeps one pass enough and makes a default end at the first `}` |
 | Guard every field, including stdio | Enabling a workspace stdio entry already runs its command with the user's authority, so a stdio reference adds no exposure; guarding it would change commands that legitimately read a protected name. The guard covers what a remote entry sends |
+| A client loop calling `mcp.save` per entry | It takes one revision check and one write per entry, so a failure leaves a partial import, and the client would reimplement the decode, same-id and project policy that the owner already enforces. The owner pair makes the selection one all-or-nothing write (D23) |
+| Replace the whole source document with the imported one | It deletes entries the user did not select and drops broken entries that D18 keeps as written; import writes only the entries a resolution accepts |
+| Write the document's literal values into `.mcp.json` behind a per-field confirmation | The preview names fields and never values (D3), so the confirmation asks a user to approve a value they never saw, and a `${NAME:-literal}` default passed the reference checks as a reference. The file is commonly committed; the split keeps every withheld value in user scope (D25) |
+| Refuse every literal project value and accept only references | An ordinary stdio server's arguments are literal, so that rule would make most project imports impossible; the split accepts the entry and keeps the literal out of the file (D25) |
+| Write the withheld records before the source document | A failed source write would leave the old entry running the new import's credentials, and the record would name an entry that does not exist yet. The source-first order leaves every written entry disabled until a replace rewrites both stores and answers `mcp_import_partial` (D25) |
+| Import `enabled: true` from the document | It would let a file enable a project entry without the user's local record, contradicting ADR 003 D3; every import starts disabled (D24) |

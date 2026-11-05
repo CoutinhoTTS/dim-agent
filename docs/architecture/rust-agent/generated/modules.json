@@ -2280,6 +2280,17 @@
       ]
     },
     {
+      "id": "dim_app_server::mcp::import",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/import.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "unreachable"
+      ]
+    },
+    {
       "id": "dim_app_server::mcp::management",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -21966,6 +21977,17 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::import",
+      "references": [
+        "mod import",
+        "path import::ImportPreview",
+        "path import::ImportResolution",
+        "path import::plan",
+        "path import::preview"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::management",
       "references": [
         "mod management",
@@ -22272,6 +22294,58 @@
       ]
     },
     {
+      "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::mcp",
+      "references": [
+        "path McpError",
+        "path McpError::ImportConflict",
+        "path Result",
+        "use super::McpError",
+        "use super::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path ENTRY_MEMBERS",
+        "path McpEntryError",
+        "path McpSecretEntry",
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
+        "path McpSettings",
+        "path McpSettings::from_file",
+        "path OAUTH_MEMBERS",
+        "path RemoteTransport::Http",
+        "path RemoteTransport::Sse",
+        "path config::merge_secret",
+        "use super::config",
+        "use super::config::ENTRY_MEMBERS",
+        "use super::config::McpEntryError",
+        "use super::config::McpSecretEntry",
+        "use super::config::McpServerSettings",
+        "use super::config::McpSettings",
+        "use super::config::OAUTH_MEMBERS",
+        "use super::config::RemoteTransport"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "use crate::protocol::optional_non_null"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsError::Document",
+        "use crate::settings::SettingsError"
+      ]
+    },
+    {
       "from": "dim_app_server::mcp::management",
       "to": "dim_agent_capabilities::methods",
       "references": [
@@ -22295,6 +22369,7 @@
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
+        "path SettingsScope::Project",
         "path SettingsScope::User",
         "use crate::settings::SettingsScope"
       ]
@@ -22312,6 +22387,8 @@
         "path McpError::Closed",
         "path McpError::CredentialsAreUserScoped",
         "path McpError::Disabled",
+        "path McpError::ImportConflict",
+        "path McpError::ImportPartial",
         "path McpError::InvalidEntry",
         "path McpError::InvalidId",
         "path McpError::MoveConflict",
@@ -22371,6 +22448,17 @@
         "use super::config::McpServerSettings",
         "use super::config::McpSettings",
         "use super::config::RemoteTransport"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp::import",
+      "references": [
+        "path ImportResolution",
+        "path import::check_resolutions",
+        "path import::parse_document",
+        "use super::import",
+        "use super::import::ImportResolution"
       ]
     },
     {
@@ -27772,6 +27860,7 @@
         "path Action::ManagementStart",
         "path Action::McpDisconnect",
         "path Action::McpEnable",
+        "path Action::McpImport",
         "path Action::McpList",
         "path Action::McpLogin",
         "path Action::McpLogout",
@@ -27940,6 +28029,7 @@
         "mod management_command",
         "path management_command::add",
         "path management_command::edit",
+        "path management_command::import",
         "path management_command::run",
         "path management_command::set",
         "path management_command::start"
@@ -28293,6 +28383,7 @@
       "from": "dim_cli::args::source_tests",
       "to": "dim_cli::args",
       "references": [
+        "path Action::McpImport",
         "path Action::Migration",
         "path Options::parse"
       ]
@@ -29820,7 +29911,9 @@
       "from": "dim_cli::management_command",
       "to": "dim_cli::args",
       "references": [
+        "path McpImport",
         "path Options",
+        "use crate::args::McpImport",
         "use crate::args::Options"
       ]
     },
@@ -29867,8 +29960,20 @@
         "path mcp::Answer::Detail",
         "path mcp::Answer::Tools",
         "path mcp::Failure::ReadFailed",
+        "path mcp::ImportAction::Import",
+        "path mcp::ImportAction::Rename",
+        "path mcp::ImportAction::Replace",
+        "path mcp::ImportAction::Skip",
+        "path mcp::ImportField",
+        "path mcp::ImportPreview",
+        "path mcp::ImportResolution",
+        "path mcp::ImportStatus::Identical",
+        "path mcp::ImportUnsupported",
+        "path mcp::apply_import",
         "path mcp::apply_named",
         "path mcp::editable",
+        "path mcp::import_failure",
+        "path mcp::preview_import",
         "path mcp::seed",
         "path mcp::target",
         "path mcp::tool_row",
@@ -30009,7 +30114,9 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
-        "use crate::ui::i18n::t"
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
       ]
     },
     {
@@ -42688,6 +42795,10 @@
     {
       "module": "dim_cli::management::mcp",
       "path": "T::deserialize"
+    },
+    {
+      "module": "dim_cli::management_command",
+      "path": "BTreeMap::new"
     },
     {
       "module": "dim_cli::mcp_command",

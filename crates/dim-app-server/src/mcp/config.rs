@@ -119,6 +119,11 @@ impl McpSettings {
         self.mcp_servers.get(id)
     }
 
+    /// Every entry's value as the document wrote it, decoded or broken.
+    pub(crate) fn raw_entries(&self) -> &Map<String, Value> {
+        &self.raw
+    }
+
     /// Whether `id` names a decoded entry.
     pub fn contains(&self, id: &str) -> bool {
         self.mcp_servers.contains_key(id)
@@ -434,9 +439,18 @@ const MAX_TIMEOUT_MILLIS: u64 = 86_400_000;
 /// one of these: an unknown name there is the user's extension field, but a
 /// known name would be written back as the entry's own member
 /// (`merge_secret`).
-const ENTRY_MEMBERS: &[&str] = &[
+pub(crate) const ENTRY_MEMBERS: &[&str] = &[
     "type", "command", "args", "env", "cwd", "enabled", "timeout", "url", "headers", "auth",
     "oauth",
+];
+
+/// The members of `oauth` the decoder reads. Any other name is an extension
+/// field, kept in `McpOAuthSettings::extra` and unused.
+pub(crate) const OAUTH_MEMBERS: &[&str] = &[
+    "clientId",
+    "callbackPort",
+    "authServerMetadataUrl",
+    "scopes",
 ];
 
 fn field_timeout(
@@ -662,15 +676,9 @@ fn decode_oauth(
             ));
         }
     };
-    let known = [
-        "clientId",
-        "callbackPort",
-        "authServerMetadataUrl",
-        "scopes",
-    ];
     let extra = oauth
         .iter()
-        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .filter(|(key, _)| !OAUTH_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(Some(Box::new(McpOAuthSettings {

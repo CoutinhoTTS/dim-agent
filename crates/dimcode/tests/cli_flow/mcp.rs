@@ -83,6 +83,8 @@ fn hello(wire: &mut Wire) {
         "mcp.save",
         "mcp.remove",
         "mcp.set_enabled",
+        "mcp.import.preview",
+        "mcp.import.apply",
         "mcp.disconnect",
         "mcp.auth.start",
         "mcp.auth.complete",
@@ -904,6 +906,372 @@ fn mcp_add_refuses_an_id_the_catalog_lists() {
     }
 }
 
+/// A literal value in the imported document. The client sends it to the
+/// owner and never prints it.
+const IMPORT_TOKEN: &str = "sk-import-fixture-never-print";
+
+/// A standard `mcpServers` document whose entries cover every preview status.
+fn import_document() -> String {
+    json!({
+        "mcpServers": {
+            "keeps": {"type": "stdio", "command": "npx", "args": ["server"], "env": {}},
+            "docs": {"type": "stdio", "command": "npx", "args": ["-y", "docs"],
+                     "env": {"DOCS_TOKEN": IMPORT_TOKEN}},
+            "taken": {"type": "http", "url": "https://taken.example.com/mcp"},
+            "broken": {"type": "ws", "url": "wss://broken.example.com"},
+        },
+        "otherTopLevel": true,
+    })
+    .to_string()
+}
+
+/// The owner's preview of [`import_document`] against the user source: an
+/// identical, a changed, a conflict and an invalid entry, plus one unknown
+/// top-level member.
+fn import_preview() -> Value {
+    json!({
+        "revision": "user:1",
+        "entries": [
+            {"id": "keeps", "transport": "stdio", "status": "identical",
+             "changes": [], "unsupported": []},
+            {"id": "docs", "transport": "stdio", "status": "changed",
+             "changes": [{"field": "args", "kind": "array"},
+                         {"field": "enabled", "kind": "boolean"}],
+             "unsupported": [{"field": "x-extra", "effect": "kept-unused"}]},
+            {"id": "taken", "transport": "http", "status": "conflict",
+             "changes": [{"field": "url", "kind": "string"}],
+             "unsupported": []},
+            {"id": "broken", "status": "invalid", "changes": [],
+             "unsupported": [{"field": "auth.audience", "effect": "dropped"}],
+             "error": "broken: type is stdio, http or sse"},
+        ],
+        "unknownTopLevel": ["otherTopLevel"],
+    })
+}
+
+/// The owner's preview against the project source, where `docs` carries
+/// literal fields the workspace file does not record.
+fn import_preview_project() -> Value {
+    json!({
+        "revision": "project:1",
+        "entries": [
+            {"id": "keeps", "transport": "stdio", "status": "identical",
+             "changes": [], "unsupported": []},
+            {"id": "docs", "transport": "stdio", "status": "changed",
+             "changes": [{"field": "args", "kind": "array"},
+                         {"field": "env", "kind": "object"}],
+             "unsupported": []},
+        ],
+        "unknownTopLevel": [],
+    })
+}
+
+/// The rows [`import_preview`] prints, one per entry in the document's order.
+/// `--yes` prints them too, before the applied rows.
+const IMPORT_PREVIEW_ROWS: &str = "\"keeps\"\tidentical\tstdio\t—\t—\t—\n\
+    \"docs\"\tchanged\tstdio\targs:array, enabled:boolean\tx-extra:kept-unused\t—\n\
+    \"taken\"\tconflict\thttp\turl:string\t—\t—\n\
+    \"broken\"\tinvalid\t—\t—\tauth.audience:dropped\tbroken: type is stdio, http or sse\n";
+
+/// The rows [`import_preview_project`] prints.
+const IMPORT_PREVIEW_PROJECT_ROWS: &str = "\"keeps\"\tidentical\tstdio\t—\t—\t—\n\
+    \"docs\"\tchanged\tstdio\targs:array, env:object\t—\t—\n";
+
+/// `mcp import` previews through the owner: one row per entry with its
+/// status, changed and unsupported field names and error, then the unknown
+/// top-level members and the revision. The document's literal value goes to
+/// the owner and never appears in the output.
+#[test]
+fn mcp_import_previews_every_status_without_printing_a_value() {
+    let home = Home::new();
+    let path = home.0.join("mcp.json");
+    let document = import_document();
+    fs::write(&path, &document).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.import.preview");
+        assert_eq!(request["params"]["source"], "user");
+        assert!(request["params"]["cwd"].is_string());
+        assert_eq!(request["params"]["document"], document);
+        wire.reply(&request, import_preview());
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout, IMPORT_PREVIEW_ROWS);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr
+            .contains("Columns: ID, status, transport, changed fields, unsupported fields, error."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Top-level members the import does not carry: otherTopLevel."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("The user source was read at revision user:1."),
+        "{stderr}"
+    );
+    assert!(!stdout.contains(IMPORT_TOKEN), "{stdout}");
+    assert!(!stderr.contains(IMPORT_TOKEN), "{stderr}");
+}
+
+/// `--yes` prints the preview first, then applies the default selection at
+/// the preview's revision: changed and identical entries import, conflict and
+/// invalid entries skip.
+#[test]
+fn mcp_import_yes_applies_the_default_selection() {
+    let home = Home::new();
+    let path = home.0.join("mcp.json");
+    fs::write(&path, import_document()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.import.preview");
+        wire.reply(&request, import_preview());
+        let request = wire.read("mcp.import.apply");
+        assert_eq!(request["params"]["source"], "user");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert_eq!(
+            request["params"]["resolutions"],
+            json!([
+                {"id": "broken", "action": "skip"},
+                {"id": "docs", "action": "import"},
+                {"id": "keeps", "action": "import"},
+                {"id": "taken", "action": "skip"},
+            ])
+        );
+        wire.reply(&request, json!({"revision": "user:2"}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import"])
+        .arg(&path)
+        .arg("--yes")
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        format!(
+            "{IMPORT_PREVIEW_ROWS}\"keeps\"\tunchanged\tkeeps\n\
+             \"docs\"\timported\tdocs\n\
+             \"taken\"\tskipped\t—\n\
+             \"broken\"\tskipped\t—\n"
+        )
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Applying the selection at this revision."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Imported 1, replaced 0, renamed 0, skipped 2, unchanged 1."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Imported and replaced entries start disabled"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("An unchanged entry was already in the source and was not written."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("The source is now at revision user:2."),
+        "{stderr}"
+    );
+}
+
+/// `--replace` replaces the target's entry and `--rename OLD=NEW` writes
+/// under a new id; each resolution carries the action the flag names.
+#[test]
+fn mcp_import_yes_applies_replace_and_rename() {
+    let home = Home::new();
+    let path = home.0.join("mcp.json");
+    fs::write(&path, import_document()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.import.preview");
+        wire.reply(&request, import_preview());
+        let request = wire.read("mcp.import.apply");
+        assert_eq!(
+            request["params"]["resolutions"],
+            json!([
+                {"id": "broken", "action": "skip"},
+                {"id": "docs", "action": "rename", "newId": "docs2"},
+                {"id": "keeps", "action": "import"},
+                {"id": "taken", "action": "replace"},
+            ])
+        );
+        wire.reply(&request, json!({"revision": "user:2"}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import"])
+        .arg(&path)
+        .args(["--yes", "--replace", "taken", "--rename", "docs=docs2"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        format!(
+            "{IMPORT_PREVIEW_ROWS}\"keeps\"\tunchanged\tkeeps\n\
+             \"docs\"\trenamed\tdocs2\n\
+             \"taken\"\treplaced\ttaken\n\
+             \"broken\"\tskipped\t—\n"
+        )
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Imported 0, replaced 1, renamed 1, skipped 1, unchanged 1."),
+        "{stderr}"
+    );
+}
+
+/// A project import takes no confirmation: the preview says the workspace
+/// file receives the public skeleton and the withheld values go to the
+/// user-scope record, and the apply sends the plain resolutions.
+#[test]
+fn mcp_import_project_sends_withheld_values_to_the_user_record() {
+    let home = Home::new();
+    let path = home.0.join("mcp.json");
+    fs::write(&path, import_document()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.import.preview");
+        assert_eq!(request["params"]["source"], "project");
+        wire.reply(&request, import_preview_project());
+        let request = wire.read("mcp.import.apply");
+        assert_eq!(request["params"]["expectedVersion"], "project:1");
+        assert_eq!(
+            request["params"]["resolutions"],
+            json!([
+                {"id": "docs", "action": "import"},
+                {"id": "keeps", "action": "import"},
+            ])
+        );
+        wire.reply(&request, json!({"revision": "project:2"}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import"])
+        .arg(&path)
+        .args(["--source", "project", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        format!(
+            "{IMPORT_PREVIEW_PROJECT_ROWS}\"keeps\"\tunchanged\tkeeps\n\
+             \"docs\"\timported\tdocs\n"
+        )
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "Its arguments, environment and header values, bearer token, a URL with userinfo, path, query or fragment, and unknown members go to your user-scope mcp-secrets record, never to the workspace file."
+        ),
+        "{stderr}"
+    );
+}
+
+/// A source that changed since the preview refuses the apply; the preview it
+/// printed stays, no entry is written and the command says to preview again.
+#[test]
+fn mcp_import_reports_a_stale_revision() {
+    let home = Home::new();
+    let path = home.0.join("mcp.json");
+    fs::write(&path, import_document()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.import.preview");
+        wire.reply(&request, import_preview());
+        let request = wire.read("mcp.import.apply");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"settings changed; read the current version before updating",
+            "data":{"appError":"mcp_settings_conflict"}}}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import"])
+        .arg(&path)
+        .arg("--yes")
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "The MCP source changed since the preview; no entry was imported, and an entry it would have replaced may now be disabled. Preview again."
+        ),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        IMPORT_PREVIEW_ROWS
+    );
+}
+
+/// A daemon that does not serve the import pair is refused before the file
+/// is read.
+#[test]
+fn mcp_import_refuses_a_daemon_without_the_import_methods() {
+    let home = Home::new();
+    let path = home.0.join("mcp.json");
+    fs::write(&path, import_document()).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import"])
+        .arg(&path)
+        .arg("--yes")
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot import MCP servers."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// `mcp edit` opens the patch the configuration read seeds, without a
 /// stored argument or value, and writes it at that revision.
 #[test]
@@ -1574,6 +1942,7 @@ fn mcp_help_names_every_management_verb() {
     let help = String::from_utf8_lossy(&output.stdout);
     for verb in [
         "mcp add PATH",
+        "mcp import PATH",
         "mcp edit ID",
         "mcp set ID PATH",
         "mcp remove ID",

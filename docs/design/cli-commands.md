@@ -1164,6 +1164,41 @@ source lists is that entry, and an id more than one source lists is refused, nam
 the flag. The client never picks one. The panel uses the same resolver with the source of the row
 the action came from, and `mcp list` already prints the source each id is in.
 
+Import takes a standard `mcpServers` document — the shape other MCP clients write — instead of
+the create document. `dimcode mcp import PATH [--source user|project] [--cwd DIR]` reads the file,
+or stdin for `-`, and sends its text to `mcp.import.preview`; the client decodes, compares and
+validates nothing itself. The preview prints one row per entry — id, status (`identical`,
+`changed`, `conflict` or `invalid`), transport, the changed field names with the JSON kind each
+holds, the members the decoder keeps unused or drops, and the entry's error — then how many field
+names the owner's cap left out of those lists, the top-level members the import does not carry
+and the revision the source was read at. No value is printed: a changed entry is named by field,
+not content. A project preview adds a note that the workspace file receives each entry's public
+skeleton, while arguments, environment and header values, the bearer token, a URL with userinfo,
+path, query or fragment, hidden OAuth fields and unknown members go to the user-scope
+`mcp-secrets` record (the split a move into project applies). A document that is not an
+`mcpServers` object, exceeds 8 MiB or 1,000 entries, or names an id whose entry does not decode is
+reported with the owner's message; the preview still exits 0, since it answered what the import
+would do.
+
+`--yes` prints the same preview rows and notes first, so the user sees the fields that change
+before anything is written, then applies the default selection at the preview's revision:
+`changed` and `identical` entries import, `conflict` and `invalid` entries skip. `--replace ID`
+replaces the target's entry with the document's, `--rename OLD=NEW` writes the entry under a new
+id (the target's `OLD` entry stays), and `--only ID` restricts the default selection to the named
+ids; each flag may repeat. `--replace` or `--rename` selects the id it names whether or not
+`--only` lists it, and a `conflict` or `invalid` entry only comes in through `--replace`,
+`--rename`, or an explicit action in the preview. The apply is one `settings.update` at one
+revision: imported user entries are written with `enabled: false`, imported project entries carry
+no `enabled` member and have every enablement record withdrawn before the write, so imported and
+replaced entries start disabled. A project apply then writes the withheld records in one
+`mcp-secrets` update, replacing or removing each destination's record; a record write that fails
+after the source commit reports `mcp_import_partial` and exits 1, and replacing the entries again
+rewrites both. A source that changed since the preview refuses the whole import
+(`mcp_settings_conflict`, exit 1), as do `mcp_import_conflict` and `mcp_invalid_config`; a
+successful apply then prints each entry's action and destination, the counts, and the new
+revision, and exits 0. The `/mcp` line commands do not include import: that dispatcher is its own
+list of verbs, not the one-shot parser.
+
 The two remote forms replace `configuration` with
 `{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}` or the
 same with `"type": "sse"`, and add `"auth": {"type": "bearer", "token": "…"}` for a static
@@ -1334,6 +1369,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/workflow:save` | Open the Workflow panel in its create editor. |
 | `dimcode mcp list` | List the effective catalog over `mcp.catalog` ([The MCP area](#the-mcp-area)): each entry's id, source, transport, enablement and authorization, then each source application's errors. |
 | `dimcode mcp add PATH` | Create an entry from the panel's create document, `-` for stdin, over `mcp.save` with the source revision `mcp.catalog` reported; an id the catalog already lists is refused. |
+| `dimcode mcp import PATH [--source user\|project] [--yes]` | Preview a standard `mcpServers` document over `mcp.import.preview`, one row per entry with its status, changed and unsupported field names and error, then the count of field names the cap left out, the unknown top-level members and the revision; `--yes` prints that preview and then applies the default selection (or `--replace ID`, `--rename OLD=NEW`, `--only ID`) at that revision over `mcp.import.apply`, writing imported and replaced entries disabled. A project apply writes the public skeleton to `.mcp.json` and the withheld values to the user-scope `mcp-secrets` record. |
 | `dimcode mcp edit ID [--source SOURCE]` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
 | `dimcode mcp set ID [--source SOURCE] PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
 | `dimcode mcp remove ID [--source SOURCE]` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |

@@ -1,6 +1,7 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
 mod auth;
 pub mod config;
+mod import;
 pub(crate) mod management;
 mod publication;
 #[cfg(feature = "testing")]
@@ -55,6 +56,10 @@ pub enum McpError {
     CredentialsAreUserScoped,
     #[error("MCP withheld record has no project entry")]
     StaleSecretRecord,
+    #[error("MCP import of {id}: {reason}")]
+    ImportConflict { id: String, reason: String },
+    #[error("MCP import is partial")]
+    ImportPartial,
     #[error("MCP server is disabled")]
     Disabled,
     #[error("MCP server Plugin could not be loaded")]
@@ -1078,6 +1083,46 @@ impl McpService {
         Ok(written.revision)
     }
 
+    /// Previews importing one `mcpServers` document into one source. The
+    /// source is read with its revision; nothing is written or executed.
+    pub(crate) async fn preview_import(
+        &self,
+        source: SettingsScope,
+        document: McpSettings,
+        cancel: &CancellationToken,
+    ) -> Result<import::ImportPreview> {
+        self.run(cancel, move |settings, cancel| async move {
+            let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
+            let overlays = overlays(&settings, source, &cancel).await?;
+            Ok(import::preview(
+                &document,
+                &snapshot.document,
+                matches!(source, SettingsScope::Project(_)),
+                &overlays,
+                &snapshot.revision,
+            ))
+        })
+        .await
+    }
+
+    /// Imports the entries a selection accepts from one `mcpServers`
+    /// document. The source is read once at `expected`; every accepted entry
+    /// is written into that snapshot and committed with one Settings update,
+    /// so one revision change covers the whole import.
+    pub(crate) async fn import_entries(
+        &self,
+        source: SettingsScope,
+        expected: String,
+        document: McpSettings,
+        resolutions: BTreeMap<String, import::ImportResolution>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        self.run(cancel, move |settings, cancel| async move {
+            write_import(&settings, source, expected, document, resolutions, &cancel).await
+        })
+        .await
+    }
+
     /// Move one entry between the user and project sources. The destination is
     /// written first and the source removed last; a failure after the first
     /// destination write is reported as `MovePartial`, not success.
@@ -1384,6 +1429,140 @@ async fn write(
         captured,
         entry_absent: !present,
     })
+}
+
+/// Writes every entry a resolution accepts with one document revision check
+/// and one Settings update. A request that accepts no entry writes nothing,
+/// so re-importing unchanged entries leaves the source revision as it was.
+///
+/// A project import writes what a move into project writes (D25): the public
+/// skeleton enters `.mcp.json` and the withheld part the workspace's
+/// user-scope record. The enablement records are withdrawn first, so an
+/// imported configuration never runs enabled; a compare-and-set that then
+/// fails writes no entry but leaves an entry the import would have replaced
+/// disabled, and `mcp.set_enabled` enables it again. The source update
+/// commits next and the withheld records last; a record failure after the
+/// source commit answers `ImportPartial`, and the source entries stay as
+/// written.
+async fn write_import(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    expected: String,
+    document: McpSettings,
+    resolutions: BTreeMap<String, import::ImportResolution>,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let snapshot = settings.read::<McpSettings>(source, cancel).await?;
+    if snapshot.revision != expected {
+        return Err(SettingsError::Conflict.into());
+    }
+    let project = matches!(source, SettingsScope::Project(_));
+    let overlays = overlays(settings, source, cancel).await?;
+    let changes = import::plan(
+        &document,
+        &snapshot.document,
+        project,
+        &overlays,
+        &resolutions,
+    )?;
+    if changes.is_empty() {
+        return Ok(snapshot.revision);
+    }
+    let mut target = snapshot.document;
+    if !project {
+        for (id, configuration) in changes {
+            target.insert(id, configuration);
+        }
+        return Ok(settings
+            .update(source, &expected, target, cancel)
+            .await?
+            .revision);
+    }
+    let workspace = config::workspace(settings, source)?;
+    // Every id the import writes, an import or a replace, has its
+    // `mcp-projects` record withdrawn before the source write, so an imported
+    // configuration never runs enabled and a replaced entry cannot run while
+    // it reads its new skeleton with its old record (D24, D25). Withdrawing
+    // first also makes a failed compare-and-set fail closed: it writes no
+    // entry, but an entry it would have replaced stays disabled, and
+    // `mcp.set_enabled` enables it again. A failed withdrawal answers before
+    // the source write, so `.mcp.json` is unchanged.
+    for id in changes.keys() {
+        set_project_enabled(settings, source, id, false, cancel).await?;
+    }
+    let mut records = Vec::with_capacity(changes.len());
+    for (id, configuration) in changes {
+        let (skeleton, record) = config::split_entry(&configuration);
+        target.insert(id.clone(), skeleton);
+        records.push((id, record));
+    }
+    let revision = settings
+        .update(source, &expected, target, cancel)
+        .await?
+        .revision;
+    write_import_secrets(settings, &workspace, &records, cancel)
+        .await
+        .map_err(|_| McpError::ImportPartial)?;
+    Ok(revision)
+}
+
+/// Writes the withheld records of one import in one update, retrying a lost
+/// race: records of different ids commute, as enablement toggles do. An entry
+/// with no withheld part removes the destination's record, so the pair the
+/// import leaves is exactly the configuration the document carried.
+async fn write_import_secrets(
+    settings: &Arc<SettingsService>,
+    workspace: &str,
+    records: &[(String, Option<McpSecretEntry>)],
+    cancel: &CancellationToken,
+) -> Result<()> {
+    loop {
+        let snapshot = settings
+            .read::<McpSecrets>(SettingsScope::User, cancel)
+            .await?;
+        let mut document = snapshot.document;
+        for (id, record) in records {
+            match record {
+                Some(record) => {
+                    let mut record = record.clone();
+                    record.generation = uuid::Uuid::new_v4().to_string();
+                    document.set(workspace, id, record);
+                }
+                None => {
+                    document.remove(workspace, id);
+                }
+            }
+        }
+        match settings
+            .update(SettingsScope::User, &snapshot.revision, document, cancel)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(SettingsError::Conflict) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// The `mcp-secrets` records of one project source's workspace, by id. A user
+/// source has no record.
+async fn overlays(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    cancel: &CancellationToken,
+) -> Result<BTreeMap<String, McpSecretEntry>> {
+    let SettingsScope::Project(_) = source else {
+        return Ok(BTreeMap::new());
+    };
+    let workspace = config::workspace(settings, source)?;
+    Ok(settings
+        .read::<McpSecrets>(SettingsScope::User, cancel)
+        .await?
+        .document
+        .entries
+        .get(&workspace)
+        .cloned()
+        .unwrap_or_default())
 }
 
 fn partial(_error: McpError, into_project: bool) -> McpError {
