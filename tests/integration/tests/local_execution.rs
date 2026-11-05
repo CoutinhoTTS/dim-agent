@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     ffi::OsString,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -1656,6 +1657,105 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
         .unwrap();
     assert_eq!(settled.status, ExecStatus::Failed);
     restored.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// The page read's cursor rule on a running task, without a product Session:
+/// a short page that ends inside a character being written serves the
+/// complete characters before it, the next offset is always `cursor + bytes`,
+/// a page that fills its budget names that same offset, and `bytes == 0`
+/// ends the file walk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn output_page_advances_by_served_bytes_past_a_partial_character() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({
+                    "command": "while [ ! -f go ]; do sleep 0.01; done; printf 'alpha\\n'; sleep 100",
+                    "runInBackground": true, "timeoutMs": -1,
+                }),
+            )],
+        )
+        .await;
+    let events = until(&session, "exec/started", |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_)))
+    })
+    .await;
+    let (task_id, output_path) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ExecStarted(data) => Some((data.task_id.clone(), data.output_path.clone())),
+            _ => None,
+        })
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let background = session.service::<BackgroundExec>("main").unwrap();
+    std::fs::write(harness.cwd.join("go"), b"go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = background.output_page(&task_id, 0, 64).await.unwrap();
+            if page.text == "alpha\n" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A read can meet the file ending inside a character in progress: the
+    // page serves the complete characters before it with no `nextCursor`.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&output_path)
+        .unwrap();
+    file.write_all(&[0xc3]).unwrap();
+    drop(file);
+    let partial = background.output_page(&task_id, 0, 64).await.unwrap();
+    assert_eq!(partial.text, "alpha\n");
+    assert_eq!(partial.bytes, 6);
+    assert_eq!(partial.next_cursor, None);
+    let full = background.output_page(&task_id, 0, 4).await.unwrap();
+    assert_eq!(full.text, "alph");
+    assert_eq!(full.bytes, 4);
+    assert_eq!(full.next_cursor, Some(4));
+    // The rest of `é` arrives; the page that fills the budget while the cut
+    // splits the character names `cursor + bytes`, not the read length and
+    // not the budget.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&output_path)
+        .unwrap();
+    file.write_all(&[0xa9]).unwrap();
+    drop(file);
+    let split = background.output_page(&task_id, 0, 7).await.unwrap();
+    assert_eq!(split.text, "alpha\n");
+    assert_eq!(split.bytes, 6);
+    assert_eq!(split.next_cursor, Some(split.bytes));
+    let completed = background
+        .output_page(&task_id, split.bytes, 64)
+        .await
+        .unwrap();
+    assert_eq!(completed.text, "é");
+    assert_eq!(completed.bytes, 2);
+    assert_eq!(completed.next_cursor, None);
+    let end = background
+        .output_page(&task_id, split.bytes + completed.bytes, 64)
+        .await
+        .unwrap();
+    assert_eq!(end.text, "");
+    assert_eq!(end.bytes, 0);
+    assert_eq!(end.next_cursor, None);
+    assert_eq!(
+        background.stop(&task_id).await.unwrap().status,
+        ExecStatus::Cancelled
+    );
+    session.close().await.unwrap();
     harness.shutdown().await;
 }
 
