@@ -348,7 +348,7 @@ ToolRegistry 即提供它（[Session 边界 A.5](../contracts/session-boundary.m
 
 Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的折叠结果：
 
-**后台前置条件。** 若 `open_tasks` 非空，该 turn/end 不做任何决策——既不再续跑也不暂停——并保持未决。后台任务的非 cancelled `exec/ended` 之后会跟着它的唤醒输入（BackgroundExec 的 `<dim-notification>`），该输入驱动下一轮，其结束照常决策。`cancelled` 的 `exec/ended` 不唤醒；当它关闭最后一个开放任务且分支空闲、没有待处理驱动输入时，Goal 此时执行被推迟的 turn/end 决策。该路径只读取事实中的 cancelled 状态，因此不会与唤醒竞争；决定轮次的 `decided` 标记会去重。折叠按 `task_id` 在 `exec/started` 与 `exec/ended` 上跟踪开放任务，重建会恢复该集合。
+**后台前置条件。** 若 `open_tasks` 非空，该 turn/end 不做任何决策——既不再续跑也不暂停——并保持未决。后台任务的非 cancelled `exec/ended` 之后会跟着它的唤醒输入（BackgroundExec 的 `<dim-notification>`），该输入驱动下一轮，其结束照常决策。`cancelled` 的 `exec/ended` 不唤醒；当它关闭最后一个开放任务且分支空闲、没有待处理驱动输入时，Goal 此时执行被推迟的 turn/end 决策。该路径只读取事实中的 cancelled 状态，因此不会与唤醒竞争；决定轮次的 `decided` 标记会去重。折叠按 `task_id` 在 `exec/started` 与 `exec/ended` 上跟踪开放任务，重建会恢复该集合。若等待推迟的是一份 `continue` 结论（Pursuit §5），同一结算路径会把该结论交给实时消费它的同一个处理器：折叠按评审序号保留它，直到该评审的续跑或暂停回答它，或被更新的 turn end 或操作者输入取代。结算路径从折叠中重新推导该结论，因此重载后仍然保留。
 
 | # | 条件 | 若为假 |
 | --- | --- | --- |
@@ -491,7 +491,7 @@ Goal 消费 `branch/start`、`session/forked`、`branch/create`、`branch/create
 | 停滞期间重载 | 续跑 < 重载 < 下一个 `turn/end` | 续跑的 `idle` 重建停滞数；未决的结束决策一次 | Goal |
 | `turn/end` 时有后台任务开放 | `exec/started` < `turn/end` N < `exec/ended` | N 不决策；任务的结束与唤醒驱动下一轮 | Goal |
 | 非 cancelled 的后台结束 | `exec/ended` < 唤醒输入 | 唤醒输入驱动一轮，其结束照常决策，N 被取代 | BackgroundExec；Goal |
-| cancelled 的后台结束关闭最后一个开放任务且分支空闲 | `exec/ended {cancelled}` < 没有驱动输入 | 此时执行被推迟的 turn/end 决策，且只执行一次 | Goal |
+| cancelled 的后台结束关闭最后一个开放任务且分支空闲 | `exec/ended {cancelled}` < 没有驱动输入 | 此时执行被推迟的 turn/end 决策或 `continue` 结论，且只执行一次 | Goal |
 | 带开放任务重载 | `exec/started` < 重载 < `exec/ended` | 重建恢复开放集合；在 cancelled 结束或唤醒回合结束之前，该结束不决策 | Goal |
 | 达到显式上限 | count = limit | 暂停（`limit`） | Goal |
 | 没有设置上限 | — | 目标 active 期间每个完成的回合都续跑；只有完成、用户操作或停滞规则使其停止（A4、C7） | Goal |
@@ -531,7 +531,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 11. 设置 → `completed` → `resume`：目标重新打开（`active`，计数重新开始），resume 输入驱动一轮，其正常结束写入续跑；resume 之后压缩，上下文中最新的 `goal:status` 块是 resume 块，目标为 `active`。
 12. 设置 → `completed` → `blocked`：当前状态为 `blocked` 及第二个 summary；每次状态变更之后压缩，上下文中最新的 `goal:status` 块就是当前状态。
 13. 没有默认上限：未设置 `maxContinuations` 的目标会越过任何固定计数继续；连续三个由续跑驱动且没有 `step/tool-call` 的回合会使其暂停（`no_progress`），期间的工具调用或操作者输入会重置停滞数，续跑的 `idle` 在重载后重建它。`continue` 结论由评审者判断：它的续跑遵循 C6 与后台等待，不遵循 C7。
-14. `turn/end` 时有后台任务开放会推迟决策；非 cancelled 结束的唤醒驱动一轮并由其结束决策；cancelled 结束关闭最后一个开放任务时执行被推迟的决策，且只执行一次，重载后亦然。其他任务的 `exec/ended`，或已决策结束的 `exec/ended`，不写入。
+14. `turn/end` 时有后台任务开放会推迟决策；非 cancelled 结束的唤醒驱动一轮并由其结束决策；cancelled 结束关闭最后一个开放任务时执行被推迟的决策或 `continue` 结论，且只执行一次，重载后亦然。其他任务的 `exec/ended`，或已决策结束的 `exec/ended`，不写入。
 
 ## 附录 E. 假设
 

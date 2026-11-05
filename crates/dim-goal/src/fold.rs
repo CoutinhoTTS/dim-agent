@@ -241,6 +241,12 @@ pub struct Fold {
     pub evaluations: BTreeMap<u64, String>,
     /// The first conclusion input from each evaluation's own evaluator.
     pub conclusions: BTreeMap<u64, u64>,
+    /// The `continue` conclusions no input for their evaluation has answered
+    /// yet: evaluation → (input sequence, conclusion). A continuation or pause
+    /// for the evaluation, a newer turn end or an operator input drops the
+    /// entry. Settling a deferred turn end re-derives it here, so a reload
+    /// keeps it (Pursuit §5).
+    pending_conclusions: BTreeMap<u64, (u64, Conclusion)>,
     /// Sequence of the latest live keyed goal block.
     pub last_block: u64,
     /// The lines this branch opened that ended.
@@ -349,6 +355,10 @@ impl Fold {
                     continuation_driven: self.turn_continuation_driven,
                 });
                 self.turn_ends += 1;
+                // A newer turn end supersedes a conclusion still waiting on a
+                // background task: the newer end decides from its own state.
+                self.pending_conclusions
+                    .retain(|evaluation, _| *evaluation >= sequence);
             }
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn => {
                 self.interrupts.push(sequence);
@@ -374,9 +384,18 @@ impl Fold {
         let first = first_text.and_then(text::marker);
         if data.user.is_some() && !first_text.is_some_and(|text| text.starts_with("<dim-")) {
             self.last_operator = sequence;
+            // An operator input supersedes a conclusion still waiting on a
+            // background task: the operator's input decides what comes next.
+            self.pending_conclusions
+                .retain(|evaluation, _| *evaluation > sequence);
         }
         if let Some(after) = first.as_ref().and_then(|attrs| attrs.get("after")) {
             self.decided.insert(after.clone());
+            // A continuation or pause for the evaluation answers its
+            // conclusion; the deferred one is no longer pending.
+            if let Some(evaluation) = sequence_of(after) {
+                self.pending_conclusions.remove(&evaluation);
+            }
         }
         if first
             .as_ref()
@@ -400,6 +419,10 @@ impl Fold {
                 && !self.conclusions.contains_key(&evaluation)
             {
                 self.conclusions.insert(evaluation, sequence);
+                if conclusion.result == ConclusionKind::Continue {
+                    self.pending_conclusions
+                        .insert(evaluation, (sequence, conclusion));
+                }
             }
         }
         for raw in &data.blocks {
@@ -490,6 +513,14 @@ impl Fold {
     /// Whether a background task this branch started is still open (A.4).
     pub fn open_tasks(&self) -> bool {
         !self.open_tasks.is_empty()
+    }
+    /// The `continue` conclusion still waiting for the branch to settle, with
+    /// its input sequence. It is re-derived from the fold, so a reload keeps
+    /// it (Pursuit §5).
+    pub fn pending_conclusion(&self) -> Option<(u64, &Conclusion)> {
+        let (evaluation, (sequence, conclusion)) = self.pending_conclusions.last_key_value()?;
+        (self.conclusions.get(evaluation) == Some(sequence) && self.is_current(*evaluation))
+            .then_some((*sequence, conclusion))
     }
     pub fn turn_open(&self) -> bool {
         self.turn_start > self.turn_end.as_ref().map_or(0, |end| end.sequence)

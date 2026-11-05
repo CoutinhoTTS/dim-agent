@@ -20,7 +20,7 @@ use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Deserializer};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     num::NonZeroU64,
     sync::{Arc, Mutex},
 };
@@ -202,6 +202,17 @@ struct Role {
     evaluation: u64,
 }
 
+/// What a request for a key whose work is already in flight asks for when
+/// that work finishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Retry {
+    /// A turn-end request: take the turn-end decision again (A.4).
+    TurnEnd,
+    /// A settle request: take a deferred conclusion or the turn-end decision
+    /// again (Pursuit §5).
+    Settle,
+}
+
 #[derive(Default)]
 struct State {
     fold: Fold,
@@ -210,9 +221,8 @@ struct State {
     role: Option<Role>,
     /// The decision keys whose work is running: each runs once at a time.
     in_flight: HashSet<String>,
-    /// The keys asked for while their work was running: a turn-end decision
-    /// runs again when that work finishes.
-    retry: HashSet<String>,
+    /// What a key asked for while its work was running waits for.
+    retry: HashMap<String, Retry>,
 }
 
 struct Owner {
@@ -245,8 +255,9 @@ impl Owner {
     }
 
     /// Runs `work` once under `key` while the branch is active, and records a
-    /// failed write without letting it stop the branch.
-    fn task<F>(self: &Arc<Self>, key: String, work: F)
+    /// failed write without letting it stop the branch. A request that arrives
+    /// while the work runs is answered once more when it finishes, as `retry`.
+    fn task<F>(self: &Arc<Self>, key: String, retry: Option<Retry>, work: F)
     where
         F: FnOnce(Arc<Self>) -> BoxFuture<'static, Result<(), AgentError>> + Send + 'static,
     {
@@ -256,7 +267,9 @@ impl Owner {
         {
             let mut state = self.state.lock().unwrap();
             if !state.in_flight.insert(key.clone()) {
-                state.retry.insert(key);
+                if let Some(retry) = retry {
+                    state.retry.insert(key, retry);
+                }
                 return;
             }
         }
@@ -274,11 +287,12 @@ impl Owner {
                 state.in_flight.remove(&key);
                 state.retry.remove(&key)
             };
-            // A turn-end request that arrived while its decision ran gets that
-            // decision again over the fold as it stands now; C4 and `decided`
-            // deduplicate it.
-            if retry && key.starts_with("turn:") {
-                owner.decide_end();
+            // The second pass reads the fold as it stands now; C4, `decided`
+            // and the conclusion's own checks deduplicate it.
+            match retry {
+                Some(Retry::TurnEnd) => owner.decide_end(),
+                Some(Retry::Settle) => owner.settle_deferred(),
+                None => {}
             }
         });
     }
@@ -376,33 +390,43 @@ impl Owner {
                 if let Some(conclusion) = data.blocks.first().and_then(|block| match block {
                     InputBlock::Raw { text, .. } => fold::conclusion_of(text),
                 }) {
-                    self.concluded(sequence, conclusion);
+                    self.conclude(sequence, conclusion);
                 }
                 self.settle();
             }
             EventKind::InputDeleted(_) => self.decide_end(),
             // A cancelled background end does not wake (BackgroundExec's
             // `wakes`); when it closes the last open task of an idle branch,
-            // the turn end it deferred decides now. Other statuses are
-            // followed by their wake input, whose turn end decides.
+            // the deferred conclusion or turn end decides now. Other statuses
+            // are followed by their wake input, whose turn end decides.
             EventKind::ExecEnded(data) if data.status == ExecStatus::Cancelled => {
-                self.background_settled()
+                self.settle_deferred()
             }
             _ => {}
         }
     }
 
-    /// Takes the turn-end decision a cancelled background end released, once
-    /// the branch is idle and no task is open (A.4). The cancelled status is
-    /// read from the fact, so this cannot race a `completed` end's wake.
-    fn background_settled(self: &Arc<Self>) {
-        let decide = {
+    /// Takes what a cancelled background end released, once the branch is idle
+    /// and no task is open (A.4, Pursuit §5): a conclusion the wait deferred,
+    /// or the turn-end decision. The cancelled status is read from the fact,
+    /// so this cannot race a `completed` end's wake.
+    fn settle_deferred(self: &Arc<Self>) {
+        let pending = {
             let state = self.state.lock().unwrap();
             let fold = &state.fold;
-            fold.running() && !fold.open_tasks() && !fold.turn_open() && !fold.pending_driving()
+            if !(fold.running()
+                && !fold.open_tasks()
+                && !fold.turn_open()
+                && !fold.pending_driving())
+            {
+                return;
+            }
+            fold.pending_conclusion()
+                .map(|(sequence, conclusion)| (sequence, conclusion.clone()))
         };
-        if decide {
-            self.decide_end();
+        match pending {
+            Some((sequence, conclusion)) => self.conclude(sequence, conclusion),
+            None => self.decide_end(),
         }
     }
 
@@ -429,7 +453,7 @@ impl Owner {
             }
             return;
         }
-        self.task(format!("start:{at}"), move |owner| {
+        self.task(format!("start:{at}"), None, move |owner| {
             Box::pin(async move {
                 if owner.inherited_live().await? {
                     owner.started_clear(at);
@@ -440,7 +464,7 @@ impl Owner {
     }
 
     fn started_clear(self: &Arc<Self>, at: u64) {
-        self.task(format!("clear:{at}"), move |owner| {
+        self.task(format!("clear:{at}"), None, move |owner| {
             Box::pin(async move {
                 let write = {
                     let state = owner.state.lock().unwrap();
@@ -462,7 +486,7 @@ impl Owner {
     }
 
     fn interrupted(self: &Arc<Self>, at: u64) {
-        self.task(format!("interrupt:{at}"), move |owner| {
+        self.task(format!("interrupt:{at}"), None, move |owner| {
             Box::pin(async move {
                 let decision = {
                     let state = owner.state.lock().unwrap();
@@ -647,48 +671,57 @@ impl Owner {
         if !decide {
             return;
         }
-        self.task(format!("turn:{sequence}"), move |owner| {
-            Box::pin(async move {
-                owner.resolved().await;
-                let skip = {
-                    let state = owner.state.lock().unwrap();
-                    state.role.is_some()
-                        || state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(sequence)
-                };
-                if owner.stopped() || skip {
-                    return Ok(());
-                }
-                owner.do_turn_end(sequence).await
-            })
-        });
+        self.task(
+            format!("turn:{sequence}"),
+            Some(Retry::TurnEnd),
+            move |owner| {
+                Box::pin(async move {
+                    owner.resolved().await;
+                    let skip = {
+                        let state = owner.state.lock().unwrap();
+                        state.role.is_some()
+                            || state.fold.turn_end.as_ref().map(|end| end.sequence)
+                                != Some(sequence)
+                    };
+                    if owner.stopped() || skip {
+                        return Ok(());
+                    }
+                    owner.do_turn_end(sequence).await
+                })
+            },
+        );
     }
 
     /// The decision a live `turn/end` at `sequence` takes: the evaluator
     /// role's report, or the branch's own turn-end decision.
     fn turn_decision(self: &Arc<Self>, sequence: u64, turn_start: u64, end: TurnEndData) {
-        self.task(format!("turn:{sequence}"), move |owner| {
-            Box::pin(async move {
-                owner.resolved().await;
-                if owner.stopped() {
-                    return Ok(());
-                }
-                let (role, decide) = {
-                    let state = owner.state.lock().unwrap();
-                    (
-                        state.role.clone(),
-                        state.fold.running() && !state.fold.is_decided(sequence),
-                    )
-                };
-                if role.is_some() {
-                    return owner.evaluated(sequence, turn_start, &end).await;
-                }
-                if decide {
-                    owner.do_turn_end(sequence).await
-                } else {
-                    Ok(())
-                }
-            })
-        });
+        self.task(
+            format!("turn:{sequence}"),
+            Some(Retry::TurnEnd),
+            move |owner| {
+                Box::pin(async move {
+                    owner.resolved().await;
+                    if owner.stopped() {
+                        return Ok(());
+                    }
+                    let (role, decide) = {
+                        let state = owner.state.lock().unwrap();
+                        (
+                            state.role.clone(),
+                            state.fold.running() && !state.fold.is_decided(sequence),
+                        )
+                    };
+                    if role.is_some() {
+                        return owner.evaluated(sequence, turn_start, &end).await;
+                    }
+                    if decide {
+                        owner.do_turn_end(sequence).await
+                    } else {
+                        Ok(())
+                    }
+                })
+            },
+        );
     }
 
     /// The evaluator line's report for the turn that ended at `sequence`
@@ -814,7 +847,7 @@ impl Owner {
     }
 
     fn evaluation_failed(self: &Arc<Self>, evaluation: u64) {
-        self.task(format!("failed:{evaluation}"), move |owner| {
+        self.task(format!("failed:{evaluation}"), None, move |owner| {
             Box::pin(async move {
                 let current = owner.state.lock().unwrap().fold.is_current(evaluation);
                 if !current {
@@ -833,103 +866,107 @@ impl Owner {
     }
 
     /// The conclusion the evaluator wrote decides the evaluation it names
-    /// (Pursuit §4.1).
-    fn concluded(self: &Arc<Self>, sequence: u64, conclusion: Conclusion) {
-        self.task(format!("conclusion:{sequence}"), move |owner| {
-            Box::pin(async move {
-                let action = {
-                    let state = owner.state.lock().unwrap();
-                    fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                };
-                let Some(action) = action else {
+    /// (Pursuit §4.1). A conclusion the background wait deferred is taken
+    /// again through here when the branch settles (Pursuit §5).
+    fn conclude(self: &Arc<Self>, sequence: u64, conclusion: Conclusion) {
+        self.task(
+            format!("conclusion:{sequence}"),
+            Some(Retry::Settle),
+            move |owner| Box::pin(async move { owner.run_conclusion(sequence, conclusion).await }),
+        );
+    }
+
+    async fn run_conclusion(
+        self: &Arc<Self>,
+        sequence: u64,
+        conclusion: Conclusion,
+    ) -> Result<(), AgentError> {
+        let action = {
+            let state = self.state.lock().unwrap();
+            fold::decide_conclusion(&state.fold, sequence, &conclusion)
+        };
+        let Some(action) = action else {
+            return Ok(());
+        };
+        let evaluation = conclusion.evaluation;
+        let named = evaluation.to_string();
+        match action {
+            ConclusionAction::Failed => {
+                self.tree
+                    .input(
+                        self.branch_id.clone(),
+                        text::automatic_pause(&self.branch_id, "evaluation_failed", evaluation),
+                    )
+                    .await?;
+            }
+            ConclusionAction::Completed(text) => {
+                self.tree
+                    .input(
+                        self.branch_id.clone(),
+                        text::evaluated(&self.branch_id, "completed", &named, &text),
+                    )
+                    .await?;
+            }
+            ConclusionAction::Blocked(text) => {
+                self.tree
+                    .input(
+                        self.branch_id.clone(),
+                        text::evaluated(&self.branch_id, "blocked", &named, &text),
+                    )
+                    .await?;
+            }
+            ConclusionAction::Continue => {
+                let Ok(limit) = self.limit().await else {
                     return Ok(());
                 };
-                let evaluation = conclusion.evaluation;
-                let named = evaluation.to_string();
-                match action {
-                    ConclusionAction::Failed => {
-                        owner
-                            .tree
-                            .input(
-                                owner.branch_id.clone(),
-                                text::automatic_pause(
-                                    &owner.branch_id,
-                                    "evaluation_failed",
-                                    evaluation,
-                                ),
-                            )
-                            .await?;
-                    }
-                    ConclusionAction::Completed(text) => {
-                        owner
-                            .tree
-                            .input(
-                                owner.branch_id.clone(),
-                                text::evaluated(&owner.branch_id, "completed", &named, &text),
-                            )
-                            .await?;
-                    }
-                    ConclusionAction::Blocked(text) => {
-                        owner
-                            .tree
-                            .input(
-                                owner.branch_id.clone(),
-                                text::evaluated(&owner.branch_id, "blocked", &named, &text),
-                            )
-                            .await?;
-                    }
-                    ConclusionAction::Continue => {
-                        let Ok(limit) = owner.limit().await else {
-                            return Ok(());
-                        };
-                        if owner.stopped() {
-                            return Ok(());
-                        }
-                        let end = {
-                            let state = owner.state.lock().unwrap();
-                            if fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                                != Some(ConclusionAction::Continue)
-                            {
-                                return Ok(());
-                            }
-                            state.fold.turn_end.clone()
-                        };
-                        let Some(end) = end else {
-                            return Ok(());
-                        };
-                        let decision = {
-                            let state = owner.state.lock().unwrap();
-                            if fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                                != Some(ConclusionAction::Continue)
-                                || state.fold.turn_end.as_ref().map(|end| end.sequence)
-                                    != Some(end.sequence)
-                            {
-                                return Ok(());
-                            }
-                            fold::decide_evaluated_continuation(&state.fold, limit)
-                        };
-                        let Some(decision) = decision else {
-                            return Ok(());
-                        };
-                        let input = match decision {
-                            Decision::Continuation { count, idle } => text::evaluated_continuation(
-                                &owner.branch_id,
-                                count,
-                                limit,
-                                idle,
-                                evaluation,
-                                &named,
-                            ),
-                            Decision::Pause { reason } => {
-                                text::automatic_pause(&owner.branch_id, reason, evaluation)
-                            }
-                        };
-                        owner.tree.input(owner.branch_id.clone(), input).await?;
-                    }
+                if self.stopped() {
+                    return Ok(());
                 }
-                Ok(())
-            })
-        });
+                let end = {
+                    let state = self.state.lock().unwrap();
+                    if fold::decide_conclusion(&state.fold, sequence, &conclusion)
+                        != Some(ConclusionAction::Continue)
+                    {
+                        return Ok(());
+                    }
+                    state.fold.turn_end.clone()
+                };
+                let Some(end) = end else {
+                    return Ok(());
+                };
+                // C7 measures the branch's own continuations; the evaluator
+                // judged this turn, so this path reads no progress (Pursuit §5).
+                let decision = {
+                    let state = self.state.lock().unwrap();
+                    if fold::decide_conclusion(&state.fold, sequence, &conclusion)
+                        != Some(ConclusionAction::Continue)
+                        || state.fold.turn_end.as_ref().map(|end| end.sequence)
+                            != Some(end.sequence)
+                    {
+                        return Ok(());
+                    }
+                    fold::decide_evaluated_continuation(&state.fold, limit)
+                };
+                let Some(decision) = decision else {
+                    return Ok(());
+                };
+                let input = match decision {
+                    Decision::Continuation { count, idle } => text::evaluated_continuation(
+                        &self.branch_id,
+                        count,
+                        limit,
+                        idle,
+                        evaluation,
+                        &named,
+                    ),
+                    Decision::Pause { reason } => {
+                        text::automatic_pause(&self.branch_id, reason, evaluation)
+                    }
+                };
+                self.tree.input(self.branch_id.clone(), input).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Ends the evaluator lines no evaluation needs any more (Pursuit §13 E2).
@@ -954,7 +991,7 @@ impl Owner {
             if settled {
                 continue;
             }
-            self.task(format!("settle:{evaluation}"), move |owner| {
+            self.task(format!("settle:{evaluation}"), None, move |owner| {
                 Box::pin(async move {
                     owner.resolved().await;
                     if !owner.session.activated().await {

@@ -356,7 +356,7 @@ only while an objective is live (A16). Under [Pursuit](Pursuit.md)'s evaluator j
 
 When Goal consumes `turn/end` at sequence `N` on branch `B`, over the fold through `N`:
 
-**Background precondition.** If `open_tasks` is non-empty, the turn end decides nothing — no continuation and no pause — and stays undecided. A background task's non-cancelled `exec/ended` is followed by its wake input (BackgroundExec's `<dim-notification>`), which drives the next turn; that turn's end decides as usual. A `cancelled` `exec/ended` does not wake; when it closes the last open task while the branch is idle and no driving input is pending, Goal takes the deferred turn-end decision then. That path reads only the cancelled status from the fact, so it cannot race a wake; the deciding turn's `decided` marker deduplicates it. The fold tracks open tasks by `task_id` across `exec/started` and `exec/ended`, and the rebuild restores the set.
+**Background precondition.** If `open_tasks` is non-empty, the turn end decides nothing — no continuation and no pause — and stays undecided. A background task's non-cancelled `exec/ended` is followed by its wake input (BackgroundExec's `<dim-notification>`), which drives the next turn; that turn's end decides as usual. A `cancelled` `exec/ended` does not wake; when it closes the last open task while the branch is idle and no driving input is pending, Goal takes the deferred turn-end decision then. That path reads only the cancelled status from the fact, so it cannot race a wake; the deciding turn's `decided` marker deduplicates it. The fold tracks open tasks by `task_id` across `exec/started` and `exec/ended`, and the rebuild restores the set. When the wait deferred a `continue` conclusion (Pursuit §5), the same settle path takes that conclusion through the handler that consumes it live: the fold keeps it, keyed by its evaluation, until a continuation or pause for that evaluation answers it, and a newer turn end or an operator input supersedes it. The settle path re-derives the conclusion from the fold, so a reload keeps it.
 
 | # | Condition | If false |
 | --- | --- | --- |
@@ -499,7 +499,7 @@ Goal consumes `branch/start`, `session/forked`, `branch/create`, `branch/create-
 | Reload in a stalled streak | continuation < reload < next `turn/end` | The continuation's `idle` rebuilds the streak; the undecided end is decided once | Goal |
 | Background task open at `turn/end` | `exec/started` < `turn/end` N < `exec/ended` | No decision at N; the task's end and wake drive the next turn | Goal |
 | Non-cancelled background end | `exec/ended` < wake input | The wake input drives a turn; its end decides as usual, and N is superseded | BackgroundExec; Goal |
-| Cancelled background end closes the last open task while idle | `exec/ended {cancelled}` < no driving input | The deferred turn-end decision runs then, once | Goal |
+| Cancelled background end closes the last open task while idle | `exec/ended {cancelled}` < no driving input | The deferred turn-end decision or `continue` conclusion runs then, once | Goal |
 | Reload with an open task | `exec/started` < reload < `exec/ended` | The rebuild restores the open set; the end decides nothing until the cancelled end or a wake turn's end | Goal |
 | Explicit limit reached | count = limit | Pause (`limit`) | Goal |
 | No limit set | — | Each completed turn continues while the goal is active; only completion, the user or the stall rule stops it (A4, C7) | Goal |
@@ -539,7 +539,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 11. Set → `completed` → `resume`: the goal reopens (`active`, count restarted), the resume input drives a turn and its normal end writes a continuation; after a compaction following the resume, the latest `goal:status` block in the context is the resume block and the goal is `active`.
 12. Set → `completed` → `blocked`: the current status is `blocked` with the second summary; after a compaction following each status change, the latest `goal:status` block in the context is the current status.
 13. No default limit: a goal with no `maxContinuations` continues past any fixed count; three consecutive continuation-driven turns without a `step/tool-call` pause it (`no_progress`), a tool call or an operator input resets the streak, and the continuation's `idle` rebuilds it after a reload. A `continue` conclusion is judged by the evaluator: its continuation obeys C6 and the background wait, not C7.
-14. A background task open at a turn end defers the decision; a non-cancelled end's wake drives a turn whose end decides, and a cancelled end that closes the last open task takes the deferred decision exactly once, also after a reload. An `exec/ended` of another task, or of an already-decided end, writes nothing.
+14. A background task open at a turn end defers the decision; a non-cancelled end's wake drives a turn whose end decides, and a cancelled end that closes the last open task takes the deferred decision or `continue` conclusion exactly once, also after a reload. An `exec/ended` of another task, or of an already-decided end, writes nothing.
 
 ## Appendix E. Assumptions
 
