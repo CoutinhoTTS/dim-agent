@@ -102,6 +102,36 @@ fn plugin_install_reports_hook_handlers_that_will_not_run() {
     assert!(!stdout.contains("Stop unsupported"), "{stdout}");
 }
 
+/// A daemon that does not advertise `hooks.catalog` is never asked for the
+/// catalog: the install still succeeds and reports no handler state.
+#[test]
+fn plugin_install_reports_no_handlers_without_a_catalog() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["plugin.install"]);
+        let request = wire.read("plugin.install");
+        wire.reply(&request, json!({"id":"mem","name":"mem","enabled":true}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("hooks.catalog"), "unexpected call: {line}");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["plugin", "install", "/work/plugins/mem"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("Hook handlers"), "{stdout}");
+}
+
 #[test]
 fn hooks_enable_and_disable_send_the_workspace_and_the_revision() {
     let home = Home::new();

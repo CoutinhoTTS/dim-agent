@@ -116,7 +116,7 @@ pub async fn run(client: &mut Client, method: &str, params: Value) -> Result<i32
         println!("{}", summary(method, &result));
     }
     if method == "plugin.install" {
-        report_unrunnable_hooks(client, &result).await?;
+        report_unrunnable_hooks(client, &result).await;
     }
     Ok(0)
 }
@@ -124,24 +124,25 @@ pub async fn run(client: &mut Client, method: &str, params: Value) -> Result<i32
 /// After a successful `plugin.install`, reads `hooks.catalog` and prints
 /// the installed plugin's hook handlers whose state is not `ok` — the
 /// events and handler kinds Dim does not run — with one line pointing to
-/// `Hooks.md` Appendix G. A daemon without the `hooks.catalog` method, or
-/// a profile without Hooks, reports nothing.
-async fn report_unrunnable_hooks(client: &mut Client, result: &Value) -> Result<()> {
+/// `Hooks.md` Appendix G. A daemon that does not advertise `hooks.catalog`
+/// is not asked, and a read that fails reports that the handlers could not
+/// be checked without failing the install.
+async fn report_unrunnable_hooks(client: &mut Client, result: &Value) {
     let Some(id) = result["id"].as_str() else {
-        return Ok(());
+        return;
     };
-    let request = client.send("hooks.catalog", json!({})).await?;
-    let catalog = loop {
-        break match client.next().await? {
-            Message::Response {
-                id: received,
-                result,
-            } if received == request => match result {
-                Ok(catalog) => catalog,
-                Err(_) => return Ok(()),
-            },
-            _ => continue,
-        };
+    if !client.supports(&["hooks.catalog"]) {
+        return;
+    }
+    let catalog = match read_catalog(client).await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            eprintln!(
+                "The installed plugin's hook handlers could not be checked: {}",
+                safe_line(&error.to_string())
+            );
+            return;
+        }
     };
     let source = format!("plugin:{id}");
     let mut lines = Vec::new();
@@ -163,7 +164,19 @@ async fn report_unrunnable_hooks(client: &mut Client, result: &Value) -> Result<
         }
         println!("See Hooks.md Appendix G for the events Dim runs and the differences.");
     }
-    Ok(())
+}
+
+/// The reply to `hooks.catalog`, read past any notices.
+async fn read_catalog(client: &mut Client) -> Result<Value> {
+    let request = client.send("hooks.catalog", json!({})).await?;
+    loop {
+        match client.next().await? {
+            Message::Response { id, result } if id == request => {
+                return result.map_err(Into::into);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn text(value: &Value) -> String {
