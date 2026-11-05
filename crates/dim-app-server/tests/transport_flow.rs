@@ -168,6 +168,8 @@ mod titles;
 
 #[path = "transport_flow/named_parts.rs"]
 mod named_parts;
+#[path = "transport_flow/ui_extensions.rs"]
+mod ui_extensions;
 #[path = "transport_flow/ui_host.rs"]
 mod ui_host;
 #[path = "transport_flow/web_entry.rs"]

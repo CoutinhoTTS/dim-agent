@@ -632,6 +632,8 @@ export function readMemberApproval(value: unknown): MemberApprovalDetail {
 export function readNotification(method: string, value: unknown): Notification | undefined {
   const params = obj(value ?? {}, method)
   switch (method) {
+    case "ui.extensions.changed":
+      return { method, revision: num(params, "revision", method) }
     case "session.event":
       return {
         method,
@@ -687,4 +689,63 @@ export function readNotification(method: string, value: unknown): Notification |
     default:
       return undefined
   }
+}
+
+export function readExtensions(value: unknown): import("../../../npm/ui").ExtensionDirectory {
+  const source = obj(value, "ui.extensions.list")
+  return {
+    revision: num(source, "revision", "ui.extensions.list"),
+    extensions: arr(source.extensions, "extensions").map(value => {
+      const extension = obj(value, "extension")
+      return {
+        pluginName: str(extension, "pluginName", "extension"),
+        generation: str(extension, "generation", "extension"),
+        panels: arr(extension.panels, "panels").map(value => {
+          const panel = obj(value, "panel")
+          const title = obj(panel.title, "title")
+          const translations = title.translations === undefined ? undefined : obj(title.translations, "translations")
+          return {
+            id: str(panel, "id", "panel"),
+            title: { default: str(title, "default", "title"), translations: translations === undefined ? undefined : Object.fromEntries(Object.entries(translations).map(([key]) => [key, str(translations, key, "translations")])) },
+            icon: optStr(panel, "icon", "panel"),
+            entry: str(panel, "entry", "panel"),
+            placement: str(panel, "placement", "panel"),
+            requires: arr(panel.requires, "requires").map(value => typeof value === "string" ? value : fail("requires", "strings")),
+            methods: arr(panel.methods, "methods").map(value => {
+              const method = obj(value, "method")
+              const scope = method.scope
+              if (scope !== "session" && scope !== "branch") fail("scope", "session or branch")
+              return { name: str(method, "name", "method"), scope }
+            }),
+          }
+        }),
+      }
+    }),
+    errors: arr(source.errors, "errors").map(value => {
+      const error = obj(value, "error")
+      return { pluginName: str(error, "pluginName", "error"), message: str(error, "message", "error") }
+    }),
+  }
+}
+
+function readAgentEvent(value: unknown): import("./protocol").AgentEvent {
+  const event = obj(value, "event")
+  return {
+    id: str(event, "id", "event"), sequence: num(event, "sequence", "event"), create_at: num(event, "create_at", "event"),
+    type: str(event, "type", "event"), name: str(event, "name", "event"), data: obj(event.data, "event.data") as import("./protocol").JsonObject,
+    ...(event.tags === undefined ? {} : { tags: arr(event.tags, "event.tags").map(tag => typeof tag === "string" ? tag : fail("event.tags", "strings")) }),
+    ...(event.context_render === undefined ? {} : { context_render: bool(event, "context_render", "event") }),
+    ...(event.context_state === undefined ? {} : { context_state: bool(event, "context_state", "event") }),
+  }
+}
+
+export function readTimelinePage(value: unknown): import("./protocol").TimelinePage {
+  const page = obj(value, "session.history")
+  return { events: arr(page.events, "events").map(readAgentEvent), through: num(page, "through", "history"), nextAfter: num(page, "nextAfter", "history"), done: bool(page, "done", "history") }
+}
+export function readSubmit(value: unknown): import("./protocol").SubmitResult {
+  return { event: readAgentEvent(obj(value, "session.submit").event) }
+}
+export function readInterrupt(value: unknown): import("./protocol").InterruptResult {
+  return { sequence: num(obj(value, "session.stop"), "sequence", "session.stop") }
 }

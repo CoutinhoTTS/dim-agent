@@ -1281,6 +1281,10 @@ async fn an_invalid_reply_clears_invalid() {
         Role::User,
         "<dim-state source=\"fixture\">state</dim-state>",
     )));
+    request.messages.push(Arc::new(Message::text(
+        Role::User,
+        "<dim-rule source=\"fixture\">rule</dim-rule>",
+    )));
     assert_eq!(
         prompt_suggestion::last_user_text(&request).as_deref(),
         Some("add a test"),

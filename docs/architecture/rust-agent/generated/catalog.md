@@ -56,6 +56,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `settingsService` | process | Settings | Rust-only | — |
 | `skillsCatalog` | process | SkillsCatalog | Rust-only | — |
 | `sqliteStorage` | process | SqliteStorage | Rust-only | — |
+| `uiExtensions` | process | UiExtensions | Rust-only | — |
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
 | `worktreeAssociations` | process | SessionStore | Rust-only | — |
@@ -90,6 +91,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `toolRegistry` | session | ToolRegistry | yes | `register` async |
 | `toolSourcesView` | session | ToolRegistry | Rust-only | — |
 | `treeCommands` | session | TimelineTree | yes | `create` async, `end` async, `info` async, `input` async, `list` async, `page` async, `query` async |
+| `uiResources` | session | UiResources | yes | `publishFile` async, `withdraw` async |
 | `agentLoop` | branch | Loop | Rust-only | — |
 | `approval` | branch | Approval | Rust-only | — |
 | `backgroundExec` | branch | BackgroundExec | Rust-only | — |

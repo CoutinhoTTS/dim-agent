@@ -13,20 +13,14 @@ pub const MAX_MOCK_OUTPUT_BYTES: usize = 1024 * 1024;
 
 pub struct EchoModel;
 impl EchoModel {
-    /// The latest conversational message for a mock reply. Runtime state
-    /// snapshots inform a model; they do not replace the operator's request.
+    /// Selects the latest mock command or tool result, skipping runtime state and rules.
     pub fn last_message(request: &ModelRequest) -> Option<&Message> {
-        request
-            .messages
-            .iter()
-            .rev()
-            .map(Arc::as_ref)
-            .find(|message| {
-                !matches!(&message.content, MessageContent::Text(text)
-                if message.role == Role::User
-                    && text.starts_with("<dim-state ")
-                    && text.ends_with("</dim-state>"))
-            })
+        request.messages.iter().rev().map(AsRef::as_ref).find(|message: &&Message| {
+            message.role != Role::User || !match &message.content {
+                MessageContent::Text(text) => crate::context_block::is_state_or_rule(text),
+                MessageContent::Parts(parts) => matches!(parts.as_slice(), [MessagePart::Text { text, .. }] if crate::context_block::is_state_or_rule(text)),
+            }
+        })
     }
 }
 impl ModelDriver for EchoModel {

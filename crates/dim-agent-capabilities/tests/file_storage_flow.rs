@@ -83,6 +83,64 @@ async fn mount(path: PathBuf) -> (Ctx, FiberView, Arc<FileStorage>) {
 }
 
 #[tokio::test]
+async fn streaming_reads_pin_files_and_end_with_storage() {
+    let directory = Directory::new();
+    let authorized = directory.0.join("authorized");
+    let source = authorized.join("media.bin");
+    let bytes: Vec<_> = (0..200_000).map(|i| (i % 251) as u8).collect();
+    fs::write(&source, &bytes).unwrap();
+    let (root, _, storage) = mount(authorized.clone()).await;
+    let cancel = CancellationToken::new();
+    let path = storage.resolve(&source).unwrap();
+    let reader = storage.open_read(&path, &cancel).await.unwrap();
+    assert_eq!(reader.len(), bytes.len() as u64);
+    assert!(!reader.is_empty());
+    let (first, second) = tokio::join!(
+        reader.read_at(100, usize::MAX, &cancel),
+        reader.read_at(199_995, 30, &cancel),
+    );
+    assert_eq!(first.unwrap(), bytes[100..100 + 64 * 1024]);
+    assert_eq!(second.unwrap(), bytes[199_995..]);
+    storage
+        .replace(&path, b"new".to_vec(), None, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(reader.read_at(0, 10, &cancel).await.unwrap(), bytes[..10]);
+    assert_eq!(storage.read(&path, &cancel).await.unwrap(), b"new");
+    assert!(
+        storage
+            .resolve(&directory.0.join("outside/secret"))
+            .is_err()
+    );
+    assert!(
+        storage
+            .resolve(&authorized.join("../outside/secret"))
+            .is_err()
+    );
+    #[cfg(unix)]
+    {
+        symlink(&source, authorized.join("link")).unwrap();
+        assert!(
+            storage
+                .open_read(&storage.path(0, "link").unwrap(), &cancel)
+                .await
+                .is_err()
+        );
+    }
+    let stopped = CancellationToken::new();
+    stopped.cancel();
+    assert!(matches!(
+        reader.read_at(0, 1, &stopped).await,
+        Err(FileStorageError::Cancelled)
+    ));
+    root.shutdown().await.unwrap();
+    assert!(matches!(
+        reader.read_at(0, 1, &cancel).await,
+        Err(FileStorageError::Closed)
+    ));
+}
+
+#[tokio::test]
 async fn bounded_reads_preserve_exact_bytes_and_reject_larger_files() {
     let directory = Directory::new();
     let authorized = directory.0.join("authorized");

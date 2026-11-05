@@ -30,8 +30,12 @@ use std::{
 
 /// The Session and branch services marked `#[rutis::service]`: provided in
 /// their instance, each is served by name there.
-fn crossing_instance_names() -> [(String, &'static str); 8] {
+fn crossing_instance_names() -> [(String, &'static str); 9] {
     [
+        (
+            name_of::<crate::ui_extensions::UiResources>(),
+            SESSION_GROUP,
+        ),
         (
             name_of::<dim_agent_capabilities::timeline_tree::TreeCommands>(),
             SESSION_GROUP,
@@ -667,6 +671,7 @@ mod tests {
     fn crossing_services_are_named_and_grouped_as_the_rust_binding_names_them() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_agent_capabilities::register_names(&mut builder);
+        crate::register_names(builder.catalog_mut());
         let rust = builder.catalog().clone();
         super::share_names(builder.catalog_mut());
         for (name, group) in super::crossing_instance_names() {

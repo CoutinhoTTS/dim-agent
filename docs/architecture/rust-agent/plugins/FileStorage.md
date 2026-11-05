@@ -274,3 +274,18 @@ public API cannot produce reliably.
 | 提供 | `P:FileStorage` |
 | 被注入于 | `HostPlatform` |
 <!-- /generated -->
+
+## Native streaming reads
+
+`resolve(absolute)` identifies an existing authorized root without adding one;
+paths use the root's canonical spelling. `open_read(path, cancel)` traverses held
+directory handles and pins a regular file. Its `FileReader` reports the length
+at open and reads at explicit offsets, at most 64 KiB per call. Concurrent reads
+serialize access to the pinned descriptor; replacing a pathname does not change
+an existing reader. The producer keeps published files unchanged in place.
+
+Readers belong to the storage generation. Closing refuses new work, drains
+accepted reads and closes retained descriptors. Caller cancellation is checked
+before and after each bounded read. This native interface does not export binary
+callbacks through the language bridge. UiResources uses it for the protected
+resource routes in the [client UI contract](../../../design/client-ui-extensions.md).

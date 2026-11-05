@@ -49,6 +49,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Local development and managed provider boundary](architecture/development.md)
 - [内存快速增长与不释放：分析方案](architecture/memory-investigation.md)（中文）：同版本隔离复现、进程内存与存活分配分析
 - [Clients](design/clients.md): which clients exist, what they share, capability coverage per client, gaps and open decisions（[中文](zh/design/clients.md)）
+- [客户端 UI 扩展](design/client-ui-extensions.md)：框架无关的面板挂载、公开服务、内容生命周期与展示资源（#1136）
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)

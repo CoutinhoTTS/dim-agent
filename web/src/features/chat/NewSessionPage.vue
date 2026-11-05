@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n"
 import { Check, ChevronDown, Folder } from "lucide-vue-next"
 import BrandMark from "../../components/BrandMark.vue"
 import ComposerPanel from "./ComposerPanel.vue"
+import ExtensionMenu from "../extensions/ExtensionMenu.vue"
 import { MAIN_BRANCH, type ModelId } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
 import { useModelsStore } from "../../stores/models"
@@ -67,6 +68,7 @@ async function send(text: string): Promise<void> {
     <div class="new-session-hero">
       <BrandMark class="new-session-mark" />
       <h1 data-route-heading tabindex="-1">{{ t("newThread.title") }}</h1>
+      <ExtensionMenu />
     </div>
     <ComposerPanel class="is-new-thread" :running="false" :model="model" :model-selectable="true" :send="send" :attachments="false" :select-model="(next) => { picked = next }">
       <template #status>
