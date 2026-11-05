@@ -1,6 +1,7 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
 mod auth;
 pub mod config;
+mod discovery;
 mod import;
 pub(crate) mod management;
 mod publication;

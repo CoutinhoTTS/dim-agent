@@ -132,6 +132,10 @@ pub(crate) struct ImportPreview {
     /// Top-level members other than `mcpServers`; an import does not carry
     /// them.
     pub unknown_top_level: Vec<String>,
+    /// The digest of the store document a `from` preview read; absent for a
+    /// client-supplied `document`, which the apply carries itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,6 +210,7 @@ pub(crate) fn preview(
             .map(|id| entry_preview(id, document, target, project, overlays))
             .collect(),
         unknown_top_level: document.extra.keys().cloned().collect(),
+        source_revision: None,
     }
 }
 
