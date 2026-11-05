@@ -9,7 +9,6 @@ fn skill_discovery_reports_failures_and_a_failed_reload_keeps_the_palette() {
     let workspace = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -51,7 +50,7 @@ fn skill_discovery_reports_failures_and_a_failed_reload_keeps_the_palette() {
     });
     let mut command = home.command();
     command.env_remove("TMUX");
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("Skills unavailable: Skill source is unavailable");
     terminal.write(b"/reload-skills\r");
     terminal.write(b"/comm");
@@ -420,7 +419,6 @@ fn tui_skills_panel_reads_again_after_a_failed_read() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["skills.catalog"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -451,7 +449,7 @@ fn tui_skills_panel_reads_again_after_a_failed_read() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/skills\r");
@@ -474,7 +472,6 @@ fn tui_skills_panel_lists_toggles_and_reloads() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -528,7 +525,7 @@ fn tui_skills_panel_lists_toggles_and_reloads() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/skills\r");
@@ -557,7 +554,6 @@ fn tui_skills_panel_reloads_an_empty_catalog() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -604,7 +600,7 @@ fn tui_skills_panel_reloads_an_empty_catalog() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/skills\r");
@@ -628,7 +624,6 @@ fn tui_skills_panel_says_when_the_daemon_cannot_manage_them() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -651,7 +646,7 @@ fn tui_skills_panel_says_when_the_daemon_cannot_manage_them() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/skills\r");
