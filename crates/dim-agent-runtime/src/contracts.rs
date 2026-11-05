@@ -115,6 +115,17 @@ pub struct TimelineInfo {
     pub source: Option<dim_agent_types::BranchSource>,
 }
 
+/// One line's directory record: its identity, its head and its end.
+#[derive(Debug, Clone)]
+pub struct BranchDirectoryEntry {
+    pub info: TimelineInfo,
+    /// The published head while open, the fixed head once ended.
+    pub head: u64,
+    pub ended: bool,
+    /// The line's `branch/end` sequence, when the directory recorded it.
+    pub end_event: Option<u64>,
+}
+
 impl From<BranchRecord> for TimelineInfo {
     fn from(record: BranchRecord) -> Self {
         Self {
@@ -149,5 +160,7 @@ pub trait TimelineTreeControl: Send + Sync + 'static {
     /// The fixed head of an ended line, `None` for an open or unknown one.
     fn ended_head(&self, id: &str) -> Option<u64>;
     fn list(&self) -> Vec<TimelineInfo>;
+    /// The complete branch directory: open and ended lines.
+    fn directory(&self) -> Vec<BranchDirectoryEntry>;
     fn close(&self) -> BoxFuture<'_, Result<()>>;
 }

@@ -560,6 +560,11 @@ impl Session {
     pub fn branches(&self) -> Vec<TimelineInfo> {
         self.0.tree.list()
     }
+    /// The complete branch directory: open and ended lines. `main` comes
+    /// first, then the rest in branch identity order.
+    pub fn directory(&self) -> Vec<BranchDirectoryEntry> {
+        self.0.tree.directory()
+    }
     pub async fn branch(&self, parent: String, at: u64, options: BranchOptions) -> Result<String> {
         self.branch_with_admission(parent, at, options, CancellationToken::new())
             .await

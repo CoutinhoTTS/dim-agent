@@ -7208,3 +7208,88 @@ async fn a_chain_read_continues_past_a_page_that_ended_in_an_ancestor() {
     }
     soon(agent.close()).await.unwrap();
 }
+
+/// #1165: the tree's directory lists open lines and ended lines, `main`
+/// first, and an ended line's `endEvent` is its own `branch/end`, cascaded
+/// ends included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_directory_lists_open_and_cascade_ended_lines_with_their_end_events() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("ancestor".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let cut = session.sequence("main").unwrap();
+    let parent = soon(session.branch("main".into(), cut, options("parent")))
+        .await
+        .unwrap();
+    soon(session.idle(&parent)).await.unwrap();
+    let grandchild = soon(session.branch(parent.clone(), 0, options("grandchild")))
+        .await
+        .unwrap();
+    soon(session.idle(&grandchild)).await.unwrap();
+
+    let directory = session.directory();
+    assert_eq!(
+        directory.first().map(|entry| entry.info.id.as_str()),
+        Some("main"),
+        "the directory starts with main"
+    );
+    let open = directory
+        .iter()
+        .find(|entry| entry.info.id == parent)
+        .expect("the parent is listed while open");
+    assert!(!open.ended);
+    assert_eq!(open.end_event, None);
+    assert_eq!(open.head, session.sequence(&parent).unwrap());
+    let child = directory
+        .iter()
+        .find(|entry| entry.info.id == grandchild)
+        .expect("the grandchild is listed while open");
+    assert_eq!(child.info.parent.as_deref(), Some(parent.as_str()));
+
+    let source = BranchSource::Host {
+        operation_id: "op:directory".into(),
+    };
+    soon(session.end_branch(&parent, source.clone()))
+        .await
+        .unwrap();
+
+    let own_end = |events: Vec<Arc<AgentEvent>>| -> u64 {
+        events
+            .iter()
+            .find_map(|event| {
+                matches!(event.kind, EventKind::BranchEnd(_)).then_some(event.sequence)
+            })
+            .expect("the line holds its own end")
+    };
+    let parent_end = own_end(local_events(&session, &parent).await);
+    let grandchild_end = own_end(local_events(&session, &grandchild).await);
+
+    let directory = session.directory();
+    assert_eq!(
+        directory.first().map(|entry| entry.info.id.as_str()),
+        Some("main"),
+        "main stays first after the end"
+    );
+    assert!(!directory[0].ended, "main cannot end");
+    let ended = directory
+        .iter()
+        .find(|entry| entry.info.id == parent)
+        .expect("the ended parent is listed");
+    assert!(ended.ended);
+    assert_eq!(ended.end_event, Some(parent_end));
+    assert_eq!(ended.head, session.sequence(&parent).unwrap());
+    let cascaded = directory
+        .iter()
+        .find(|entry| entry.info.id == grandchild)
+        .expect("the cascaded grandchild is listed");
+    assert!(cascaded.ended);
+    assert_eq!(cascaded.end_event, Some(grandchild_end));
+    assert_eq!(cascaded.head, session.sequence(&grandchild).unwrap());
+    soon(agent.close()).await.unwrap();
+}
