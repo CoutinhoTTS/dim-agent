@@ -12469,19 +12469,19 @@
       "to": "dim_agent_capabilities::workspace_tools::exec",
       "references": [
         "path OutputSink",
+        "path bounded_preview",
         "path capture_preview",
         "path pump",
         "path sanitize",
         "path signal_name",
         "path tail_bytes",
-        "path truncate_preview",
         "use crate::workspace_tools::exec::OutputSink",
+        "use crate::workspace_tools::exec::bounded_preview",
         "use crate::workspace_tools::exec::capture_preview",
         "use crate::workspace_tools::exec::pump",
         "use crate::workspace_tools::exec::sanitize",
         "use crate::workspace_tools::exec::signal_name",
-        "use crate::workspace_tools::exec::tail_bytes",
-        "use crate::workspace_tools::exec::truncate_preview"
+        "use crate::workspace_tools::exec::tail_bytes"
       ]
     },
     {

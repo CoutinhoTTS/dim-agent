@@ -83,6 +83,20 @@ branchId, taskId)`, and a task id this branch did not start is
 `exec_task_unknown` even when another branch or Session has it. The same key
 holds for `session.exec.stop` and `session.exec.output.page`.
 
+Command completion remains authoritative through `exec/ended`. Its
+`structuredContent` carries the final `preview` and `previewTruncated` beside
+`outputBytes`, `outputTruncated` and `outputPath`: `preview` is the same
+sanitized tail the live read shows (the last 2,000 lines within 50 KiB, with
+the existing terminal-newline behavior), and `previewTruncated` says those
+bounds left something out — bytes outside the captured tail buffer, or a
+sanitized tail the rule cut. Both come from the same settled capture as the
+result's model-readable `Preview:` section, so they cannot differ; a command
+that printed nothing carries `preview: ""`. A recovered end — a task whose
+owner restarted — carries neither member, because its final output is unknown
+and its file stays readable through `session.exec.output.page`. The members
+are additive `structuredContent` fields: no event, method, feature entry or
+fixture changes.
+
 | Condition | Result |
 | --- | --- |
 | Active task, including no output yet | Current preview in `text` |
@@ -219,6 +233,7 @@ the CLI's existing localization and theme paths.
 | Owner | Change |
 | --- | --- |
 | WorkspaceTools / BackgroundExec | Finite active-capture read, C1 declaration on the existing Session part and leaf namespace registration; no new plugin |
+| WorkspaceTools / exec | The background `exec/ended` result gains `preview` and `previewTruncated` in `structuredContent`, computed by the shared bounded-tail rule |
 | Rpc | Existing C1 routing and Session admission only; no custom handler |
 | CLI | Existing tasks projection, command detail and refresh lifetime; stop remains `session.exec.stop` |
 
