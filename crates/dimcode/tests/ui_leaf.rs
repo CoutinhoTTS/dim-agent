@@ -3,8 +3,8 @@
 //! `dimcode` process is a rutis kernel in session with the daemon, running
 //! its own `Tui`. It keeps the shell's terminal until it leaves and returns
 //! the TUI's exit code; `ui.close` and daemon shutdown close the session,
-//! the process restores the terminal and exits. A `Tui` that fails to load
-//! ends the process nonzero, and with it the session.
+//! the process restores the terminal and exits. Before the first message,
+//! Home owns neither a Session nor a registered UI leaf.
 
 #[path = "support/daemon.rs"]
 #[allow(dead_code)]
@@ -268,7 +268,7 @@ impl Home {
     }
 
     /// Runs `dimcode` on `pty` through a shell that prints its exit code.
-    fn dimcode(&self, pty: &Pty) -> Child {
+    fn dimcode(&self, pty: &Pty, args: &[&str]) -> Child {
         let binary = Path::new(env!("CARGO_BIN_EXE_dimcode"));
         let model_config =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../dim-agent-aimux/examples/offline.json");
@@ -277,7 +277,7 @@ impl Home {
             assert!(fd >= 0, "dup terminal");
             Stdio::from(unsafe { OwnedFd::from_raw_fd(fd) })
         };
-        let script = "\"$0\" --model-config \"$1\"; code=$?; printf 'SHELL-RETURNED:%s\\n' \"$code\"; exit \"$code\"";
+        let script = "model_config=$1; shift; \"$0\" --model-config \"$model_config\" \"$@\"; code=$?; printf 'SHELL-RETURNED:%s\\n' \"$code\"; exit \"$code\"";
         Command::new("sh")
             .args([
                 "-c",
@@ -285,6 +285,7 @@ impl Home {
                 binary.to_str().unwrap(),
                 model_config.to_str().unwrap(),
             ])
+            .args(args)
             .env("DIMCODE_HOME", &self.home)
             .env("DIMCODE_WEB_ASSETS", &self.assets)
             .env("DIMCODE_OAUTH_MANUAL", "1")
@@ -389,13 +390,16 @@ fn assert_raw(pty: &Pty) {
 fn normal_dimcode_is_the_leaf_until_it_leaves() {
     let home = Home::new("normal-leaf");
     let pty = Pty::new();
-    let mut child = home.dimcode(&pty);
+    let mut child = home.dimcode(&pty, &[]);
     let welcome = pty.read_until("Welcome to DIM");
     assert!(
         !welcome.contains("SHELL-RETURNED"),
         "the shell returned early"
     );
     let mut rpc = home.rpc();
+    assert!(instances(&mut rpc).is_empty());
+    assert_eq!(rpc.ok("session.summaries", json!({})), json!([]));
+    pty.write(b"first leaf message\r");
     let leaf = wait_new_online(&mut rpc, &pty, &[]);
     let ui_id = leaf["uiId"].as_str().unwrap().to_owned();
     let first_session = leaf["sessionId"].as_str().unwrap().to_owned();
@@ -444,6 +448,43 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
     assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
     assert_restored(&pty);
     wait_unregistered(&mut rpc, &pty, &ui_id);
+
+    let sessions = rpc.ok("session.summaries", json!({}));
+    let permission = rpc.ok(
+        "session.permission.get",
+        json!({"sessionId":first_session,"branchId":"main"}),
+    );
+    assert_ne!(permission["policy"]["preset"], "read-only");
+    let resumed_pty = Pty::new();
+    let mut resumed = home.dimcode(
+        &resumed_pty,
+        &["--resume", &first_session, "--permission", "read-only"],
+    );
+    let leaf = wait_new_online(&mut rpc, &resumed_pty, &[]);
+    let resumed_id = leaf["uiId"].as_str().unwrap();
+    assert_eq!(leaf["sessionId"], first_session);
+    assert_eq!(instances(&mut rpc).len(), 1);
+    let resumed_permission = rpc.ok(
+        "session.permission.get",
+        json!({"sessionId":first_session,"branchId":"main"}),
+    );
+    let mut expected_policy = permission["policy"].clone();
+    expected_policy["preset"] = json!("read-only");
+    assert_eq!(resumed_permission["policy"], expected_policy);
+    assert_eq!(
+        rpc.ok("session.summaries", json!({}))
+            .as_array()
+            .unwrap()
+            .len(),
+        sessions.as_array().unwrap().len(),
+        "resume must attach eagerly without creating another Session"
+    );
+    assert_raw(&resumed_pty);
+    resumed_pty.write(b"/exit\r");
+    let shown = wait_exit(&mut resumed, &resumed_pty);
+    assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
+    assert_restored(&resumed_pty);
+    wait_unregistered(&mut rpc, &resumed_pty, resumed_id);
     let _ = rpc.call("daemon.shutdown", json!({}));
 }
 
@@ -452,9 +493,10 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     let home = Home::new("ui-leaf");
 
     let first_pty = Pty::new();
-    let mut first = home.dimcode(&first_pty);
+    let mut first = home.dimcode(&first_pty, &[]);
     first_pty.read_until("Welcome to DIM");
     let mut rpc = home.rpc();
+    first_pty.write(b"first leaf message\r");
     let first_id = wait_new_online(&mut rpc, &first_pty, &[])["uiId"]
         .as_str()
         .unwrap()
@@ -470,8 +512,9 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     assert!(instances(&mut rpc).is_empty());
 
     let second_pty = Pty::new();
-    let mut second = home.dimcode(&second_pty);
+    let mut second = home.dimcode(&second_pty, &[]);
     second_pty.read_until("Welcome to DIM");
+    second_pty.write(b"second leaf message\r");
     let second_id = wait_new_online(&mut rpc, &second_pty, std::slice::from_ref(&first_id))["uiId"]
         .as_str()
         .unwrap()
@@ -493,9 +536,10 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     assert_restored(&second_pty);
 
     let third_pty = Pty::new();
-    let mut third = home.dimcode(&third_pty);
+    let mut third = home.dimcode(&third_pty, &[]);
     third_pty.read_until("Welcome to DIM");
     let mut rpc = home.rpc();
+    third_pty.write(b"third leaf message\r");
     wait_new_online(&mut rpc, &third_pty, &[first_id, second_id]);
     assert_raw(&third_pty);
     let _ = rpc.call("daemon.shutdown", json!({}));
@@ -510,9 +554,10 @@ fn a_home_the_daemon_fits_also_fits_its_leaf() {
         - 1;
     let home = Home::with_socket_length(limit);
     let pty = Pty::new();
-    let mut child = home.dimcode(&pty);
+    let mut child = home.dimcode(&pty, &[]);
     pty.read_until("Welcome to DIM");
     let mut rpc = home.rpc();
+    pty.write(b"long path leaf message\r");
     wait_new_online(&mut rpc, &pty, &[]);
     pty.drain(Duration::from_millis(300));
     pty.write(b"/exit");
@@ -523,109 +568,27 @@ fn a_home_the_daemon_fits_also_fits_its_leaf() {
     let _ = rpc.call("daemon.shutdown", json!({}));
 }
 
-/// A daemon that opens the leaf's session and replies to `ui.open`, then
-/// drops the connection the leaf's `Tui` opens, so that `Tui` fails to load.
-/// Returns whether the leaf's session ended.
-async fn refusing_daemon(
-    listener: std::os::unix::net::UnixListener,
-    model_config: PathBuf,
-) -> bool {
-    use rutis::host::{CtxHost, FiberState};
-    use rutis_bridge::{LocalId, PeerId, Session};
-    use sha2::Digest;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
-    struct Shut(std::os::unix::net::UnixStream);
-    impl rutis_bridge::channel::Closer for Shut {
-        fn close(&self, _: rutis_bridge::Close) {
-            let _ = self.0.shutdown(std::net::Shutdown::Both);
-        }
-    }
-
-    let profile = format!(
-        "{:x}",
-        sha2::Sha256::digest(std::fs::read(model_config).unwrap())
-    );
-    listener.set_nonblocking(true).unwrap();
-    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
-    let root = rutis::Ctx::root().unwrap();
-    root.provide(LocalId(PeerId::new("dim-daemon").unwrap()))
-        .unwrap();
-    let (read, mut write) = listener.accept().await.unwrap().0.into_split();
-    let mut lines = tokio::io::BufReader::new(read).lines();
-    let session = loop {
-        let line = lines.next_line().await.unwrap().expect("a request");
-        let request: Value = serde_json::from_str(&line).unwrap();
-        let mut session = None;
-        let result = match request["method"].as_str().unwrap() {
-            "hello" => json!({"instanceId": "fake", "serverVersion": env!("CARGO_PKG_VERSION"),
-                "protocolVersion": 3,
-                "daemonProfile": {"kind": "configured", "modelConfigSha256": profile},
-                "features": ["session.create", "session.history", "ui.attach", "ui.leaf.2"]}),
-            "session.create" => json!({"sessionId": "session", "sequence": 0,
-                "model": {"providerId": "test", "modelId": "model"}}),
-            "session.attach" => json!({"sessionId": "session", "cwd": "/workspace", "createdAt": 1,
-                "running": false, "sequence": 0, "attachedClients": 1}),
-            "ui.open" => {
-                let path = request["params"]["address"].as_str().unwrap();
-                let stream =
-                    std::os::unix::net::UnixStream::connect(path.strip_prefix("unix:").unwrap())
-                        .unwrap();
-                let reader = stream.try_clone().unwrap();
-                let closer = std::sync::Arc::new(Shut(stream.try_clone().unwrap()));
-                let channel = rutis_bridge::pipe::framed(reader, stream, closer);
-                let greeted = Session::handshake(&root, channel).await.unwrap();
-                assert_eq!(greeted.id(), request["params"]["peer"]);
-                let view = root.plugin(greeted);
-                (&view).await.unwrap();
-                session = Some(view);
-                json!({"uiId": request["params"]["peer"], "generation": 1, "token": "token"})
-            }
-            other => panic!("unexpected request {other}"),
-        };
-        let reply = json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
-        write
-            .write_all(format!("{reply}\n").as_bytes())
-            .await
-            .unwrap();
-        if let Some(session) = session {
-            break session;
-        }
-    };
-    drop(listener.accept().await.unwrap());
-    let mut state = session.watch();
-    let ended = tokio::time::timeout(
-        Duration::from_secs(15),
-        state.wait_for(|s| matches!(s.state, FiberState::Disposed | FiberState::Failed)),
-    )
-    .await
-    .is_ok();
-    let _ = root.shutdown().await;
-    ended
-}
-
 #[test]
-fn a_leaf_whose_tui_fails_to_load_exits_nonzero_and_ends_its_session() {
-    let home = Home::new("tui-fails");
-    private_dir(&home.home.join("rust")).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(home.socket()).unwrap();
-    std::fs::set_permissions(home.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
-    let model_config =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../dim-agent-aimux/examples/offline.json");
-    let daemon = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(refusing_daemon(listener, model_config))
-    });
-    let pty = Pty::new();
-    let mut child = home.dimcode(&pty);
-    let shown = wait_exit(&mut child, &pty);
-    assert!(
-        shown.contains("SHELL-RETURNED:") && !shown.contains("SHELL-RETURNED:0"),
-        "{shown:?}"
-    );
-    assert_restored(&pty);
-    assert!(daemon.join().unwrap(), "the leaf's session did not end");
+fn exiting_home_leaves_no_session_or_ui_registration() {
+    for fullscreen in [false, true] {
+        let home = Home::new("lazy-home");
+        std::fs::write(
+            home.home.join("config.json"),
+            serde_json::to_vec(&json!({"locale":"en", "tuiMode":if fullscreen { "fullscreen" } else { "scrollback" }})).unwrap(),
+        )
+        .unwrap();
+        let pty = Pty::new();
+        let mut child = home.dimcode(&pty, &[]);
+        pty.read_until("Welcome to DIM");
+        let mut rpc = home.rpc();
+        assert_eq!(rpc.ok("session.summaries", json!({})), json!([]));
+        assert!(instances(&mut rpc).is_empty());
+        pty.write(b"/exit\r");
+        let shown = wait_exit(&mut child, &pty);
+        assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
+        assert_restored(&pty);
+        assert_eq!(rpc.ok("session.summaries", json!({})), json!([]));
+        assert!(instances(&mut rpc).is_empty());
+        let _ = rpc.call("daemon.shutdown", json!({}));
+    }
 }

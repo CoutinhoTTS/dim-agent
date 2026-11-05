@@ -87,7 +87,6 @@ fn listing(truncated: bool) -> Value {
 /// advertises besides the Session basics.
 fn opened_with(wire: &mut Wire, features: &[&str]) {
     wire.hello(features);
-    wire.created();
     let attach = wire.read("session.attach");
     wire.reply(&attach, attach_record(&attach));
     let history = wire.read("session.history");
@@ -1014,7 +1013,7 @@ fn tui_workflow_panel_lists_definitions() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1062,8 +1061,8 @@ fn tui_workflow_short_screen_keeps_the_composer_and_hints() {
             if fullscreen {
                 command.arg("--fullscreen");
             }
-            let mut terminal = Terminal::launch_tui(command);
-            terminal.until("Git branch");
+            let mut terminal = Terminal::resume_tui(command);
+            terminal.until("resumed session");
             // A draft proves the composer is on the short screen; Ctrl+C
             // clears it before the command.
             terminal.write(b"xyzzy");
@@ -1116,7 +1115,7 @@ fn tui_workflow_save_command_writes_a_definition() {
             wire.reply(&request, settings());
             drains(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow:save\r");
@@ -1211,7 +1210,7 @@ fn tui_workflow_panel_starts_a_run_with_parameters() {
             wire.reply(&request, json!([started_run()]));
             drains(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1365,7 +1364,7 @@ fn tui_workflow_panel_keeps_a_runs_parameters_for_its_own_definition() {
         });
         let mut command = edit_command(&home, &script, fullscreen);
         command.env("RUN_LOG", &log);
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1446,7 +1445,7 @@ fn tui_workflow_run_leaves_a_listed_default_unsent() {
         wire.reply(&request, settings());
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    let mut terminal = Terminal::resume_tui(edit_command(&home, &script, false));
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/workflow\r");
@@ -1533,7 +1532,7 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
         wire.reply(&request, settings());
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     // The branch row may be painted before the frame that `test / model`
@@ -1606,7 +1605,7 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
     });
     let mut command = home.command();
     command.args(["--cwd", home.0.to_str().unwrap()]);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/new\r");
@@ -1670,7 +1669,7 @@ fn tui_workflow_panel_reports_a_conflict_and_rereads() {
             wire.reply(&request, settings());
             drains(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1710,7 +1709,7 @@ fn tui_workflow_panel_refuses_a_rename_and_keeps_the_draft() {
             wire.reply(&request, settings());
             drains_without_saving(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1750,7 +1749,7 @@ fn tui_workflow_save_is_refused_when_the_daemon_cannot_write() {
         wire.reply(&request, settings());
         drains_without_saving(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/workflow:save\r");
@@ -1791,7 +1790,7 @@ fn tui_workflow_save_reports_an_invalid_definition_and_keeps_the_draft() {
                 "code":-32000,"message":"Stage build: invalid reference {{params.branch}}","data":{"appError":"invalid_definition"}}}));
             drains_without_saving(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow:save\r");
@@ -1822,7 +1821,7 @@ fn tui_workflow_panel_offers_no_write_without_the_settings_methods() {
         // No settings.read: the daemon does not advertise one.
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/workflow\r");

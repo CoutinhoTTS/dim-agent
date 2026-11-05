@@ -13,7 +13,6 @@ fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
     let expected = workspace.clone();
     let daemon=home.daemon(move |wire| {
         wire.hello(&["session.catalog", "session.catalog.cancel"]);
-        wire.created();
         let attach=wire.read("session.attach");
         wire.reply(&attach,attach_record(&attach));
         let history=wire.read("session.history");
@@ -48,7 +47,7 @@ fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
     });
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("topic0000");
@@ -93,7 +92,6 @@ fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
             "session.catalog.cancel",
             "session.catalog.origins",
         ]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -125,7 +123,7 @@ fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
     });
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("[Chat] Update cache");
@@ -148,7 +146,6 @@ fn tui_resume_ctrl_s_widens_to_every_workspace_and_names_the_workspace_of_a_row(
     let mine = workspace.clone();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.catalog"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -181,7 +178,7 @@ fn tui_resume_ctrl_s_widens_to_every_workspace_and_names_the_workspace_of_a_row(
     });
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("mine preview");
@@ -203,7 +200,6 @@ fn tui_resume_says_when_the_workspace_has_no_saved_sessions() {
     let workspace = workspace.to_str().unwrap().to_owned();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.catalog"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -220,7 +216,7 @@ fn tui_resume_says_when_the_workspace_has_no_saved_sessions() {
     });
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");
@@ -241,7 +237,6 @@ fn tui_resume_hides_other_workspaces_on_the_summaries_fallback() {
     let mine = workspace.clone();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -264,7 +259,7 @@ fn tui_resume_hides_other_workspaces_on_the_summaries_fallback() {
     });
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("mine preview");
@@ -428,7 +423,7 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
     });
     let start = Instant::now();
     let mut terminal = Terminal::launch_tui(command());
-    terminal.until("diagram-model");
+    terminal.until("Ask anything...");
     let ready = start.elapsed();
     let stream = UnixStream::connect(home.0.join("rust/daemon.sock")).unwrap();
     stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
@@ -445,6 +440,11 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
             .contains(&json!("ui.leaf.2"))
     );
     let status = rpc(&mut wire, "ui.status", json!({}));
+    assert_eq!(status["result"]["instances"], json!([]), "{status}");
+    let sent = Instant::now();
+    terminal.write(b"cold first submission marker\r");
+    terminal.until("native-cold-reply");
+    let status = rpc(&mut wire, "ui.status", json!({}));
     assert_eq!(
         status["result"]["instances"].as_array().unwrap().len(),
         1,
@@ -457,9 +457,6 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
             .starts_with("ui-"),
         "the terminal uses the ui.leaf.2 path: {status}"
     );
-    let sent = Instant::now();
-    terminal.write(b"cold first submission marker\r");
-    terminal.until("native-cold-reply");
     eprintln!(
         "1001 dormant Sessions, compaction row {bytes} bytes: cold UI {ready:?}, first reply {:?}",
         sent.elapsed()
@@ -629,7 +626,6 @@ fn tui_resume_toggles_between_the_repository_and_all_workspaces() {
     .unwrap();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.catalog", "session.catalog.workspaces"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -683,7 +679,7 @@ fn tui_resume_toggles_between_the_repository_and_all_workspaces() {
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
     command.env("PATH", &path);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("Sessions · This repository");
@@ -718,7 +714,6 @@ fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
     let path = gated_git(scratch.path(), &marker);
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -747,7 +742,7 @@ fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
     command.env("PATH", &path);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("Sessions · This repository");
@@ -776,7 +771,6 @@ fn tui_resume_names_a_one_worktree_repository() {
     let mine = workspace.clone();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.catalog", "session.catalog.workspaces"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -802,7 +796,7 @@ fn tui_resume_names_a_one_worktree_repository() {
     });
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");
@@ -841,7 +835,6 @@ fn tui_resume_draws_the_workspace_while_a_slow_git_runs() {
     let mine = workspace.clone();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.catalog", "session.catalog.workspaces"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -873,7 +866,7 @@ fn tui_resume_draws_the_workspace_while_a_slow_git_runs() {
             std::env::var("PATH").unwrap_or_default()
         ),
     );
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("mine preview");
@@ -896,7 +889,6 @@ fn tui_resume_skips_the_repository_scope_a_daemon_cannot_read() {
     assert!(linked.is_some(), "the worktree exists");
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.catalog"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -920,7 +912,7 @@ fn tui_resume_skips_the_repository_scope_a_daemon_cannot_read() {
     });
     let mut command = home.command();
     command.args(["--cwd", &workspace]);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");

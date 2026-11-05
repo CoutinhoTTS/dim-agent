@@ -27,7 +27,6 @@ fn tui_compaction_reports_committed_failures_once_and_keeps_call_errors() {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -80,7 +79,7 @@ fn tui_compaction_reports_committed_failures_once_and_keeps_call_errors() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("1.8K / 256K");
         for expected in [
             "candidate 1 does not reduce input",
@@ -113,7 +112,6 @@ fn tui_shows_context_usage_the_hello_does_not_list() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -168,7 +166,7 @@ fn tui_shows_context_usage_the_hello_does_not_list() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1.8K / 256K");
     shown.send(()).unwrap();
     terminal.write(b"hello\r");
@@ -190,7 +188,6 @@ fn tui_shows_no_reading_and_keeps_working_when_context_usage_fails() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -235,7 +232,7 @@ fn tui_shows_no_reading_and_keeps_working_when_context_usage_fails() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"still here\r");
     terminal.until("the session still answers");
@@ -296,7 +293,6 @@ fn tui_usage_shows_the_last_requests_cache_hit_rate() {
         let (shown, wait_shown) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -348,7 +344,7 @@ fn tui_usage_shows_the_last_requests_cache_hit_rate() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("1.8K / 256K");
         shown.send(()).unwrap();
         terminal.until("first request");
@@ -385,7 +381,6 @@ fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -424,7 +419,7 @@ fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1.8K / 256K");
     shown.send(()).unwrap();
     terminal.until("full hit");
@@ -467,7 +462,6 @@ fn tui_usage_shows_the_cache_hit_rate_a_resumed_session_recorded() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -497,7 +491,7 @@ fn tui_usage_shows_the_cache_hit_rate_a_resumed_session_recorded() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("64K / 256K");
     terminal.write(b"/usage\r");
     terminal.until("last request cached 92%");
@@ -514,7 +508,6 @@ fn tui_usage_cache_hit_rate_ignores_events_off_main() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -561,7 +554,7 @@ fn tui_usage_cache_hit_rate_ignores_events_off_main() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("64K / 256K");
     shown.send(()).unwrap();
     terminal.until("main request");
@@ -599,7 +592,6 @@ fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
     let (read, wait_read) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let first = wire.read("session.history");
@@ -656,7 +648,7 @@ fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1.8K / 256K");
     terminal.write(b"/usage\r");
     terminal.until("tokens (25%)");
@@ -698,7 +690,6 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
     let (ended, wait_ended) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -793,7 +784,7 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1.8K / 256K");
     shown.send(()).unwrap();
     terminal.write(b"hello\r");

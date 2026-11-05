@@ -7,7 +7,6 @@ fn models_reports_account_discovery_failure_instead_of_an_empty_list() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -22,7 +21,7 @@ fn models_reports_account_discovery_failure_instead_of_an_empty_list() {
             "code":-32000,"message":"Account discovery is unavailable","data":{"appError":"account_unavailable"}}}));
         wire.hold();
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/models\r");
     terminal.until("account.providers: Account discovery is unavailable");
@@ -633,7 +632,6 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -710,7 +708,7 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -768,7 +766,6 @@ fn picker_and_limit_declaration_read_the_same_catalog() {
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
             if tui {
-                wire.created();
                 let attach = wire.read("session.attach");
                 wire.reply(&attach, attach_record(&attach));
                 let history = wire.read("session.history");
@@ -810,7 +807,7 @@ fn picker_and_limit_declaration_read_the_same_catalog() {
             }
         });
         if tui {
-            let mut terminal = Terminal::launch_tui(home.command());
+            let mut terminal = Terminal::resume_tui(home.command());
             terminal.until("test / model");
             terminal.write(b"/models\r");
             terminal.until("Fixture / ready");
@@ -925,7 +922,6 @@ fn tui_models_area_opens_and_toggles_a_model() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -982,7 +978,7 @@ fn tui_models_area_opens_and_toggles_a_model() {
     // 24 rows; the panel is the same at any size.
     let mut command = home.command();
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -1017,7 +1013,6 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1073,7 +1068,7 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -1109,7 +1104,6 @@ fn tui_models_area_keeps_the_panel_on_a_refused_write() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1158,7 +1152,7 @@ fn tui_models_area_keeps_the_panel_on_a_refused_write() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -1217,7 +1211,6 @@ fn tui_models_area_rereads_after_a_conflict() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1286,7 +1279,7 @@ fn tui_models_area_rereads_after_a_conflict() {
     });
     let mut command = home.command();
     command.env_remove("VISUAL").env("EDITOR", &script);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -1346,7 +1339,6 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1414,7 +1406,7 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
     });
     let mut command = home.command();
     command.env_remove("VISUAL").env("EDITOR", &script);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
