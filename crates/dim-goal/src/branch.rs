@@ -902,13 +902,7 @@ impl Owner {
                 query.kinds = vec!["input/message".into()];
                 query.direction = TimelineQueryDirection::Descending;
                 let reply = self.tree.query(branch.clone(), query).await?;
-                for (index, event) in reply.events.iter().enumerate() {
-                    // A branch-scope read returns the ancestor's own facts, so
-                    // this cannot hold today; it stays so a later change of
-                    // scope cannot read this branch's goal as inherited.
-                    if reply.positions[index].branch_id == self.branch_id {
-                        continue;
-                    }
+                for event in &reply.events {
                     let EventKind::InputMessage(data) = &event.kind else {
                         continue;
                     };
