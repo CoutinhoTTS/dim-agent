@@ -10,6 +10,9 @@ const OBJECTIVE: &str = "goal:objective";
 const STATUS: &str = "goal:status";
 const OBJECTIVE_TEXT: &str = "<dim-goal kind=\"goal\" op=\"set\">ship it</dim-goal>";
 const STATUS_TEXT: &str = "<dim-goal kind=\"status\" status=\"active\"></dim-goal>";
+/// Mirrors `connection::tree::REPLY_FRAME_BYTES`: the flow test cannot see
+/// the private constant.
+const REPLY_FRAME_BYTES: usize = 16 * 1024 * 1024 - 64 * 1024;
 
 fn goal(text: &str, key: &str) -> InputBlock {
     context_block::raw(text.into(), Some(key.into()))
@@ -23,6 +26,15 @@ fn message(blocks: Vec<InputBlock>, text: &str) -> InputMessageData {
     InputMessageData {
         blocks,
         ..InputMessageData::text(text, Some(InputMode::Queue))
+    }
+}
+
+/// Commits the input without starting a turn: the read projects facts, so a
+/// flow test can write many inputs without running a model turn for each.
+fn appended(blocks: Vec<InputBlock>) -> InputMessageData {
+    InputMessageData {
+        blocks,
+        ..InputMessageData::text("append", Some(InputMode::Append))
     }
 }
 
@@ -599,6 +611,61 @@ async fn retired_branches_are_empty_and_above_the_cap_is_too_many_keys() {
     assert_eq!(
         reply["error"]["data"]["appError"], "too_many_keys",
         "{reply}"
+    );
+}
+
+/// A reply above the reply-frame bound is the `keys_too_large` application
+/// error on a connection that keeps serving; a reply just under the bound is
+/// delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_above_the_frame_bound_fails_and_the_connection_survives() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = create_session(&mut client, json!([])).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+
+    // Neither input alone reaches the bound; together they do.
+    let half = REPLY_FRAME_BYTES / 2 + 1024 * 1024;
+    for (key, byte) in [("large:a", "a"), ("large:b", "b")] {
+        let text = byte.repeat(half);
+        assert!(text.len() < REPLY_FRAME_BYTES);
+        session
+            .input(appended(vec![goal(&text, key)]), "main")
+            .await
+            .unwrap();
+    }
+    session.idle("main").await.unwrap();
+    let reply = client
+        .rpc("session.keys", json!({"sessionId":id,"branchId":"main"}))
+        .await;
+    assert_eq!(
+        reply["error"]["data"]["appError"], "keys_too_large",
+        "{reply}"
+    );
+    assert_eq!(
+        read_keys(&mut client, &id, "main", json!({"through":0})).await,
+        json!({"through":0,"entries":[]}),
+        "the connection still answers the next call"
+    );
+
+    let id = create_session(&mut client, json!([])).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let text = "u".repeat(REPLY_FRAME_BYTES - 4096);
+    let input = session
+        .input(appended(vec![goal(&text, "large:under")]), "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let reply = read_keys(&mut client, &id, "main", json!({})).await;
+    assert_eq!(
+        entries(&reply),
+        [entry("large:under", &input, &text)],
+        "a reply just under the bound is served"
+    );
+    let bytes = reply.to_string().len();
+    assert!(
+        bytes > REPLY_FRAME_BYTES - 4096,
+        "the served reply sits just under the bound: {bytes}"
     );
 }
 
