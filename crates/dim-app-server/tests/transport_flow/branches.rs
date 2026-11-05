@@ -318,3 +318,219 @@ async fn branches_require_v3_and_the_session() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// #1165: a line's own end commits while the turn that wrote it still runs.
+/// This model issues the `branch` tool's `end` and then holds the turn on
+/// `wait`, so the window the directory reports as `ending` stays open.
+struct HoldModel;
+impl HoldModel {
+    fn text(message: &dim_agent_types::Message) -> String {
+        match &message.content {
+            dim_agent_types::MessageContent::Text(text) => text.clone(),
+            dim_agent_types::MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    dim_agent_types::MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+    fn call(id: &str, name: &str, input: Value) -> Vec<dim_agent_capabilities::host::ModelChunk> {
+        use dim_agent_capabilities::host::{ModelChunk, ModelStopReason};
+        vec![
+            ModelChunk::MessageStart {
+                message_id: id.into(),
+            },
+            ModelChunk::ToolStart {
+                id: id.into(),
+                name: name.into(),
+            },
+            ModelChunk::ToolUse(dim_agent_types::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                input: serde_json::from_value(input).expect("tool input"),
+            }),
+            ModelChunk::MessageStop {
+                message_id: id.into(),
+                reason: ModelStopReason::ToolUse,
+            },
+        ]
+    }
+}
+impl dim_agent_capabilities::host::ModelDriver for HoldModel {
+    fn invoke(
+        &self,
+        request: Arc<dim_agent_types::ModelRequest>,
+        connection: dim_agent_capabilities::host::ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
+        let messages: Vec<&dim_agent_types::Message> =
+            request.messages.iter().map(AsRef::as_ref).collect();
+        let held = messages.iter().any(|message| {
+            message.role == dim_agent_types::Role::User && Self::text(message).trim() == "hold"
+        });
+        let results = messages
+            .iter()
+            .filter(|message| message.role == dim_agent_types::Role::ToolResult)
+            .count();
+        let holding = dim_agent_capabilities::adapters::EchoModel::last_message(&request)
+            .is_some_and(|message| {
+                message.role == dim_agent_types::Role::User && Self::text(message).trim() == "hold"
+            });
+        if holding {
+            return Box::pin(async {
+                Ok(Box::pin(futures_util::stream::iter(
+                    Self::call(
+                        "hold-end",
+                        "branch",
+                        json!({"action":"end","content":"the work is done"}),
+                    )
+                    .into_iter()
+                    .map(Ok),
+                ))
+                    as dim_agent_capabilities::host::ModelStream)
+            });
+        }
+        if held && results == 1 {
+            return Box::pin(async {
+                Ok(Box::pin(futures_util::stream::iter(
+                    Self::call("hold-wait", "wait", json!({"millis":20000}))
+                        .into_iter()
+                        .map(Ok),
+                ))
+                    as dim_agent_capabilities::host::ModelStream)
+            });
+        }
+        dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel)
+    }
+}
+
+async fn launch_holding() -> (RunningServer, dim_agent_runtime::Agent) {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts_with_model(
+        &mut builder,
+        dim_agent_capabilities::history::HistoryRenderer::default(),
+        Arc::new(HoldModel),
+    );
+    defaults::tool_host(&mut builder, Arc::new(MockTools));
+    dim_app_server::collaboration::install(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
+                "dim-server-test-{}/server.sock",
+                uuid::Uuid::new_v4()
+            ))),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    (server, agent)
+}
+
+async fn open_tool_line(
+    client: &mut Client,
+    session: &dim_agent_runtime::Session,
+    id: &str,
+) -> String {
+    let text = format!(
+        "tool:branch {}",
+        json!({"action": "create", "prompt": "watch the tests"})
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    session.idle("main").await.unwrap();
+    let child = session
+        .branches()
+        .into_iter()
+        .find(|info| info.parent.as_deref() == Some("main"))
+        .expect("main opened a line")
+        .id;
+    session.idle(&child).await.unwrap();
+    child
+}
+
+/// Waits until the line's directory row reads `state`, and returns it.
+async fn row_in_state(client: &mut Client, id: &str, line: &str, state: &str) -> Value {
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let rows = directory(client, id).await;
+            let row = row(&rows, line).clone();
+            if row["state"] == state {
+                return row;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    waited.unwrap_or_else(|_| panic!("{line} never read {state}"))
+}
+
+/// #1165: the wire reports a line whose end is pending as `ending` with its
+/// committed `branch/end`, and as `ended`, with the same event, once its turn
+/// ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_whose_end_is_pending_reads_ending_on_the_wire() {
+    let (server, agent) = launch_holding().await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({
+                "cwd": std::env::temp_dir(),
+                "tools": ["branch", "wait"],
+                "permissionPolicy": {"allowedTools": ["branch", "wait"]}
+            }),
+        )
+        .await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    assert_ok(&client.rpc("session.attach", json!({"sessionId": id})).await);
+    let child = open_tool_line(&mut client, &session, &id).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":child,"text":"hold"}),
+            )
+            .await,
+    );
+    let ending = row_in_state(&mut client, &id, &child, "ending").await;
+    let end = own_end(&mut client, &id, &child).await;
+    assert_eq!(
+        ending["endEvent"], end,
+        "the pending end is the line's own branch/end"
+    );
+    assert!(
+        ending["head"].as_u64().unwrap() >= end,
+        "the ending head includes the committed end: {ending}"
+    );
+    assert_ok(
+        &client
+            .rpc("session.stop", json!({"sessionId":id,"branchId":child}))
+            .await,
+    );
+    let ended = row_in_state(&mut client, &id, &child, "ended").await;
+    assert_eq!(
+        ended["endEvent"], end,
+        "the turn's end closes the same event: {ended}"
+    );
+    assert_eq!(ended["head"], session.sequence(&child).unwrap());
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
