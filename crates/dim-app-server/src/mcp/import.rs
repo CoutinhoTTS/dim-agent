@@ -245,13 +245,14 @@ fn entry_preview(
             None => ImportStatus::Changed,
         }
     };
-    if preview.status != ImportStatus::Identical {
-        let (changes, omitted_changes) = capped(changed_fields(existing, &import));
-        preview.changes = changes;
-        preview.omitted += omitted_changes;
-        if project {
-            preview.confirm = confirm_fields(&import);
-        }
+    // Enablement is not part of `status`, so an `identical` entry can still
+    // name `enabled`: a replace would write `enabled: false` where the entry
+    // is enabled, while an import of it writes nothing.
+    let (changes, omitted_changes) = capped(changed_fields(existing, &import));
+    preview.changes = changes;
+    preview.omitted += omitted_changes;
+    if preview.status != ImportStatus::Identical && project {
+        preview.confirm = confirm_fields(&import);
     }
     preview
 }

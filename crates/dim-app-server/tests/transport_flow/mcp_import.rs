@@ -142,7 +142,16 @@ async fn mcp_import_previews_selects_and_writes_multiple_user_entries() {
     assert_eq!(entry(&preview, "dup")["status"], "conflict");
     assert_eq!(entry(&preview, "same")["status"], "identical");
     assert_eq!(entry(&preview, "keeps")["status"], "identical");
-    assert_eq!(entry(&preview, "keeps")["changes"], json!([]));
+    assert_eq!(
+        entry(&preview, "keeps")["changes"],
+        json!([{"field": "enabled", "kind": "boolean"}]),
+        "an enabled entry names the disablement a replace would write"
+    );
+    assert_eq!(
+        entry(&preview, "same")["changes"],
+        json!([]),
+        "a disabled entry's replace changes no field"
+    );
     assert_eq!(entry(&preview, "broken")["status"], "invalid");
     assert_eq!(entry(&preview, "remote")["status"], "changed");
     assert_eq!(entry(&preview, "remote")["transport"], "http");

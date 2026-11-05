@@ -507,10 +507,11 @@ status (`identical`, `changed`, `conflict` or `invalid`), the changed field name
 kinds, the members the decoder keeps unused or drops, the project fields needing confirmation,
 the entry's own decode error, the document's unknown top-level names and the target revision.
 Enablement is not part of the comparison: an entry whose configuration matches is `identical`
-however it is enabled, and `changes` names `enabled` only when a write would change it. No value
-from the document appears in the reply (D3). Each entry reports at most 32 names in `changes`
-and 32 in `unsupported`, with `omitted` counting the names the cap left out, so a 1,000-entry
-document stays well under the 16 MiB transport frame.
+however it is enabled. An `identical` entry's `changes` is empty except `enabled`, which it names
+when the entry is enabled, because a replace would write `enabled: false`; importing it writes
+nothing. No value from the document appears in the reply (D3). Each entry reports at most 32
+names in `changes` and 32 in `unsupported`, with `omitted` counting the names the cap left out,
+so a 1,000-entry document stays well under the 16 MiB transport frame.
 
 ### D23. One compare-and-set covers the accepted selection
 
@@ -972,7 +973,7 @@ An `ImportEntry` is:
 | `id` | string | The document's entry id |
 | `transport` | `"stdio"` \| `"http"` \| `"sse"`, absent when the entry does not decode | The transport the entry would run |
 | `status` | `"identical"` \| `"changed"` \| `"conflict"` \| `"invalid"` | What importing the entry would do |
-| `changes` | `[{field, kind}]` | For `changed` and `conflict`: the field names and the JSON kind each holds (`string`, `number`, `boolean`, `array`, `object`, `null`). Never a value. `conflict` lists the fields that differ from the target entry, including `enabled` when the import would change it; `identical` is empty |
+| `changes` | `[{field, kind}]` | The field names and the JSON kind each holds (`string`, `number`, `boolean`, `array`, `object`, `null`). Never a value. `conflict` lists the fields that differ from the target entry; `changed` lists every field of the entry the write would add; `identical` is empty except `enabled` when the entry is enabled, which a replace would set to `false` |
 | `unsupported` | `[{field, effect}]` | Members the decoder does not act on, by name. `effect` is `kept-unused` for an entry's or its `oauth` object's extension member, preserved in the document and unused, or `dropped` for an unknown `auth` member, which the decoder discards |
 | `omitted` | number | How many names the 32-name cap left out of `changes` and `unsupported`; the reported lists are then partial |
 | `confirm` | string[] | Project scope only: the fields whose literal value the apply must confirm, from `args`, `env`, `headers` and `url`; empty for `identical`, `invalid` and user scope |
@@ -1005,8 +1006,8 @@ id stays `mcp_import_conflict`. `replace` accepts an id the source holds,
 decoded or broken; a project entry with an `mcp-secrets` overlay refuses it with
 `mcp_credentials_are_user_scoped` (D14, D17). `replace` writes the entry as an import writes it
 (D24): a user entry is written with `enabled: false` and a project entry without the member, so
-replacing an enabled user entry disables it; when the configurations differ, its preview's
-`changes` names `enabled`. The preview does not read `mcp-secrets`: a project destination with a
+replacing an enabled user entry disables it; the preview's `changes` names `enabled` when a
+replace would do that (D22). The preview does not read `mcp-secrets`: a project destination with a
 credential overlay previews as an ordinary conflict or a free id, and only the apply answers
 `mcp_credentials_are_user_scoped` or `mcp_stale_secret_record`, before writing anything. `rename`
 writes the entry under `newId`, which must be free in the target source and not another
