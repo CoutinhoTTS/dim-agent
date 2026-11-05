@@ -52,7 +52,7 @@ The shapes follow [session access A.1](../contracts/session-access.md#a1-the-ses
 
 The request has no `keys` filter. The reply always lists every live key of the segment, unknown ones included; a client reads the keys it knows and ignores the rest — not an error, no re-read, no effect on other keys. A filter would not reduce the walk (a key last set a thousand messages ago still has to be found) and would add a second unknown-key rule on top of this one.
 
-There is no paging. The entry count grows with the number of live keys, not with the branch's length. `key` is writer-chosen and unchecked, so the count is bounded here: more than 1024 live keys fails the call with the non-retryable application error `too_many_keys`. The read never truncates: truncation would silently lose live state. Goal contributes 2 keys and TimelineTree 2, so the bound is reached only by a producer outside the documented contracts. A reply above the transport frame cannot be sent either and fails the same way rather than being dropped (`outbound::MAX_FRAME_BYTES`).
+There is no paging. The entry count grows with the number of live keys, not with the branch's length. `key` is writer-chosen and unchecked, so the count is bounded here: more than 1024 live keys fails the call with the non-retryable application error `too_many_keys`. The read never truncates: truncation would silently lose live state. Goal contributes 2 keys and TimelineTree 2, so the bound is reached only by a producer outside the documented contracts. The reply is also bounded by size: its serialized JSON must fit the same reply-frame bound `session.history` measures against (`outbound::MAX_FRAME_BYTES` less 64 KiB of envelope), and a larger one fails `keys_too_large` instead of being dropped by the transport. A few large blocks reach that bound before the key count does. Truncation is not an answer to it either, for the same reason.
 
 ### 2.3 Rules
 
@@ -69,6 +69,7 @@ There is no paging. The entry count grows with the number of live keys, not with
 | `session_invalid_input` | The Session or the branch does not exist (the acquire and read outcomes of every session method) |
 | `session_closed`, `branch_ended`, `service_reloading` | The Session closed, the line ended before the read could run, or the serving service reloads; as `session.history` |
 | `too_many_keys` | More than 1024 live keys; not retryable, a retry answers the same |
+| `keys_too_large` | The serialized reply exceeds the reply-frame bound; not retryable, a retry answers the same |
 
 A `through` past the published head is invalid input, never clamped to the head: a client asks for a position it observed, and one beyond this connection's head means it built its overlay from a different view of the branch. Clamping would answer a position the client did not ask for.
 
@@ -152,6 +153,7 @@ Goal A8 is unchanged: a Goal-specific query would need a Session part to read a 
 - `through` before a later change returns the older value; a `through` past the head is `invalid_params`.
 - A v2 connection answers `unknown_method`; an ended line is served at its fixed head with the entries the open line folded.
 - A read fixed at position 0 answers `{through: 0, entries: []}`; a fully retired branch lists no entries; more than 1024 live keys is `too_many_keys`.
+- Two keyed inputs whose texts together exceed the reply-frame bound answer `keys_too_large`, and the same connection still answers the next call; a reply just under the bound is served.
 - At a quiescent point the reply equals the last `HistoryEntry.baseline` by key: same keys, same text bytes, and each id names the same input fact.
 
 ## 9. Changes to other documents

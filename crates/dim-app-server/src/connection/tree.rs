@@ -268,7 +268,9 @@ impl Connection {
     /// newest live block of each key on the branch's own segment, or the
     /// published head when `through` is absent. A position past the head is
     /// invalid input, not a clamp: the client's overlay was built from a
-    /// different view of the branch.
+    /// different view of the branch. A serialized reply above
+    /// `REPLY_FRAME_BYTES` fails `keys_too_large` rather than produce a frame
+    /// the transport would drop.
     pub(super) async fn keys(&self, rpc: &RpcService, params: Keys) -> Result<Reply, RpcError> {
         let session = self.session(rpc, &params.session_id)?;
         let branch = params.branch_id.as_deref().expect("validated branchId");
@@ -303,7 +305,14 @@ impl Connection {
                 other => other?,
             }
         };
-        Ok(Reply::Keys(wire::KeysResult { through, entries }))
+        let result = wire::KeysResult { through, entries };
+        let bytes = serde_json::to_vec(&result)
+            .map_err(|error| RpcError::wire(-32603, error.to_string()))?
+            .len();
+        if bytes > REPLY_FRAME_BYTES {
+            return Err(keys_too_large(bytes));
+        }
+        Ok(Reply::Keys(result))
     }
 
     pub(super) async fn end_branch(
@@ -415,10 +424,11 @@ const HISTORY_TURN_LIMIT: usize = 4096;
 /// batch is the smallest unit the window can trim, so a batch above this is
 /// returned whole rather than split.
 const HISTORY_TURN_BYTES: usize = 4 * 1024 * 1024;
-/// The largest reply a `latestTurn` page may produce: below the transport's
-/// 16 MiB frame, with room for the envelope. A batch above it cannot be sent
-/// and the read fails `history_too_large`.
-const HISTORY_FRAME_BYTES: usize = crate::outbound::MAX_FRAME_BYTES - 64 * 1024;
+/// The largest reply a built-in read may produce: below the transport's
+/// 16 MiB frame, with room for the envelope. A `latestTurn` batch above it
+/// fails `history_too_large`; a `session.keys` reply above it fails
+/// `keys_too_large`.
+const REPLY_FRAME_BYTES: usize = crate::outbound::MAX_FRAME_BYTES - 64 * 1024;
 /// Facts one page of the window's anchor read keeps.
 const TURN_WINDOW_PAGE: u64 = 256;
 /// Facts one page of the `session.keys` scan keeps.
@@ -443,6 +453,14 @@ fn too_many_keys() -> RpcError {
         format!(
             "The branch has more than {KEYS_ENTRY_LIMIT} live keyed blocks; the read refuses to truncate live state"
         ),
+    )
+}
+
+fn keys_too_large(bytes: usize) -> RpcError {
+    RpcError::app(
+        -32000,
+        "keys_too_large",
+        format!("The reply is {bytes} bytes; a reply frame allows {REPLY_FRAME_BYTES}"),
     )
 }
 
@@ -902,12 +920,12 @@ async fn history_window(
             let begin = batch_begin(read, branch, &items, end).await?;
             let bytes: usize = items[begin..end].iter().map(|item| item.bytes).sum();
             if newest {
-                if bytes > HISTORY_FRAME_BYTES {
+                if bytes > REPLY_FRAME_BYTES {
                     return Err(RpcError::app(
                         -32000,
                         "history_too_large",
                         format!(
-                            "The newest history batch is {bytes} bytes; a reply frame allows {HISTORY_FRAME_BYTES}"
+                            "The newest history batch is {bytes} bytes; a reply frame allows {REPLY_FRAME_BYTES}"
                         ),
                     ));
                 }

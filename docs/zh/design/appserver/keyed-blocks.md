@@ -50,7 +50,7 @@
 
 请求没有 `keys` 过滤参数。回复总是列出该段全部存活 key，包括陌生的；客户端只读它认识的 key，其余忽略——不是错误、不触发重读、不影响其他 key。过滤不会减少扫描（一千条消息之前写下的 key 仍要找到），只会在这条规则之上再加一条未知 key 规则。
 
-没有分页。entry 数随存活 key 数增长，与分支长度无关。`key` 由写入方自选且无人检查，所以计数在此处设上界：超过 1024 个存活 key 以不可重试的应用错误 `too_many_keys` 失败。本读从不截断：截断会悄悄丢掉存活状态。Goal 贡献 2 个 key、TimelineTree 2 个，只有文档合同之外的生产者才会触及该上界。超过传输帧的回复同样发不出去，按同样方式失败而不是被丢弃（`outbound::MAX_FRAME_BYTES`）。
+没有分页。entry 数随存活 key 数增长，与分支长度无关。`key` 由写入方自选且无人检查，所以计数在此处设上界：超过 1024 个存活 key 以不可重试的应用错误 `too_many_keys` 失败。本读从不截断：截断会悄悄丢掉存活状态。Goal 贡献 2 个 key、TimelineTree 2 个，只有文档合同之外的生产者才会触及该上界。回复同样有大小上界：其序列化 JSON 必须落在 `session.history` 所用的同一回复帧上界之内（`outbound::MAX_FRAME_BYTES` 减去 64 KiB 信封余量），超出即以 `keys_too_large` 失败，而不是被传输层丢弃。几个大块就会先于 key 数触及该上界。截断同样不是答案，理由同上。
 
 ### 2.3 规则
 
@@ -67,6 +67,7 @@
 | `session_invalid_input` | Session 或分支不存在（所有 session 方法的 acquire 与读取结果） |
 | `session_closed`、`branch_ended`、`service_reloading` | Session 关闭、线在读取运行前结束、或服务重载；同 `session.history` |
 | `too_many_keys` | 存活 key 超过 1024；不可重试，重试得到同样结果 |
+| `keys_too_large` | 序列化回复超出回复帧上界；不可重试，重试得到同样结果 |
 
 超过发布头的 `through` 是无效输入，绝不夹取到头部：客户端请求的是它观察到的位置，超出本连接头部意味着它的 overlay 建立在对分支的另一份视图上。夹取会回答客户端没有请求的位置。
 
@@ -150,6 +151,7 @@ Goal A8 不变：Goal 专属查询需要 Session 部分读取每个分支各一�
 - 早于后续变更的 `through` 返回旧值；超过头部的 `through` 是 `invalid_params`。
 - v2 连接回答 `unknown_method`；结束线在固定头提供与活线折叠相同的 entries。
 - 固定在位置 0 的读取回答 `{through: 0, entries: []}`；全部 retire 的分支不列 entry；超过 1024 个存活 key 是 `too_many_keys`。
+- 两条带 key 输入的文本合计超过回复帧上界时回答 `keys_too_large`，同一连接仍能回答下一次调用；刚好低于上界的回复正常提供。
 - 在静止点上，回复按 key 等于最后一个 `HistoryEntry.baseline`：同样的 key、同样的文本字节，且每个 id 指名同一个输入事实。
 
 ## 9. 对其他文档的改动
