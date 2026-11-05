@@ -7420,3 +7420,173 @@ async fn the_directory_reports_a_line_whose_end_is_pending_as_ending() {
     );
     soon(agent.close()).await.unwrap();
 }
+
+/// #1165: a host end commits `branch/end` and closes the line in one flow.
+/// While the close is held, the directory reports the line as ending with its
+/// own end event and a live head, before its ended row exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_directory_reports_a_host_end_as_ending_before_its_ended_row() {
+    let probe = Arc::new(Probe::default());
+    let gate = Arc::new(Gate::default());
+    let agent = MinimalHost::start(&gated(&probe, &gate)).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = soon(session.branch("main".into(), 0, options("host line")))
+        .await
+        .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    *gate.target.lock().unwrap() = Some(line.clone());
+    gate.armed.store(true, Ordering::SeqCst);
+    let ender = {
+        let session = session.clone();
+        let line = line.clone();
+        tokio::spawn(async move {
+            session
+                .end_branch(
+                    &line,
+                    BranchSource::Host {
+                        operation_id: "op:end".into(),
+                    },
+                )
+                .await
+        })
+    };
+    soon(gate.entered.notified()).await;
+    let end = local_events(&session, &line)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchEnd(_) => Some(event.sequence),
+            _ => None,
+        })
+        .expect("the host end committed on the line");
+    assert!(
+        session.ended_head(&line).is_none(),
+        "the ended row is still ahead while the close is held"
+    );
+    let directory = session.directory();
+    let ending = directory
+        .iter()
+        .find(|entry| entry.info.id == line)
+        .expect("the ending line is listed");
+    assert_eq!(
+        ending.state,
+        BranchDirectoryState::Ending,
+        "the host end committed and the close is held"
+    );
+    assert_eq!(
+        ending.end_event,
+        Some(end),
+        "the ending line carries its own branch/end"
+    );
+    assert!(
+        ending.head >= end && ending.head <= session.sequence(&line).unwrap(),
+        "the ending head is live and includes the committed end"
+    );
+
+    gate.release.notify_one();
+    patient(ender).await.unwrap().unwrap();
+    let directory = session.directory();
+    let ended = directory
+        .iter()
+        .find(|entry| entry.info.id == line)
+        .expect("the ended line is listed");
+    assert_eq!(ended.state, BranchDirectoryState::Ended);
+    assert_eq!(
+        ended.end_event,
+        Some(end),
+        "the same branch/end is the result"
+    );
+    assert_eq!(ended.head, session.sequence(&line).unwrap());
+    soon(agent.close()).await.unwrap();
+}
+
+/// #1165: a cascade end commits a descendant's own `branch/end`. While that
+/// descendant's close is held, the directory reports it as ending with its own
+/// end event, before its ended row exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_directory_reports_a_cascaded_end_as_ending_before_its_ended_row() {
+    let probe = Arc::new(Probe::default());
+    let gate = Arc::new(Gate::default());
+    let agent = MinimalHost::start(&gated(&probe, &gate)).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let ancestor = soon(session.branch("main".into(), 0, options("ancestor")))
+        .await
+        .unwrap();
+    soon(session.idle(&ancestor)).await.unwrap();
+    let child = soon(session.branch(ancestor.clone(), 0, options("cascaded child")))
+        .await
+        .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    *gate.target.lock().unwrap() = Some(child.clone());
+    gate.armed.store(true, Ordering::SeqCst);
+    let ender = {
+        let session = session.clone();
+        let ancestor = ancestor.clone();
+        tokio::spawn(async move {
+            session
+                .end_branch(
+                    &ancestor,
+                    BranchSource::Host {
+                        operation_id: "op:end".into(),
+                    },
+                )
+                .await
+        })
+    };
+    soon(gate.entered.notified()).await;
+    let end = local_events(&session, &child)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchEnd(_) => Some(event.sequence),
+            _ => None,
+        })
+        .expect("the cascade committed the child's own branch/end");
+    assert!(
+        session.ended_head(&child).is_none(),
+        "the child's ended row is still ahead while the close is held"
+    );
+    assert!(
+        !local_events(&session, &ancestor)
+            .await
+            .iter()
+            .any(|event| matches!(&event.kind,
+                EventKind::BranchEnded(data) if data.branch == child)),
+        "the child's result is not recorded yet"
+    );
+    let directory = session.directory();
+    let ending = directory
+        .iter()
+        .find(|entry| entry.info.id == child)
+        .expect("the ending child is listed");
+    assert_eq!(
+        ending.state,
+        BranchDirectoryState::Ending,
+        "the cascaded end committed and the child's close is held"
+    );
+    assert_eq!(
+        ending.end_event,
+        Some(end),
+        "the cascaded child carries its own branch/end"
+    );
+
+    gate.release.notify_one();
+    patient(ender).await.unwrap().unwrap();
+    let directory = session.directory();
+    let ended = directory
+        .iter()
+        .find(|entry| entry.info.id == child)
+        .expect("the ended child is listed");
+    assert_eq!(ended.state, BranchDirectoryState::Ended);
+    assert_eq!(
+        ended.end_event,
+        Some(end),
+        "the same branch/end is the result"
+    );
+    assert_eq!(ended.head, session.sequence(&child).unwrap());
+    soon(agent.close()).await.unwrap();
+}
