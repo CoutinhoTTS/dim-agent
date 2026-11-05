@@ -230,7 +230,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | --- | --- |
 | `agent_sessions` | 新 id（UUID v4）、分叉时刻的 `created_at_ms`，以及原样的源 `config` 文本，也就是整个 `SessionConfig`，包括 `interactive`（[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段)）、`permissionPolicy`、`collaborationRole`、`cwd`、`model`、`systemPrompt` 和 `tools`。复制文本而不重新序列化，`interactive` 的省略规则保持原样 |
 | `session_owners` | 源的 Agent 与协议版本 |
-| `session_catalog` | 给 F 一行，取值与按 F 的事件回填相同：`updated_at_ms` 是分叉事务最后写入的事件的 `create_at`——非零处为 `at + 1` 的 `session/forked`，`0` 处为 F 的创建时间——`preview` 是被复制事件里按同一按批次完整的窗口的第一条用户输入，`0` 处为 NULL（[#556 的目录投影](../../../design/appserver/native-storage-format.md#556-v23-格式决定)） |
+| `session_catalog` | 给 F 一行，取值与按 F 的事件回填相同：`updated_at_ms` 是分叉事务写入的最新一条活动事件的 `create_at`（[Session 目录 §3.2](session-catalog.md#32-顺序游标与分页)）——非零处为 `at + 1` 的 `session/forked`，`0` 处为 F 的创建时间——`preview` 是被复制事件里按同一按批次完整的窗口的第一条用户输入，`0` 处为 NULL（[#556 的目录投影](../../../design/appserver/native-storage-format.md#556-v23-格式决定)） |
 | `timeline_branches` | 头部为 `at + 1` 的 `main`（即它的 `session/forked`；在 `0` 处分叉为 `0`），以及 `branch/create` 位于 `main` 上 `at` 及之前的每个分支，保留存储的 `info`，头部为 0。其下的分支不复制：它们的创建事件在 F 拿不到的事件里 |
 | `timeline_events` | `main` 截至 `at` 的行（切点规则保证没有行跨过它），种类、正文、序号、批次终点、事件 id 和 before 轨迹都按存储的样子；随后在 `at + 1` 新写一行 `session/forked`（在 `0` 处分叉不写）。不含任何子分支的行 |
 | `timeline_content` | 被复制事件按编解码器写入的引用（请求及其 before 轨迹）所引用的行，以及这些引用到达的每个列表节点（格式 v17）。`session/forked` 行不引用内容 |

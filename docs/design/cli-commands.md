@@ -1266,7 +1266,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode session delete SESSION` | Permanently delete the Session and everything the store keeps for it; there is no prompt. |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | Show the Sessions one selector matches, then delete them after confirmation. |
 | `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
-| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` cycles this workspace, this repository when offered, and every workspace. |
+| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` toggles between the local scope — the launch workspace, or its repository once git answers — and every workspace. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
@@ -1412,11 +1412,16 @@ and refuses a path that is not, before it connects to the daemon. A chat that
 resumes a Session and runs on a prompt (`--resume ID -p TEXT`, or a prompt read
 from stdin) names no workspace: it attaches, reads history and submits, and the
 composer never runs, so it keeps working in a directory whose path is not valid
-UTF-8. An interactive resume, a new Session and the TUI still name it. The list
-holds the stored Sessions of exactly that workspace, newest first, and every
-open starts there. `Ctrl+S` cycles this workspace, this repository and all
-workspaces, and the title names the scope shown. The filter keeps the
-composer's `Ctrl+A` and `Ctrl+W`, and `Tab` moves the selection down.
+UTF-8. An interactive resume, a new Session and the TUI still name it. The
+local scope holds the stored Sessions of the launch workspace and, in a git
+checkout, of the same relative directory in its other worktrees, newest first,
+and every open starts there. `Ctrl+S` toggles between the local scope and all
+workspaces: two states, never a third, whatever git, the worktree count or the
+daemon offer. The title names the scope shown: `Sessions · This workspace`
+until git answers, `Sessions · This repository` once it does — even when the
+repository has one worktree — and `Sessions · All workspaces` for the other
+state. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and `Tab` moves
+the selection down.
 
 ```text
 ╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
@@ -1451,23 +1456,31 @@ composer's `Ctrl+A` and `Ctrl+W`, and `Tab` moves the selection down.
 - A scope change works like a new query: it cancels the pending read, drops the
   cursor and reads the first page again; the query stays and applies within the
   new scope.
-- This repository holds the launch workspace and the same relative directory in
+- The local scope is the launch workspace and the same relative directory in
   every worktree of its git repository, read with `git rev-parse` and
   `git worktree list --porcelain` in the background when the picker opens. The
-  first page does not wait for git, and both reads share a two-second bound; a
-  git that fails or does not answer leaves the scope out, without a notice. It
-  is offered only when the set holds more than one entry and the daemon reads a
-  set of workspaces (`session.catalog.workspaces`) or lists through
-  `session.summaries`. A bare worktree adds nothing.
-- Outside this workspace's scope every row leads with its update time and then
+  first page does not wait for git, and both reads share a two-second bound. A
+  git that succeeds names the scope `This repository`; when the picker is
+  showing the local scope and the set holds more than one entry, the title
+  changes and the first page is read again, and a one-entry set changes only
+  the title, since the catalog's canonical `cwd` treats the single workspace as
+  the same filter. A git that fails or does not answer, and a daemon that reads
+  neither a workspace set (`session.catalog.workspaces`) nor
+  `session.summaries`, leave the local scope named `This workspace` and listing
+  exactly the launch workspace, without a notice. A bare worktree adds nothing.
+- The rows name their workspace inside the local scope only when it holds more
+  than one workspace, so a one-worktree repository adds no path to every row;
+  in the all-workspaces scope every row leads with its update time and then
   names its workspace, with the home directory written `~`. The label takes at
   most half the row, and the time comes first, so a long path is what gets cut.
-- With no Sessions and no query, this workspace's scope says `No saved sessions
-  in this workspace. Ctrl+S shows more.`; the other empty and no-match lines
-  stay unchanged.
+- With no Sessions and no query, the local scope says `No saved sessions in
+  this workspace. Ctrl+S shows more.` while it lists exactly the launch
+  workspace — before git answers, outside a git repository, and for a
+  one-worktree repository; a local scope over more worktrees, the
+  all-workspaces scope and the no-match line say `No saved sessions yet.`.
 - A daemon before `session.catalog` is listed through `session.summaries`, and
-  the client applies the scope to the rows it receives with the same exact
-  match.
+  the client applies the scope to the rows it receives: the exact launch
+  workspace, membership in the git set, or no filter.
 - `dimcode --resume ID` resumes a Session of any workspace, and cleanup selects
   across every workspace.
 
@@ -1531,7 +1544,10 @@ command cannot see a closed Session; it therefore stops before any delete, print
 so a server that refuses one refuses both, and a delete that answers `invalid_params`
 before anything was deleted stops the same way. It
 selects with one of two selectors and reads both from the `updatedAt` of
-`session.summaries`, the Session's last activity:
+`session.summaries`, the Session's activity time ([session catalog](appserver/session-catalog.md#32-order-cursor-and-paging)),
+not the time of its last stored event: attaching, restoring and every other housekeeping
+event leave it alone, so a Session that was only attached or resumed keeps its earlier
+time and can become eligible for deletion:
 
 | Selector | Selection |
 | --- | --- |
@@ -1791,6 +1807,15 @@ Exported Markdown: /tmp/Session notes.md
 Exported JSON: /tmp/events.json
 
 > /exit
++--------------------------------------------------------+
+| Bye!                                                   |
+|                                                        |
+| Feedback or ideas? Join us on Discord:                  |
+| https://discord.gg/ds35K3TadP                           |
+|                                                        |
+| To resume this session:                                |
+|   dimcode --resume <session-id>                         |
++--------------------------------------------------------+
 $
 
 $ dimcode session export <session-id> --format markdown > notes.md
@@ -1801,6 +1826,9 @@ The prompt keeps keyboard focus and the terminal keeps scrollback. There are no
 new dialogs, overlays or fixed-width columns. Paths and error messages use the
 existing terminal text filter; narrow terminals wrap normally. An empty Session
 exports an empty event list or a Markdown heading without fabricated messages.
+
+Both TUI modes print the feedback invitation when exiting. The resume command
+appears only when there is an active Session to resume.
 
 ## Execution and JSONL output
 

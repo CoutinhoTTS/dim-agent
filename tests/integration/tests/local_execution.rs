@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     ffi::OsString,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -1549,22 +1550,27 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     session.idle("main").await.unwrap();
     unload_once_released(&session).await;
     let id = session.id().to_owned();
-    let started = |task_id: &str| {
+    let orphan_path = harness.output_root.join("exec-orphan.log");
+    std::fs::write(&orphan_path, "partial\n").unwrap();
+    let started = |task_id: &str, output_path: &str| {
         EventKind::ExecStarted(ExecStartedData {
             turn_id: "t".into(),
             request_id: "r".into(),
             call_id: "c".into(),
             task_id: task_id.into(),
             description: task_id.into(),
-            output_path: format!("/tmp/{task_id}.log"),
+            output_path: output_path.into(),
         })
     };
     let lost = stored(
         &harness,
         &id,
         vec![
-            started("exec-orphan"),
-            started("exec-lost"),
+            started("exec-orphan", &orphan_path.to_string_lossy()),
+            started(
+                "exec-lost",
+                &harness.output_root.join("exec-lost.log").to_string_lossy(),
+            ),
             EventKind::ExecEnded(ExecEndedData {
                 task_id: "exec-lost".into(),
                 status: ExecStatus::Completed,
@@ -1595,8 +1601,44 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     let (orphan_event, orphan) = &ends[2];
     assert_eq!(orphan.task_id, "exec-orphan");
     assert_eq!(orphan.status, ExecStatus::Failed);
-    assert!(text(&orphan.result).contains(
-        "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: /tmp/exec-orphan.log."
+    assert!(text(&orphan.result).contains(&format!(
+        "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: {}.",
+        orphan_path.display()
+    )));
+    // A rebuilt task pages the file its own `exec/started` registered. Its
+    // recovery terminal has no `outputTruncated` flag, so truncation comes
+    // from the file's size there: this file is small.
+    let page = restored
+        .service::<BackgroundExec>("main")
+        .unwrap()
+        .output_page("exec-orphan", 0, 64)
+        .await
+        .unwrap();
+    assert_eq!(page.text, "partial\n");
+    assert_eq!(page.bytes, 8);
+    assert!(page.next_cursor.is_none());
+    assert!(!page.truncated);
+    // A read can land inside one write and see the file end inside a
+    // character; with no whole character to serve the page is empty and
+    // carries no `nextCursor` rather than indexing past the read.
+    std::fs::write(&orphan_path, [0xe2, 0x82]).unwrap();
+    let partial = restored
+        .service::<BackgroundExec>("main")
+        .unwrap()
+        .output_page("exec-orphan", 0, 64)
+        .await
+        .unwrap();
+    assert_eq!(partial.text, "");
+    assert_eq!(partial.bytes, 0);
+    assert!(partial.next_cursor.is_none());
+    // A task whose registered file is gone answers the read's own error.
+    assert!(matches!(
+        restored
+            .service::<BackgroundExec>("main")
+            .unwrap()
+            .output_page("exec-lost", 0, 64)
+            .await,
+        Err(workspace_tools::background::OutputPageError::Unavailable)
     ));
     restored.idle("main").await.unwrap();
     let mut woken: Vec<_> = notifications(&local_events(&restored).await)
@@ -1615,6 +1657,105 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
         .unwrap();
     assert_eq!(settled.status, ExecStatus::Failed);
     restored.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// The page read's cursor rule on a running task, without a product Session:
+/// a short page that ends inside a character being written serves the
+/// complete characters before it, the next offset is always `cursor + bytes`,
+/// a page that fills its budget names that same offset, and `bytes == 0`
+/// ends the file walk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn output_page_advances_by_served_bytes_past_a_partial_character() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({
+                    "command": "while [ ! -f go ]; do sleep 0.01; done; printf 'alpha\\n'; sleep 100",
+                    "runInBackground": true, "timeoutMs": -1,
+                }),
+            )],
+        )
+        .await;
+    let events = until(&session, "exec/started", |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_)))
+    })
+    .await;
+    let (task_id, output_path) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ExecStarted(data) => Some((data.task_id.clone(), data.output_path.clone())),
+            _ => None,
+        })
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let background = session.service::<BackgroundExec>("main").unwrap();
+    std::fs::write(harness.cwd.join("go"), b"go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = background.output_page(&task_id, 0, 64).await.unwrap();
+            if page.text == "alpha\n" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A read can meet the file ending inside a character in progress: the
+    // page serves the complete characters before it with no `nextCursor`.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&output_path)
+        .unwrap();
+    file.write_all(&[0xc3]).unwrap();
+    drop(file);
+    let partial = background.output_page(&task_id, 0, 64).await.unwrap();
+    assert_eq!(partial.text, "alpha\n");
+    assert_eq!(partial.bytes, 6);
+    assert_eq!(partial.next_cursor, None);
+    let full = background.output_page(&task_id, 0, 4).await.unwrap();
+    assert_eq!(full.text, "alph");
+    assert_eq!(full.bytes, 4);
+    assert_eq!(full.next_cursor, Some(4));
+    // The rest of `é` arrives; the page that fills the budget while the cut
+    // splits the character names `cursor + bytes`, not the read length and
+    // not the budget.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&output_path)
+        .unwrap();
+    file.write_all(&[0xa9]).unwrap();
+    drop(file);
+    let split = background.output_page(&task_id, 0, 7).await.unwrap();
+    assert_eq!(split.text, "alpha\n");
+    assert_eq!(split.bytes, 6);
+    assert_eq!(split.next_cursor, Some(split.bytes));
+    let completed = background
+        .output_page(&task_id, split.bytes, 64)
+        .await
+        .unwrap();
+    assert_eq!(completed.text, "é");
+    assert_eq!(completed.bytes, 2);
+    assert_eq!(completed.next_cursor, None);
+    let end = background
+        .output_page(&task_id, split.bytes + completed.bytes, 64)
+        .await
+        .unwrap();
+    assert_eq!(end.text, "");
+    assert_eq!(end.bytes, 0);
+    assert_eq!(end.next_cursor, None);
+    assert_eq!(
+        background.stop(&task_id).await.unwrap().status,
+        ExecStatus::Cancelled
+    );
+    session.close().await.unwrap();
     harness.shutdown().await;
 }
 

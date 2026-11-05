@@ -257,7 +257,7 @@ PluginManager 除 `plugin` 工具外不向模型上下文加入任何自己的�
   | 命令 | 作用 |
   | --- | --- |
   | `list`、`install …`、`enable …`、`disable <name>`、`reload <name>`、`update <id>`、`remove <id>` | 调用同名的 `plugin.*` 方法，参数与 CLI 相同；相对路径按 Session 的工作目录解析。结果和错误相同。 |
-  | `config <name>` | `<name>` 所用插件登记的声明式（JSON Schema）Settings 来源（R4）；Rust 类型的来源（例如 Mcp 的）不经这里提供，也不列出：每个来源的用户文档、revision、schema 和仅限用户的字段。schema 标为 `writeOnly` 的成员（密钥，[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）不出现在文档中，有值时列在 `writeOnlySet` 里。没有运行的插件没有登记来源。 |
+  | `config <name>` | `<name>` 所用插件登记的声明式（JSON Schema）Settings 来源（R4）；Rust 类型的来源（例如 Mcp 的）不经这里提供，也不列出：每个来源的用户文档、revision、schema 和仅限用户的字段。schema 标为 `writeOnly` 的成员（密钥，[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）不出现在文档中，有值时列在 `writeOnlySet` 里。没有运行的插件没有登记来源。客户端的对应物是 `settings.sources`（[settings-service §4.3](../appserver/settings-service.md#43-管理方法-settings客户端路径)），它只列出声明。 |
   | `config <name> set <key> <value>` | 通过 Settings 替换某个来源的一个顶层成员：读取用户文档，把 `<key>`（插件有多个来源时写成 `<source>.<key>`）设为 `<value>`（能解析为 JSON 就按 JSON，否则按字符串），再用读到的 revision 更新。revision 和 schema 由 Settings 检查；这是所有者写入，所以仅限用户的字段会被拒绝，本身是或含有 `writeOnly` 成员的成员也会被拒绝。所有者在需要时读取自己的来源，所以新值不用重启就生效。行的结构配置不在这里修改。 |
   | `help [command]` | 命令列表，或一个命令的用法和细节。 |
 

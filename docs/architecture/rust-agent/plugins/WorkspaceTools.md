@@ -9,7 +9,9 @@ Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/wo
 [exec.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs).
 Provides ToolHost for read, write, edit, glob, grep, exec and exec_stop, and registers the
 leaf namespace `session.exec.output` with `sessionMethods` for the active
-command's bounded tail preview. It also registers the namespace `session.files`
+command's bounded tail preview and, beside it, `session.exec.output.page`,
+which pages the task's registered output file by byte cursor. It also registers
+the namespace `session.files`
 with `sessionMethods`: `session.files.search` returns the files of the Session's
 workspace an `@` mention offers, ranked as the TUI picker ranks them
 (`workspace_tools/mentions.rs`); a query that names a path outside the workspace
@@ -215,9 +217,14 @@ is written to.
 The read-only [`session.exec.output`](../../../design/background-task-output.md)
 method resolves the requested branch through TreeCommands and reads that branch's
 BackgroundExec capture. It accepts only `{sessionId, branchId, taskId}` and returns
-`{text}`. C1 owns admission and unload settlement on WorkspaceTools' original
-context. The method does not open a client-supplied or historical path, append
-events, acquire Session holds or start background work.
+`{text}`. It does not open a client-supplied or historical path, append events,
+acquire Session holds or start background work. Its sibling
+`session.exec.output.page` reads the task's registered output file by byte cursor
+with the same sanitization, as
+[the same design document](../../../design/background-task-output.md) describes;
+it opens the path the branch's own `exec/started` registers, never a
+caller-supplied one. C1 owns admission and unload settlement on WorkspaceTools'
+original context.
 
 - §1 and ADR 002 D1–D3: command construction belongs to HostPlatform; no new
   plugin, wiring layer, state owner or dependency is added.

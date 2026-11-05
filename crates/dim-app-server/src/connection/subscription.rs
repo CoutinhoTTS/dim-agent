@@ -14,19 +14,48 @@ use rutis::Disposer;
 use rutis::host::FiberStatusChanged;
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 use tokio::sync::{mpsc, watch};
+use tokio_util::task::TaskTracker;
 
 /// Replacing, detaching or closing ends the subscription and its listener.
 pub(super) struct Attachment {
     pub generation: u64,
+    /// Released when the attachment is dropped, after `retire` awaited the
+    /// work below.
     pub _usage: crate::agents::SessionUse,
     pub cancel: CancellationToken,
     pub listener: Option<Disposer>,
     /// v3: signals plugin activation, so a reloaded progress cell is reacquired.
     pub availability: Option<Disposer>,
+    /// The `follow` and `follow_mcp` tasks this subscription spawned.
+    pub tasks: TaskTracker,
     pub delivery: Arc<Delivery>,
 }
+impl Attachment {
+    /// Ends the subscription and waits until nothing of it remains: the
+    /// listeners are disposed, the tasks it spawned have returned, and the
+    /// usage is released last, so a later attach, detach or finish starts
+    /// from none of it. Disposal errors are logged, never dropped. When the
+    /// follow task ends the Session itself it removes its own attachment and
+    /// this value is dropped instead; that runs off-thread, so `finish`
+    /// settles such a subscription by its absence from the map.
+    pub(super) async fn retire(mut self) {
+        self.cancel.cancel();
+        for disposer in [self.listener.take(), self.availability.take()]
+            .into_iter()
+            .flatten()
+        {
+            if let Err(error) = disposer.dispose().await {
+                tracing::warn!(%error, "subscription listener disposal failed");
+            }
+        }
+        self.tasks.close();
+        self.tasks.wait().await;
+    }
+}
 impl Drop for Attachment {
-    /// Unregistering waits for in-flight deliveries; the connection does not.
+    /// The fallback that cannot wait: the Session ended and the follow task
+    /// removed its own attachment, or the attach reply could not be sent.
+    /// Cancels and runs the listener disposal off-thread.
     fn drop(&mut self) {
         self.cancel.cancel();
         for listener in [self.listener.take(), self.availability.take()]
@@ -420,6 +449,14 @@ impl Connection {
             .session_record(&host, &session, version)
             .await
             .map_err(RpcError::from)?;
+        // The transition lock keeps one attach, detach or finish in flight per
+        // connection. When this attach replaces an existing attachment, the new
+        // one is in place before the previous retires, so every event committed
+        // after this reply's pin has a listener: the previous one until the map
+        // changes, this one after. With no previous attachment — a first
+        // attach, or a detach that completed first — events committed between
+        // the pin and the new listener have none.
+        let _transition = self.transitions.lock().await;
         let generation = self.next_attachment.fetch_add(1, Ordering::Relaxed);
         let cancel = self.closed.child_token();
         let watched = Arc::new(Mutex::new(HashSet::new()));
@@ -441,6 +478,10 @@ impl Connection {
             signals,
             delivery: delivery.clone(),
         });
+        #[cfg(feature = "testing")]
+        if self.hub.take_attach_failure_before_registration() {
+            return Err(RpcError::closed());
+        }
         let listener = host
             .ctx
             .listen::<SessionBroadcast>()
@@ -471,14 +512,15 @@ impl Connection {
         };
         let (availability, active) = availability.unzip();
         let ended = session.is_closing();
+        let tasks = TaskTracker::new();
         // The reply carries the count this attach produces. The hub reads every
         // connection's attachment map, including this one's, and the reply must
         // be sent under that same map so no notice precedes it.
         let attached_clients =
             self.hub.attached_clients(&session_id) + usize::from(!self.is_attached(&session_id));
-        {
+        let previous = {
             let mut attachments = self.attachments.lock().expect("attachments");
-            attachments.insert(
+            let previous = attachments.insert(
                 session_id.clone(),
                 Attachment {
                     _usage: usage,
@@ -486,6 +528,7 @@ impl Connection {
                     cancel: cancel.clone(),
                     listener: Some(listener),
                     availability,
+                    tasks: tasks.clone(),
                     delivery,
                 },
             );
@@ -533,6 +576,13 @@ impl Connection {
                 attachments.remove(&session_id);
                 return Err(RpcError::wire(-32603, "Connection closed"));
             }
+            previous
+        };
+        // The previous subscription settles before this attach returns, but
+        // after the new one is in place: its own listeners and tasks cannot
+        // strand an event committed from now on.
+        if let Some(previous) = previous {
+            previous.retire().await;
         }
         self.hub.notify_clients(&session_id);
         crate::approval::replay(&session, |branch_id, request| {
@@ -547,24 +597,25 @@ impl Connection {
             let host = host.clone();
             let session = session.clone();
             let cancel = cancel.clone();
-            self.subscriptions.spawn(async move {
+            tasks.spawn(async move {
                 this.follow_mcp(host, session, generation, cancel).await;
             });
         }
         let this = self.clone();
-        self.subscriptions.spawn(async move {
+        let followed = session_id.clone();
+        tasks.spawn(async move {
             this.follow(
                 session, generation, cancel, watched, receiver, active, ended,
             )
             .await;
             let mut attachments = this.attachments.lock().expect("attachments");
             if attachments
-                .get(&session_id)
+                .get(&followed)
                 .is_some_and(|a| a.generation == generation)
             {
-                attachments.remove(&session_id);
-                this.hub.ui.detach(&this.id, &session_id);
-                this.hub.notify_clients(&session_id);
+                attachments.remove(&followed);
+                this.hub.ui.detach(&this.id, &followed);
+                this.hub.notify_clients(&followed);
             }
         });
         Ok(())
@@ -583,6 +634,17 @@ impl Connection {
         mut active: Option<watch::Receiver<()>>,
         mut ended: bool,
     ) {
+        #[cfg(feature = "testing")]
+        if let Some(hold) = self.hub.take_follow_hold() {
+            hold.waiting.notify_one();
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    hold.cancelled.notify_one();
+                    hold.release.notified().await;
+                }
+                _ = hold.release.notified() => {}
+            }
+        }
         let version = self.protocol_version();
         let id = session.id().to_owned();
         let mut watches = FuturesUnordered::<StateChange>::new();
