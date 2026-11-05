@@ -22169,6 +22169,7 @@
         "path McpError::CredentialsAreUserScoped",
         "path McpError::ImportConflict",
         "path McpError::ImportUnconfirmed",
+        "path McpError::StaleSecretRecord",
         "path Result",
         "use super::McpError",
         "use super::Result"

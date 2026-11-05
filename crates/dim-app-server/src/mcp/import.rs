@@ -245,13 +245,14 @@ fn entry_preview(
 }
 
 /// The entries a request's resolutions accept, by destination id. Every
-/// check runs against the target snapshot read with the revision, before the
-/// caller writes anything.
+/// check runs against the target snapshot read with the revision and the ids
+/// that have a withheld `mcp-secrets` record, before the caller writes
+/// anything.
 pub(crate) fn plan(
     document: &McpSettings,
     target: &McpSettings,
     project: bool,
-    overlays: &BTreeSet<String>,
+    withheld: &BTreeSet<String>,
     resolutions: &BTreeMap<String, ImportResolution>,
 ) -> Result<BTreeMap<String, McpServerSettings>> {
     let mut planned = BTreeMap::new();
@@ -284,6 +285,7 @@ pub(crate) fn plan(
                         "the target source holds this id as an entry that does not decode; replace or rename it",
                     ));
                 }
+                refuse_stale_record(id, target, withheld)?;
                 id.clone()
             }
             ImportAction::Replace => {
@@ -293,7 +295,7 @@ pub(crate) fn plan(
                         "the target source does not hold this id",
                     ));
                 }
-                if project && overlays.contains(id) {
+                if project && withheld.contains(id) {
                     return Err(McpError::CredentialsAreUserScoped);
                 }
                 id.clone()
@@ -311,6 +313,7 @@ pub(crate) fn plan(
                 {
                     return Err(import_conflict(id, "the new id is already taken"));
                 }
+                refuse_stale_record(new_id, target, withheld)?;
                 new_id.to_owned()
             }
         };
@@ -338,6 +341,18 @@ fn import_conflict(id: &str, reason: &str) -> McpError {
         id: id.to_owned(),
         reason: reason.to_owned(),
     }
+}
+
+/// A withheld `mcp-secrets` record at a destination with no entry in the
+/// source would be merged into the entry the import writes, so an import or a
+/// rename refuses that destination exactly as `mcp.save` refuses the same
+/// state (D17). A destination the source still holds answers the conflict its
+/// own arm checks first.
+fn refuse_stale_record(id: &str, target: &McpSettings, withheld: &BTreeSet<String>) -> Result<()> {
+    if withheld.contains(id) && target.get(id).is_none() {
+        return Err(McpError::StaleSecretRecord);
+    }
+    Ok(())
 }
 
 fn transport(entry: &McpServerSettings) -> &'static str {

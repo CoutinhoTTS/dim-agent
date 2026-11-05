@@ -1445,28 +1445,42 @@ async fn write_import(
         return Err(SettingsError::Conflict.into());
     }
     let project = matches!(source, SettingsScope::Project(_));
-    let overlays = if project {
+    let (withheld, project_enablement) = if project {
         let workspace = config::workspace(settings, source)?;
-        settings
+        let withheld = settings
             .read::<McpSecrets>(SettingsScope::User, cancel)
             .await?
             .document
             .entries
             .get(&workspace)
             .map(|entries| entries.keys().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let enablement = enablement(settings, source, cancel).await;
+        (withheld, enablement)
     } else {
-        BTreeSet::new()
+        (BTreeSet::new(), McpProjectEnablement::default())
     };
     let changes = import::plan(
         &document,
         &snapshot.document,
         project,
-        &overlays,
+        &withheld,
         &resolutions,
     )?;
     if changes.is_empty() {
         return Ok(snapshot.revision);
+    }
+    if project {
+        // An entry removed through an external `.mcp.json` edit leaves its
+        // `mcp-projects` record behind, and the entry this import writes
+        // would then start enabled. Withdraw the record before the write, so
+        // an import never enables anything (D24).
+        let workspace = config::workspace(settings, source)?;
+        for id in changes.keys() {
+            if !snapshot.document.contains(id) && project_enablement.contains(&workspace, id) {
+                set_project_enabled(settings, source, id, false, cancel).await?;
+            }
+        }
     }
     let mut target = snapshot.document;
     for (id, configuration) in changes {

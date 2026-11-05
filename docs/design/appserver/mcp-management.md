@@ -526,7 +526,11 @@ nothing. Entries it does not touch keep their stored value, broken entries inclu
 The document's `enabled` member is not carried as enablement. A user entry is written with
 `enabled: false`; a project entry is written without the member and gets no `mcp-projects`
 record, so only `mcp.set_enabled` can enable it (ADR 003 D3). An entry whose configuration is
-identical is not rewritten, so an enabled user entry keeps its enablement.
+identical is not rewritten, so an enabled user entry keeps its enablement. A destination whose
+entry an external edit removed may still carry that entry's `mcp-projects` record, which would
+make the entry the import writes start enabled; the import withdraws the record before the
+source write. The record is inert while no entry holds the id, so withdrawing it changes nothing
+else, and the same write is what `mcp.remove` would do if the entry were still there.
 
 ### D25. A project import refuses credentials and confirms literal workspace values
 
@@ -679,8 +683,8 @@ skeleton only; the overlay-held fields stay in `mcp-secrets` and are never copie
 | `mcp_settings_read` | The source could not be read |
 | `mcp_move_conflict` | The destination source already holds an entry with that id; nothing is written |
 | `mcp_move_partial` | A destination-side write committed and the source removal did not; the client rereads and follows the direction's recovery: into project remove the destination and retry, into user remove the project source (D11, §4.6) |
-| `mcp_credentials_are_user_scoped` | A patch on a moved project entry sets a field held in `mcp-secrets`, or a save targets that entry; move the entry back to user scope (D14) |
-| `mcp_stale_secret_record` | A project save finds a withheld record whose project entry is absent; call `mcp.remove` with that id and the project revision to delete it, then save again (D17) |
+| `mcp_credentials_are_user_scoped` | A patch on a moved project entry sets a field held in `mcp-secrets`, a save targets that entry, or a replace imports onto it; move the entry back to user scope (D14) |
+| `mcp_stale_secret_record` | A project save, import or rename finds a withheld record whose project entry is absent; call `mcp.remove` with that id and the project revision to delete it, then retry (D17) |
 | `mcp_import_conflict` | An import resolution cannot apply to the source read at `expectedVersion`: `import` on an id the source holds with different content or as a broken entry, `replace` on an id it does not hold, a `rename` destination already taken, a non-skip resolution on an invalid entry, or a project entry with a literal `auth.token` or a URL with userinfo; nothing is written (§4.8) |
 | `mcp_import_unconfirmed` | A project import would write a literal `args`, `env`, `headers` or `url` value the resolution did not confirm; nothing is written (§4.8) |
 | `invalid_params` (`-32602`) | A field of the wrong transport, a project target without `cwd`, a plugin source, the same `from` and `to`, an import resolution naming an entry the document does not contain, a `newId` on another action or a `confirm` name outside the four fields, or a write to a plugin entry, which answers `plugin MCP entries change through their plugin` |
@@ -988,17 +992,23 @@ nothing (D22).
 | `confirm` | string[], project scope | The fields the user confirmed; it must include every field in the preview's `confirm` |
 
 `import` accepts a free id and an `identical` entry; an id the source holds with different
-content or as a broken entry is `mcp_import_conflict`. `replace` accepts an id the source holds,
+content or as a broken entry is `mcp_import_conflict`. A destination whose id still has a
+withheld `mcp-secrets` record but no entry in the source is refused before the write with
+`mcp_stale_secret_record`, naming `mcp.remove` as the cleanup, exactly the state `mcp.save`
+refuses (D17). `import` checks
+the id it writes and `rename` its `newId`, after the source's own ids have answered, so a taken
+id stays `mcp_import_conflict`. `replace` accepts an id the source holds,
 decoded or broken; a project entry with an `mcp-secrets` overlay refuses it with
 `mcp_credentials_are_user_scoped` (D14, D17). `replace` writes the entry as an import writes it
 (D24): a user entry is written with `enabled: false` and a project entry without the member, so
 replacing an enabled user entry disables it; when the configurations differ, its preview's
-`changes` names `enabled`. The preview does not read `mcp-secrets`: a project entry with a
-credential overlay previews as an ordinary conflict, and only the apply answers
-`mcp_credentials_are_user_scoped`, before writing anything. `rename` writes the entry under
-`newId`, which must be free in the target source and not another resolution's destination. An
-`invalid` entry can only be skipped. An `id` the document does not contain, a `newId` on another
-action and a `confirm` name outside the four fields are `invalid_params`.
+`changes` names `enabled`. The preview does not read `mcp-secrets`: a project destination with a
+credential overlay previews as an ordinary conflict or a free id, and only the apply answers
+`mcp_credentials_are_user_scoped` or `mcp_stale_secret_record`, before writing anything. `rename`
+writes the entry under `newId`, which must be free in the target source and not another
+resolution's destination. An `invalid` entry can only be skipped. An `id` the document does not
+contain, a `newId` on another action and a `confirm` name outside the four fields are
+`invalid_params`.
 
 The apply re-parses the document and re-checks every resolution against the source it reads at
 `expectedVersion`; it uses no preview result (D23). Every accepted entry enters that one snapshot
@@ -1011,7 +1021,9 @@ writes nothing and answers the source's current revision.
 
 An import never enables anything (D24): the document's `enabled` member is not carried as
 enablement, a user entry is written with `enabled: false`, and a project entry is written without
-the member and gets no `mcp-projects` record. A project import writes literal values into
+the member and gets no `mcp-projects` record. A project destination whose entry an external edit
+removed keeps that entry's `mcp-projects` record, so the import withdraws the record before the
+source write. A project import writes literal values into
 `.mcp.json`, a file commonly committed, so it refuses an entry with a literal `auth.token` (the
 value is not only `${NAME}` references) or a URL carrying userinfo, and it requires the
 resolution's `confirm` to name `args`, `env`, `headers` or `url` when the entry carries a literal

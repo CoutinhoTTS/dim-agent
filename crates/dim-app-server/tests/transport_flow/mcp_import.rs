@@ -548,6 +548,169 @@ async fn project_revision(client: &mut Client, project: &std::path::Path) -> Val
     catalog["result"]["projectRevision"].clone()
 }
 
+/// Saves an entry in user scope and moves it into the project source, where a
+/// literal value becomes a withheld `mcp-secrets` record.
+async fn move_to_project(
+    client: &mut Client,
+    project: &std::path::Path,
+    id: &str,
+    configuration: Value,
+) {
+    let user = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":id,"expectedVersion":user["result"]["userRevision"],"configuration":configuration}),
+            )
+            .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&client.rpc("mcp.move", json!({"id":id,"from":"user","to":"project","cwd":project,"expectedFromVersion":catalog["result"]["userRevision"],"expectedToVersion":catalog["result"]["projectRevision"]})).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_refuses_a_destination_that_keeps_a_withheld_record() {
+    let home = scratch("dm-import-withheld");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    // `kept` keeps its args in `mcp-secrets`; `plain` leaves no record.
+    move_to_project(
+        &mut client,
+        &project,
+        "kept",
+        json!({"command":"echo","args":["--withheld"]}),
+    )
+    .await;
+    move_to_project(&mut client, &project, "plain", json!({"command":"echo"})).await;
+    for id in ["kept", "plain"] {
+        let revision = project_revision(&mut client, &project).await;
+        assert_ok(&client.rpc("mcp.set_enabled", json!({"source":"project","id":id,"cwd":project,"expectedVersion":revision,"enabled":true})).await);
+    }
+    // An external edit removes both entries; their records stay.
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let document = servers_document(json!({
+        "kept": {"command":"echo"},
+        "plain": {"command":"echo"},
+        "free": {"command":"echo"}
+    }));
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    for id in ["kept", "plain", "free"] {
+        assert_eq!(entry(&preview, id)["status"], "changed", "{id}");
+    }
+    let revision = project_revision(&mut client, &project).await;
+    let imported = client
+        .rpc(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":document,
+                "expectedVersion":revision,
+                "resolutions":[{"id":"kept","action":"import"}]
+            }),
+        )
+        .await;
+    assert_eq!(
+        imported["error"]["data"]["appError"],
+        "mcp_stale_secret_record"
+    );
+    assert_eq!(
+        project_revision(&mut client, &project).await,
+        revision,
+        "a refused import writes nothing"
+    );
+    let renamed = client
+        .rpc(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":document,
+                "expectedVersion":revision,
+                "resolutions":[{"id":"free","action":"rename","newId":"kept"}]
+            }),
+        )
+        .await;
+    assert_eq!(
+        renamed["error"]["data"]["appError"],
+        "mcp_stale_secret_record"
+    );
+    assert_eq!(project_revision(&mut client, &project).await, revision);
+    // A free id with no record imports, and the stale enablement record of the
+    // id it writes is withdrawn, so the entry starts disabled (D24).
+    let applied = client
+        .rpc(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":document,
+                "expectedVersion":revision,
+                "resolutions":[{"id":"plain","action":"import"}]
+            }),
+        )
+        .await;
+    assert_ok(&applied);
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(
+        catalog_entry(&catalog, "plain")["enabled"],
+        false,
+        "an import never enables anything"
+    );
+    let applied = client
+        .rpc(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":document,
+                "expectedVersion":applied["result"]["revision"],
+                "resolutions":[{"id":"free","action":"import"}]
+            }),
+        )
+        .await;
+    assert_ok(&applied);
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(stored["mcpServers"]["plain"], json!({"command":"echo"}));
+    assert_eq!(stored["mcpServers"]["free"], json!({"command":"echo"}));
+    assert!(
+        stored["mcpServers"].get("kept").is_none(),
+        "a refused import writes nothing: {stored}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_import_answers_stale_revisions_and_refuses_oversize_documents() {
     let home = scratch("dm-import-limits");
