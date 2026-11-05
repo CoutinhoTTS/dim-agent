@@ -437,25 +437,44 @@ fn same_configuration(left: &McpServerSettings, right: &McpServerSettings) -> bo
     configuration(left) == configuration(right)
 }
 
-/// The declared members a comparison sees, without enablement or extension
-/// members.
+/// The configuration the comparison sees: the declared members without
+/// enablement, which is the user's state rather than the entry's.
 fn configuration(entry: &McpServerSettings) -> Map<String, Value> {
+    let mut members = declared_members(entry);
+    members.remove("enabled");
+    members
+}
+
+/// The declared members a comparison sees: extension members are dropped at
+/// both levels, because `oauth`'s unknown names are extension members too
+/// (`unsupported` names them `oauth.<name>`). An `oauth` object left with no
+/// declared member declares nothing and is dropped with them.
+fn declared_members(entry: &McpServerSettings) -> Map<String, Value> {
     let mut members = members(entry);
-    members.retain(|name, _| declared(name) && name != "enabled");
+    members.retain(|name, _| declared(name));
+    if let Some(Value::Object(oauth)) = members.get_mut("oauth") {
+        oauth.retain(|name, _| OAUTH_MEMBERS.contains(&name.as_str()));
+    }
+    if members
+        .get("oauth")
+        .is_some_and(|oauth| oauth.as_object().is_some_and(Map::is_empty))
+    {
+        members.remove("oauth");
+    }
     members
 }
 
 /// Compares the declared members of the normalized entry, so an enablement the
 /// import would change is reported even though `status` ignores enablement.
-/// Extension members stay out of both sides, so no name is reported twice: the
-/// document's are named by `unsupported`, and the target's are extension data
-/// the import does not compare.
+/// Extension members stay out of both sides, those inside `oauth` included, so
+/// no name is reported twice: the document's are named by `unsupported`, and
+/// the target's are extension data the import does not compare.
 fn changed_fields(
     before: Option<&McpServerSettings>,
     after: &McpServerSettings,
 ) -> Vec<ImportField> {
-    let before = before.map(members).unwrap_or_default();
-    let after = members(after);
+    let before = before.map(declared_members).unwrap_or_default();
+    let after = declared_members(after);
     let mut fields = BTreeMap::new();
     for (name, value) in &after {
         if declared(name) && before.get(name) != Some(value) {

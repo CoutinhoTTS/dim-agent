@@ -1122,6 +1122,144 @@ async fn mcp_import_ignores_extension_members_in_the_comparison() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// `oauth`'s unknown names are extension members too: a target that carries
+/// one and a document that does not compare `identical`, the document's are
+/// named `oauth.<name>`, and an import writes neither store; a declared
+/// `oauth` difference is still a `conflict`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_ignores_oauth_extension_members_in_the_comparison() {
+    let home = scratch("dm-import-oauth-extension");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    // Import the entries the comparison reads; a project import keeps the
+    // `kept` entry's oauth extension member in the withheld record.
+    let seeded = servers_document(json!({
+        "kept": {"type":"http","url":"https://example.test/mcp","oauth":{"clientId":"x","x-note":"a"}},
+        "gained": {"type":"http","url":"https://example.test/mcp","oauth":{"clientId":"x"}},
+        "changed": {"type":"http","url":"https://example.test/mcp","oauth":{"clientId":"old"}}
+    }));
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":seeded}),
+        )
+        .await;
+    assert_ok(&preview);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":seeded,
+                    "expectedVersion":preview["result"]["revision"],
+                    "resolutions":[
+                        {"id":"kept","action":"import"},
+                        {"id":"gained","action":"import"},
+                        {"id":"changed","action":"import"}
+                    ]
+                }),
+            )
+            .await,
+    );
+    let document = servers_document(json!({
+        "kept": {"type":"http","url":"https://example.test/mcp","oauth":{"clientId":"x"}},
+        "gained": {"type":"http","url":"https://example.test/mcp","oauth":{"clientId":"x","x-note":"b"}},
+        "changed": {"type":"http","url":"https://example.test/mcp","oauth":{"clientId":"new"}}
+    }));
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    // The target-only oauth extension member is not compared.
+    let kept = entry(&preview, "kept");
+    assert_eq!(kept["status"], "identical");
+    assert_eq!(fields(kept), Vec::<&str>::new());
+    assert_eq!(unsupported(kept), Vec::new());
+    // The document-only one is unsupported, not a change.
+    let gained = entry(&preview, "gained");
+    assert_eq!(gained["status"], "identical");
+    assert_eq!(fields(gained), Vec::<&str>::new());
+    assert_eq!(unsupported(gained), [("oauth.x-note", "kept-unused")]);
+    // A declared oauth difference is still a conflict.
+    let changed = entry(&preview, "changed");
+    assert_eq!(changed["status"], "conflict");
+    assert_eq!(fields(changed), ["oauth"]);
+    // The import writes neither store.
+    fn records(database: &rusqlite::Connection) -> Option<String> {
+        database
+            .query_row(
+                "SELECT document FROM settings_documents WHERE source='user/mcp-secrets'",
+                [],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+    let before = std::fs::read(project.join(".mcp.json")).unwrap();
+    let native = std::fs::canonicalize(home.join("native")).unwrap();
+    let database = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
+    database
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let records_before = records(&database);
+    assert!(
+        records_before
+            .as_deref()
+            .is_some_and(|records| records.contains("x-note")),
+        "the seeded import wrote the oauth extension member to the record: {records_before:?}"
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":document,
+                    "expectedVersion":preview["result"]["revision"],
+                    "resolutions":[
+                        {"id":"kept","action":"import"},
+                        {"id":"gained","action":"import"}
+                    ]
+                }),
+            )
+            .await,
+    );
+    assert_eq!(
+        std::fs::read(project.join(".mcp.json")).unwrap(),
+        before,
+        "the import leaves the source untouched"
+    );
+    assert_eq!(
+        records(&database),
+        records_before,
+        "the import leaves the record untouched"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Saves an entry in user scope and moves it into the project source, where a
 /// literal value becomes a withheld `mcp-secrets` record.
 async fn move_to_project(
