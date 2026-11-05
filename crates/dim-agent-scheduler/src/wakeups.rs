@@ -285,8 +285,8 @@ impl Wakeups {
     /// within the grace window is fired once, one whose instant is past the
     /// window is `expired` and never replayed — unless the target already
     /// accepted its submission id, when it is `fired` instead — one whose
-    /// Session is gone is `cancelled`, and a terminal record older than
-    /// [`RETENTION_AFTER_TERMINAL`] is removed. A fire is only the input
+    /// Session or branch is gone is `cancelled`, and a terminal record older
+    /// than [`RETENTION_AFTER_TERMINAL`] is removed. A fire is only the input
     /// write through the public `sessions.input`; there is no launch, stop
     /// or withdraw (§10). The pass reads the file once, takes one clock
     /// reading, and writes at most once.
@@ -360,7 +360,12 @@ impl Wakeups {
                     #[cfg(test)]
                     crate::wakeup_pass::pause(&wakeup_id).await;
                 }
-                Ok(Err(code)) if matches!(code.as_str(), "session_closed" | "branch_missing") => {
+                Ok(Err(code))
+                    if matches!(
+                        code.as_str(),
+                        "session_closed" | "branch_missing" | "branch_ended"
+                    ) =>
+                {
                     outcomes.push((wakeup.wakeup_id, WakeupState::Cancelled))
                 }
                 // `reloading`, transport failures and any other code leave the

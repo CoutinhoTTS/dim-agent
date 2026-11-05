@@ -646,6 +646,62 @@ async fn a_record_past_the_grace_with_no_accepted_input_is_expired_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ended_branch_cancels_its_record_and_never_retries() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    // A branch can only be opened when the Session mounts the `branch` tool.
+    let session = create_session(&mut client, home.path(), &["branch"], true).await;
+    let agent: Agent = server.agent().expect("the default Agent");
+    let at = agent
+        .get_session(&session)
+        .unwrap()
+        .sequence("main")
+        .unwrap();
+    let child = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId": session, "parentBranchId": "main", "at": at,
+                "prompt": "Child work."}),
+        )
+        .await
+        .unwrap()["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let created: Value = client
+        .rpc(
+            "session.wakeup.create",
+            json!({"sessionId": session, "branchId": child, "at": instant_after(6),
+                "prompt": "Into the ended line."}),
+        )
+        .await
+        .unwrap();
+    let wakeup_id = created["wakeupId"].as_str().unwrap().to_owned();
+    client
+        .rpc(
+            "session.branch_end",
+            json!({"sessionId": session, "branchId": child}),
+        )
+        .await
+        .unwrap();
+
+    // An ended line accepts no new input, so the record settles cancelled like
+    // one whose Session is gone instead of retrying until the grace expires.
+    wait_state(home.path(), &wakeup_id, "cancelled").await;
+    let events = history(&mut client, &session).await;
+    assert!(
+        wakeup_inputs(&events).is_empty(),
+        "the ended line never takes the input: {events:?}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_records_are_pruned_after_their_retention_age() {
     let home = home();
     let model = Arc::new(Script::default());
