@@ -206,7 +206,7 @@ impl FileReads {
             let Some(last) = reply.events.last().map(|event| event.sequence) else {
                 return Ok(None);
             };
-            if (reply.events.len() as u64) < COMPACTION_PAGE || last == 0 {
+            if (reply.events.len() as u64) < COMPACTION_PAGE || last <= 1 {
                 return Ok(None);
             }
             from_sequence = Some(last - 1);
