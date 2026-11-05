@@ -391,9 +391,37 @@ The client RPC boundary omits Git source userinfo, query and fragment, preservin
 the repository path, ref and commit. The persisted source is unchanged and remains
 available to update. Only catalog candidate sources, top-level status errors and
 direct content-refusal errors are projected; plugin-owned settings are not traversed.
-Status and content-refusal errors carry a generic message at this boundary, including
-in mutation replies: arbitrary Git, loader, manifest and content-error text can contain
-credentials.
+Status errors carry a generic message at this boundary, including in mutation replies:
+arbitrary Git, loader and manifest text can contain credentials.
+
+A content refusal reaches the client with the static reason its cause carries —
+its owner's, or PluginManager's own for a content file it reads itself — and as
+the generic "Plugin content was refused" otherwise. A reason never carries a
+source position or the raw text, and the raw text, with the paths and URLs in it,
+stays in the server's logs and in the model-facing `plugin` tool.
+
+| Owner | Kind | Cause | Reason |
+| --- | --- | --- | --- |
+| PluginManager | `mcp` | The content file is not valid JSON | the file is not valid JSON |
+| PluginManager | `mcp` | The content file could not be read | the file could not be read |
+| PluginManager | `hooks` | The content file is not valid JSON | the file is not valid JSON |
+| PluginManager | `hooks` | The content file could not be read | the file could not be read |
+| McpSettings | `mcp` | The document is not a JSON object | MCP document must be a JSON object |
+| McpSettings | `mcp` | The document has no `mcpServers` object | MCP document must contain an mcpServers object |
+| McpSettings | `mcp` | `mcpServers` is not a JSON object | mcpServers must be a JSON object |
+| McpSettings | `mcp` | A server entry id is empty | MCP server entry id is empty |
+| McpSettings | `mcp` | A stdio entry `cwd` is not a directory inside the plugin | MCP plugin cwd must be a directory inside the plugin |
+| HooksSettings | `hooks` | The document is not a valid hooks document | invalid hook document |
+
+The table is the contract: a client matches a refusal by its exact message. The
+skills and UI kinds have no reasons, because their refusals name files and paths.
+A missing content file is not in the table: `Manifest::read` resolves every
+content path and refuses a missing one as `invalid_manifest` before PluginManager
+reads it. The table lists every reason a plugin's own content can produce. Dim's
+own registration state can also refuse a plugin, for example when the stored
+registration file of the owner is damaged; that refusal carries the owner's
+settings message, which is outside this contract, and a client shows a message it
+does not know as it shows the generic one.
 
 ### A.2 Errors
 

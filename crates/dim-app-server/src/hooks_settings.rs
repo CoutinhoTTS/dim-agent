@@ -417,8 +417,10 @@ fn reader(
 /// `hooks-plugins`.
 pub struct HooksService {
     settings: Arc<SettingsService>,
-    /// Why the last registration of a plugin was refused, by plugin id.
-    refused: Mutex<BTreeMap<String, String>>,
+    /// Why the last registration of a plugin was refused, by plugin id: the
+    /// raw error, and its static reason when the cause has one
+    /// (PluginManager A.2).
+    refused: Mutex<BTreeMap<String, (String, Option<&'static str>)>>,
 }
 impl HooksService {
     /// Adds or replaces the hook document of `plugin` (a plugin id, §3.7),
@@ -459,7 +461,7 @@ impl HooksService {
         };
         let mut refused = self.refused.lock().unwrap();
         match &result {
-            Err(error) => refused.insert(plugin, error.to_string()),
+            Err(error) => refused.insert(plugin, (error.to_string(), error.reason())),
             Ok(()) => refused.remove(&plugin),
         };
         result
@@ -478,7 +480,21 @@ impl HooksService {
 
     /// Why Hooks refused the last document `plugin` registered.
     pub fn plugin_refusal(&self, plugin: &str) -> Option<String> {
-        self.refused.lock().unwrap().get(plugin).cloned()
+        self.refused
+            .lock()
+            .unwrap()
+            .get(plugin)
+            .map(|(error, _)| error.clone())
+    }
+
+    /// The static reason of the refusal [`Self::plugin_refusal`] reports,
+    /// when its cause has one (PluginManager A.2).
+    pub fn plugin_reason(&self, plugin: &str) -> Option<&'static str> {
+        self.refused
+            .lock()
+            .unwrap()
+            .get(plugin)
+            .and_then(|(_, reason)| *reason)
     }
 
     /// The plugin ids whose hook documents Hooks holds.

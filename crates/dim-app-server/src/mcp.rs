@@ -447,8 +447,10 @@ fn resolved_entry(
 pub struct McpService {
     settings: Arc<SettingsService>,
     credentials: Arc<dyn CredentialVariables>,
-    /// Why the last registration of a plugin was refused, by plugin id.
-    refused: Mutex<BTreeMap<String, String>>,
+    /// Why the last registration of a plugin was refused, by plugin id: the
+    /// raw error, and its static reason when the cause has one
+    /// (PluginManager A.2).
+    refused: Mutex<BTreeMap<String, (String, Option<&'static str>)>>,
     publication: Arc<publication::Publication>,
     stopping: CancellationToken,
     gate: Mutex<()>,
@@ -549,8 +551,15 @@ impl McpService {
         };
         let mut refused = self.refused.lock().unwrap();
         match &result {
-            Err(error) => refused.insert(plugin, error.to_string()),
-            Ok(()) => refused.remove(&plugin),
+            Err(McpError::Settings(error)) => {
+                refused.insert(plugin, (error.to_string(), error.reason()));
+            }
+            Err(error) => {
+                refused.insert(plugin, (error.to_string(), None));
+            }
+            Ok(()) => {
+                refused.remove(&plugin);
+            }
         };
         result
     }
@@ -568,7 +577,21 @@ impl McpService {
 
     /// Why Mcp refused the last document `plugin` registered.
     pub fn plugin_refusal(&self, plugin: &str) -> Option<String> {
-        self.refused.lock().unwrap().get(plugin).cloned()
+        self.refused
+            .lock()
+            .unwrap()
+            .get(plugin)
+            .map(|(error, _)| error.clone())
+    }
+
+    /// The static reason of the refusal [`Self::plugin_refusal`] reports,
+    /// when its cause has one (PluginManager A.2).
+    pub fn plugin_reason(&self, plugin: &str) -> Option<&'static str> {
+        self.refused
+            .lock()
+            .unwrap()
+            .get(plugin)
+            .and_then(|(_, reason)| *reason)
     }
 
     /// The plugin ids whose MCP documents Mcp holds.

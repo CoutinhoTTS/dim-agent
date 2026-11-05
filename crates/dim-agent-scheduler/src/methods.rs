@@ -236,9 +236,9 @@ impl From<SchedulerError> for RpcError {
 /// data, so it is `invalid_data`.
 fn read_failure(error: SettingsError) -> SchedulerError {
     match error {
-        SettingsError::Invalid(_) | SettingsError::Document(_) => {
-            SchedulerError::invalid_data(error.to_string())
-        }
+        SettingsError::Invalid(_)
+        | SettingsError::Document(_)
+        | SettingsError::DocumentShape { .. } => SchedulerError::invalid_data(error.to_string()),
         error => SchedulerError::new("service_unavailable", error.to_string()),
     }
 }
@@ -248,7 +248,9 @@ fn read_failure(error: SettingsError) -> SchedulerError {
 fn write_failure(error: SettingsError) -> SchedulerError {
     match error {
         SettingsError::Conflict => SchedulerError::new("schedule_conflict", error.to_string()),
-        SettingsError::Invalid(_) | SettingsError::Document(_) => {
+        SettingsError::Invalid(_)
+        | SettingsError::Document(_)
+        | SettingsError::DocumentShape { .. } => {
             SchedulerError::new("schedule_invalid", error.to_string())
         }
         error => SchedulerError::new("service_unavailable", error.to_string()),
