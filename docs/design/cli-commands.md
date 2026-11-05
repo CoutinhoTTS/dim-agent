@@ -208,9 +208,12 @@ and changing attachment or shown line closes it.
 Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
 text draft replaces their attachments. Esc interrupt instead withdraws all held
-messages before stopping, restoring their complete content to the draft, oldest
-first, so they cannot start a new run automatically. Stored paste/file links are
-kept verbatim. Steering always uses the owner's full held input.
+messages before stopping, restoring their operator content to the draft, oldest
+first, so they cannot start a new run automatically. Appended runtime text blocks
+(after the first block, starting with `<dim-`) are not restored; references such
+as `$skill: name` stay so resubmission loads fresh context. Adjacent operator text
+blocks are separated by newlines. Images and stored paste/file links are kept.
+Steering always uses the owner's full held input.
 
 ### Queue strip
 

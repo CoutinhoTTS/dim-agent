@@ -8659,6 +8659,25 @@ fn tui_escape_withdraws_the_queue_before_the_run_stops() {
                 json!({"text":"existing draft\nfirst\nsecond"}),
             ),
             (
+                "existing draft",
+                json!([
+                    {"type":"text","text":"hello\n$skill: checkin"},
+                    {"type":"text","text":"<dim-skill name=\"checkin\">\nPRIVATE SKILL BODY\n</dim-skill>"},
+                    {"type":"text","text":"world"},
+                    {"type":"text","text":"<dim-hooks kind=\"context\">\nPRIVATE RUNTIME CONTEXT\n</dim-hooks>"},
+                    {"type":"text","text":"keep <dim-literal> inside operator text"}
+                ]),
+                json!({"text":"existing draft\nhello\n$skill: checkin\nworld\nkeep <dim-literal> inside operator text\nsecond"}),
+            ),
+            (
+                "existing draft",
+                json!([
+                    {"type":"text","text":"<dim-literal> first block is operator text"},
+                    {"type":"text","text":"next line"}
+                ]),
+                json!({"text":"existing draft\n<dim-literal> first block is operator text\nnext line\nsecond"}),
+            ),
+            (
                 "!existing draft",
                 json!([{"type":"text","text":"first"}]),
                 json!({"text":"existing draft\nfirst\nsecond"}),
@@ -8668,12 +8687,14 @@ fn tui_escape_withdraws_the_queue_before_the_run_stops() {
                 json!([
                     {"type":"text","text":"compare"},
                     {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/queued.png"}},
-                    {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)"}
+                    {"type":"text","text":"<dim-skill name=\"checkin\">\nPRIVATE SKILL BODY\n</dim-skill>"},
+                    {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)"},
+                    {"type":"text","text":"follow-up notes"}
                 ]),
                 json!({"user":{"content":[
                     {"type":"text","text":"existing draft\ncompare"},
                     {"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/queued.png"}},
-                    {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)\nsecond"}
+                    {"type":"text","text":"[Pasted text: /files/paste.txt (24 lines)] [source.rs](/work/source.rs)\nfollow-up notes\nsecond"}
                 ]}}),
             ),
             (

@@ -262,8 +262,10 @@ messages are labelled Incorporating and cannot be withdrawn; a raced operation
 reports that the input has already left the queue. Esc closes the panel.
 Shift+Left keeps messages with images or multiple content blocks queued with a
 notice rather than losing attachments. Esc interrupt withdraws every held message
-before stopping and restores its complete content, including images and stored
-paste/file links, after withdrawal succeeds. No held message starts another run.
+before stopping and restores its operator content, including images and stored
+paste/file links, after withdrawal succeeds. Appended runtime context is omitted
+so skill references load fresh context on resubmission; adjacent operator text
+blocks retain a newline separator. No held message starts another run.
 
 ```text
 Queue

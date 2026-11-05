@@ -173,17 +173,29 @@ impl Composer {
         self.area.set_cursor(text.len());
     }
 
-    /// Appends withdrawn input after the current draft, preserving image blocks.
+    /// Appends withdrawn operator content, excluding appended runtime blocks.
+    /// Adjacent text blocks are separated by newlines; images stay atomic.
     pub fn restore(&mut self, input: dim_agent_types::UserInput) {
         self.shell = None;
         self.area.set_cursor(self.area.text().len());
         if !self.area.text().trim().is_empty() {
             self.area.insert_str("\n");
         }
-        for block in input.content {
+        let mut previous_text = false;
+        for (index, block) in input.content.into_iter().enumerate() {
             match block {
-                dim_agent_types::ContentBlock::Text { text } => self.area.insert_str(&text),
+                dim_agent_types::ContentBlock::Text { text } => {
+                    if index > 0 && text.starts_with("<dim-") {
+                        continue;
+                    }
+                    if previous_text {
+                        self.area.insert_str("\n");
+                    }
+                    self.area.insert_str(&text);
+                    previous_text = true;
+                }
                 block @ dim_agent_types::ContentBlock::Image { .. } => {
+                    previous_text = false;
                     let buffer = "[Image]".to_owned();
                     let id =
                         self.area
