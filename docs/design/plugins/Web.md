@@ -47,7 +47,7 @@ The search API key is `searchService.apiKey`, a user-only field in Web's Setting
 ```mermaid
 flowchart TB
   subgraph CFG["Business configuration (Settings source web)"]
-    WebCfg["searchService, allowPrivateHosts, proxy"]
+    WebCfg["searchService, allowPrivateHosts, proxy, proxyDns"]
     Secret["searchService.apiKey (user-only)"]
   end
   subgraph MEM["Web memory per Session (not persisted)"]
@@ -82,8 +82,8 @@ sequenceDiagram
   X->>A: admit risk network
   A-->>X: allow (or ask, deny)
   X->>W: execute(ToolCall)
-  W->>W: validate URL, resolve host, check every address
-  W->>N: GET pinned to the validated IP (direct, or CONNECT IP:port through proxy)
+  W->>W: validate URL, select resolution and address policy (A.4)
+  W->>N: GET via validated IP or proxy-resolved hostname (A.4)
   N-->>W: body up to 5 MiB
   W-->>X: ToolResult header plus text slice
   X->>TL: step/tool-completed, then one step/tool-result for the batch
@@ -190,7 +190,7 @@ No Session methods, `managementMethods` or CLI subcommand: protected client conf
 
 The process row `web` is registered with the App Server when a home exists. Its apply registers the Settings source `web` (user file `web.json`, no project file) and the Session part `Web` with `partRegistry`. Each Session mounts that part. The part injects `settings`, `toolRegistry` and `managedProviders`. Its apply registers cleanup and the two tools, and performs no I/O until a call. The Rust spelling is Appendix G.
 
-The source schema the row registers, with `userOnly` paths `/searchService` and `/allowPrivateHosts`:
+The source schema the row registers, with `userOnly` paths `/searchService`, `/allowPrivateHosts` and `/proxyDns`:
 
 ```json
 {
@@ -212,25 +212,26 @@ The source schema the row registers, with `userOnly` paths `/searchService` and 
       "items": { "type": "string" },
       "default": []
     },
-    "proxy": { "type": "string", "format": "uri", "writeOnly": true }
+    "proxy": { "type": "string", "format": "uri", "writeOnly": true },
+    "proxyDns": { "type": "boolean", "default": false }
   }
 }
 ```
 
 Execution follows the tool handler with the call's cancellation token. Every call reads the user-scoped `web` source. A read failure, or a stored document that does not deserialize into the web document, fails the call with `settings_unavailable` and opens no connection. Web does not substitute defaults for that document. When an API-key adapter is configured, the key is `searchService.apiKey`. When `searchService` is absent or `{"kind":"dim-oauth"}`, `web_search` calls `managedProviders` and does not read OAuth tokens.
 
-Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values.
+Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy, or `proxyDns: true` without a proxy, fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values. Web's proxy settings apply to fetches and directly configured search adapters; account-backed search follows the managed provider contract.
 
 The initial source is the user file `web.json`, read at user scope, with no projectFile or implicit user/project merge (A16). Clients write private-host exceptions; Web has no configuration-writing tool. The App Server registers the built-in Web row whenever a product home exists; Web requires no package installation. [PluginManager acceptance item 5](PluginManager.md#appendix-c-acceptance-m1) governs its on/off state: `plugin.disable {"name":"web"}` withdraws its tools from the next turn of an open Session; `plugin.enable {"name":"web"}` restores them there and in new Sessions. The state survives a restart. Explicit `plugin.reload` returns `not_reloadable`.
 
 ## 7. Security
 
 - Admission: both tools declare `network`; every call passes Approval and Permission (read-only denies, workspace-write asks, FullAccess allows).
-- SSRF: Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address, with or without `proxy`; cross-host redirects need a new call and a new admission (A.4, A10).
+- SSRF: by default Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address, with or without `proxy`. User-only `proxyDns` delegates hostname resolution and the resolved-address access policy to the configured proxy (A.4). Cross-host redirects need a new call and a new admission (A10).
 - No ambient authority: `GET` only; no cookies, stored site credentials or client certificates; nothing from the Session except the URL the model wrote (A8).
 - API key: read with the document per call; never in definitions, results, `structuredContent`, diagnostics or errors.
 - Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission.
-- With `proxy`, Web asks the proxy for an HTTP `CONNECT` to the validated IP and port, never to the hostname, so the proxy does not resolve the target name; TLS SNI and the `Host` header carry the original hostname. Pinning and private-address protection are the same as for a direct connection (A.4).
+- With `proxy`, the `CONNECT` target follows A.4; TLS certificate verification, SNI and the `Host` header use the original URL host in either DNS mode.
 
 ## 8. Rule check
 
@@ -332,14 +333,15 @@ The title is independently limited to 500 Unicode scalar values in both result f
 
 | Rule | Content |
 | --- | --- |
-| Resolution | Web resolves the hostname, validates every resolved address and tries only validated addresses in DNS order until connected or the shared connect deadline expires (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
+| Resolution | With `proxyDns: false` (default), Web resolves the hostname, validates every resolved address and tries only validated addresses in DNS order until connected or the shared connect deadline expires (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
 | Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these; hostnames `localhost` and `*.localhost` |
-| Literal IPs | Allowed only when public by the same rules |
+| Literal IPs | Allowed only when public by the same rules or covered by `allowPrivateHosts`, including with `proxyDns: true`; a literal IP never delegates resolution |
 | Ports | Any port on a public address (A12) |
 | Exceptions | `allowPrivateHosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
-| Proxy | With `proxy`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`; TLS SNI and the `Host` header use the original hostname; the proxy never receives the hostname as the connect target. A proxy that refuses the `CONNECT` fails the call with `connect_failed` (A15) |
+| Proxy | With `proxyDns: false`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`. With `proxyDns: true`, a hostname URL instead uses `CONNECT <hostname>:<port>` without local target DNS resolution. A literal IP still undergoes the address check and uses an IP target. Both modes share the existing connect deadline and cancellation; a refused tunnel fails with `connect_failed` (A15), without direct fallback |
+| Proxy DNS trust | `proxyDns` requires an explicit `proxy` and is disabled by default. Enabling it trusts that proxy to resolve hostnames and enforce the resolved-address access policy: Web cannot inspect or pin those addresses, so a hostname may reach private or metadata addresses if the proxy permits them. Web still rejects `localhost` and `*.localhost` unless explicitly allowed by hostname. CIDR exceptions apply only to addresses Web checks, not to addresses hidden behind proxy resolution |
 
-Fake-IP DNS answers remain subject to this policy. Synthetic benchmark addresses (`198.18.0.0/15`) are blocked by default; use real-address DNS answers or an explicit trusted-host exception in `allowPrivateHosts`. Neither the search endpoint nor a configured proxy implicitly bypasses address checks.
+Fake-IP DNS answers remain subject to the default address policy: reserved ranges are not automatically trusted. With `proxyDns: true`, Web avoids the local target DNS answer entirely, so Fake-IP ranges need no special cases or per-site exceptions. Without this opt-in, use real-address DNS answers or an explicit trusted-host exception in `allowPrivateHosts`. Neither a search endpoint nor `proxy` alone enables proxy DNS.
 
 ### A.5 Business configuration (Settings source `web`)
 
@@ -348,6 +350,7 @@ Fake-IP DNS answers remain subject to this policy. Synthetic benchmark addresses
 | `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` or absent; user-only | absent (uses `dim-oauth` via `managedProviders` when signed in; otherwise `web_search` returns `search_unavailable`) |
 | `allowPrivateHosts` | string[] | `[]` |
 | `proxy` | string (URL) | absent |
+| `proxyDns` | boolean; user-only; requires `proxy` when enabled | `false` |
 
 Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. The row's structural on/off state belongs to PluginManager (§6). Built-in adapter ids are an implementation choice (A13). The API key is `searchService.apiKey` (§1).
 
@@ -394,12 +397,12 @@ Every error is an error `ToolResult` (`isError: true`) with content `web_fetch f
 | --- | --- |
 | `invalid_input` | Parameter violates Appendix A |
 | `blocked_address` | Host or a redirect hop resolves to a blocked address; the message names the rule only |
-| `dns_failed`, `connect_failed`, `tls_failed` | Network errors; `connect_failed` includes an unparsable proxy or a proxy refusing the `CONNECT` |
+| `dns_failed`, `connect_failed`, `tls_failed` | Network errors; `connect_failed` includes an unparsable proxy, `proxyDns: true` without a proxy, or a proxy refusing the `CONNECT` |
 | `timeout` | Connect or whole-call limit reached |
 | `http_status` | Non-2xx final status |
 | `too_many_redirects` | More than 5 same-host hops |
 | `unsupported_content_type` | Type not in A.3 |
-| `search_unavailable` | No usable service or signed-in account, endpoint/proxy unparsable, adapter unusable, or a required API key missing |
+| `search_unavailable` | No usable service or signed-in account, endpoint/proxy unparsable, enabled proxy DNS without a proxy for a direct adapter, adapter unusable, or a required API key missing |
 | `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
 | `settings_unavailable` | The `web` source could not be read, or the stored document does not match the web document |
 | `cancelled` | Call cancelled |
@@ -410,17 +413,18 @@ Recovery: Web holds no durable work; reload and restart lose only the cache.
 
 Flow tests through public interfaces: tool calls in a test Session, a local HTTP server reachable only through a test `allowPrivateHosts` entry, a fake search adapter.
 
-1. Without a service `web_search` returns `search_unavailable`; configuring one makes the next call succeed with no reload; removing it fails the next call. Schema-valid but unparsable endpoint/proxy values produce the errors in §6.1 without opening a connection or falling back to a direct connection.
+1. Without a service `web_search` returns `search_unavailable`; configuring one makes the next call succeed with no reload; removing it fails the next call. Schema-valid but unparsable endpoint/proxy values, and enabled proxy DNS without a proxy, produce the errors in §6.1 without opening a connection or falling back to a direct connection.
 2. `web_search` format, domain filters, zero results, service error.
 3. `web_fetch` HTML header and Markdown; `start_char` pagination to the end; `max_chars`; download limit notice.
 4. Plain text, JSON, unsupported type, 404, empty page.
 5. Same-host redirects up to 5; sixth fails; cross-host redirect returns the notice.
-6. Loopback, private, link-local, IPv4-mapped IPv6, `localhost` and a private-resolving hostname blocked; DNS rebinding test not connected, both directly and with `proxy` (the test proxy receives only `CONNECT <validated IP>:<port>`, with SNI and `Host` set to the hostname).
+6. With proxy DNS disabled, loopback, private, link-local, IPv4-mapped IPv6, `localhost` and a private-resolving hostname blocked; DNS rebinding test not connected, both directly and with `proxy` (the test proxy receives only `CONNECT <validated IP>:<port>`, with SNI and `Host` set to the hostname).
 7. Permission: read-only denies, workspace-write asks, FullAccess allows.
 8. Interrupt before dispatch, during approval and during a slow response (socket closed, one result).
 9. Restart settlement repeats no request.
 10. Non-interactive Session declares both tools.
 11. Diagnostics and results never contain the API key.
+12. Enabling proxy DNS through `settings.update` makes the next uncached fetch and direct search-adapter request use `CONNECT <hostname>:<port>` without reload or local target DNS, even when that name has a Fake-IP answer or cannot resolve locally. The URL host remains the HTTP `Host` and HTTPS certificate/SNI identity. Disabling it restores local validation. Literal private, benchmark and IPv4-mapped IPs, plus localhost names, remain blocked without an applicable exception; proxy refusal and cancellation settle without a direct retry. These tests use a disposable home and a fixture proxy, never system DNS or proxy configuration.
 
 ## Appendix E. Assumptions
 
@@ -440,14 +444,14 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | A12 | Any port on public addresses | Judgment | Restrict to 80/443 |
 | A13 | Built-in adapter list is an implementation choice | Overview names no service | A service is fixed by the overview |
 | A14 | No framing text around fetched content | Judgment | Model-visible framing to define |
-| A15 | A configured proxy supports HTTP `CONNECT` to an IP address for both `http` and `https` targets | Maintainer decision: one pinning guarantee with and without a proxy | Proxies that only accept hostnames cannot be used; private-address protection would depend on the proxy |
+| A15 | A configured proxy supports HTTP `CONNECT` to the target form selected by A.4, for both `http` and `https` | Address pinning by default; explicit proxy trust with `proxyDns` | A proxy that refuses that target form cannot be used |
 | A16 | Initial source is user file `web.json`, read at user scope; no implicit project merge | Maintainer decision | Define project source/merge semantics before using existing projectFile |
 
 ## Appendix F. Implementation boundaries
 
 | Question | Current boundary |
 | --- | --- |
-| Initial scope | Tool parameters, network/content policy and A1–A16 are maintainer-confirmed. Web is the built-in process row `web` and its Session part. Product installation of optional packages remains PluginManager work. |
+| Initial scope | Web is the built-in process row `web` and its Session part. Product installation of optional packages remains PluginManager work. |
 | Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 | HTML to text | A scanner, not a browser. A `<` followed later by `>` starts a tag, including a bare `<` in prose. Script, style and navigation are removed by regular expressions before that scan. |
 | Content encoding | `gzip`, `deflate` and `identity` are decoded. `br` and any other encoding fail as `connect_failed`. An incomplete gzip, zlib-wrapped deflate or raw deflate stream fails with `connect_failed`, unless the download limit was already reached, in which case the capped body is returned with `download_limited`. Raw deflate is the fallback for servers that omit the zlib wrapper. |
