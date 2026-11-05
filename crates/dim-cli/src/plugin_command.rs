@@ -1,7 +1,11 @@
 //! `dimcode plugin`: PluginManager's `plugin.*` methods (PluginManager §6).
 
 use crate::model::session::PluginAction;
-use crate::{Result, client::Client, sanitize::safe};
+use crate::{
+    Result,
+    client::Client,
+    sanitize::{safe, safe_line},
+};
 use dim_client::Message;
 use serde_json::{Value, json};
 
@@ -147,8 +151,8 @@ async fn report_unrunnable_hooks(client: &mut Client, result: &Value) -> Result<
         {
             lines.push(format!(
                 "  {} {}",
-                text(&entry["event"]),
-                text(&entry["state"])
+                safe_line(entry["event"].as_str().unwrap_or("-")),
+                safe_line(entry["state"].as_str().unwrap_or("-"))
             ));
         }
     }
