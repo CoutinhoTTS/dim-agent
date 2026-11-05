@@ -127,6 +127,10 @@ pub(crate) fn convert_responses_input_with_conversation(
                 // The text parts of one message item reference it once (#468:
                 // each content part streams as its own text part).
                 let mut text_items = std::collections::HashSet::new();
+                // Without `store`, a message item's text parts replay as one
+                // input item that keeps its id and per-part content (#468).
+                let mut replayed_text_items: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
                 for part in content {
                     match part {
                         AssistantPart::Text(TextPart {
@@ -143,15 +147,37 @@ pub(crate) fn convert_responses_input_with_conversation(
                                 }
                                 continue;
                             }
-                            let phase = phase_from_provider_options(ns, provider_options);
-                            let mut item = json!({
-                                "role": "assistant",
-                                "content": text,
-                            });
-                            if let Some(phase) = phase {
-                                item["phase"] = json!(phase);
+                            if let Some(ref id) = id {
+                                if let Some(&index) = replayed_text_items.get(id) {
+                                    let part = json!({ "type": "output_text", "text": text });
+                                    input[index]["content"]
+                                        .as_array_mut()
+                                        .expect("text item content is an array")
+                                        .push(part);
+                                } else {
+                                    let phase = phase_from_provider_options(ns, provider_options);
+                                    let mut item = json!({
+                                        "role": "assistant",
+                                        "id": id,
+                                        "content": [{ "type": "output_text", "text": text }],
+                                    });
+                                    if let Some(phase) = phase {
+                                        item["phase"] = json!(phase);
+                                    }
+                                    replayed_text_items.insert(id.clone(), input.len());
+                                    input.push(item);
+                                }
+                            } else {
+                                let phase = phase_from_provider_options(ns, provider_options);
+                                let mut item = json!({
+                                    "role": "assistant",
+                                    "content": text,
+                                });
+                                if let Some(phase) = phase {
+                                    item["phase"] = json!(phase);
+                                }
+                                input.push(item);
                             }
-                            input.push(item);
                         }
                         AssistantPart::ToolCall(ToolCallPart {
                             tool_call_id,
@@ -224,6 +250,11 @@ pub(crate) fn convert_responses_input_with_conversation(
                                 "name": tool_name,
                                 "arguments": serialize_arguments(tool_input),
                             });
+                            // Without `store`, the client call keeps the item
+                            // id it was streamed with (#468).
+                            if !store && let Some(ref id) = id {
+                                item["id"] = json!(id);
+                            }
                             if let Some(ref namespace) = namespace {
                                 item["namespace"] = json!(namespace);
                             }
