@@ -126,7 +126,7 @@ pub(crate) async fn read_page(
             biased;
             _ = cancel.cancelled() => return Err(gone()),
             _ = stop.cancelled() => return Err(gone()),
-            chunk = read.file.read_at(at, (end - at).min(65536) as usize, &stop) => chunk,
+            chunk = read.file.read_at(at, (end - at) as usize, &stop) => chunk,
         }
         .map_err(page_error)?;
         if chunk.is_empty() {
