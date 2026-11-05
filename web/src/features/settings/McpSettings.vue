@@ -432,7 +432,8 @@ onBeforeUnmount(() => {
         <p v-if="entry.unsupported.length">{{ s('Not carried', '不携带') }}: {{ importUnsupported(entry) }}</p>
         <p v-if="entry.omitted">{{ importOmitted(entry) }}</p>
         <p v-if="entry.error">{{ entry.error }}</p>
-        <label><span>{{ s('Action', '操作') }}</span><select v-model="entry.action" class="ui-field" data-size="md" :disabled="busy" :aria-label="s('Import action', '导入操作')"><option value="import">{{ s('Import', '导入') }}</option><option value="skip">{{ s('Skip', '跳过') }}</option><option value="replace">{{ s('Replace the existing entry', '替换现有条目') }}</option><option value="rename">{{ s('Import under a new id', '以新 ID 导入') }}</option></select></label>
+        <p v-if="entry.status === 'invalid'">{{ s('This entry does not decode, so it can only be skipped.', '此条目无法解码，只能跳过。') }}</p>
+        <label v-else><span>{{ s('Action', '操作') }}</span><select v-model="entry.action" class="ui-field" data-size="md" :disabled="busy" :aria-label="s('Import action', '导入操作')"><option value="import">{{ s('Import', '导入') }}</option><option value="skip">{{ s('Skip', '跳过') }}</option><option value="replace">{{ s('Replace the existing entry', '替换现有条目') }}</option><option value="rename">{{ s('Import under a new id', '以新 ID 导入') }}</option></select></label>
         <label v-if="entry.action === 'rename'"><span>{{ s('New id', '新 ID') }}</span><input v-model="entry.newId" class="ui-field" data-size="md" :disabled="busy" :aria-label="s('New id for this entry', '此条目的新 ID')" required /></label>
       </div>
       <div class="settings-actions"><button class="ui-button" data-size="md" data-variant="primary" :disabled="busy || !importReady" @click="applyImport">{{ s('Apply import', '应用导入') }}</button><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy" @click="closeImportPreview">{{ s('Close preview', '关闭预览') }}</button></div>

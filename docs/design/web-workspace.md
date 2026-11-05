@@ -533,13 +533,15 @@ environment and header values, the bearer token, a URL with userinfo, path,
 query or fragment, hidden OAuth fields and unknown members go to the user-scope
 `mcp-secrets` record, as a move into project does.
 
-Each previewed entry has an action: Import, Skip, Replace the existing entry, or
-Import under a new id with a new-id field. The defaults match the CLI: `changed`
-and `identical` import, `conflict` and `invalid` skip. `--only` restricts the
-default selection, and `--replace` or `--rename` — or this page's explicit
-action — selects the id it names whether or not `--only` lists it; a `conflict`
-or `invalid` entry only comes in through such an action. Rename needs a
-nonempty new id before Apply is enabled.
+Each previewed entry that decodes has an action: Import, Skip, Replace the
+existing entry, or Import under a new id with a new-id field. The defaults match
+the CLI: `changed` and `identical` import, `conflict` and `invalid` skip.
+`--only` restricts the default selection, and `--replace` or `--rename` — or
+this page's explicit action — selects the id it names whether or not `--only`
+lists it; a `conflict` or `invalid` entry only comes in through such an action.
+An `invalid` entry shows no action control, because the owner refuses every
+resolution but Skip for it, and says in its row that it cannot decode and can
+only be skipped. Rename needs a nonempty new id before Apply is enabled.
 
 Apply sends `mcp.import.apply` with the previewed document, its `revision` as
 `expectedVersion`, and one resolution per entry. On success the page drops the

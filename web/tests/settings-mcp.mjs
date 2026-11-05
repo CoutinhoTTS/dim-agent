@@ -317,7 +317,9 @@ test("an import preview shows every status and its fields without a value", asyn
     assert.match(shown, /Top-level members the import does not carry: otherTopLevel\./)
     assert.equal(shown.includes(secret), false)
     assert.match(shown, /Import into: user configuration/)
-    assert.equal(importSelects(root).length, 4)
+    // Every entry that decodes has an action; the invalid one can only skip.
+    assert.equal(importSelects(root).length, 3)
+    assert.match(shown, /This entry does not decode, so it can only be skipped\./)
     // No default action is a rename, so no entry asks for a new id.
     assert.equal(all(root).find((element) => element.type === "label" && text(element).startsWith("New id")), undefined)
     assert.equal(button(root, "Apply import").props.disabled, false)
@@ -402,6 +404,22 @@ test("a project import applies without confirmation and says where withheld valu
       { id: "keeps", action: "import" },
       { id: "docs", action: "import" },
     ])
+  } finally { closeImport(app) }
+})
+
+test("an entry that does not decode offers no action but skip", async () => {
+  const preview = importPreviewReply([
+    importEntry({ id: "broken", transport: undefined, status: "invalid", error: "broken: type is stdio, http or sse" }),
+  ])
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined)] })
+  try {
+    await chooseImportFile(root, "{}")
+    assert.equal(importSelects(root).length, 0)
+    assert.match(text(root), /This entry does not decode, so it can only be skipped\./)
+    assert.equal(button(root, "Apply import").props.disabled, false)
+    await button(root, "Apply import").props.onClick(); await flush()
+    const applied = calls.find((call) => call.method === "mcp.import.apply")
+    assert.deepEqual(applied.params.resolutions, [{ id: "broken", action: "skip" }])
   } finally { closeImport(app) }
 })
 
