@@ -1167,12 +1167,13 @@ the action came from, and `mcp list` already prints the source each id is in.
 Import takes a standard `mcpServers` document — the shape other MCP clients write — instead of
 the create document. `dimcode mcp import PATH [--source user|project] [--cwd DIR]` reads the file,
 or stdin for `-`, and sends its text to `mcp.import.preview`; the client decodes, compares and
-validates nothing itself. The preview prints one row per entry — id, status (`identical`,
-`changed`, `conflict` or `invalid`), transport, the changed field names with the JSON kind each
-holds, the members the decoder keeps unused or drops, and the entry's error — then how many field
-names the owner's cap left out of those lists, the top-level members the import does not carry
-and the revision the source was read at. No value is printed: a changed entry is named by field,
-not content. A project preview adds a note that the workspace file receives each entry's public
+validates nothing itself. `--from ID` names one known store of another local client instead, and
+`--discover` lists those stores; the CLI never holds a discovered store's text. The preview
+prints one row per entry — id, status (`identical`, `changed`, `conflict` or `invalid`),
+transport, the changed field names with the JSON kind each holds, the members the decoder keeps
+unused or drops, and the entry's error — then how many field names the owner's cap left out of
+those lists, the top-level members the import does not carry, and the revision the source was
+read at. No value is printed: a changed entry is named by field, not content. A project preview adds a note that the workspace file receives each entry's public
 skeleton, while arguments, environment and header values, the bearer token, a URL with userinfo,
 path, query or fragment, hidden OAuth fields and unknown members go to the user-scope
 `mcp-secrets` record (the split a move into project applies). A document that is not an
@@ -1198,6 +1199,17 @@ rewrites both. A source that changed since the preview refuses the whole import
 successful apply then prints each entry's action and destination, the counts, and the new
 revision, and exits 0. The `/mcp` line commands do not include import: that dispatcher is its own
 list of verbs, not the one-shot parser.
+
+`dimcode mcp import --from ID` runs the same preview and apply from one known store instead of a
+file: the request carries `from` in place of `document`, and the apply also carries the preview's
+`sourceRevision` as `expectedSourceRevision`, so the owner writes the store text it previewed. The
+store's text never reaches the CLI, and a store that changed since the preview exits 1 with the
+owner's conflict. `dimcode mcp import --discover` lists the known stores over
+`mcp.import.sources` — id, client, scope, path, state and the entry count or the owner's message,
+with no value — so a user can pick a `ready` id for `--from`. `--cwd` names the workspace whose
+project stores and Claude Code local record are reported; without it the command uses its launch
+workspace. A path, `--from` and `--discover` are mutually exclusive, and `--discover` takes no
+`--source`, `--yes`, `--replace`, `--rename` or `--only`.
 
 The two remote forms replace `configuration` with
 `{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}` or the
@@ -1370,6 +1382,8 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode mcp list` | List the effective catalog over `mcp.catalog` ([The MCP area](#the-mcp-area)): each entry's id, source, transport, enablement and authorization, then each source application's errors. |
 | `dimcode mcp add PATH` | Create an entry from the panel's create document, `-` for stdin, over `mcp.save` with the source revision `mcp.catalog` reported; an id the catalog already lists is refused. |
 | `dimcode mcp import PATH [--source user\|project] [--yes]` | Preview a standard `mcpServers` document over `mcp.import.preview`, one row per entry with its status, changed and unsupported field names and error, then the count of field names the cap left out, the unknown top-level members and the revision; `--yes` prints that preview and then applies the default selection (or `--replace ID`, `--rename OLD=NEW`, `--only ID`) at that revision over `mcp.import.apply`, writing imported and replaced entries disabled. A project apply writes the public skeleton to `.mcp.json` and the withheld values to the user-scope `mcp-secrets` record. |
+| `dimcode mcp import --from ID [--source user\|project] [--yes]` | The same preview and import from one known store of another local client over `mcp.import.preview` and `mcp.import.apply` with `from`, the apply carrying the preview's `sourceRevision` as `expectedSourceRevision`; the store's text never reaches the CLI. |
+| `dimcode mcp import --discover [--cwd DIR]` | List the known stores over `mcp.import.sources`: id, client, scope, path, state and the entry count or the owner's message; no value is printed, and only a `ready` id is usable with `--from`. |
 | `dimcode mcp edit ID [--source SOURCE]` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
 | `dimcode mcp set ID [--source SOURCE] PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
 | `dimcode mcp remove ID [--source SOURCE]` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |

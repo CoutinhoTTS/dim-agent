@@ -83,6 +83,7 @@ fn hello(wire: &mut Wire) {
         "mcp.save",
         "mcp.remove",
         "mcp.set_enabled",
+        "mcp.import.sources",
         "mcp.import.preview",
         "mcp.import.apply",
         "mcp.disconnect",
@@ -1270,6 +1271,145 @@ fn mcp_import_refuses_a_daemon_without_the_import_methods() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// `--discover` lists every known store with its state and no value. The
+/// client names the stores; the owner reads them.
+#[test]
+fn mcp_import_discover_lists_known_stores_without_a_value() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.import.sources");
+        assert!(request["params"]["cwd"].is_string(), "{request}");
+        wire.reply(
+            &request,
+            json!({"sources": [
+                {"id": "claude-code:user", "client": "claude-code", "scope": "user",
+                 "path": "~/.claude.json", "state": "ready", "entries": 2},
+                {"id": "codex:user", "client": "codex", "scope": "user",
+                 "path": "~/.codex/config.toml", "state": "malformed",
+                 "error": "the file is not valid TOML at line 2 column 1"},
+                {"id": "omp:user", "client": "omp", "scope": "user",
+                 "path": "~/.omp/agent/mcp.json", "state": "absent"},
+            ]}),
+        );
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import", "--discover"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "claude-code:user\tclaude-code\tuser\t~/.claude.json\tready\t2\n\
+         codex:user\tcodex\tuser\t~/.codex/config.toml\tmalformed\tthe file is not valid TOML at line 2 column 1\n\
+         omp:user\tomp\tuser\t~/.omp/agent/mcp.json\tabsent\t—\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Columns: ID, client, scope, path, state, entries or error."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("No value from a store is read out or printed"),
+        "{stderr}"
+    );
+
+    // A daemon without the discovery read is refused before a file or a
+    // store is named.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import", "--discover"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+}
+
+/// `--from` names one known store: the preview and the apply carry its id
+/// and the digest the preview answered, never its text.
+#[test]
+fn mcp_import_from_previews_and_applies_a_known_store() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.import.preview");
+        assert_eq!(request["params"]["from"], "codex:user");
+        assert_eq!(request["params"]["source"], "user");
+        assert!(request["params"].get("document").is_none(), "{request}");
+        let mut preview = import_preview();
+        preview["sourceRevision"] = json!("9f2c");
+        wire.reply(&request, preview);
+        let request = wire.read("mcp.import.apply");
+        assert_eq!(request["params"]["from"], "codex:user");
+        assert_eq!(request["params"]["expectedSourceRevision"], "9f2c");
+        assert!(request["params"].get("document").is_none(), "{request}");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        wire.reply(&request, json!({"revision": "user:2"}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import", "--from", "codex:user", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "{IMPORT_PREVIEW_ROWS}\"keeps\"\tunchanged\tkeeps\n\
+             \"docs\"\timported\tdocs\n\
+             \"taken\"\tskipped\t—\n\
+             \"broken\"\tskipped\t—\n"
+        )
+    );
+}
+
+/// `mcp import` reads one document: a path, `--from` or `--discover`; a
+/// discovery takes no selection flags.
+#[test]
+fn mcp_import_takes_one_source() {
+    let home = Home::new();
+    for (arguments, message) in [
+        (
+            vec!["mcp", "import"],
+            "Use one of PATH, --from ID or --discover",
+        ),
+        (
+            vec!["mcp", "import", "document.json", "--from", "codex:user"],
+            "Use one of PATH, --from ID or --discover",
+        ),
+        (
+            vec!["mcp", "import", "document.json", "--discover"],
+            "Use one of PATH, --from ID and --discover",
+        ),
+        (
+            vec!["mcp", "import", "--discover", "--yes"],
+            "--discover takes no --yes",
+        ),
+    ] {
+        let output = home.command().args(&arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{arguments:?}: {stderr}");
+    }
 }
 
 /// `mcp edit` opens the patch the configuration read seeds, without a
