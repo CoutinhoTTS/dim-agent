@@ -19,7 +19,8 @@ the source name, its files, a JSON Schema (with `default` values) and its user-o
 
 - the process service `settings`, which the owner uses: `register`, `read`, `update` (CAS on
   the revision) and `projects`;
-- the client management methods `settings.read`, `settings.update` and `settings.sources`;
+- the client management methods `settings.read`, `settings.update`, `settings.sources` and
+  `settings.projects`;
 - the same rutis events as S8a, `settings.changed` and `settings.project_authorized`. Their
   payloads become serializable. There is no `subscribe(source)`.
 
@@ -104,7 +105,7 @@ depended on a store nobody owned. That service and the `*Ref` rule are withdrawn
  |         settings.project_authorized on settings/projects                |
  +------^-------------------------------^----------------------------------+
         | register/read/update/projects | settings.read / settings.update
-        |                               | settings.sources
+        |                               | settings.sources / settings.projects
         |                               |
   TypeScript owner (rutis runtime row)  Rpc  <--  local client
 ```
@@ -242,6 +243,7 @@ with `managementMethods` (§4.5). They are never served to paired devices (overv
 | `settings.read` | `{source, scope}` | `{revision, document}` | invalid params (bad scope), `settings_unknown_source`, `settings_failed` |
 | `settings.update` | `{source, scope, expectedRevision, document}` | `{revision, document}` | invalid params (bad scope, schema violation), `settings_unknown_source`, `settings_conflict`, `settings_unsynced`, `settings_failed` |
 | `settings.sources` | `{}` | `{dialect, sources: [...]}` (`Sources`, §4.1) | invalid params |
+| `settings.projects` | `{}` | `{projects: [{root, cwd}]}`: the authorized project roots now, as the service's `projects` answers them (§4.2) | invalid params |
 
 - Only registered declared sources are served. A Rust source (for example `mcp`) is
   `settings_unknown_source`.
@@ -265,6 +267,16 @@ with `managementMethods` (§4.5). They are never served to paired devices (overv
 - `settings.sources` is never served to paired devices (§4.3 opening) and is absent from the
   Web entry's allowlist, so the Web entry answers `unknown_method` (§11 items 7–8): discovery
   is local-only like the rest of the namespace.
+- `settings.projects` is the read a client needs before it can pass `{project: root}`: it
+  answers the same `{projects: [{root, cwd}]}` as the owner-facing `projects` service (§4.2),
+  in cwd order, and the same Web-entry and paired-device rule applies (absent from the
+  allowlist, so `unknown_method`). **`root` is a process-local number** (§4.1): it holds for the
+  life of the daemon process, is not a durable identity, and a client re-reads
+  `settings.projects` after it reconnects to a restarted daemon rather than storing a root. The
+  list only grows while the process runs — authorizing the same cwd again adds no item and
+  emits nothing (§4.4) — so no event or push carries it; the client reads it when it opens a
+  project-scoped form. A `{project: root}` this process has not authorized is invalid params,
+  the same answer as for a source without project scope.
 
 ### 4.4 Events
 
@@ -548,6 +560,12 @@ through C4's path):
    registered declared source with its schema verbatim, its scopes, its user-only pointers and
    its `writeOnly` hint, never lists a Rust source, and drops a declared source's entry the
    moment its owner unloads, when `settings.read` answers `settings_unknown_source` again.
+10. `settings.projects` replies `{projects: []}` before anything is authorized, then lists the
+    root `session.create` authorized with its canonical cwd, and that root serves
+    `settings.read` with `{project: root}`; a second authorization of the same cwd adds no item,
+    a root this process never authorized is invalid params, and a root a client authorized
+    through `hooks.catalog` for a cwd with no Session is listed too. The list starts empty again
+    after a daemon restart on the same home.
 
 ## 12. Implementation status
 
