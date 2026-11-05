@@ -711,6 +711,58 @@ async fn mcp_import_refuses_a_destination_that_keeps_a_withheld_record() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The reply reports a bounded number of names per list and counts the rest,
+/// so a document of long unknown field names cannot push the reply past the
+/// transport frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_bounds_the_field_names_one_entry_reports() {
+    const MAX: usize = 32;
+    const UNKNOWN: usize = 40;
+    let home = scratch("dm-import-cap");
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut wide = serde_json::Map::new();
+    wide.insert("command".into(), json!("echo"));
+    for index in 0..UNKNOWN {
+        wide.insert(format!("unknown{index:02}"), json!(index));
+    }
+    let document = servers_document(json!({"wide": wide}));
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"user","document":document}),
+        )
+        .await;
+    assert_ok(&preview);
+    let wide = entry(&preview, "wide");
+    assert_eq!(wide["status"], "changed");
+    // `changes` compares against the free id and names the entry's own
+    // `command` and `enabled` members too; `unsupported` names only the
+    // members the decoder does not act on.
+    assert_eq!(wide["changes"].as_array().unwrap().len(), MAX);
+    assert_eq!(wide["unsupported"].as_array().unwrap().len(), MAX);
+    assert_eq!(
+        wide["omitted"],
+        json!((UNKNOWN + 2 - MAX) + (UNKNOWN - MAX)),
+        "the count matches the names the cap left out"
+    );
+    assert_eq!(wide["changes"][0]["field"], "command");
+    assert_eq!(wide["changes"][1]["field"], "enabled");
+    assert_eq!(wide["unsupported"][0]["field"], "unknown00");
+    assert_eq!(wide["unsupported"][0]["effect"], "kept-unused");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_import_answers_stale_revisions_and_refuses_oversize_documents() {
     let home = scratch("dm-import-limits");

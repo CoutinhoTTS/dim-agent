@@ -508,7 +508,9 @@ kinds, the members the decoder keeps unused or drops, the project fields needing
 the entry's own decode error, the document's unknown top-level names and the target revision.
 Enablement is not part of the comparison: an entry whose configuration matches is `identical`
 however it is enabled, and `changes` names `enabled` only when a write would change it. No value
-from the document appears in the reply (D3).
+from the document appears in the reply (D3). Each entry reports at most 32 names in `changes`
+and 32 in `unsupported`, with `omitted` counting the names the cap left out, so a 1,000-entry
+document stays well under the 16 MiB transport frame.
 
 ### D23. One compare-and-set covers the accepted selection
 
@@ -943,8 +945,9 @@ into one source (D21). Only the standard `mcpServers` object is read, with the o
 the size is checked before parsing and the count after, and neither writes anything. A file that
 is not JSON, a non-object `mcpServers` and an empty id fail the whole document; an entry's own
 error makes that entry invalid and leaves the rest usable. The reply names only ids and field
-names taken from the document, plus a bounded field list per entry, so it stays below the 16 MiB
-transport frame.
+names taken from the document. Each entry reports at most 32 names in `changes` and 32 in
+`unsupported` and counts the rest in `omitted`, so a 1,000-entry document stays well under the
+16 MiB transport frame.
 
 `mcp.import.preview` takes:
 
@@ -971,6 +974,7 @@ An `ImportEntry` is:
 | `status` | `"identical"` \| `"changed"` \| `"conflict"` \| `"invalid"` | What importing the entry would do |
 | `changes` | `[{field, kind}]` | For `changed` and `conflict`: the field names and the JSON kind each holds (`string`, `number`, `boolean`, `array`, `object`, `null`). Never a value. `conflict` lists the fields that differ from the target entry, including `enabled` when the import would change it; `identical` is empty |
 | `unsupported` | `[{field, effect}]` | Members the decoder does not act on, by name. `effect` is `kept-unused` for an entry's or its `oauth` object's extension member, preserved in the document and unused, or `dropped` for an unknown `auth` member, which the decoder discards |
+| `omitted` | number | How many names the 32-name cap left out of `changes` and `unsupported`; the reported lists are then partial |
 | `confirm` | string[] | Project scope only: the fields whose literal value the apply must confirm, from `args`, `env`, `headers` and `url`; empty for `identical`, `invalid` and user scope |
 | `error` | string, with `invalid` | The entry's decode error, or the project refusal; it names the field and the expected kind and never a value |
 

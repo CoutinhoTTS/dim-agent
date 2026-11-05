@@ -15,13 +15,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The largest document a client may send. A reply names only ids and field
-/// names taken from this document, plus a bounded field list per entry, so it
-/// stays under the transport frame's 16 MiB.
+/// The largest document a client may send. The reply names only ids and field
+/// names taken from this document: each entry reports at most
+/// `MAX_REPORTED_FIELDS` names in `changes` and in `unsupported`, plus how
+/// many it left out, so a 1,000-entry document stays under the transport
+/// frame's 16 MiB.
 pub(crate) const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 
 /// The largest number of entries one document may carry.
 pub(crate) const MAX_ENTRIES: usize = 1_000;
+
+/// The most field names one preview list reports; the rest are counted in
+/// the entry's `omitted` and the client says the list is partial.
+const MAX_REPORTED_FIELDS: usize = 32;
 
 /// The entry fields a project import asks the user to confirm: literal values
 /// that the workspace file would record.
@@ -145,6 +151,8 @@ pub(crate) struct ImportEntryPreview {
     /// Field names and the kind each holds; never a value.
     pub changes: Vec<ImportField>,
     pub unsupported: Vec<ImportUnsupported>,
+    /// Field names the cap left out of `changes` and `unsupported`.
+    pub omitted: usize,
     /// Project scope only: fields whose literal value needs confirmation.
     pub confirm: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,12 +216,14 @@ fn entry_preview(
     target: &McpSettings,
     project: bool,
 ) -> ImportEntryPreview {
+    let (unsupported, omitted) = capped(unsupported(document, id));
     let mut preview = ImportEntryPreview {
         id: id.to_owned(),
         transport: document.get(id).map(transport),
         status: ImportStatus::Invalid,
         changes: Vec::new(),
-        unsupported: unsupported(document, id),
+        unsupported,
+        omitted,
         confirm: Vec::new(),
         error: document.invalid_error(id).map(ToString::to_string),
     };
@@ -236,12 +246,22 @@ fn entry_preview(
         }
     };
     if preview.status != ImportStatus::Identical {
-        preview.changes = changed_fields(existing, &import);
+        let (changes, omitted_changes) = capped(changed_fields(existing, &import));
+        preview.changes = changes;
+        preview.omitted += omitted_changes;
         if project {
             preview.confirm = confirm_fields(&import);
         }
     }
     preview
+}
+
+/// The reported field names and the count the cap left out. They come from a
+/// sorted map, so the reported names are the first in order.
+fn capped<T>(mut fields: Vec<T>) -> (Vec<T>, usize) {
+    let omitted = fields.len().saturating_sub(MAX_REPORTED_FIELDS);
+    fields.truncate(MAX_REPORTED_FIELDS);
+    (fields, omitted)
 }
 
 /// The entries a request's resolutions accept, by destination id. Every
