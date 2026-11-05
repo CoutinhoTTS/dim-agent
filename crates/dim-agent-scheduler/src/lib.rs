@@ -9,6 +9,7 @@ mod engine;
 mod methods;
 mod runs;
 mod session;
+mod wakeups;
 
 #[cfg(test)]
 extern crate self as dim_agent_scheduler;
@@ -18,6 +19,9 @@ mod binding_flow;
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 mod support;
+#[cfg(test)]
+#[path = "../tests/support/wakeup_pass.rs"]
+mod wakeup_pass;
 
 use dim_agent_runtime::AgentBuilder;
 use rutis::host::DynPlugin;
@@ -26,6 +30,7 @@ pub use document::ScheduleDocument;
 pub use methods::{ScheduleJobs, SchedulerPlugin};
 pub use runs::{RUNS_FILE, SchedulerError};
 pub use session::SchedulerSession;
+pub use wakeups::Wakeups;
 
 /// Installs the scheduler as an optional feature: the process owner and the
 /// `schedule` tool. Neither is required, so a host without the App Server
@@ -62,6 +67,7 @@ pub fn install_with(builder: &mut AgentBuilder, texts: SchedulerTexts) -> Result
     }
     let texts = std::sync::Arc::new(texts);
     dim_agent_runtime::names::register::<ScheduleJobs>(builder.catalog_mut(), None);
+    dim_agent_runtime::names::register::<Wakeups>(builder.catalog_mut(), None);
     builder.optional_plugin(move |names| {
         Ok(Box::new(SchedulerPlugin::new(names, texts.clone())?) as Box<dyn DynPlugin>)
     });
