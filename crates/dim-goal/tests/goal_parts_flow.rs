@@ -42,6 +42,15 @@ async fn goal_reads_current_settings_and_stops_decisions_on_read_failure() {
         "an unreadable limit must not produce an automatic input"
     );
 
+    // An explicit null is not a value either (A4).
+    std::fs::write(env.home().join("goal.json"), r#"{"maxContinuations":null}"#).unwrap();
+    env.turn("main", &[]);
+    assert_eq!(
+        env.settled("main").await.len(),
+        2,
+        "an explicit null must not produce an automatic input"
+    );
+
     let interrupt = env.interrupt("main");
     let pause = env.wait_for("main", r#"reason="interrupted""#).await;
     assert_eq!(
