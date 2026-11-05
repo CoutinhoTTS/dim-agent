@@ -4,6 +4,10 @@ export type { ResourceRef } from "./branch-services.js"
 export type { TimelinePage, HistoryQuery, SubmitResult, InterruptResult, StateNotice, SubmitInput, UserInput } from "./client-protocol.js"
 
 export type Dispose = () => void
+export interface PanelError extends Error {
+  readonly name: "PanelError"
+  readonly code: "binding_closed" | "invalid_binding" | "missing_capability"
+}
 export type PanelActivity = {
   readonly branch: Readonly<Pick<StateNotice, "running" | "stopping">>
   readonly sessionRunning: boolean

@@ -1,4 +1,4 @@
-import type { Dispose, PanelActivity, PanelContext, PanelDeclaration, PanelEnvironment, PanelServices } from "../../../../npm/ui"
+import type { Dispose, PanelActivity, PanelContext, PanelDeclaration, PanelEnvironment, PanelError as PublicPanelError, PanelServices } from "../../../../npm/ui"
 import { RpcError, type RpcClient } from "../../rpc/client"
 import { readInterrupt, readSubmit, readTimelinePage } from "../../rpc/read"
 
@@ -12,8 +12,9 @@ export function panelUnavailable(panel: PanelDeclaration, supports: (method: str
   }
   for (const method of panel.methods) if (!methods.includes(method.name)) return `Unavailable method: ${method.name}`
 }
-export class PanelError extends Error {
-  constructor(readonly code: string, message: string) { super(message); this.name = "PanelError" }
+export class PanelError extends Error implements PublicPanelError {
+  override readonly name = "PanelError"
+  constructor(readonly code: PublicPanelError["code"], message: string) { super(message) }
 }
 
 type Host = {

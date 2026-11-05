@@ -116,13 +116,19 @@ impl Package {
             {
                 return Err("UI titles must not be empty".into());
             }
-            for path in std::iter::once(&panel.entry).chain(panel.icon.iter()) {
-                let resolved = root
-                    .join(relative(path)?)
-                    .canonicalize()
-                    .map_err(|_| "UI entry or icon is unreadable")?;
-                if !resolved.starts_with(&root) || !resolved.is_file() {
-                    return Err("UI entry or icon leaves its resource root".into());
+            let resolved = root
+                .join(relative(&panel.entry)?)
+                .canonicalize()
+                .map_err(|_| "UI entry is unreadable")?;
+            if !resolved.starts_with(&root) || !resolved.is_file() {
+                return Err("UI entry leaves its resource root or is not a file".into());
+            }
+            if let Some(icon) = &panel.icon {
+                let icon = root.join(relative(icon)?);
+                if let Ok(resolved) = icon.canonicalize()
+                    && !resolved.starts_with(&root)
+                {
+                    return Err("UI icon leaves its resource root".into());
                 }
             }
             let mut required = BTreeSet::new();

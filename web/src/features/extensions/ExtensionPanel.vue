@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
+import { Puzzle } from "lucide-vue-next"
 import type { Dispose, PanelActivity, PanelEnvironment, PanelModule } from "../../../../npm/ui"
 import { readSessionMethods } from "../../rpc/read"
 import { useAppearanceStore } from "../../stores/appearance"
@@ -27,6 +28,8 @@ const branchId = computed(() => ui.activeLineTab[props.sessionId] ?? "main")
 const view = computed(() => chat.views[props.sessionId])
 const extension = computed(() => extensions.directory?.extensions.find(extension => extension.pluginName === ui.extension?.pluginName))
 const panel = computed(() => extension.value?.panels.find(panel => panel.id === ui.extension?.panelId))
+const icon = computed(() => panel.value?.icon && extension.value ? resourceUrl(extension.value.generation, panel.value.icon) : undefined)
+const failedIcon = ref<string>()
 const title = computed(() => panel.value ? panelTitle(panel.value, locale.value) : t("extensions"))
 const ended = computed(() => view.value?.status === "closed" || view.value?.lines.some(line => line.id === branchId.value && (line.state.kind.startsWith("ended") || line.state.kind === "creation-failed")))
 const ready = computed(() => view.value?.status === "ready" && (branchId.value === "main" || view.value.branches[branchId.value]?.status === "ready"))
@@ -113,7 +116,8 @@ onBeforeUnmount(() => dispose?.())
 <template>
   <component :is="ui.shellMode === 'compact' ? 'dialog' : 'section'" ref="surface" class="extension-panel" :aria-label="title" tabindex="-1" @cancel.prevent="close" @keydown.stop @pointerdown.stop="ui.detailFocused = true" @focusin="ui.detailFocused = true">
     <header class="extension-header">
-      <img v-if="panel?.icon && extension" :src="resourceUrl(extension.generation, panel.icon)" alt="" width="20" height="20">
+      <img v-if="icon && failedIcon !== icon" :src="icon" alt="" width="20" height="20" @error="failedIcon = icon">
+      <Puzzle v-else :size="20" aria-hidden="true" />
       <strong>{{ title }}</strong>
       <button type="button" class="ui-button" data-variant="ghost" data-size="sm" @click="ui.openLines(sessionId)">{{ t("lines") }}</button>
       <button type="button" class="ui-button" data-variant="ghost" data-size="sm" :aria-label="t('close')" @click="close">×</button>

@@ -107,6 +107,11 @@ test("directory parsing, localization and capability selection keep the browser 
   assert.throws(() => readExtensions({ ...directory, revision: "3" }))
   assert.equal(panelTitle(panel, "zh-CN"), "预览")
   assert.equal(panelUnavailable(panel, () => true, panel.methods.map(method => method.name)), undefined)
+  const features = new Set(["session.history", "session.submit", "session.stop"])
+  assert.equal(panelUnavailable(panel, method => features.has(method), panel.methods.map(method => method.name)), undefined)
+  for (const [capability, method] of [["session.submit", "session.submit"], ["session.interrupt", "session.stop"]]) {
+    assert.equal(panelUnavailable({ ...panel, requires: [capability], methods: [] }, feature => feature !== method, []), `Unavailable capability: ${capability}`)
+  }
   assert.equal(panelUnavailable({ ...panel, requires: ["future.api"] }, () => true, []), "Unsupported capability: future.api")
   assert.equal(panelUnavailable(panel, () => false, []), "Unavailable capability: session.history")
   assert.equal(panelUnavailable(panel, () => true, []), "Unavailable method: session.preview.list")

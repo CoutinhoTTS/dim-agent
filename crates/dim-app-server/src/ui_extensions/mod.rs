@@ -193,13 +193,9 @@ impl UiExtensions {
         let generation = uuid::Uuid::new_v4().to_string();
         let directory = self.cache.join(&generation);
         crate::create_private_directory(&directory).map_err(|error| error.to_string())?;
-        let result = self.copy(root, &directory).await.and_then(|paths| {
-            if panels.iter().any(|panel| {
-                std::iter::once(&panel.entry)
-                    .chain(panel.icon.iter())
-                    .any(|path| !paths.contains(path))
-            }) {
-                Err("UI entry or icon disappeared during registration".into())
+        let result = self.copy(root, &directory, panels).await.and_then(|paths| {
+            if panels.iter().any(|panel| !paths.contains(&panel.entry)) {
+                Err("UI entry disappeared during registration".into())
             } else {
                 Ok(paths)
             }
@@ -209,7 +205,14 @@ impl UiExtensions {
                 extension: Extension {
                     plugin_name: name.into(),
                     generation,
-                    panels: panels.to_vec(),
+                    panels: panels
+                        .iter()
+                        .cloned()
+                        .map(|mut panel| {
+                            panel.icon = panel.icon.filter(|icon| paths.contains(icon));
+                            panel
+                        })
+                        .collect(),
                 },
                 directory,
                 paths,
@@ -221,7 +224,12 @@ impl UiExtensions {
             }
         }
     }
-    async fn copy(&self, root: &Path, destination: &Path) -> Result<BTreeSet<String>, String> {
+    async fn copy(
+        &self,
+        root: &Path,
+        destination: &Path,
+        panels: &[Panel],
+    ) -> Result<BTreeSet<String>, String> {
         let cancel = &self.reads.stop;
         let source = self
             .files
@@ -265,36 +273,54 @@ impl UiExtensions {
                             .files
                             .path(source, &relative)
                             .map_err(|error| error.to_string())?;
-                        let file = self
-                            .files
-                            .open_read(&path, cancel)
-                            .await
-                            .map_err(|error| error.to_string())?;
                         let name = target
                             .to_str()
                             .ok_or("UI resources must have UTF-8 paths")?
                             .replace(std::path::MAIN_SEPARATOR, "/");
                         manifest::relative(&name)?;
-                        let mut output = tokio::fs::OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(destination.join(target))
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        let mut offset = 0;
-                        while offset < file.len() {
-                            let bytes = file
-                                .read_at(offset, 65536, cancel)
+                        let copied: Result<(), String> = async {
+                            let file = self
+                                .files
+                                .open_read(&path, cancel)
                                 .await
                                 .map_err(|error| error.to_string())?;
-                            output
-                                .write_all(&bytes)
+                            let mut output = tokio::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(destination.join(target))
                                 .await
                                 .map_err(|error| error.to_string())?;
-                            offset += bytes.len() as u64;
+                            let mut offset = 0;
+                            while offset < file.len() {
+                                let bytes = file
+                                    .read_at(offset, 65536, cancel)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                output
+                                    .write_all(&bytes)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                offset += bytes.len() as u64;
+                            }
+                            output.flush().await.map_err(|error| error.to_string())?;
+                            Ok(())
                         }
-                        output.flush().await.map_err(|error| error.to_string())?;
-                        paths.insert(name);
+                        .await;
+                        match copied {
+                            Ok(()) => {
+                                paths.insert(name);
+                            }
+                            Err(_)
+                                if !cancel.is_cancelled()
+                                    && panels
+                                        .iter()
+                                        .any(|panel| panel.icon.as_deref() == Some(&name))
+                                    && !panels.iter().any(|panel| panel.entry == name) =>
+                            {
+                                let _ = tokio::fs::remove_file(destination.join(target)).await;
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
                     EntryKind::Other => {
                         return Err(

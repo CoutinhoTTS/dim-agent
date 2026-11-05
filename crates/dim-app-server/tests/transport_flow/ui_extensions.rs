@@ -3,7 +3,7 @@ use super::*;
 use dim_app_server::ui_extensions::{PublishFile, UiResources};
 
 fn manifest() -> Value {
-    json!({"name":"preview","ui":{"version":1,"root":"ui","panels":[{"id":"viewer","title":{"default":"Preview"},"entry":"panel.js","placement":"session-panel","requires":["session.state","resources"],"methods":[]}]}})
+    json!({"name":"preview","ui":{"version":1,"root":"ui","panels":[{"id":"viewer","title":{"default":"Preview"},"icon":"icon.svg","entry":"panel.js","placement":"session-panel","requires":["session.state","session.history","session.submit","session.interrupt","resources"],"methods":[]}]}})
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -64,13 +64,22 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
         )
     };
     let mut browser = web_client(address, cookie).await;
-    assert!(
-        browser
-            .features
-            .as_array()
-            .unwrap()
-            .contains(&json!("ui.extensions.list"))
-    );
+    for method in [
+        "ui.extensions.list",
+        "session.history",
+        "session.submit",
+        "session.stop",
+    ] {
+        assert!(
+            browser
+                .features
+                .as_array()
+                .unwrap()
+                .contains(&json!(method)),
+            "missing panel method {method}: {}",
+            browser.features
+        );
+    }
     let installed = local
         .rpc("plugin.install", json!({"source":{"path":source}}))
         .await;
@@ -92,6 +101,13 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
         "{directory}; {installed}"
     );
     assert!(!directory.to_string().contains(home.to_str().unwrap()));
+    assert_eq!(directory["errors"], json!([]));
+    assert!(
+        directory["extensions"][0]["panels"][0]
+            .get("icon")
+            .is_none(),
+        "a missing icon must keep the panel available: {directory}"
+    );
     let plain = home.join("plain");
     std::fs::create_dir(&plain).unwrap();
     std::fs::write(plain.join("dim-plugin.json"), r#"{"name":"plain"}"#).unwrap();
@@ -187,6 +203,8 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
         .2,
         "export const lazy = 1"
     );
+    let icon = source.join("ui/icon.svg");
+    std::fs::write(&icon, "<svg xmlns=\"http://www.w3.org/2000/svg\"/>").unwrap();
     let reload = local.rpc("plugin.reload", json!({"name":"preview"})).await;
     assert!(reload.get("error").is_none(), "{reload}");
     assert_ne!(reload["result"]["status"], "failed", "{reload}");
@@ -194,6 +212,28 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
     let next = browser.rpc("ui.extensions.list", json!({})).await["result"].clone();
     assert_ne!(next["extensions"][0]["generation"], generation);
     assert!(next["revision"].as_u64().unwrap() > directory["revision"].as_u64().unwrap());
+    assert_eq!(next["extensions"][0]["panels"][0]["icon"], "icon.svg");
+    let icon_path = format!(
+        "/api/ui/extensions/{}/icon.svg",
+        next["extensions"][0]["generation"].as_str().unwrap()
+    );
+    assert_eq!(http(address, request("GET", &icon_path, "")).await.0, 200);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::metadata(&icon).unwrap().permissions();
+        std::fs::set_permissions(&icon, std::fs::Permissions::from_mode(0o000)).unwrap();
+        local.rpc("plugin.reload", json!({"name":"preview"})).await;
+        std::fs::set_permissions(&icon, permissions).unwrap();
+        let unreadable = browser.rpc("ui.extensions.list", json!({})).await["result"].clone();
+        assert_eq!(unreadable["errors"], json!([]), "{unreadable}");
+        assert_eq!(unreadable["extensions"][0]["pluginName"], "preview");
+        assert!(
+            unreadable["extensions"][0]["panels"][0]
+                .get("icon")
+                .is_none()
+        );
+    }
     let mut renamed = manifest();
     renamed["name"] = json!("renamed");
     std::fs::write(source.join("dim-plugin.json"), renamed.to_string()).unwrap();
@@ -377,11 +417,17 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
 
     let mut unsupported = manifest();
     unsupported["ui"]["version"] = json!(9);
-    std::fs::write(source.join("dim-plugin.json"), unsupported.to_string()).unwrap();
-    local.rpc("plugin.reload", json!({"name":"preview"})).await;
-    let unavailable = browser.rpc("ui.extensions.list", json!({})).await;
-    assert_eq!(unavailable["result"]["extensions"], json!([]));
-    assert_eq!(unavailable["result"]["errors"][0]["pluginName"], "preview");
+    let mut escaping_icon = manifest();
+    escaping_icon["ui"]["panels"][0]["icon"] = json!("../secret.svg");
+    let mut missing_entry = manifest();
+    missing_entry["ui"]["panels"][0]["entry"] = json!("missing.js");
+    for invalid in [unsupported, escaping_icon, missing_entry] {
+        std::fs::write(source.join("dim-plugin.json"), invalid.to_string()).unwrap();
+        local.rpc("plugin.reload", json!({"name":"preview"})).await;
+        let unavailable = browser.rpc("ui.extensions.list", json!({})).await;
+        assert_eq!(unavailable["result"]["extensions"], json!([]));
+        assert_eq!(unavailable["result"]["errors"][0]["pluginName"], "preview");
+    }
     local.rpc("plugin.disable", json!({"name":"preview"})).await;
     assert_eq!(
         browser.rpc("ui.extensions.list", json!({})).await["result"]["errors"],

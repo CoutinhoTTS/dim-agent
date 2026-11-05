@@ -671,6 +671,7 @@ mod tests {
     fn crossing_services_are_named_and_grouped_as_the_rust_binding_names_them() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_agent_capabilities::register_names(&mut builder);
+        crate::register_names(builder.catalog_mut());
         let rust = builder.catalog().clone();
         super::share_names(builder.catalog_mut());
         for (name, group) in super::crossing_instance_names() {

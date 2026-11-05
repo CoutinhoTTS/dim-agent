@@ -233,7 +233,9 @@ const lossyCut: number = cutoff;
 `);
   const uiFixture = path.join(directory, 'ui.mts');
   writeFileSync(uiFixture, `
-import type { PanelModule, PanelServices, TimelinePage } from 'dimcode/ui';
+import type { PanelError, PanelModule, PanelServices, TimelinePage } from 'dimcode/ui';
+const isClosedBinding = (error: PanelError): boolean => error.name === 'PanelError' && error.code === 'binding_closed';
+void isClosedBinding;
 import type { UiResources, PublishFile, ResourceRef } from 'dimcode/plugin';
 declare const resources: UiResources;
 const input: PublishFile = { path: '/workspace/report.txt', mediaType: 'text/plain' };

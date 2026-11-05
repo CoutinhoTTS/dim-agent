@@ -728,6 +728,8 @@ async fn run_connection(
                                     {
                                         features.extend([
                                             "session.history",
+                                            "session.submit",
+                                            "session.stop",
                                             "session.keys",
                                             "session.input_lookup",
                                             "session.create",
