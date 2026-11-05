@@ -477,12 +477,12 @@ WorkspaceTools 不变。
 - `main` 与一条线之间的消息，在发送方读作已发出（它的 `branch` 工具调用），在接收方读作已收到（`◂ from C`）。
 - 切换显示的线就在一条边界行（`line C`）之下换一份记录，和切换 Session 一样，因为终端的回滚缓冲只追加。一条线的记录从它的事件折叠而来，显示与否都在折叠，所以打开一条线不读历史。
 
-**分支目录。** `session.branches {sessionId}`（v3，按与 `session.history` 相同的准入规则，在 `hello.features` 里与其他会话方法一起列出）为每条线回答一条记录：它的身份（`branchId`，有的话还有 `parentBranchId`、`branchPoint` 和 `createEvent`）、按 `TimelineInfo.source` 给出的 `source`、`state`（`open`、`ending` 或 `ended`）、`head`，处于结束中或已结束的线还有 `endEvent`。`main` 排第一，其余按 `branchId` 顺序。回复不分页：它随线的数量增长，而线的数量由 Session 自己的使用决定，不随历史增长。答案归 `TimelineTree`（`directory()`）；`branches()` 仍然只列未结束的线，供持有活动线的调用方使用。
+**分支目录。** `session.branches {sessionId}`（v3，按与 `session.history` 相同的准入规则，在 `hello.features` 里与其他会话方法一起列出）为每条线回答一条记录：它的身份（`branchId`，有的话还有 `parentBranchId`、`branchPoint` 和 `createEvent`）、按 `TimelineInfo.source` 给出的 `source`、`state`（`open`、`ending` 或 `ended`）、`head`，处于结束中或已结束的线还有 `endEvent`。`main` 排第一，其余按 `branchId` 顺序。回复不分页：它随线的数量增长，而线的数量由 Session 自己的使用决定，不随历史增长。答案归 `TimelineTree`（`directory()`）；`branches()` 列出尚未结束的线（`open` 和 `ending`），供持有活动线的调用方使用。
 
 `head` 有三条规则，决定客户端能用它做什么：
 
 - 已结束（`ended`）线的 `head` 和 `endEvent` 固定。客户端把 `head` 作为 `through` 传给 `session.history` 读这条线；`endEvent` 是这条线自己的 `branch/end` 序号，祖先结束级联到它时也一样。
-- 结束中（`ending`）线的 `endEvent` 是它已提交的 `branch/end`，而 `head` 仍是活值：写入结束的那一轮尚未结束，关闭以及 `branch/ended` 都还在后面。输入被拒绝；这一轮结束时，这条线变成 `ended`，`head` 随之固定。重启不保留这个窗口：`branch/end` 已提交、但那一轮从未结束的线，恢复后是 `ended`（§10）。
+- 结束中（`ending`）线的 `endEvent` 是它已提交的 `branch/end`，而 `head` 仍是活值：这条线的已结束记录以及 `branch/ended` 都还在后面。一条线从它自己的 `branch/end` 提交起——工具结束、host 结束或级联结束——一直读作 `ending`，直到它的已结束记录被写入，期间输入一直被拒绝。运行中的轮次里由工具发起的结束，会一直保持 `ending`，直到那一轮结束、关闭完成。重启不保留这个窗口：`branch/end` 已提交、但已结束记录从未写入的线，恢复后是 `ended`（§10）。
 - 未结束（`open`）线的 `head` 是活值。恢复会给每条未结束线追加 `branch/resume` 和中断事实，因此重启后 `head` 会前进；客户端在重连后重新读目录，不要缓存 head。
 
 这个面板与任务面板分开：任务面板列后台命令、成员和 Workflow 运行，它的 `x` 是停止任务，而结束是永久的，两者不共用按键。
@@ -514,7 +514,7 @@ WorkspaceTools 不变。
 | 模块 | 改动 | 原因 |
 | --- | --- | --- |
 | [设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义) | 改写：同一主体的多条线、共享事实、父子是唯一的通信和读取关系、共用交互面。关系表一行改为"只在父子之间"，读取父线已提交的事件经工具结果；Session 一行加上"结束" | 现在的文本是"平等的线，父子只记录来源"，没有通信关系 |
-| TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线。它的 `directory()` 报告未结束、结束中和已结束的线，结束中的线带它已提交的 `branch/end` 与活头部。它的节点把这条线最新轮次结束的序号发布给它开出的线（§7.1.1） | 它拥有线的生命周期和开启输入 |
+| TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线。它的 `directory()` 报告未结束、结束中和已结束的线：结束中的线从工具、host 或级联写入它自己的 `branch/end` 起，到它的已结束记录被写入为止，带该事件与活头部。它的节点把这条线最新轮次结束的序号发布给它开出的线（§7.1.1） | 它拥有线的生命周期和开启输入 |
 | TreeTimeline | 消费 `branch/end`，以及由工具调用发出的结束时这条线的下一次轮次结束，并转给 TimelineTree。它把每一次 `turn/end` 报告给 TimelineTree，后者为这条线的子线发布 | 它现在就这样转 `branch/create` |
 | BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件。`read` 既能读调用方被切出来的那条线，在 `main` 上也能读它开的工具线，共用一条游标规则 | 工具的各个动作，以及一条线对自己相关各线的视图 |
 | Session 门面 | `Session::end_branch(id, source)`。已结束线的头部由 `Session::sequence` 给出；其历史在固定的头部经 `TreeCommands.page` 读取 | §17 |
@@ -638,7 +638,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 
 分支目录：
 
-17. `session.branches` 先返回 `main`，其余按 `branchId` 顺序，每条带身份、来源、状态和 head。级联结束时，被结束的子分支以它自己的 `branch/end` 序号作为 `endEvent` 记入目录；把该子分支的 `head` 作为 `through` 传给 `session.history` 能读到它。`branch/end` 已提交、但那一轮仍在运行的线读作 `ending`，带该事件和活头部；这一轮结束后读作 `ended`，事件不变、头部固定。
+17. `session.branches` 先返回 `main`，其余按 `branchId` 顺序，每条带身份、来源、状态和 head。级联结束时，被结束的子分支以它自己的 `branch/end` 序号作为 `endEvent` 记入目录；把该子分支的 `head` 作为 `through` 传给 `session.history` 能读到它。一条线从它自己的 `branch/end` 提交起——工具结束、host 结束或级联结束——读作 `ending`，带该事件和活头部，直到它的已结束记录被写入；之后读作 `ended`，事件不变、头部固定。运行中的轮次里由工具发起的结束，会一直保持 `ending`，直到那一轮结束、关闭完成。
 18. 重启后目录保持 id、父分支、切点、创建事件和状态；已结束线保持 `head` 和 `endEvent`，未结束线的 `head` 不低于旧值。在一轮仍在运行时结束的线，恢复后是 `ended`，不是 `ending`。
 19. fork 的目录列出 fork 之前已结束的线，带来源记录的结束，而那些线在 fork 里没有事件。v1、v2 客户端没有 `session.branches`；已关闭的 Session 回答 `session_closed`。
 
@@ -656,7 +656,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 | `branch/end` 与 `branch/ended` | 没有它们，一条线无法持久结束，恢复时又会被打开 |
 | 结束上的 `source`（`BranchSource`） | 创建和结束以同样的方式记录发起方，插件的结束不会被记成这条线自己的结束 |
 | `TimelineInfo.source` | 开线的一方不用解析 prompt 文本就能找到自己的线 |
-| 目录里的 `endEvent` 与 `ending` 状态 | 没有 `endEvent`，客户端无法指出级联结束那条线的结束；这条线自己的 `branch/end` 只隔一页。没有 `ending`，工具发出的结束到那一轮结束之间的窗口会读作未结束，客户端分不清一条线还能收输入，还是已经拒绝输入 |
+| 目录里的 `endEvent` 与 `ending` 状态 | 没有 `endEvent`，客户端无法指出级联结束那条线的结束；这条线自己的 `branch/end` 只隔一页。没有 `ending`，从一条线自己的 `branch/end`——工具结束、host 结束或级联结束——到它的已结束记录之间的窗口会读作未结束，客户端分不清一条线还能收输入，还是已经拒绝输入 |
 | 工具限于 `main` 和工具线 | 一个协调者，创建者也保有自己的协议 |
 | 关于文件的提示词规则 | 唯一的保护是 FileReads，其余靠协议 |
 

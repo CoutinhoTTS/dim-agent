@@ -505,16 +505,18 @@ Session methods under the same admission rules as `session.history`) answers one
 `TimelineInfo.source` carries it, `state` (`open`, `ending` or `ended`), `head`, and, for an ending or ended
 line, `endEvent`. `main` comes first and the rest follow in `branchId` order. The reply is not paged: it grows with
 the number of lines, which a Session bounds by its own use, not with history. `TimelineTree` owns the answer
-(`directory()`); `branches()` stays open-only for the callers that hold a live line.
+(`directory()`); `branches()` lists the lines that have not ended (open and ending), for the callers that hold a live line.
 
 Three rules about `head` decide what a client may do with it:
 
 - An `ended` line's `head` and `endEvent` are fixed. The client passes `head` as `through` to `session.history` to
   read the line, and `endEvent` names the line's own `branch/end`, including when an ancestor's end cascaded to it.
-- An `ending` line's `endEvent` is its committed `branch/end`, while its `head` is still live: the turn that wrote
-  the end has not finished, so the close, and with it `branch/ended`, is still ahead. Input is refused, and the line
-  becomes `ended`, with its head fixed, when that turn ends. A restart does not keep this window: a line whose
-  `branch/end` is committed but whose turn never ended is restored as `ended` (§10).
+- An `ending` line's `endEvent` is its committed `branch/end`, while its `head` is still live: the line's ended row,
+  and with it `branch/ended`, is still ahead. A line reads `ending` from the commit of its own `branch/end` — a tool
+  end, a host end or a cascade end — until its ended row is recorded, and input is refused throughout. A
+  tool-sourced end written inside a running turn stays `ending` until that turn ends and the close completes. A
+  restart does not keep this window: a line whose `branch/end` is committed but whose ended row was never written is
+  restored as `ended` (§10).
 - An `open` line's `head` is live. Restore appends `branch/resume` and the interruption facts to every open line, so
   `head` moves across a restart; a client re-reads the directory after it reconnects instead of caching a head.
 
@@ -525,7 +527,7 @@ Three rules about `head` decide what a client may do with it:
 | Module | Change | Why |
 | --- | --- | --- |
 | [Design rules §2](../architecture/rust-agent/principles.md#2-作用域的含义) | Rewritten: lines of one subject, shared facts, parent and child as the only communication and reading relation, and the shared interaction surface. Relations row: "only between parent and child", reading the parent's committed events through a tool result. Session row: adds "end" | The current text, "equal lines, the relation only records the source", has no communication relation |
-| TimelineTree | The identity block in `first_input` for every source. `TreeCommands.end(id, source)` and `TreeCommands.page(id, after, limit)`. `TimelineInfo.source`, filled from the parent's `branch/create` (§5). The end flow, refusing input once a line is ending, `branch/ended`, the restore rule, and reads of ended lines. Its `directory()` reports an open line, an ending line (its `branch/end` committed while its turn still runs) and an ended line, with the ending line's live head. Its node publishes the sequence of the line's latest turn end to the line's children (§7.1.1) | It owns the line lifecycle and the opening input |
+| TimelineTree | The identity block in `first_input` for every source. `TreeCommands.end(id, source)` and `TreeCommands.page(id, after, limit)`. `TimelineInfo.source`, filled from the parent's `branch/create` (§5). The end flow, refusing input once a line is ending, `branch/ended`, the restore rule, and reads of ended lines. Its `directory()` reports an open line, an ending line (its own `branch/end` committed, from a tool, a host or a cascade, until its ended row is written) and an ended line, with the ending line's live head. Its node publishes the sequence of the line's latest turn end to the line's children (§7.1.1) | It owns the line lifecycle and the opening input |
 | TreeTimeline | Consumes `branch/end`, plus the line's next turn end for an end issued by a tool call, and routes them to TimelineTree. It reports every `turn/end` to TimelineTree, which publishes it for the line's children | It routes `branch/create` the same way |
 | BranchTool | The action-based tool, plus the new BranchLine branch part. `read` reaches the line the caller was cut from as well as, on `main`, the tool lines it opened, with one cursor rule | The tool's actions and one line's view of its lines |
 | Session facade | `Session::end_branch(id, source)`. An ended line's head is `Session::sequence`; its history is read at that fixed head through `TreeCommands.page` | §17 |
@@ -649,7 +651,7 @@ Line end and sources:
 
 The branch directory:
 
-17. `session.branches` returns `main` first and the rest in `branchId` order, with each line's identity, source, state and head. A cascade end records the ended child with the sequence of its own `branch/end` as `endEvent`, and `session.history` with `through` set to that child's `head` reads it. A line whose `branch/end` is committed while its turn still runs reads `ending`, with that event and a live head, and `ended`, with the same event and a fixed head, once the turn ends.
+17. `session.branches` returns `main` first and the rest in `branchId` order, with each line's identity, source, state and head. A cascade end records the ended child with the sequence of its own `branch/end` as `endEvent`, and `session.history` with `through` set to that child's `head` reads it. A line reads `ending`, with its own committed `branch/end` as `endEvent` and a live head, from that commit — a tool end, a host end or a cascade end — until its ended row is written, and `ended`, with the same event and a fixed head, after it. A tool-sourced end inside a running turn stays `ending` until that turn ends and the close completes.
 18. After a restart the directory keeps ids, parents, branch points, create events and states; ended lines keep their `head` and `endEvent`, and an open line's `head` is at or above its old value. A line that ended while its turn was still running restores as `ended`, not `ending`.
 19. A fork's directory lists the lines that ended before the fork, with the end the source recorded, and those lines have no events in the fork. A v1 or v2 client has no `session.branches`, and a closed Session answers `session_closed`.
 
@@ -667,7 +669,7 @@ What is left, and why each piece is needed:
 | `branch/end` and `branch/ended` | Without them a line cannot end durably, and restore reopens it |
 | `source` on the end (`BranchSource`) | A create and an end record their issuer the same way, so a plugin's end is not recorded as the line's own |
 | `TimelineInfo.source` | An opener finds its own lines without parsing prompt text |
-| The directory's `endEvent` and its `ending` state | Without `endEvent` a client cannot name a cascaded line's end, and the line's own `branch/end` is one page away. Without `ending` the window between a tool-sourced end and the end of its turn reads as open, and a client cannot tell a line that takes input from one that already refuses it |
+| The directory's `endEvent` and its `ending` state | Without `endEvent` a client cannot name a cascaded line's end, and the line's own `branch/end` is one page away. Without `ending` the window between a line's own `branch/end` — a tool end, a host end or a cascade end — and its ended row reads as open, and a client cannot tell a line that takes input from one that already refuses it |
 | The tool restricted to `main` and to tool lines | One coordinator, and creators keep their own protocols |
 | The prompt rules on files | The only guard is FileReads; the rest is protocol |
 
