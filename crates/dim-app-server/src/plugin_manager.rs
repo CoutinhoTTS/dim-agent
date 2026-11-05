@@ -933,8 +933,8 @@ impl Owners {
             match own {
                 Some((detail, reason)) => found.push((Kind::Mcp, detail, Some(reason))),
                 None => {
-                    if let Some(error) = mcp.plugin_refusal(plugin) {
-                        found.push((Kind::Mcp, error, mcp.plugin_reason(plugin)));
+                    if let Some((error, reason)) = mcp.plugin_refusal(plugin) {
+                        found.push((Kind::Mcp, error, reason));
                     }
                 }
             }
@@ -951,8 +951,8 @@ impl Owners {
             match own {
                 Some((detail, reason)) => found.push((Kind::Hooks, detail, Some(reason))),
                 None => {
-                    if let Some(error) = hooks.plugin_refusal(plugin) {
-                        found.push((Kind::Hooks, error, hooks.plugin_reason(plugin)));
+                    if let Some((error, reason)) = hooks.plugin_refusal(plugin) {
+                        found.push((Kind::Hooks, error, reason));
                     }
                 }
             }
