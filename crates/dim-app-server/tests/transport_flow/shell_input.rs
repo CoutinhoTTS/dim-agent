@@ -717,6 +717,10 @@ async fn background_exec_output_page_clamps_scopes_and_errors() {
             error["error"]["data"]["appError"], "exec_task_unknown",
             "{error}"
         );
+        assert_eq!(
+            error["error"]["message"], "No such task is known on this branch",
+            "{error}"
+        );
     }
     // A second task writes past the maximum page: the request clamps.
     let command = "while [ ! -f big ]; do sleep 0.01; done; awk 'BEGIN { for (i=0; i<5500000; i++) printf \"x\" }'; exit 0";
