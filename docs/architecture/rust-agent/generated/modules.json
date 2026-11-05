@@ -352,6 +352,7 @@
       "file": "crates/dim-agent-capabilities/src/adapters.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "tokio::select",
         "vec"
       ]
@@ -37920,6 +37921,7 @@
       "to": "dim_cli::ui",
       "references": [
         "path Env",
+        "path crate::ui::tilde",
         "use crate::ui::Env"
       ]
     },
@@ -38778,6 +38780,13 @@
       "to": "dim_cli::projection",
       "references": [
         "path crate::projection::Projection::default"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui",
+      "references": [
+        "path crate::ui::tilde"
       ]
     },
     {
