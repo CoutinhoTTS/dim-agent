@@ -9,7 +9,7 @@ use dim_app_server::{
     settings::{
         BusinessDocument, ProjectAuthorized, Result, SettingsChanged, SettingsError,
         SettingsPlugin, SettingsScope, SettingsService, SourceDeclaration, Writer,
-        project_authorizations, settings_changes,
+        project_authorizations, settings_changes, without_write_only,
     },
     settings_methods::SettingsMethodsPlugin,
     storage::SqliteStoragePlugin,
@@ -1346,6 +1346,52 @@ async fn client_settings_sources_carries_the_write_only_hint() {
         .find(|item| item["source"] == "workflow")
         .unwrap();
     assert_eq!(workflow["writeOnly"], false);
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// §4.1: a root-level `writeOnly` counts for the `settings.sources` hint but
+/// hides nothing. The listing says `writeOnly: true` while the redaction the
+/// agent's `plugin config` path applies (§1.2) over the same schema removes
+/// no member and reports an empty `writeOnlySet`.
+#[tokio::test]
+async fn client_settings_sources_root_write_only_hints_without_hiding() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let mut views = client_sources(&home, &root);
+    let owner = root.plugin(owner("test.sources-root-write-only", |settings, ctx| {
+        settings.register_declared(
+            ctx,
+            SourceDeclaration {
+                source: "sealed".into(),
+                user_file: "sealed.json".into(),
+                project_file: None,
+                schema: json!({
+                    "type": "object",
+                    "writeOnly": true,
+                    "properties": {"token": {"type": "string"}},
+                    "additionalProperties": false
+                }),
+                user_only: vec![],
+            },
+        )
+    }));
+    views.push(owner.clone());
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let reply = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    let item = &reply["sources"][0];
+    assert_eq!(item["source"], "sealed", "{reply}");
+    assert_eq!(item["writeOnly"], true, "{reply}");
+    assert_eq!(item["userOnly"], json!([]), "{reply}");
+    let document = json!({"token": "t"});
+    let (shown, set) = without_write_only(&item["schema"], document.clone());
+    assert_eq!(shown, document);
+    assert!(set.is_empty(), "{set:?}");
     root.shutdown().await.unwrap();
     fs::remove_dir_all(home).unwrap();
 }
