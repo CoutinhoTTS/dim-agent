@@ -505,7 +505,21 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .await,
     );
     let through = first_session.sequence("main").unwrap();
-    let expected: Vec<Value> = branch_events(&first_session, "main", first_after + 1..)
+    let child = first_session
+        .branch(
+            "main".into(),
+            through,
+            dim_agent_runtime::BranchOptions {
+                prompt: "child branch observation".into(),
+                source: dim_agent_types::BranchSource::Host {
+                    operation_id: "observation".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    first_session.idle(&child).await.unwrap();
+    let expected: Vec<Value> = branch_events(&first_session, "main", first_after + 1..=through)
         .await
         .unwrap()
         .iter()
@@ -521,41 +535,23 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         assert_ok(&observed);
         assert_eq!(observed["result"]["records"], json!(expected));
     }
-    let child = first_session
-        .branch(
-            "main".into(),
-            through,
-            dim_agent_runtime::BranchOptions {
-                prompt: "child branch observation".into(),
-                source: dim_agent_types::BranchSource::Host {
-                    operation_id: "observation".into(),
-                },
-            },
-        )
+    let child_through = first_session.sequence(&child).unwrap();
+    let child_history = branch_events(&first_session, &child, ..=child_through)
         .await
         .unwrap();
-    first_session.idle(&child).await.unwrap();
-    let child_history = branch_events(&first_session, &child, ..).await.unwrap();
     let child_records = client
         .rpc(
             "session.observer.through",
             json!({"sessionId":first,
-        "branchId":child,"sequence":first_session.sequence(&child).unwrap()}),
+        "branchId":child,"sequence":child_through}),
         )
         .await;
     assert_ok(&child_records);
-    let actual_child: Vec<_> = child_records["result"]["records"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|record| record["branchId"] == child)
-        .cloned()
-        .collect();
     let expected_child: Vec<_> = child_history
         .iter()
         .map(|event| json!({"sessionId":first,"branchId":child,"event":event}))
         .collect();
-    assert_eq!(actual_child, expected_child);
+    assert_eq!(child_records["result"]["records"], json!(expected_child));
     let view = session_copy(
         &ctx,
         session_instance,
@@ -852,7 +848,7 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         assert_ok(&status);
         submit(&mut client, &id, text).await;
         let through = session.sequence("main").unwrap();
-        let expected: Vec<Value> = branch_events(&session, "main", after + 1..)
+        let expected: Vec<Value> = branch_events(&session, "main", after + 1..=through)
             .await
             .unwrap()
             .iter()
