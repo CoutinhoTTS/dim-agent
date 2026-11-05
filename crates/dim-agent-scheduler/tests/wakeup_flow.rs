@@ -795,15 +795,19 @@ async fn terminal_records_are_pruned_after_their_retention_age() {
             .unwrap();
     }
     // The timer edits stand in for the two terminal ages: the first record
-    // has been terminal for eight days, the second for one.
+    // was created a moment ago and has been terminal for eight days, the
+    // second was created eight days ago and has been terminal for one. Both
+    // contrasts make `settled_at`, not `created_at`, the cutoff.
     let days = |days: i64| {
         (chrono::Utc::now() - chrono::Duration::days(days))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     };
     edit_wakeups(home.path(), |wakeups| {
         wakeups[0]["state"] = json!("fired");
+        wakeups[0]["created_at"] = json!(days(0));
         wakeups[0]["settled_at"] = json!(days(8));
         wakeups[1]["state"] = json!("cancelled");
+        wakeups[1]["created_at"] = json!(days(8));
         wakeups[1]["settled_at"] = json!(days(1));
     });
     wait_for("the old terminal record to be pruned", || {
