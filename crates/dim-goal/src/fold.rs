@@ -33,10 +33,34 @@ pub struct Request {
     pub summary: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnEnd {
     pub sequence: u64,
     pub status: TurnStatus,
+    /// The turn's id, which a progress query names (C7).
+    pub turn_id: String,
+    /// The `turn/start` sequence the end closes; a progress query starts here.
+    pub turn_start: u64,
+    /// Whether Goal's own continuation drove the turn that ended here.
+    pub continuation_driven: bool,
+}
+
+/// Whether the turn a decision follows made a tool call (C7). `None` where the
+/// decision needs the answer means it is not known yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    ToolCall,
+    NoToolCall,
+}
+
+/// Consecutive continuation-driven turns without a tool call that pause a goal
+/// (C7).
+pub const NO_PROGRESS_TURNS: usize = 3;
+
+/// One continuation input Goal wrote, and the streak it states (C7).
+struct Continuation {
+    sequence: u64,
+    idle: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +241,12 @@ pub struct Fold {
     pub evaluations: BTreeMap<u64, String>,
     /// The first conclusion input from each evaluation's own evaluator.
     pub conclusions: BTreeMap<u64, u64>,
+    /// The `continue` conclusions no input for their evaluation has answered
+    /// yet: evaluation → (input sequence, conclusion). A continuation or pause
+    /// for the evaluation, a newer turn end or an operator input drops the
+    /// entry. Settling a deferred turn end re-derives it here, so a reload
+    /// keeps it (Pursuit §5).
+    pending_conclusions: BTreeMap<u64, (u64, Conclusion)>,
     /// Sequence of the latest live keyed goal block.
     pub last_block: u64,
     /// The lines this branch opened that ended.
@@ -225,8 +255,15 @@ pub struct Fold {
     pub failed: HashSet<String>,
     /// Turn ends in this branch's local events.
     pub turn_ends: usize,
+    /// Background tasks this branch started and has not ended, by `task_id`.
+    open_tasks: HashSet<String>,
     interrupts: Vec<u64>,
-    continuations: Vec<u64>,
+    continuations: Vec<Continuation>,
+    /// The ids of the continuation inputs, which drive turns (C7).
+    continuation_inputs: HashSet<String>,
+    /// Whether the latest `turn/start` was driven by Goal's continuation; the
+    /// `turn/end` that closes it keeps the answer.
+    turn_continuation_driven: bool,
     decided: BTreeSet<String>,
     driving: HashMap<String, u64>,
     events: Vec<AgentEvent>,
@@ -302,16 +339,35 @@ impl Fold {
             EventKind::InputConsumed(data) => {
                 self.driving.remove(&data.input_id);
             }
-            EventKind::TurnStart(_) => self.turn_start = sequence,
+            EventKind::TurnStart(_) => {
+                self.turn_start = sequence;
+                self.turn_continuation_driven = self
+                    .driving
+                    .keys()
+                    .any(|id| self.continuation_inputs.contains(id));
+            }
             EventKind::TurnEnd(data) => {
                 self.turn_end = Some(TurnEnd {
                     sequence,
                     status: TurnStatus::of(&data.outcome),
+                    turn_id: data.turn_id.clone(),
+                    turn_start: self.turn_start,
+                    continuation_driven: self.turn_continuation_driven,
                 });
                 self.turn_ends += 1;
+                // A newer turn end supersedes a conclusion still waiting on a
+                // background task: the newer end decides from its own state.
+                self.pending_conclusions
+                    .retain(|evaluation, _| *evaluation >= sequence);
             }
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn => {
                 self.interrupts.push(sequence);
+            }
+            EventKind::ExecStarted(data) => {
+                self.open_tasks.insert(data.task_id.clone());
+            }
+            EventKind::ExecEnded(data) => {
+                self.open_tasks.remove(&data.task_id);
             }
             _ => {}
         }
@@ -328,9 +384,18 @@ impl Fold {
         let first = first_text.and_then(text::marker);
         if data.user.is_some() && !first_text.is_some_and(|text| text.starts_with("<dim-")) {
             self.last_operator = sequence;
+            // An operator input supersedes a conclusion still waiting on a
+            // background task: the operator's input decides what comes next.
+            self.pending_conclusions
+                .retain(|evaluation, _| *evaluation > sequence);
         }
         if let Some(after) = first.as_ref().and_then(|attrs| attrs.get("after")) {
             self.decided.insert(after.clone());
+            // A continuation or pause for the evaluation answers its
+            // conclusion; the deferred one is no longer pending.
+            if let Some(evaluation) = sequence_of(after) {
+                self.pending_conclusions.remove(&evaluation);
+            }
         }
         if first
             .as_ref()
@@ -338,7 +403,15 @@ impl Fold {
             .map(String::as_str)
             == Some("continuation")
         {
-            self.continuations.push(sequence);
+            self.continuation_inputs.insert(event.id.clone());
+            self.continuations.push(Continuation {
+                sequence,
+                idle: first
+                    .as_ref()
+                    .and_then(|attrs| attrs.get("idle"))
+                    .and_then(|idle| idle.parse().ok())
+                    .unwrap_or(0),
+            });
         }
         if let Some(conclusion) = first_text.and_then(conclusion_of) {
             let evaluation = conclusion.evaluation;
@@ -346,6 +419,10 @@ impl Fold {
                 && !self.conclusions.contains_key(&evaluation)
             {
                 self.conclusions.insert(evaluation, sequence);
+                if conclusion.result == ConclusionKind::Continue {
+                    self.pending_conclusions
+                        .insert(evaluation, (sequence, conclusion));
+                }
             }
         }
         for raw in &data.blocks {
@@ -416,14 +493,37 @@ impl Fold {
         let since = self.active.max(self.last_operator);
         self.continuations
             .iter()
-            .filter(|sequence| **sequence > since)
+            .filter(|continuation| continuation.sequence > since)
             .count()
+    }
+    /// The streak the latest continuation after the count's cutoff states: the
+    /// continuation-driven turns without a tool call ending at the turn it
+    /// follows (C7). A continuation from before an operator input states none.
+    fn idle(&self) -> usize {
+        let since = self.active.max(self.last_operator);
+        self.continuations
+            .iter()
+            .rev()
+            .find(|continuation| continuation.sequence > since)
+            .map_or(0, |continuation| continuation.idle)
     }
     pub fn pending_driving(&self) -> bool {
         self.driving.keys().any(|id| !self.deleted.contains(id))
     }
+    /// Whether a background task this branch started is still open (A.4).
+    pub fn open_tasks(&self) -> bool {
+        !self.open_tasks.is_empty()
+    }
+    /// The `continue` conclusion still waiting for the branch to settle, with
+    /// its input sequence. It is re-derived from the fold, so a reload keeps
+    /// it (Pursuit §5).
+    pub fn pending_conclusion(&self) -> Option<(u64, &Conclusion)> {
+        let (evaluation, (sequence, conclusion)) = self.pending_conclusions.last_key_value()?;
+        (self.conclusions.get(evaluation) == Some(sequence) && self.is_current(*evaluation))
+            .then_some((*sequence, conclusion))
+    }
     pub fn turn_open(&self) -> bool {
-        self.turn_start > self.turn_end.map_or(0, |end| end.sequence)
+        self.turn_start > self.turn_end.as_ref().map_or(0, |end| end.sequence)
     }
     /// The worker's completion request inside the turn that ends at `sequence`.
     pub fn request_in_turn(&self, sequence: u64) -> Option<&Request> {
@@ -455,14 +555,55 @@ fn block_text(block: &InputBlock) -> &str {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    Continuation { count: usize },
+    Continuation { count: usize, idle: usize },
     Pause { reason: &'static str },
 }
 
+/// C6 and C7 over a continuation C1–C5 allow (A.4). `progress` is the tool-call
+/// answer for the turn the decision follows; it is needed only when a
+/// continuation drove that turn.
+fn decide_continuation(
+    fold: &Fold,
+    limit: Option<u64>,
+    end: Option<&TurnEnd>,
+    progress: Option<Progress>,
+) -> Option<Decision> {
+    if limit.is_some_and(|limit| fold.count() as u64 >= limit) {
+        return Some(Decision::Pause { reason: "limit" });
+    }
+    let idle = match end {
+        Some(end) if !end.continuation_driven => 0,
+        Some(_) => match progress? {
+            Progress::ToolCall => 0,
+            Progress::NoToolCall => fold.idle() + 1,
+        },
+        None => 0,
+    };
+    if idle >= NO_PROGRESS_TURNS {
+        return Some(Decision::Pause {
+            reason: "no_progress",
+        });
+    }
+    Some(Decision::Continuation {
+        count: fold.count() + 1,
+        idle,
+    })
+}
+
 /// The decision for the latest `turn/end` (A.4), over the fold as consumed.
-pub fn decide_turn_end(fold: &Fold, limit: u64) -> Option<Decision> {
-    let end = fold.turn_end?;
+/// `limit` is the document's explicit `maxContinuations`; `None` is no limit.
+pub fn decide_turn_end(
+    fold: &Fold,
+    limit: Option<u64>,
+    progress: Option<Progress>,
+) -> Option<Decision> {
+    let end = fold.turn_end.as_ref()?;
     if fold.is_decided(end.sequence) || !fold.running() {
+        return None;
+    }
+    // A turn end with a background task still open decides nothing: its wake
+    // drives the next turn, or its cancelled end takes this decision later.
+    if fold.open_tasks() {
         return None;
     }
     if fold.interrupted() {
@@ -478,12 +619,7 @@ pub fn decide_turn_end(fold: &Fold, limit: u64) -> Option<Decision> {
     if end.status != TurnStatus::Completed || fold.turn_open() || fold.pending_driving() {
         return None;
     }
-    if fold.count() as u64 >= limit {
-        return Some(Decision::Pause { reason: "limit" });
-    }
-    Some(Decision::Continuation {
-        count: fold.count() + 1,
-    })
+    decide_continuation(fold, limit, Some(end), progress)
 }
 
 /// The decision for a `stop/interrupt {scope: turn}` at `sequence`.
@@ -499,7 +635,7 @@ pub fn decide_interrupt(fold: &Fold, sequence: u64) -> Option<Decision> {
 /// Whether the turn ending at `sequence` creates an evaluator instead of
 /// continuing (Pursuit §4.1).
 pub fn decide_evaluation(fold: &Fold, sequence: u64) -> bool {
-    let Some(end) = fold.turn_end else {
+    let Some(end) = fold.turn_end.as_ref() else {
         return false;
     };
     if end.sequence != sequence || fold.is_decided(sequence) || !fold.running() {
@@ -540,16 +676,20 @@ pub fn decide_conclusion(
     })
 }
 
-/// Goal's continuation for a `continue` conclusion: C1, C5 and C6.
-pub fn decide_evaluated_continuation(fold: &Fold, limit: u64) -> Option<Decision> {
-    if !fold.running() || fold.pending_driving() {
+/// Goal's continuation for a `continue` conclusion: C1, C5, C6 and the
+/// background wait. C7 measures the branch's own continuations; the evaluator
+/// judged this turn with the whole of it in front of it, so the evaluated
+/// path does not read progress and states `idle="0"` (Pursuit §5).
+pub fn decide_evaluated_continuation(fold: &Fold, limit: Option<u64>) -> Option<Decision> {
+    if !fold.running() || fold.pending_driving() || fold.open_tasks() {
         return None;
     }
-    if fold.count() as u64 >= limit {
+    if limit.is_some_and(|limit| fold.count() as u64 >= limit) {
         return Some(Decision::Pause { reason: "limit" });
     }
     Some(Decision::Continuation {
         count: fold.count() + 1,
+        idle: 0,
     })
 }
 

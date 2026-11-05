@@ -40248,12 +40248,14 @@
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
         "path EventKind::BranchEnded",
+        "path EventKind::ExecEnded",
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::ModelStart",
         "path EventKind::StopInterrupt",
         "path EventKind::Text",
         "path EventKind::TurnEnd",
+        "path ExecStatus::Cancelled",
         "path InputBlock::Raw",
         "path InterruptScope::Turn",
         "path TurnEndData",
@@ -40262,6 +40264,7 @@
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::ExecStatus",
         "use dim_agent_types::InputBlock",
         "use dim_agent_types::InterruptScope",
         "use dim_agent_types::TurnEndData",
@@ -40295,6 +40298,8 @@
         "path fold::ConclusionKind::Continue",
         "path fold::ConclusionKind::Done",
         "path fold::ConclusionKind::Failed",
+        "path fold::Progress::NoToolCall",
+        "path fold::Progress::ToolCall",
         "path fold::conclusion_of",
         "path fold::decide_conclusion",
         "path fold::decide_evaluated_continuation",
@@ -40345,6 +40350,8 @@
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
         "path EventKind::BranchEnded",
+        "path EventKind::ExecEnded",
+        "path EventKind::ExecStarted",
         "path EventKind::InputConsumed",
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
@@ -43077,6 +43084,10 @@
     {
       "module": "dim_client::wire",
       "path": "Wire::deserialize"
+    },
+    {
+      "module": "dim_goal::branch",
+      "path": "D::Error"
     },
     {
       "module": "dim_migration::accounts",

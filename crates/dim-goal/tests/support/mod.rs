@@ -811,7 +811,16 @@ pub async fn branch_events<R: std::ops::RangeBounds<u64> + Send>(
 }
 
 fn home() -> PathBuf {
-    let home = std::path::PathBuf::from("/tmp").join(format!("dim-goal-{}", uuid::Uuid::new_v4()));
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let home = std::env::temp_dir().join(format!("dim-goal-{}", &id[..16]));
+    let socket = home.join("server.sock");
+    assert!(
+        socket.as_os_str().len() <= 103,
+        "test home socket path is {} bytes, over the 103-byte Unix socket limit; \
+         point TMPDIR at a shorter directory: {}",
+        socket.as_os_str().len(),
+        socket.display()
+    );
     std::fs::create_dir_all(&home).unwrap();
     #[cfg(unix)]
     {

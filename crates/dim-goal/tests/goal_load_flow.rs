@@ -255,11 +255,11 @@ async fn e2_a_restored_evaluator_already_asked_writes_no_further_follow_up() {
         "completed",
         &[("r3", &["done, I think"])],
     );
-    let needle = format!(r#"count="1" limit="20" after="{evaluation}" evaluation="{evaluation}""#);
+    let needle = format!(r#"count="1" after="{evaluation}" evaluation="{evaluation}""#);
     let continuation = env.wait_for("main", &needle).await;
     assert_eq!(
         continuation.text,
-        texts::evaluated_continuation("main", 1, 20, evaluation, evaluation)
+        texts::evaluated_continuation("main", 1, None, 0, evaluation, evaluation)
     );
     assert_eq!(
         env.writes("eval").await.len(),
@@ -374,7 +374,7 @@ async fn pursuit_6_7_10_a_reload_creates_no_second_evaluator() {
 #[tokio::test]
 async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
     // `branch.rs`'s `KEYS`: the fold's kinds and the Dispatcher's subscription.
-    const KEYS: [&str; 11] = [
+    const KEYS: [&str; 13] = [
         "branch/start",
         "session/forked",
         "branch/create",
@@ -386,6 +386,8 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
         "turn/start",
         "turn/end",
         "stop/interrupt",
+        "exec/started",
+        "exec/ended",
     ];
     let env = Env::start_refusing().await;
     let mut seed = env.seed_new("load-kinds").await;
@@ -462,7 +464,7 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence),
+        texts::continuation("main", 1, None, 0, end.sequence),
         "the fold is the one the kinds behind the noise leave"
     );
     let events = env.all_events("main").await;

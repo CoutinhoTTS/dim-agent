@@ -4,7 +4,7 @@
 //! test. Every expectation is a literal text or a written input.
 mod support;
 
-use dim_agent_types::{InputMode, ToolContent, ToolResult};
+use dim_agent_types::{EventKind, InputMode, ToolContent, ToolResult};
 use serde_json::json;
 use support::parts::*;
 use support::texts;
@@ -25,7 +25,7 @@ async fn goal_reads_current_settings_and_stops_decisions_on_read_failure() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 1, end.sequence)
+        texts::continuation("main", 1, Some(1), 0, end.sequence)
     );
     assert_eq!(
         env.writes("main").await.len(),
@@ -40,6 +40,15 @@ async fn goal_reads_current_settings_and_stops_decisions_on_read_failure() {
         env.settled("main").await.len(),
         2,
         "an unreadable limit must not produce an automatic input"
+    );
+
+    // An explicit null is not a value either (A4).
+    std::fs::write(env.home().join("goal.json"), r#"{"maxContinuations":null}"#).unwrap();
+    env.turn("main", &[]);
+    assert_eq!(
+        env.settled("main").await.len(),
+        2,
+        "an explicit null must not produce an automatic input"
     );
 
     let interrupt = env.interrupt("main");
@@ -143,7 +152,7 @@ async fn a_completed_turn_drives_the_continuation_and_the_limit_pauses_it() {
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 1, end.sequence)
+        texts::continuation("main", 1, Some(1), 0, end.sequence)
     );
     let end = env.turn("main", &[&continuation]);
     let pause = env.wait_for("main", r#"reason="limit""#).await;
@@ -161,13 +170,474 @@ async fn a_completed_turn_drives_the_continuation_and_the_limit_pauses_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_absent_limit_continues_past_twenty_turns() {
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let mut continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    for count in 1..21 {
+        assert!(
+            !continuation.marker.contains("limit="),
+            "an absent limit writes no limit: {continuation:#?}"
+        );
+        let end = env.tool_turn("main", &[&continuation]);
+        continuation = env
+            .wait_for(
+                "main",
+                &format!(
+                    r#"kind="continuation" count="{}" after="{}""#,
+                    count + 1,
+                    end.sequence
+                ),
+            )
+            .await;
+    }
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes.len(),
+        22,
+        "the set and 21 continuations: {writes:#?}"
+    );
+    assert!(
+        writes
+            .iter()
+            .all(|block| !block.marker.contains(r#"op="pause""#)),
+        "an absent limit never pauses: {writes:#?}"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_limit_pauses_after_the_fifth_continuation_turn() {
+    let env = Env::start().await;
+    env.set_limit(5);
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let mut continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    for count in 1..5 {
+        let end = env.tool_turn("main", &[&continuation]);
+        continuation = env
+            .wait_for(
+                "main",
+                &format!(
+                    r#"kind="continuation" count="{}" limit="5" after="{}""#,
+                    count + 1,
+                    end.sequence
+                ),
+            )
+            .await;
+    }
+    let end = env.tool_turn("main", &[&continuation]);
+    let pause = env.wait_for("main", r#"reason="limit""#).await;
+    assert_eq!(
+        pause.text,
+        texts::automatic_pause(
+            "main",
+            "limit",
+            "the automatic continuation limit was reached",
+            end.sequence
+        )
+    );
+    assert_eq!(
+        env.settled("main").await.len(),
+        7,
+        "the set, five continuations and the pause"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn three_continued_text_only_turns_pause_no_progress() {
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    let end = env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+    assert_eq!(
+        first.text,
+        texts::continuation("main", 1, None, 0, end.sequence)
+    );
+
+    let end = env.turn("main", &[&first]);
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 2, None, 1, end.sequence)
+    );
+
+    let end = env.turn("main", &[&second]);
+    let third = env
+        .wait_for("main", r#"kind="continuation" count="3""#)
+        .await;
+    assert_eq!(
+        third.text,
+        texts::continuation("main", 3, None, 2, end.sequence)
+    );
+
+    let end = env.turn("main", &[&third]);
+    let pause = env.wait_for("main", r#"reason="no_progress""#).await;
+    assert_eq!(
+        pause.text,
+        texts::automatic_pause(
+            "main",
+            "no_progress",
+            "the goal made no tool call in its last 3 continued turns",
+            end.sequence
+        )
+    );
+    assert_eq!(
+        env.settled("main").await.len(),
+        5,
+        "the set, three continuations and the pause"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_call_or_operator_input_resets_the_streak() {
+    // A tool call in a continued turn resets the streak.
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+    let end = env.tool_turn("main", &[&first]);
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 2, None, 0, end.sequence)
+    );
+    env.close().await;
+
+    // An operator input restarts the streak: without it the third continued
+    // turn would pause.
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+    env.turn("main", &[&first]);
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    env.turn("main", &[&second]);
+    let third = env
+        .wait_for("main", r#"kind="continuation" count="3""#)
+        .await;
+    let operator = env.emit("main", user("also the changelog", InputMode::Queue));
+    let end = env.turn_ids("main", &[&third.id, &operator.id]);
+    let fourth = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="continuation" count="1" after="{}" idle="1""#,
+                end.sequence
+            ),
+        )
+        .await;
+    assert_eq!(
+        fourth.text,
+        texts::continuation("main", 1, None, 1, end.sequence)
+    );
+    assert!(
+        env.settled("main")
+            .await
+            .iter()
+            .all(|block| !block.text.contains(r#"reason="no_progress""#)),
+        "the operator input keeps the goal running"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reload_keeps_the_streak_and_decides_the_turn_end_once() {
+    let env = Env::start().await;
+    let mut seed = env.seed_new("load-streak").await;
+    let (objective, status) = texts::set_blocks("main", "ship it");
+    let set = seed.append(
+        "main",
+        message(
+            vec![
+                raw(&objective, Some("goal:objective"), false),
+                raw(&status, Some("goal:status"), false),
+            ],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        EventKind::TurnStart(dim_agent_types::TurnStartData {
+            turn_id: "t1".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    let end = seed.append("main", turn_end_with("t1", "completed"));
+    let first = seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::continuation("main", 1, None, 0, end.sequence),
+                None,
+                false,
+            )],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        EventKind::TurnStart(dim_agent_types::TurnStartData {
+            turn_id: "t2".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: first.id.clone(),
+        }),
+    );
+    let end = seed.append("main", turn_end_with("t2", "completed"));
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::continuation("main", 2, None, 1, end.sequence),
+                None,
+                false,
+            )],
+            InputMode::Queue,
+        ),
+    );
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-streak").await;
+    assert_eq!(
+        env.settled("main").await.len(),
+        3,
+        "the restore repeats no decision"
+    );
+    let second = env.writes("main").await[2].clone();
+    let end = env.turn("main", &[&second]);
+    let third = env
+        .wait_for("main", r#"kind="continuation" count="3""#)
+        .await;
+    assert_eq!(
+        third.text,
+        texts::continuation("main", 3, None, 2, end.sequence)
+    );
+    let end = env.turn("main", &[&third]);
+    let pause = env.wait_for("main", r#"reason="no_progress""#).await;
+    assert_eq!(
+        pause.text,
+        texts::automatic_pause(
+            "main",
+            "no_progress",
+            "the goal made no tool call in its last 3 continued turns",
+            end.sequence
+        )
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_background_task_defers_the_turn_end_until_its_end() {
+    // A completed background end does not wake in this harness; its wake is a
+    // separate input whose turn end decides.
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+    env.turn_start("main", "bg");
+    env.tool_call("main", "bg");
+    env.consume("main", &first.id);
+    env.exec_started("main", "bg", "task-1");
+    env.end_turn("main", "bg", "completed");
+    assert_eq!(
+        env.settled("main").await.len(),
+        2,
+        "an open task defers the turn end"
+    );
+    env.exec_ended("main", "task-1", "completed");
+    assert_eq!(
+        env.settled("main").await.len(),
+        2,
+        "a completed end waits for its wake"
+    );
+
+    let wake = env.write_message(
+        "main",
+        vec![raw(
+            "<dim-notification task=\"task-1\">\nbackground task finished\n</dim-notification>",
+            None,
+            false,
+        )],
+        InputMode::Queue,
+    );
+    let end = env.turn_ids("main", &[&wake.id]);
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 2, None, 0, end.sequence)
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_background_end_takes_the_deferred_decision_once() {
+    let env = Env::start().await;
+    let set = env.set("ship it").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+    env.turn_start("main", "bg");
+    env.tool_call("main", "bg");
+    env.consume("main", &first.id);
+    env.exec_started("main", "bg", "task-1");
+    let end = env.end_turn("main", "bg", "completed");
+    assert_eq!(env.settled("main").await.len(), 2);
+
+    env.exec_ended("main", "task-1", "cancelled");
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 2, None, 0, end.sequence)
+    );
+    assert_eq!(
+        env.settled("main").await.len(),
+        3,
+        "the deferred decision runs exactly once"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reload_with_an_open_background_task_defers_the_end_once() {
+    let env = Env::start().await;
+    let mut seed = env.seed_new("load-open-task").await;
+    let (objective, status) = texts::set_blocks("main", "ship it");
+    let set = seed.append(
+        "main",
+        message(
+            vec![
+                raw(&objective, Some("goal:objective"), false),
+                raw(&status, Some("goal:status"), false),
+            ],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        EventKind::TurnStart(dim_agent_types::TurnStartData {
+            turn_id: "t1".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    let end = seed.append("main", turn_end_with("t1", "completed"));
+    let first = seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::continuation("main", 1, None, 0, end.sequence),
+                None,
+                false,
+            )],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        EventKind::TurnStart(dim_agent_types::TurnStartData {
+            turn_id: "t2".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: first.id.clone(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::ToolCall(dim_agent_types::ToolCallData {
+            turn_id: "t2".into(),
+            request_id: "r".into(),
+            calls: vec![dim_agent_types::ToolCall {
+                id: "c".into(),
+                name: "exec".into(),
+                input: serde_json::Map::new(),
+            }],
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::ExecStarted(dim_agent_types::ExecStartedData {
+            turn_id: "t2".into(),
+            request_id: "r".into(),
+            call_id: "c".into(),
+            task_id: "task-1".into(),
+            description: "background work".into(),
+            output_path: "/dev/null".into(),
+        }),
+    );
+    let end = seed.append("main", turn_end_with("t2", "completed"));
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-open-task").await;
+    assert_eq!(
+        env.settled("main").await.len(),
+        2,
+        "the open task defers the end"
+    );
+    env.exec_ended("main", "task-1", "cancelled");
+    let second = env
+        .wait_for("main", r#"kind="continuation" count="2""#)
+        .await;
+    assert_eq!(
+        second.text,
+        texts::continuation("main", 2, None, 0, end.sequence)
+    );
+    assert_eq!(
+        env.settled("main").await.len(),
+        3,
+        "the restored open task is decided once"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_reopens_the_goal_and_the_count_restarts() {
     let env = Env::start().await;
     env.set_limit(2);
     let set = env.set("ship it").await;
     let end = env.turn("main", &[&set]);
     let first = env.wait_for("main", r#"kind="continuation""#).await;
-    assert_eq!(first.text, texts::continuation("main", 1, 2, end.sequence));
+    assert_eq!(
+        first.text,
+        texts::continuation("main", 1, Some(2), 0, end.sequence)
+    );
 
     env.tool("main", json!({"status": "completed", "summary": "done"}))
         .await;
@@ -195,7 +665,7 @@ async fn set_reopens_the_goal_and_the_count_restarts() {
         .await;
     assert_eq!(
         again.text,
-        texts::continuation("main", 1, 2, end.sequence),
+        texts::continuation("main", 1, Some(2), 0, end.sequence),
         "resume restarts the count"
     );
     env.close().await;

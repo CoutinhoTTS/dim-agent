@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use dim_agent_types::{
     BranchCreateAt, BranchCreateData, BranchCreateFailedData, BranchEndedData, BranchSource,
-    InputBlock, InputMode,
+    BranchStartData, EventKind, ExecEndedData, ExecStartedData, ExecStatus, InputBlock,
+    InputConsumedData, InputMode, ToolResult, TurnStartData,
 };
 use serde_json::json;
 use support::parts::*;
@@ -32,21 +33,24 @@ async fn next_create(env: &Env, branch: &str, seen: usize) -> BranchCreateData {
 /// evaluator Goal creates for it. The evaluator clears the inherited goal on
 /// its own line, as every new line does; its parts are mounted on return.
 async fn completion_requested(env: &Env) -> (u64, BranchCreateData) {
-    completion_requested_with(env, 20).await
+    completion_requested_with(env, None).await
 }
 
 /// [`completion_requested`] under the Settings limit `limit`.
-async fn completion_requested_with(env: &Env, limit: u64) -> (u64, BranchCreateData) {
+async fn completion_requested_with(env: &Env, limit: Option<u64>) -> (u64, BranchCreateData) {
     env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
         .await
         .expect("set writes");
     let set = env.wait_for("main", r#"op="set""#).await;
     let end = env.turn("main", &[&set]);
+    let limit = limit
+        .map(|limit| format!(r#" limit="{limit}""#))
+        .unwrap_or_default();
     let continuation = env
         .wait_for(
             "main",
             &format!(
-                r#"kind="continuation" count="1" limit="{limit}" after="{}""#,
+                r#"kind="continuation" count="1"{limit} after="{}""#,
                 end.sequence
             ),
         )
@@ -98,6 +102,27 @@ async fn writes_with(env: &Env, branch: &str, needle: &str) -> Vec<Block> {
         .collect()
 }
 
+/// Waits for the evaluated continuation of `evaluation` on `branch`: the
+/// conclusion input itself also names the evaluation.
+async fn wait_evaluated(env: &Env, branch: &str, evaluation: u64) -> Block {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let writes = env.writes(branch).await;
+            if let Some(block) = writes.iter().find(|block| {
+                block.marker.contains(r#"kind="continuation""#)
+                    && block
+                        .marker
+                        .contains(&format!(r#"evaluation="{evaluation}""#))
+            }) {
+                return block.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an evaluated continuation")
+}
+
 /// The pending inputs of `branch`, as string slices for a turn.
 async fn pending_refs(env: &Env, branch: &str) -> Vec<String> {
     env.pending_inputs(branch).await
@@ -129,7 +154,7 @@ async fn pursuit_1_the_judge_is_recorded_kept_by_edit_and_a_completion_is_a_requ
     let continuation = env.wait_for("main", r#"kind="continuation""#).await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, 20, end.sequence)
+        texts::continuation("main", 1, None, 0, end.sequence)
     );
 
     // The completion is a request: the goal stays active and an evaluator
@@ -157,13 +182,13 @@ async fn pursuit_1_the_judge_is_recorded_kept_by_edit_and_a_completion_is_a_requ
     let next = env
         .wait_for(
             "main",
-            &format!(
-                r#"kind="continuation" count="2" limit="20" after="{}""#,
-                end2.sequence
-            ),
+            &format!(r#"kind="continuation" count="2" after="{}""#, end2.sequence),
         )
         .await;
-    assert_eq!(next.text, texts::continuation("main", 2, 20, end2.sequence));
+    assert_eq!(
+        next.text,
+        texts::continuation("main", 2, None, 0, end2.sequence)
+    );
     assert_eq!(env.creates("main").await.len(), 1);
 
     // clear returns to the model judge.
@@ -258,13 +283,12 @@ async fn pursuit_2_7_10_a_conclusion_decides_once_from_its_own_evaluator() {
         "continue",
         "CONTINUE:\n- two tests fail: <output>\n- the changelog",
     );
-    let needle = format!(
-        r#"kind="continuation" count="2" limit="20" after="{evaluation}" evaluation="{evaluation}""#
-    );
+    let needle =
+        format!(r#"kind="continuation" count="2" after="{evaluation}" evaluation="{evaluation}""#);
     let continuation = env.wait_for("main", &needle).await;
     assert_eq!(
         continuation.text,
-        texts::evaluated_continuation("main", 2, 20, evaluation, evaluation)
+        texts::evaluated_continuation("main", 2, None, 0, evaluation, evaluation)
     );
     env.close().await;
 
@@ -723,19 +747,18 @@ async fn pursuit_2_a_continue_conclusion_writes_one_continuation_or_pauses_at_th
         "continue",
         "CONTINUE:\n- two tests fail: <output>",
     );
-    let needle = format!(
-        r#"kind="continuation" count="2" limit="20" after="{evaluation}" evaluation="{evaluation}""#
-    );
+    let needle =
+        format!(r#"kind="continuation" count="2" after="{evaluation}" evaluation="{evaluation}""#);
     let continuation = env.wait_for("main", &needle).await;
     assert_eq!(
         continuation.text,
-        texts::evaluated_continuation("main", 2, 20, evaluation, evaluation)
+        texts::evaluated_continuation("main", 2, None, 0, evaluation, evaluation)
     );
     env.close().await;
 
     let env = Env::start().await;
     env.set_limit(1);
-    let (evaluation, create) = completion_requested_with(&env, 1).await;
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
     write_conclusion(
         &env,
         &create.branch,
@@ -752,6 +775,226 @@ async fn pursuit_2_a_continue_conclusion_writes_one_continuation_or_pauses_at_th
             "the automatic continuation limit was reached",
             evaluation
         )
+    );
+    env.close().await;
+}
+
+/// A `continue` conclusion that arrives while a background task is open waits
+/// for the task: its cancelled end takes the conclusion once, and a second
+/// cancelled end writes nothing more (Pursuit §5).
+#[tokio::test]
+async fn pursuit_8_a_continue_conclusion_waits_for_a_cancelled_background_task() {
+    let env = Env::start_gated().await;
+    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
+        .await
+        .expect("set writes");
+    let set = env.wait_for("main", r#"op="set""#).await;
+    env.turn_start("main", "work");
+    env.consume("main", &set.id);
+    env.exec_started("main", "work", "task-1");
+    env.tool(
+        "main",
+        json!({"status": "completed", "summary": "all tests pass"}),
+    )
+    .await;
+    let end = env.end_turn("main", "work", "completed");
+    let create = next_create(&env, "main", 0).await;
+    // Hold the continuation's publication so the settle retry runs while the
+    // fold has not seen the written input.
+    let (written, release) = env.gated().hold_continuation();
+    write_conclusion(
+        &env,
+        &create.branch,
+        end.sequence,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    env.exec_ended("main", "task-1", "cancelled");
+    written.await.expect("the continuation write is committed");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    release.send(()).unwrap();
+    let evaluated = wait_evaluated(&env, "main", end.sequence).await;
+    assert_eq!(
+        evaluated.text,
+        texts::evaluated_continuation("main", 1, None, 0, end.sequence, end.sequence),
+        "the cancelled end takes the deferred conclusion"
+    );
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="continuation""#))
+            .count(),
+        1,
+        "the settle retry writes no second continuation: {writes:#?}"
+    );
+
+    env.consume("main", &evaluated.id);
+    env.exec_started("main", "work", "task-2");
+    env.exec_ended("main", "task-2", "cancelled");
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="continuation""#))
+            .count(),
+        1,
+        "a second cancelled end writes no second continuation: {writes:#?}"
+    );
+    env.close().await;
+}
+
+/// Seeds the history of a `continue` conclusion that arrived while a
+/// background task was open, optionally with the cancelled end already
+/// committed, and restores the Session. Returns the evaluation sequence.
+async fn deferred_conclusion(env: Env, cancelled: bool) -> (Env, u64) {
+    let mut seed = env.seed_new("load-deferred").await;
+    let (objective, status) = texts::evaluator_set_blocks("main", "ship it");
+    let set = seed.append(
+        "main",
+        message(
+            vec![
+                raw(&objective, Some("goal:objective"), false),
+                raw(&status, Some("goal:status"), false),
+            ],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        EventKind::TurnStart(TurnStartData {
+            turn_id: "work".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::InputConsumed(InputConsumedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    seed.append(
+        "main",
+        EventKind::ExecStarted(ExecStartedData {
+            turn_id: "work".into(),
+            request_id: "request".into(),
+            call_id: "call-1".into(),
+            task_id: "task-1".into(),
+            description: "background work".into(),
+            output_path: "/dev/null".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::report("main", "completed", "all tests pass"),
+                Some("goal:status"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    let end = seed.append("main", turn_end_with("work", "completed"));
+    let create = seed.append(
+        "main",
+        EventKind::BranchCreate(BranchCreateData {
+            at: BranchCreateAt::Sequence {
+                sequence: end.sequence,
+            },
+            source: BranchSource::Host {
+                operation_id: format!("goal:evaluate:{}", end.sequence),
+            },
+            branch: "eval".into(),
+            prompt: texts::evaluator_prompt("main", end.sequence, "ship it", "all tests pass"),
+        }),
+    );
+    seed.append(
+        "eval",
+        EventKind::BranchStart(BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create.sequence),
+        }),
+    );
+    seed.append(
+        "eval",
+        message(vec![raw("line work", None, false)], InputMode::Queue),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::conclusion(
+                    "main",
+                    "eval",
+                    end.sequence,
+                    "continue",
+                    "CONTINUE:\n- still missing",
+                ),
+                None,
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    if cancelled {
+        seed.append(
+            "main",
+            EventKind::ExecEnded(ExecEndedData {
+                task_id: "task-1".into(),
+                status: ExecStatus::Cancelled,
+                result: ToolResult::default(),
+            }),
+        );
+    }
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-deferred").await;
+    (env, end.sequence)
+}
+
+/// The deferred conclusion is re-derived from the fold, so a reload between
+/// the conclusion and the cancelled end keeps it (Pursuit §5).
+#[tokio::test]
+async fn pursuit_8_a_reload_keeps_a_deferred_continue_conclusion() {
+    let (env, evaluation) = deferred_conclusion(Env::start().await, false).await;
+    let writes = env.settled("main").await;
+    assert!(
+        writes
+            .iter()
+            .all(|block| !block.marker.contains(r#"kind="continuation""#)),
+        "the reload writes no continuation: {writes:#?}"
+    );
+
+    env.exec_ended("main", "task-1", "cancelled");
+    let evaluated = wait_evaluated(&env, "main", evaluation).await;
+    assert_eq!(
+        evaluated.text,
+        texts::evaluated_continuation("main", 1, None, 0, evaluation, evaluation),
+        "the rebuild re-derives the deferred conclusion"
+    );
+    env.close().await;
+}
+
+/// A cancelled end committed before the reload leaves the pending conclusion
+/// in the fold; the rebuild takes the settle path and writes exactly one
+/// continuation (Pursuit §5).
+#[tokio::test]
+async fn pursuit_8_a_reload_after_a_cancelled_end_takes_the_conclusion() {
+    let (env, evaluation) = deferred_conclusion(Env::start().await, true).await;
+    let evaluated = wait_evaluated(&env, "main", evaluation).await;
+    assert_eq!(
+        evaluated.text,
+        texts::evaluated_continuation("main", 1, None, 0, evaluation, evaluation),
+        "the rebuild settles the pending conclusion"
+    );
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="continuation""#))
+            .count(),
+        1,
+        "exactly one continuation follows the reload: {writes:#?}"
     );
     env.close().await;
 }

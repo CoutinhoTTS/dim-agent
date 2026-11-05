@@ -418,6 +418,13 @@ pub struct GatedStore {
     memory: MemoryTimelineStore,
     entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// A continuation input's publication, held until the case releases it.
+    published: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
 }
 
 impl GatedStore {
@@ -435,6 +442,21 @@ impl GatedStore {
         *self.entered.lock().unwrap() = Some(entered);
         *self.release.lock().unwrap() = Some(held);
         (waiting, release)
+    }
+
+    /// Holds the next continuation input's publication: the first end fires
+    /// once its append is committed, and sending on the second publishes it.
+    /// Until then the Dispatcher has not delivered the input to the fold.
+    pub fn hold_continuation(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, written) = tokio::sync::oneshot::channel();
+        let (release, held) = tokio::sync::oneshot::channel();
+        *self.published.lock().unwrap() = Some((entered, held));
+        (written, release)
     }
 }
 
@@ -479,7 +501,32 @@ impl TimelineStore for GatedStore {
         events: Vec<StoredEvent>,
         publish: PublishCallback,
     ) -> dim_agent_runtime::Result<()> {
-        self.memory.append(key, events, publish)
+        let continuation = events.iter().any(|stored| {
+            let EventKind::InputMessage(data) = &stored.event.kind else {
+                return false;
+            };
+            data.blocks.first().is_some_and(|block| {
+                let InputBlock::Raw { text, .. } = block;
+                text.contains(r#"kind="continuation""#)
+            })
+        });
+        let held = continuation
+            .then(|| self.published.lock().unwrap().take())
+            .flatten();
+        let Some((entered, held)) = held else {
+            return self.memory.append(key, events, publish);
+        };
+        self.memory.append(
+            key,
+            events,
+            Box::new(move |result| {
+                tokio::spawn(async move {
+                    let _ = entered.send(());
+                    let _ = held.await;
+                    publish(result);
+                });
+            }),
+        )
     }
     fn batch_end<'a>(
         &'a self,
@@ -1167,6 +1214,67 @@ impl Env {
     /// `turn/end` for the open `turn_id`.
     pub fn end_turn(&self, branch: &str, turn_id: &str, status: &str) -> Arc<AgentEvent> {
         self.emit(branch, turn_end_with(turn_id, status))
+    }
+
+    /// The `step/tool-call` a turn writes when the model calls a tool.
+    pub fn tool_call(&self, branch: &str, turn_id: &str) -> Arc<AgentEvent> {
+        self.emit(
+            branch,
+            EventKind::ToolCall(dim_agent_types::ToolCallData {
+                turn_id: turn_id.to_owned(),
+                request_id: "request".into(),
+                calls: vec![ToolCall {
+                    id: format!("call-{}", uuid::Uuid::new_v4()),
+                    name: "echo".into(),
+                    input: serde_json::Map::new(),
+                }],
+            }),
+        )
+    }
+
+    /// The `exec/started` a background tool writes for `task_id`.
+    pub fn exec_started(&self, branch: &str, turn_id: &str, task_id: &str) -> Arc<AgentEvent> {
+        self.emit(
+            branch,
+            EventKind::ExecStarted(dim_agent_types::ExecStartedData {
+                turn_id: turn_id.to_owned(),
+                request_id: "request".into(),
+                call_id: format!("call-{task_id}"),
+                task_id: task_id.to_owned(),
+                description: "background work".into(),
+                output_path: "/dev/null".into(),
+            }),
+        )
+    }
+
+    /// The `exec/ended` that closes `task_id` with `status`.
+    pub fn exec_ended(&self, branch: &str, task_id: &str, status: &str) -> Arc<AgentEvent> {
+        let status = match status {
+            "completed" => dim_agent_types::ExecStatus::Completed,
+            "failed" => dim_agent_types::ExecStatus::Failed,
+            "cancelled" => dim_agent_types::ExecStatus::Cancelled,
+            other => panic!("unknown exec status {other}"),
+        };
+        self.emit(
+            branch,
+            EventKind::ExecEnded(dim_agent_types::ExecEndedData {
+                task_id: task_id.to_owned(),
+                status,
+                result: ToolResult::default(),
+            }),
+        )
+    }
+
+    /// A completed turn that takes in `inputs` and makes one tool call, as the
+    /// Loop writes a turn that used a tool.
+    pub fn tool_turn(&self, branch: &str, inputs: &[&Block]) -> Arc<AgentEvent> {
+        let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
+        self.turn_start(branch, &turn_id);
+        self.tool_call(branch, &turn_id);
+        for input in inputs {
+            self.consume(branch, &input.id);
+        }
+        self.end_turn(branch, &turn_id, "completed")
     }
 
     /// An input message of literal blocks, committed on `branch`.
