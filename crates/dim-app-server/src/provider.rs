@@ -172,11 +172,12 @@ pub struct ProviderModel {
     /// Why the model cannot serve a non-conversational (modality) use. The
     /// conversational reason above also excludes models a modality operation
     /// may use (text modality, chat kind, text limits), so the two are
-    /// separate rules over the same entry. This rule is the App Server's own
+    /// separate rules over the same entry, both derived from one
+    /// `Unavailable` the catalog builds. This rule is the App Server's own
     /// and is never part of a reply: a client learns what modality can use
     /// from `modality.*`, so the field is skipped on the wire.
     #[serde(skip)]
-    pub modality_unavailable_reason: Option<String>,
+    pub(crate) modality_unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub zdr: bool,
     pub metadata: Option<ModelMetadata>,
@@ -468,13 +469,12 @@ impl ProviderRecord {
                 };
                 fill_bundled_limits(bundled, &mut entry);
                 let missing_limits = entry.capabilities.missing_limits();
-                let unavailable_reason =
-                    limits_reason(source.unavailable_reason.clone(), &missing_limits);
+                let unavailable = limits_reason(source.unavailable_reason.clone(), &missing_limits);
                 EffectiveModel {
                     source,
                     entry,
                     missing_limits,
-                    unavailable_reason,
+                    unavailable,
                     overridden: replacement.is_some(),
                 }
             })
@@ -490,15 +490,8 @@ impl ProviderRecord {
                 .effective_models(bundled)
                 .into_iter()
                 .map(|model| {
-                    // The chat-kind and text-limit reasons do not apply to a
-                    // non-conversational use; every other reason does.
-                    let modality_unavailable_reason = model
-                        .unavailable_reason
-                        .as_deref()
-                        .filter(|reason| {
-                            !matches!(*reason, "unsupported_model_type" | "limits_undeclared")
-                        })
-                        .map(str::to_owned);
+                    let (unavailable_reason, modality_unavailable_reason) =
+                        catalog_reasons(&model.unavailable);
                     ProviderModel {
                         id: model.entry.model_id,
                         name: model.entry.display_name,
@@ -514,7 +507,7 @@ impl ProviderRecord {
                         },
                         capabilities: model.entry.capabilities,
                         missing_limits: model.missing_limits,
-                        unavailable_reason: model.unavailable_reason,
+                        unavailable_reason,
                         modality_unavailable_reason,
                         zdr: model.source.zdr,
                         metadata: model.entry.metadata,
@@ -532,8 +525,74 @@ pub(crate) struct EffectiveModel<'a> {
     pub source: &'a ManagedModel,
     pub entry: ModelEntry,
     pub missing_limits: Vec<String>,
-    pub unavailable_reason: Option<String>,
+    pub unavailable: Option<Unavailable>,
     pub overridden: bool,
+}
+
+/// Why a catalog entry cannot serve a use, and whether the same rule also
+/// excludes a non-conversational one. Both catalog builders produce it beside
+/// the reason they publish, so the conversational and the modality selection
+/// rules read one typed fact and neither parses the reason text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unavailable {
+    /// The text a client reads as `unavailableReason`.
+    pub reason: String,
+    /// True when the rule excludes a non-conversational use too: the status,
+    /// route, credential, provider and account rules do, while text modality,
+    /// chat kind and text limits do not.
+    pub excludes_modality: bool,
+}
+
+impl Unavailable {
+    /// A rule that excludes every use, named from the static path.
+    fn every_use(reason: &str) -> Self {
+        Self {
+            reason: reason.to_owned(),
+            excludes_modality: true,
+        }
+    }
+
+    /// A rule that excludes a conversational use only.
+    fn conversational(reason: &str) -> Self {
+        Self {
+            reason: reason.to_owned(),
+            excludes_modality: false,
+        }
+    }
+
+    /// The class of a reason a managed record stored. Discovery names a reason
+    /// once, for a conversational use; the two it stores that leave a
+    /// non-conversational use open are `unsupported_model_type` (the non-chat
+    /// kind) and `limits_undeclared` (the text limits). A new reason that
+    /// excludes only a conversational use is added here, so it reaches
+    /// modality instead of dropping the model.
+    fn of(reason: String) -> Self {
+        let excludes_modality = !matches!(
+            reason.as_str(),
+            "unsupported_model_type" | "limits_undeclared"
+        );
+        Self {
+            reason,
+            excludes_modality,
+        }
+    }
+
+    /// The reason a non-conversational use sees, `None` when this rule does
+    /// not exclude it.
+    fn modality_reason(&self) -> Option<String> {
+        self.excludes_modality.then(|| self.reason.clone())
+    }
+}
+
+/// The two reasons a catalog publishes for one derivation: the conversational
+/// reason, and the modality one when the same rule excludes that use too.
+fn catalog_reasons(unavailable: &Option<Unavailable>) -> (Option<String>, Option<String>) {
+    (
+        unavailable
+            .as_ref()
+            .map(|unavailable| unavailable.reason.clone()),
+        unavailable.as_ref().and_then(Unavailable::modality_reason),
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -936,7 +995,16 @@ fn static_models(
                 || (record.credential_authority == CredentialAuthority::Static
                     && record.auth != StaticAuth::Anonymous
                     && record.credential.is_none());
-            let unavailable = status_unavailable || chat_only_unavailable || provider_unavailable;
+            let unavailable = if status_unavailable || provider_unavailable {
+                Some(Unavailable::every_use("provider_unavailable"))
+            } else if chat_only_unavailable {
+                Some(Unavailable::conversational("provider_unavailable"))
+            } else if !missing_limits.is_empty() {
+                Some(Unavailable::conversational("limits_undeclared"))
+            } else {
+                None
+            };
+            let (unavailable_reason, modality_unavailable_reason) = catalog_reasons(&unavailable);
             let endpoint = record.routes.get(&entry.model_id).copied();
             ProviderModel {
                 id: entry.model_id,
@@ -952,15 +1020,8 @@ fn static_models(
                     ..Default::default()
                 },
                 capabilities: entry.capabilities,
-                unavailable_reason: if unavailable {
-                    Some("provider_unavailable".into())
-                } else if !missing_limits.is_empty() {
-                    Some("limits_undeclared".into())
-                } else {
-                    None
-                },
-                modality_unavailable_reason: (status_unavailable || provider_unavailable)
-                    .then(|| "provider_unavailable".into()),
+                unavailable_reason,
+                modality_unavailable_reason,
                 missing_limits,
                 zdr: false,
                 metadata: entry.metadata,
@@ -1377,10 +1438,14 @@ pub(crate) fn fill_bundled_limits(bundled: &BundledCatalog, model: &mut ModelEnt
 
 /// A stored reason other than the limit-derived one stands; otherwise an
 /// absent limit names `limits_undeclared`, so a supplied limit clears it.
-pub(crate) fn limits_reason(reason: Option<String>, missing_limits: &[String]) -> Option<String> {
+pub(crate) fn limits_reason(
+    reason: Option<String>,
+    missing_limits: &[String],
+) -> Option<Unavailable> {
     reason
         .filter(|reason| reason != "limits_undeclared")
-        .or_else(|| (!missing_limits.is_empty()).then(|| "limits_undeclared".into()))
+        .or_else(|| (!missing_limits.is_empty()).then(|| "limits_undeclared".to_owned()))
+        .map(Unavailable::of)
 }
 
 fn save_catalog(

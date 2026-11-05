@@ -1780,7 +1780,16 @@ async fn selectable_modality_models_carry_declared_operations_without_chat_rules
         media.unavailable_reason.as_deref(),
         Some("provider_unavailable")
     );
-    assert_eq!(media.modality_unavailable_reason, None);
+    assert!(
+        selectable
+            .0
+            .selectable_for_modality(cancel.clone())
+            .await
+            .unwrap()
+            .iter()
+            .any(|model| model.target.model_id == "modality-media"),
+        "its conversational reason does not exclude the model from modality"
+    );
 
     provider
         .set_enabled_models(
