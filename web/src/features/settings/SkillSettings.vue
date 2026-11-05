@@ -67,7 +67,7 @@ onMounted(() => load())
       <label><span>{{ s('Scope', '范围') }}</span><select :value="cwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User skills', '用户技能') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label>
       <label><span>{{ s('Search skills', '搜索技能') }}</span><input v-model="search" class="ui-field" data-size="md" type="search" :placeholder="s('Name or description', '名称或描述')" /></label>
     </div>
-    <GeneralSettingsStatus :busy="busy" :error="error" @reload="load()" />
+    <GeneralSettingsStatus :busy="busy" :error="error" @reload="load(connection.supports('skills.refresh'))" />
     <p v-if="status" role="status" class="settings-banner">{{ status }}</p>
     <p v-for="issue in catalog?.issues" :key="`${issue.path}:${issue.message}`" class="ui-banner settings-banner" data-tone="warning"><code>{{ issue.path }}</code> — {{ issue.message }}</p>
     <ul v-if="entries.length" class="skill-list">

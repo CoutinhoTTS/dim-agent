@@ -70,7 +70,6 @@ async function load(): Promise<void> {
   if (dirty.value && !window.confirm(s('Discard unsaved defaults?', '放弃未保存的默认设置？'))) return
   busy.value = true
   error.value = ""
-  conflict.value = false
   saved.value = false
   try {
     if (!connection.supports("modality.capabilities")) throw new Error(s('Modality settings are not available on this server.', '此服务器不支持多模态设置。'))
@@ -78,6 +77,7 @@ async function load(): Promise<void> {
     if (!next.categories.some((category) => category.category === "image")) throw new Error(s('The server reports no image category for Modality.', '服务器未返回多模态的图像类别。'))
     snapshot.value = next
     fill(next)
+    conflict.value = false
     if (models.error) error.value = models.error
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }

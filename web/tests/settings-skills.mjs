@@ -81,10 +81,15 @@ test("installed skills retain search and scope across reloads and authoritative 
 
 test("failed reloads preserve the list, expose a retry and never report success", async t => {
   let fail = false
+  let refreshes = 0
   const root = mount(t, async method => {
-    if (fail) throw new Error("Discovery failed")
+    if (method === "skills.refresh") {
+      refreshes++
+      if (fail) throw new Error("Discovery failed")
+      return {}
+    }
     assert.equal(method, "skills.catalog")
-    return { version: 1, entries: [skill("authoring")], issues: [{ path: "/bad/SKILL.md", message: "Invalid metadata" }] }
+    return { version: 1, entries: [skill(refreshes > 1 ? "rescanned" : "authoring")], issues: [{ path: "/bad/SKILL.md", message: "Invalid metadata" }] }
   })
   await flush()
   assert.match(text(root), /Invalid metadata/)
@@ -96,6 +101,10 @@ test("failed reloads preserve the list, expose a retry and never report success"
   fail = false
   await button(root, "Reload").props.onClick(); await flush()
   assert.doesNotMatch(text(root), /Discovery failed/)
+  assert.equal(refreshes, 2)
+  assert.ok(button(root, "Disable rescanned"))
+  assert.equal(button(root, "Disable authoring"), undefined)
+  assert.match(text(root), /Skills reloaded/)
 })
 
 test("failed scope switches retain the loaded skills and target subsequent actions at that scope", async t => {

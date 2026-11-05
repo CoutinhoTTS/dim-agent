@@ -190,7 +190,28 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 | Errors | `branch_missing`, `branch_ended`, `input_blocked`, an invalid cut and a disabled Branch tool are shown at the action that raised them; an ended line is read-only |
 | State | Line tabs are per Session and live in `stores/ui.ts`; the tree is rebuilt from facts on reload and reconnect. No line list method or storage format is added |
 
-**Not in this phase:** session fork, a drawn DAG, compare/adopt, per-line model selection and questions (`ask_user`). Each needs its own client design.
+**Not in this phase:** session fork, a drawn DAG, compare/adopt and per-line model selection. Each needs its own client design.
+
+#### Questions
+
+A waiting `ask_user` call shows one question at a time, with question steps,
+Previous/Next controls and a final review for multi-question calls. Changing steps
+preserves selections and custom text. Single and multiple choices both require an
+explicit Next action; Enter in the answer field advances rather than submitting
+an incomplete call. Only the final Send answers action submits the entire call
+through `session.question.respond`. Decline still declines the whole call. Rejected
+answers preserve the draft; successful answers stay disabled until their result
+settles. Long content scrolls inside the current question, keeping navigation
+visible. The same prompt serves main and child lines.
+
+```text
+ Dim has a question              Awaiting answer
+ [1. Database] [2. Features] [Review]
+ Which database?
+ ( ) SQLite   ( ) PostgreSQL
+ [Type your own answer]
+ [Decline]                  [Previous] [Next]
+```
 
 ### 4.2 Model discovery and slash commands
 
@@ -393,7 +414,7 @@ than automatically retrying. Unsupported server methods are errors, not inferred
 defaults. The setting affects new host commands, not existing processes or
 persistent shells, and does not change a Session's permission preset.
 
-#### Skills and questions interaction
+#### Skills interaction
 
 The Skills page reads `skills.catalog`, changes individual skills through
 `skills.set_enabled`, and rescans through `skills.refresh` before reading the
@@ -404,29 +425,12 @@ editable directory settings. Search and scope survive a reload; discovery issues
 failed writes and empty or unmatched lists remain distinguishable. Installation
 APIs stay with the Skills owner; package installation and activation stay on Plugins.
 
-A waiting `ask_user` call shows one question at a time, with question steps,
-Previous/Next controls and a final review for multi-question calls. Changing steps
-preserves selections and custom text. Single and multiple choices both require an
-explicit Next action; Enter in the answer field advances rather than submitting
-an incomplete call. Only the final Send answers action submits the entire call
-through `session.question.respond`. Decline still declines the whole call. Rejected
-answers preserve the draft; successful answers stay disabled until their result
-settles. Long content scrolls inside the current question, keeping navigation
-visible. The same prompt serves main and child lines.
-
 ```text
  Skills                         [Reload skills]
  [User skills / workspace]      [Search skills]
  name                 Enabled       [Disable]
  description
  > Details
-
- Dim has a question              Awaiting answer
- [1. Database] [2. Features] [Review]
- Which database?
- ( ) SQLite   ( ) PostgreSQL
- [Type your own answer]
- [Decline]                  [Previous] [Next]
 ```
 
 #### Scheduled tasks interaction

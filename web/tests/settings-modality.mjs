@@ -115,14 +115,18 @@ test("modality rows show the automatic effective model and an unavailable defaul
 
 test("a conflicting configure keeps the draft and asks for a reload", async () => {
   const calls = []
-  const initial = snapshot("native:user/modality:3", [
+  let failRead = false
+  let current = snapshot("native:user/modality:3", [
     operation("generate", "modality.image.generate", { effective: effective("beta"), options: [option("alpha"), option("beta")] }),
     operation("edit", "modality.image.edit", { default: option("beta"), effective: effective("beta", "default"), options: [option("alpha"), option("beta")] }),
     operation("enhance", "modality.image.enhance", { available: false, reasons: [{ dimension: "adapter", detail: "No image adapter in this build" }] }),
     operation("understand", "modality.image.understand", { options: [option("alpha")] }),
   ])
   const { root, app } = mount(async (method, params, read) => {
-    if (method === "modality.capabilities") return read(initial)
+    if (method === "modality.capabilities") {
+      if (failRead) throw new Error("Modality read failed")
+      return read(current)
+    }
     assert.equal(method, "modality.configure")
     calls.push(JSON.parse(JSON.stringify(params)))
     if (calls.length === 1) return read(snapshot("native:user/modality:4", [
@@ -131,6 +135,7 @@ test("a conflicting configure keeps the draft and asks for a reload", async () =
       operation("enhance", "modality.image.enhance", { available: false, reasons: [{ dimension: "adapter", detail: "No image adapter in this build" }] }),
       operation("understand", "modality.image.understand", { options: [option("alpha")] }),
     ]))
+    if (calls.length === 3) return read(current)
     throw new RpcError(-32000, "Modality defaults changed", "modality_conflict")
   })
   try {
@@ -149,7 +154,28 @@ test("a conflicting configure keeps the draft and asks for a reload", async () =
     assert.equal(selects(root)[1].props.value, "", "the conflicting draft is preserved")
     assert.equal(selects(root)[1].props.disabled, true, "a conflict disables further picks until reload")
     assert.equal(save(root).props.disabled, true)
-  } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsModels }
+    const reload = () => all(root).find(el => el.type === "button" && text(el) === "Reload models")
+    globalThis.window = { confirm: () => false }
+    await reload().props.onClick(); await flush()
+    assert.equal(save(root).props.disabled, true, "cancelled reload keeps writes blocked")
+    globalThis.window.confirm = () => true
+    failRead = true
+    await reload().props.onClick(); await flush()
+    assert.equal(selects(root)[1].props.value, "")
+    assert.equal(selects(root)[1].props.disabled, true)
+    assert.equal(save(root).props.disabled, true, "failed reload must not unlock a stale draft")
+    submit(root).props.onSubmit({ preventDefault() {} }); await flush()
+    assert.equal(calls.length, 2)
+    failRead = false
+    current = snapshot("native:user/modality:remote", [operation("edit", "modality.image.edit", { default: option("beta"), effective: effective("beta", "default"), options: [option("alpha"), option("beta")] })])
+    await reload().props.onClick(); await flush()
+    assert.equal(selects(root)[0].props.value, JSON.stringify([PROVIDER, "beta"]))
+    assert.equal(selects(root)[0].props.disabled, false)
+    selects(root)[0].props.onChange({ target: { value: "" } }); await flush()
+    assert.equal(save(root).props.disabled, false)
+    submit(root).props.onSubmit({ preventDefault() {} }); await flush()
+    assert.deepEqual(calls[2], { expectedRevision: "native:user/modality:remote", category: "image", operation: "edit", model: null })
+  } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsModels; delete globalThis.window }
 })
 
 test("selecting and clearing defaults survive reload, while cancelling reload retains a dirty draft", async () => {

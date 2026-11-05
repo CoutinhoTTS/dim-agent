@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue"
+import { computed, onMounted, ref } from "vue"
 import { RouterLink } from "vue-router"
 import { useSettingsText } from "../../i18n/settings-general"
 import { readSavedSessions, type SavedSessions } from "../../rpc/general-settings"
@@ -20,8 +20,9 @@ const loadedQuery = ref("")
 const loadedCwd = ref("")
 const busy = ref(false)
 const error = ref("")
+const filtersChanged = computed(() => query.value.trim() !== loadedQuery.value || cwd.value.trim() !== loadedCwd.value)
 async function load(more = false): Promise<void> {
-  if (busy.value) return
+  if (busy.value || (more && filtersChanged.value)) return
   busy.value = true
   error.value = ""
   try {
@@ -55,7 +56,7 @@ onMounted(() => load())
     <form class="settings-card settings-form" role="search" @submit.prevent="load()"><label><span>{{ s('Search history', '搜索历史') }}</span><input v-model="query" class="ui-field" data-size="md" type="search" /></label><label><span>{{ s('Workspace filter', '工作区筛选') }}</span><select v-model="cwd" class="ui-field" data-size="md" :disabled="busy"><option value="">{{ s('All workspaces', '所有工作区') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('Only filters saved sessions; this does not change any project settings.', '仅筛选已保存的会话，不会更改任何项目设置。') }}</p><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Search', '搜索') }}</button></form>
     <GeneralSettingsStatus :busy="busy" :error="error" @reload="load()" />
     <section v-for="session in page?.sessions" :key="session.sessionId" class="settings-card"><h3>{{ session.title ?? (session.preview || session.sessionId) }}</h3><p><code>{{ session.cwd }}</code></p><p><time :datetime="new Date(session.updatedAt).toISOString()">{{ new Date(session.updatedAt).toLocaleString() }}</time> · {{ session.model.modelId }}<template v-if="session.running"> · {{ s('Running', '正在运行') }}</template></p><div class="settings-actions"><RouterLink class="ui-button" data-size="md" data-variant="secondary" :to="{ name: 'chat-session', params: { sessionId: session.sessionId } }">{{ s('Reopen', '重新打开') }}</RouterLink><button class="ui-button" data-size="md" data-variant="danger-ghost" :disabled="busy || session.running || !connection.supports('session.delete')" @click="remove(session)">{{ s('Delete permanently', '永久删除') }}</button></div></section>
-    <p v-if="page && !page.sessions.length" role="status">{{ s('No matching saved sessions.', '没有匹配的已保存会话。') }}</p><button v-if="page?.nextCursor" class="ui-button" data-size="md" data-variant="secondary" :disabled="busy" @click="load(true)">{{ s('Load more', '加载更多') }}</button>
+    <p v-if="page && !page.sessions.length" role="status">{{ s('No matching saved sessions.', '没有匹配的已保存会话。') }}</p><button v-if="page?.nextCursor" class="ui-button" data-size="md" data-variant="secondary" :disabled="busy || filtersChanged" @click="load(true)">{{ s('Load more', '加载更多') }}</button>
   </article>
 </template>
 
