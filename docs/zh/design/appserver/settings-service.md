@@ -180,7 +180,7 @@ Settings 在内存中保存已登记的来源（声明已编译），各自保�
 | `Scope` | `"user"` 或 `{"project": <root>}`。`root` 是 Settings 在本进程内分配的项目根编号（`SettingsScope::Project`）。它不是持久标识，从不持久化 |
 | `Snapshot` | `{revision: string, document: object}` |
 | `Error` | `{code, message}` |
-| `Sources` | `settings.sources` 的回复（§4.3）：`{dialect: string, sources: [{source, schema, scopes, userOnly, writeOnly}]}`。`dialect` 精确等于 `https://json-schema.org/draft/2020-12/schema`，即每个 `schema` 编译所用的 draft（§3.1）。`schema` 是登记时的 schema 原样，含 `default` 成员。`scopes` 是 `["user"]`，或来源声明了项目文件时的 `["user", "project"]`。`userOnly` 是登记的指针列表。`writeOnly` 提示有经 `properties` 可达的成员标了 `writeOnly`；它不扫描 `items`、`$defs` 或 `anyOf`，其余情况由客户端自己读 `schema`。任何条目都不带文档、文件名或所有者 |
+| `Sources` | `settings.sources` 的回复（§4.3）：`{dialect: string, sources: [{source, schema, scopes, userOnly, writeOnly}]}`。`dialect` 精确等于 `https://json-schema.org/draft/2020-12/schema`，即每个 `schema` 编译所用的 draft（§3.1）。`schema` 是登记时的 schema 原样，含 `default` 成员。`scopes` 是 `["user"]`，或来源声明了项目文件时的 `["user", "project"]`。`userOnly` 是登记的指针列表。`writeOnly` 提示 schema 根本身或经 `properties` 可达的成员标了 `writeOnly: true`。根上的 `writeOnly` 计入该提示，但不是被隐藏的成员：去值（§1.2）只去掉经 `properties` 到达的成员，因此这样的来源列出 `writeOnly: true`，却不隐藏任何成员。两条规则都不扫描 `items`、`$defs` 或 `anyOf`，其余情况由客户端自己读 `schema`。任何条目都不带文档、文件名或所有者 |
 
 ### 4.2 服务 `settings`（所有者路径）
 
