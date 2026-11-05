@@ -2230,7 +2230,6 @@ fn tui_reports_max_tokens_action_and_accepts_the_next_prompt() {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -2256,7 +2255,7 @@ fn tui_reports_max_tokens_action_and_accepts_the_next_prompt() {
             line.clear();
         }
     });
-        let mut terminal = Terminal::launch_tui(home.command());
+        let mut terminal = Terminal::resume_tui(home.command());
         terminal.until("Increase the output token");
         terminal.until("limit and retry");
         assert!(!terminal.transcript.contains("private model detail"));

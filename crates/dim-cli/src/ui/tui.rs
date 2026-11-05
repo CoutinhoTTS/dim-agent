@@ -308,8 +308,10 @@ fn run_terminal(
             title.forget();
             dirty = true;
         }
-        if app.shutdown.is_some() && !dirty {
-            break 0;
+        if let Some(code) = app.exit_code
+            && !dirty
+        {
+            break code;
         }
         if app.revealing() {
             dirty = true;
@@ -850,9 +852,7 @@ struct App {
     /// The adopted model and its reasoning effort, once the session exists.
     label: Option<ModelLabel>,
     failure: Option<String>,
-    /// The App Server asked this interface to leave: one more frame shows
-    /// why, then the interface exits and the Session carries on.
-    shutdown: Option<String>,
+    exit_code: Option<i32>,
     failure_committed: bool,
     planner: StreamPlanner,
     commits: CommitState,
@@ -1247,7 +1247,7 @@ impl App {
             snapshot: None,
             label: None,
             failure: None,
-            shutdown: None,
+            exit_code: None,
             failure_committed: false,
             planner: StreamPlanner::new(),
             commits: CommitState::default(),
@@ -2423,12 +2423,23 @@ impl App {
                 self.notices.push(message);
                 self.restore_unsent();
             }
+            Update::StartupFailed(message) => {
+                self.failure = Some(message);
+                // A first message the invocation supplied has no Session
+                // to take it: keep it in the draft and stay, rather than
+                // exiting nonzero with nothing sent.
+                if self.initial.is_some() || self.unsent.is_some() {
+                    self.restore_unsent();
+                } else {
+                    self.exit_code = Some(1);
+                }
+            }
             Update::Shutdown { reason } => {
                 self.notices.push(tf(
                     "The App Server closed this interface: {reason}",
                     &[("reason", &reason)],
                 ));
-                self.shutdown = Some(reason);
+                self.exit_code = Some(0);
             }
         }
     }
@@ -8615,16 +8626,13 @@ mod tests {
                         .take_while(|row| {
                             !row.contains("Callback URL") && !row.contains("Restart device login")
                         })
-                        .map(|row| {
-                            row.trim()
-                                .strip_prefix('│')
-                                .expect("the link keeps the left dialog border")
-                                .strip_suffix('│')
-                                .expect("the link keeps the right dialog border")
-                                .trim()
-                        })
+                        .map(|row| row.trim())
                         .collect::<Vec<_>>()
                         .join("\n");
+                    assert!(
+                        !selected.contains(['│', '|']),
+                        "Native selection must not include dialog borders: {selected}"
+                    );
                     if shortened && !mode.starts_with("device") {
                         let prefix = selected.replace('\n', "");
                         assert!(prefix.ends_with('…'));

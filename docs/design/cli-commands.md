@@ -405,7 +405,7 @@ form, and opening it starts nothing.
         ▼
 ╭─ OpenAI Codex OAuth ─────────────────────────╮
 │   Browser login                              │
-│ https://…/authorize?…                        │
+  https://…/authorize?…
 │   Callback URL: (paste here)                 │
 │   Submit callback                            │
 ╰─ Select to copy · Enter opens link ──────────╯
@@ -413,11 +413,15 @@ form, and opening it starts nothing.
 ╭─ Grok Build OAuth ───────────────────────────╮
 │   Device login                               │
 │   Enter code:    ABCD-EFGH                   │
-│ https://…/device                             │
+  https://…/device
 │   Restart device login                       │
 │   Waiting for authorization                  │
 ╰─ Select to copy · Enter opens link ──────────╯
 ```
+
+Authorization URL rows have no side borders, including wrapped continuation
+rows, so native terminal selection does not copy dialog borders into the URL.
+The other rows keep their borders; Enter on the URL still opens the full link.
 
 `dimcode login [PROVIDER]` starts the same flow in the line client and prints
 the URL or the code the daemon returns; without a PROVIDER it lists the
@@ -1370,8 +1374,10 @@ queue/steer rule. Nothing re-parses the command line after startup.
 
 A message no Session can take — no model, not signed in, or a Session that fails
 to start — leaves the text and its image tokens in the composer as an unsent
-draft beside the existing Home/sign-in hint instead of being discarded; the
-interface does not exit for that case.
+draft beside the Home/sign-in hint or the startup error, instead of being
+discarded; the interface does not exit for that case. Without `-p` the existing startup rule
+stands: a resumed Session that cannot start shows the error and exits nonzero,
+and Home remains available after a failed creation.
 
 ### Daemon startup failure
 

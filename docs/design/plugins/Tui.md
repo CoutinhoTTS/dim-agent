@@ -82,11 +82,13 @@ root.plugin(DaemonLink{options})
     provide Connection{Client}
     (no effect: dropping the service drops the Client, which detaches)
   ── DaemonLink Active
-  bootstrap the Session:
-    --resume ID: session.attach
-    otherwise:   session.create {cwd, permissionPolicy, model?}
+  Tui: raw mode, Home (no Session and no UI registration)
+    --resume ID: attach the requested Session immediately
+    otherwise: wait for the first user message
+      Home settings, model selection, /web, exit: no Session creation
+      first message: session.create {cwd, permissionPolicy, model?, startup?}
   session.attach
-  LeafNode (same process): private socket, LocalId ui-<id>, accepting
+  LeafNode (sibling of Tui at the client root): private socket, LocalId ui-<id>, accepting
   ui.open {sessionId, kind: "tui", peer: ui-<id>, address}
     ─────────────────────────────────────────────────► UiHost: one UiLeaf
                                                         dial address ──────────► accept (once)
@@ -94,8 +96,9 @@ root.plugin(DaemonLink{options})
                                                         (far id ui-<id>)         (far id dim-daemon)
                                                         session mounted          session mounted
     ◄ {uiId, generation, token}
-  Tui (this process's own): raw mode,
-    hello / session.attach, ui.attach {uiId, token} ──► online
+  same Tui and RPC connection:
+    ui.attach {sessionId, uiId, token} ──────────────► online
+    session.submit (only when a message started this Session)
 user quits (/exit, Ctrl+D) in the TUI
   Leave → dispose the client tree (Tui restores the terminal; session closes)
                                                         session ended → UiLeaf disposed,
@@ -103,13 +106,15 @@ user quits (/exit, Ctrl+D) in the TUI
   exit with the TUI's code; daemon keeps serving        later clients; stops on `daemon stop`
 ```
 
-The normal `dimcode` process is itself the UI leaf: a rutis kernel in
-session with the daemon, which runs the ordinary `Tui` plugin (§3.6). It
+The normal `dimcode` process runs the ordinary `Tui` plugin and becomes a UI
+leaf when it first attaches a Session (§3.6): a rutis kernel in session with
+the daemon. It
 keeps the terminal it was started on, stays in the shell's foreground job,
 and returns the TUI's exit code. `ui.open` is an internal daemon RPC used by
-this startup, not a separate user command. A daemon without `ui.leaf.2`
-keeps the direct TUI. Before a model is configured, initial setup uses that
-existing direct TUI (§3.6).
+this attachment, not a separate user command. A daemon without `ui.leaf.2`
+keeps the direct TUI. Both paths defer ordinary Session creation until the
+first message; startup overrides are retained in this invocation until then.
+Closing Home without sending a message leaves no Session in the catalog.
 
 `dimcode tui -p TEXT` carries the first message: the client reads it once
 from the parsed options, together with the images already read and scaled at
@@ -118,7 +123,8 @@ environment. The interface submits it once, after the first frame, through its
 own composer, so it takes the same path as a typed message (an exact command
 runs, unmatched `/` text is input, `!`/`!!` is shell mode, the queue/steer
 rule applies) in both terminal modes. A message no Session can take stays in
-the composer as an unsent draft rather than being discarded.
+the composer as an unsent draft rather than being discarded, and the
+interface does not exit for that case.
 
 ### 3.2 `/web` from the TUI: daemon-owned switch
 
@@ -219,7 +225,7 @@ or plugin.
 ### 3.6 UI registry and UI leaves
 
 The daemon is the authority over which interfaces are alive, and can close
-or replace them. A terminal interface is a **UI leaf**: the interactive
+or replace them. An attached terminal interface is a **UI leaf**: the interactive
 `dimcode` process is a rutis kernel in a rutis session with the daemon
 ([rutis 0.19 upgrade M8](../rutis-0.19-upgrade.md#m8-the-ui-leaf-is-a-plugin-whose-life-is-a-session)),
 and runs its own ordinary `Tui` plugin. The daemon's `UiLeaf` is a plugin
@@ -231,25 +237,25 @@ every interface, terminal or browser, submits input and observes events;
 none executes. `UiHost` writes no Timeline fact.
 
 ```text
-daemon root (LocalId dim-daemon)                 dimcode leaf root
-  UiHostPlugin (process Capability)                LeafNode
-    ├─ registry: uiId -> {sessionId, kind,           ├─ LocalId ui-<id>
-    │    generation, connection, state}              ├─ accept once, pipe::framed
-    └─ UiLeaf (ctx.plugin, one per ui.open)          │   handshake: far id must be dim-daemon
-         ├─ ctx isolated for catalog_key()           └─ session ── its end disposes the client tree
+daemon root (LocalId dim-daemon)                 dimcode client root
+  UiHostPlugin (process Capability)                DaemonLink ── protocol v3 ──► Rpc
+    ├─ registry: uiId -> {sessionId, kind,           Tui (Home before its first Session)
+    │    generation, connection, state}            LeafNode (first attachment)
+    └─ UiLeaf (ctx.plugin, one per ui.open)            ├─ LocalId ui-<id>
+         ├─ ctx isolated for catalog_key()             ├─ accept once, pipe::framed
          ├─ dial address ──── one channel ─────────►
          ├─ handshake: far id must be ui-<id>
          └─ session ◄═════════ rutis session ═══════► (the leaf's session)
-                                                   Tui (mounted by the leaf, config from ui.open's reply)
-                                                     └─ DaemonLink ── protocol v3 ──► Rpc (ui.attach)
+                                                        └─ its end disposes the client tree
 ```
 
 The daemon does not start the leaf process: the user's shell does, and the
 process keeps the terminal it was started on. This leaves the daemon nothing
 to do with terminals, processes or their exit codes.
 
-**Session.** Before `ui.open`, the leaf binds a private address and mounts
-`LeafNode` in its client tree, accepting there. `LeafNode` provides the
+**Session.** On its first Session attachment, before `ui.open`, the running
+`Tui` binds a private address and mounts `LeafNode` at the client root,
+beside `Tui` and `DaemonLink`, accepting there. `LeafNode` provides the
 process's `LocalId` `ui-<id>` (a fresh id it chooses) and offers no plugin
 catalog, so the daemon can run nothing on the leaf. On Unix the address is
 a socket `ui-<8 hex>` in the native home, beside `daemon.sock` and of the
@@ -269,8 +275,9 @@ and `ui.*` is local-only. Both sides then mount the session; nothing is
 spawned. Because `LeafNode` accepts before `ui.open` is called, the
 handshake completes while `ui.open` is in flight.
 
-**The leaf's `Tui`.** Once `ui.open` replies, the leaf mounts its own `Tui`.
-It takes from the reply only what the daemon decides:
+**The leaf's `Tui`.** The `Tui` already runs before `ui.open`. Once that call
+replies, it registers its existing RPC connection with `ui.attach`, using
+only what the daemon decides:
 
 | Field | Meaning |
 | --- | --- |
@@ -279,16 +286,21 @@ It takes from the reply only what the daemon decides:
 
 and `sessionId` from its own `ui.open`. Everything else (terminal mode
 flags, workspace, product home, model configuration, endpoint) is the leaf
-process's own invocation, as for a shell-started TUI. The `Tui` connects
-with its own `DaemonLink` (`start: false`) and runs as in §1. A `Tui` that
+process's own invocation, as for a shell-started TUI. The `Tui` keeps the
+same `DaemonLink` and RPC connection throughout Home and attachment; no
+second TUI or connection is started. A `Tui` that
 fails to load or ends with an error disposes the client tree as below: the
 leaf exits nonzero, its session ends, and the daemon removes the
-registration.
+registration. Failure while opening the UI on the first attachment stops
+the client worker; queued commands are discarded, not submitted to the
+partially attached Session. A creation failure before attachment leaves
+Home available for retry.
 
 **Leaving.** The session is the leaf's lifetime. Mounting the session gives
 its fiber on each side; its end (Disposed or Failed) is the fact, and no
 poll or timer observes it. When the user quits, the leaf disposes its
-client tree: the `Tui` effect restores the terminal and the session closes;
+client tree: `Tui` is disposed first, restoring the terminal, then
+`DaemonLink` and `LeafNode` close their connections;
 on the daemon the session's end disposes `UiLeaf` and `UiHost` removes the
 registration. The process exits with the TUI's code. When the daemon closes
 the leaf instead (`ui.close`, replacement, daemon shutdown), it sends the
@@ -325,9 +337,10 @@ session's. A TUI that hangs while its process lives stays `online`;
 `ui.close` still closes its session.
 
 **Ownership.** The session is the owner: a leaf lives as long as its
-session. The connection that called `ui.open` has no further role. Daemon
-shutdown disposes `UiHostPlugin`, which waits for every `UiLeaf` to be
-disposed.
+session. The connection that called `ui.open` remains the leaf's RPC
+connection for `ui.attach` and Session operations; it does not own the leaf
+registration. Daemon shutdown disposes `UiHostPlugin`, which waits for every
+`UiLeaf` to be disposed.
 
 **Generations** are monotonic per daemon. `ui.open` returns one,
 `ui.status` lists them, and replacements check the one the caller observed.
@@ -346,18 +359,24 @@ an old CLI with a new daemon, and a new CLI with an old daemon.
 Remote devices are not leaves (`DeviceLease`/RemoteGateway); browsers are
 counted viewers.
 
-**Initial setup before a Session.** When an untargeted product startup has no
-usable model, `session.create` returns `provider_failed` before creating a Session.
-There is no Session for a leaf to attach to. This entry uses the existing direct
-TUI for its lifetime, keeping `/connect` and `/login` available. A Session later
-created by that TUI uses the existing connection registration; the next normal
-startup uses a leaf. Explicit model targets, `--model-config`, resume and other
-error codes retain their errors. No fake model, implicit model substitution, new
-protocol or background setup process is introduced.
+**Home before a Session.** Ordinary startup does not call `session.create`,
+whether a usable model is configured or not. `/connect`, `/login`, `/models`,
+settings and `/web` remain available without a Session. Only submitting the
+first message creates one, using the launch options unless the user selected
+a model at Home. A failed creation is reported at that submission and leaves
+Home available for configuration and retry. No UI leaf exists until a Session
+has been attached; the same `Tui` then opens its leaf with the existing
+`ui.open` contract. `--resume` still attaches immediately and adopts startup
+overrides before accepting input. An explicit `--permission` must be applied
+before attachment; unsupported preset methods or a failed permission change
+abort startup without attaching or accepting input. Headless execution is
+unchanged. No fake model, implicit model substitution, new protocol or
+background setup process is introduced.
 
 ```text
-session.create -- usable model --> ui.open --> the leaf's own Tui
-               ` no model -----> direct Tui --> /connect or /login
+start -> Tui Home -> first message -> create / attach -> ui.open / ui.attach -> submit
+                  ` configure or exit: no Session
+resume -----------> attach ------> ui.open / ui.attach
 ```
 
 #### Later: UI events toward the agent (not implemented)
@@ -382,6 +401,7 @@ listener of their names. The contract reserved here is unchanged:
 | Daemon still assembling when the client polls | The socket does not exist yet; the client keeps polling until the deadline. The daemon's `startup_timeout` is independent of the client's 10 s; a slow managed-plugin start surfaces as "App Server startup timed out; see daemon.log". |
 | Connection drops while the TUI runs | **Not a provider replacement.** The TUI keeps its draft and reports the failure. There is no automatic reconnect in the session thread. |
 | `apply` of `Tui` fails after raw mode was entered | The terminal effect was registered before raw mode, so rutis runs it on the failed load; the error is printed on a restored terminal. |
+| Resuming fails during startup, with or without leaf support | Show the error, restore the terminal and exit nonzero. No new Session is created. |
 | Ctrl+C in the TUI | A key event in raw mode, handled by the render thread (cancel the turn or quit), as today. A SIGTERM or SIGHUP reaches the leaf process like any shell-started TUI; its terminal guard restores, and the session ends with the process. |
 | Daemon exits while a client holds `Client` | A direct TUI shows the failure and keeps running until the user quits. A leaf's session ends with the daemon, so the leaf disposes its tree (terminal restored) and exits. No automatic daemon restart from a running client. |
 | `daemon stop` while another client is attached | The daemon shuts down after settlement (`daemon.shutdown.completed`); disposing `UiHostPlugin` closes each leaf's session, and each leaf disposes its tree (terminal restored) and exits. |
@@ -427,7 +447,7 @@ None. No client plugin writes to any Timeline or produces model context; user in
 | `Tui` result | `Leave::Exit(i32)` or `Leave::Restart` delivered to the composition root through a one-shot channel the plugin is constructed with. |
 | `WebHold` input | `port: Option<u16>`, `open_browser: bool`; its result (`Ok(0)` on a signal, the error on the daemon's end) goes to the composition root through a one-shot channel, like `Tui`'s. It holds the entry open; `/web` never loads it. |
 | Daemon RPC used | Existing `hello`, `session.create/attach/submit/history`, `session.branch_end`, `approval.respond`, `web.open`/`web.toggle`/`web.disable`/`web.status`, `daemon.shutdown` and the existing command/member stop paths; optional `session.exec.output` reads the command's bounded capture; `ui.open`/`ui.close`/`ui.status`/`ui.replace` for management, `ui.attach` after each `session.attach` when offered, and the `ui.shutdown` notification (§3.6). |
-| The leaf's `Tui` | Mounted by the leaf itself once `ui.open` replies, with `uiId` and `token` from the reply (§3.6). The leaf offers no plugin catalog. |
+| The leaf's `Tui` | Runs before a Session exists; its first attachment opens the leaf and takes `uiId` and `token` from `ui.open` (§3.6). The leaf offers no plugin catalog. |
 
 ## 7. Distribution
 
@@ -441,7 +461,7 @@ Unchanged artifacts; the plugins are compiled into the client and ship with it, 
 | `release-manifest.json`, `SHA256SUMS` | Provenance | None |
 | Development: `./dev` | Build the executable, stage the local plugin archive, start the daemon through the CLI | None; the CLI still spawns the daemon the same way |
 
-No loader row is added, so there is nothing to enable, disable or persist ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)). Normal `dimcode` startup uses the daemon's internal `ui.open` management RPC; there is no `dimcode ui open` command. Whether the TUI or ACP front end runs is decided by the subcommand, as today. A client loader with `Builtins` rows (so that front ends could be toggled by configuration) is possible later without changing this document's plugins; it is out of scope.
+No loader row is added, so there is nothing to enable, disable or persist ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)). The first Session attachment uses the daemon's internal `ui.open` management RPC when leaf support is available; there is no `dimcode ui open` command. Whether the TUI or ACP front end runs is decided by the subcommand, as today. A client loader with `Builtins` rows (so that front ends could be toggled by configuration) is possible later without changing this document's plugins; it is out of scope.
 
 ## 8. Security
 
@@ -455,7 +475,7 @@ Business traffic stays on protocol v3; the leaf's session is not the business ch
 
 | Rule | Answer |
 | --- | --- |
-| §4 rule 1 (Capability, `Deps`, `apply`, effects) | `UiHostPlugin` is a process `Capability` providing `UiHost`. Each leaf is one `UiLeaf` plugin whose child is the session, so disposing `UiLeaf` closes the session and its channel. In the leaf, the client tree mounts `LeafNode`, whose child is the session, and the leaf's `Tui`, which registers its terminal restore before raw mode. |
+| §4 rule 1 (Capability, `Deps`, `apply`, effects) | `UiHostPlugin` is a process `Capability` providing `UiHost`. Each leaf is one `UiLeaf` plugin whose child is the session, so disposing `UiLeaf` closes the session and its channel. In the client, `Tui` registers its terminal restore before raw mode and mounts `LeafNode` on its first Session attachment; that node owns the rutis session. |
 | §4 rule 2 (critical effects through the Timeline) | Not applicable: no client plugin produces or consumes Timeline events; input goes through `session.submit`. Future `ui/*` events enter a Session only as adopted inputs (§3.6). |
 | §4 rule 3 (handlers register tasks and return) | `Tui::apply` starts its threads and returns. `LeafNode` accepts in a task of its own, so it is mounted and accepting before `ui.open`. No handler waits on the business connection. |
 | §4 rule 4 (state ownership, Timeline writes) | The registry is `UiHost`'s; a leaf's state is derived from its session and its attachment, not reported. Client state is view state owned by the TUI. |

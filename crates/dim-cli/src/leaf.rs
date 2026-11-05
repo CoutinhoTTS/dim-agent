@@ -1,6 +1,6 @@
 //! The interactive process as a UI leaf (Tui design §3.6). `LeafNode`
 //! accepts the daemon's one connection on a private address and mounts the
-//! session with it; the process runs its own `Tui` once `ui.open` replies.
+//! session with it once the running `Tui` attaches its first Session.
 //! The session is the leaf's lifetime: its end disposes the client tree.
 
 use std::sync::{Arc, Mutex};
@@ -11,9 +11,7 @@ use rutis_bridge::{Channel, Close, LocalId, PeerId, Session, channel::Closer, pi
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
-use crate::args::{Options, UiIdentity};
-use crate::plugins::{DaemonLink, Tui};
-use crate::ui::{self, tui::Leave};
+use crate::args::Options;
 
 /// The id the daemon greets with.
 const DAEMON_PEER: &str = "dim-daemon";
@@ -38,17 +36,12 @@ impl Leaf {
         })
     }
 
-    /// The node plugin, and what resolves once its session ended, or once
-    /// the node ended without one.
-    pub fn node(self) -> (LeafNode, oneshot::Receiver<()>) {
-        let (ended, end) = oneshot::channel();
-        (
-            LeafNode {
-                peer: self.peer,
-                accept: Mutex::new(Some((self.accept, ended))),
-            },
-            end,
-        )
+    /// The node plugin, signalling `ended` when its mounted session ends.
+    pub fn node(self, ended: oneshot::Sender<()>) -> LeafNode {
+        LeafNode {
+            peer: self.peer,
+            accept: Mutex::new(Some((self.accept, ended))),
+        }
     }
 }
 
@@ -77,7 +70,6 @@ impl DynPlugin for LeafNode {
                 .ok_or_else(|| failed("the leaf accepts one connection"))?;
             let ctx = ctx.clone();
             let session = tokio::spawn(async move {
-                let _ended = ended;
                 let Ok(channel) = accept.accept().await else {
                     return;
                 };
@@ -91,6 +83,7 @@ impl DynPlugin for LeafNode {
                 let _ = state
                     .wait_for(|s| matches!(s.state, FiberState::Disposed | FiberState::Failed))
                     .await;
+                let _ = ended.send(());
             });
             Ok(Effect::Disposer(Box::new(move || {
                 session.abort();
@@ -104,86 +97,12 @@ impl DynPlugin for LeafNode {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Opened {
-    ui_id: String,
-    token: String,
-}
-
-/// The leaf's own `Tui`: the ordinary client tree (`DaemonLink` + `Tui`) as
-/// its children, on the daemon's Session and registered as its leaf.
-pub(crate) struct LeafTui {
-    options: Options,
-    initial: Option<ui::Initial>,
-    leave: Mutex<Option<oneshot::Sender<Leave>>>,
-}
-
-impl LeafTui {
-    /// This invocation's options, on `session_id`, attaching as `opened`.
-    pub fn new(
-        options: &Options,
-        session_id: String,
-        opened: Opened,
-        leave: oneshot::Sender<Leave>,
-        initial: Option<ui::Initial>,
-    ) -> Self {
-        let mut options = options.clone();
-        options.created_session = options.resume.is_none();
-        options.resume = Some(session_id);
-        options.ui_identity = Some(UiIdentity {
-            ui_id: opened.ui_id,
-            token: opened.token,
-        });
-        Self {
-            options,
-            initial,
-            leave: Mutex::new(Some(leave)),
-        }
-    }
-}
-
-impl DynPlugin for LeafTui {
-    fn name(&self) -> &str {
-        "Tui"
-    }
-
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
-        Box::pin(async move {
-            let link = ctx.plugin(DaemonLink {
-                options: self.options.clone(),
-                start: false,
-            });
-            (&link).await.map_err(unwrap)?;
-            let leave = self
-                .leave
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
-                .ok_or_else(|| failed("Tui was loaded twice"))?;
-            let env = ui::Env {
-                home: self.options.home.clone(),
-                workspace: self.options.workspace().as_str().to_owned(),
-                fullscreen: self
-                    .options
-                    .fullscreen
-                    .unwrap_or_else(|| ui::config::saved_fullscreen(&self.options.home)),
-                initial: self.initial.clone(),
-            };
-            let tui = ctx.plugin(Tui {
-                env,
-                options: self.options.clone(),
-                leave: Mutex::new(Some(leave)),
-            });
-            (&tui).await.map_err(unwrap)?;
-            Ok(Effect::Done)
-        })
-    }
+    pub ui_id: String,
+    pub token: String,
 }
 
 fn failed(error: impl std::fmt::Display) -> Error {
     Error::from(ErrorKind::PluginFailed(error.to_string().into()))
-}
-
-fn unwrap(error: Arc<ErrorKind>) -> Error {
-    failed(error)
 }
 
 /// The leaf's side of its session: a private address that accepts exactly
