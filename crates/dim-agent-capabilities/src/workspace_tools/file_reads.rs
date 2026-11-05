@@ -241,3 +241,109 @@ impl DynPlugin for FileReadsPlugin {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dim_agent_runtime::{MemoryTimelineStore, SessionConfig, TimelineKey, TimelineStore};
+    use dim_agent_types::{
+        CompactionDiagnosticsRecord, CompactionReason, CompactionStrategyRecord, CompactionTrigger,
+        ContextCompactionData,
+    };
+
+    async fn timeline() -> Arc<Timeline> {
+        let store = Arc::new(MemoryTimelineStore::default());
+        store
+            .create_session("file-reads", &SessionConfig::default())
+            .await
+            .expect("the session");
+        Arc::new(Timeline::new(
+            Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: "file-reads".into(),
+                branch_id: "main".into(),
+            },
+            Vec::new(),
+            store,
+        ))
+    }
+
+    fn completed(retain_from: &str) -> EventKind {
+        EventKind::ContextCompaction(ContextCompactionData {
+            turn_id: None,
+            request_id: None,
+            command: None,
+            start: None,
+            through: 0,
+            outcome: ContextCompactionResult::Completed {
+                retain_from: retain_from.into(),
+                replacement: Vec::new(),
+                strategy: "test".into(),
+                diagnostics: Box::new(CompactionDiagnosticsRecord {
+                    reason: CompactionReason::Auto,
+                    trigger: CompactionTrigger::Threshold,
+                    retain_from: None,
+                    retain_limit: None,
+                    estimated_input_tokens: 0.0,
+                    estimated_output_tokens: None,
+                    entries_replaced: 0,
+                    model_call_count: 0,
+                    duration_ms: 0,
+                    model_usage: None,
+                    insufficient_space: None,
+                    strategy: CompactionStrategyRecord {
+                        kind: "test".into(),
+                        details: serde_json::Map::new(),
+                    },
+                }),
+                context_baseline: Vec::new(),
+                replacement_parts: None,
+                pinned_inputs: None,
+                digest_entries: None,
+            },
+        })
+    }
+
+    fn cancelled() -> EventKind {
+        EventKind::ContextCompaction(ContextCompactionData {
+            turn_id: None,
+            request_id: None,
+            command: None,
+            start: None,
+            through: 0,
+            outcome: ContextCompactionResult::Cancelled {
+                reason: "cancelled".into(),
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn the_guard_pages_to_a_completed_compaction_beyond_one_page() {
+        let timeline = timeline().await;
+        timeline
+            .append(completed("retained").into())
+            .expect("the completed compaction");
+        for _ in 0..COMPACTION_PAGE {
+            timeline
+                .append(cancelled().into())
+                .expect("a cancelled compaction");
+        }
+        let reads = FileReads::new(timeline);
+        assert_eq!(
+            reads.latest_completed(0).await.unwrap(),
+            Some("retained".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guard_stops_at_sequence_one_before_asking_for_zero() {
+        let timeline = timeline().await;
+        for _ in 0..COMPACTION_PAGE {
+            timeline
+                .append(cancelled().into())
+                .expect("a cancelled compaction");
+        }
+        let reads = FileReads::new(timeline);
+        assert_eq!(reads.latest_completed(0).await.unwrap(), None);
+    }
+}
