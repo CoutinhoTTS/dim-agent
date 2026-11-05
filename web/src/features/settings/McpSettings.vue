@@ -117,10 +117,18 @@ async function importFileChosen(event: Event): Promise<void> {
   catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
-/// Previews `document` against the scope the selector names: the project when
-/// a workspace is loaded, otherwise the user source.
+/// The source an import writes: the project when the selector names a
+/// workspace, otherwise the user source.
+function importSource(): "user" | "project" { return loadedCwd.value ? "project" : "user" }
+/// The destination the file will be imported into, named before a file is
+/// chosen.
+function importDestination(): string {
+  return importSource() === "project"
+    ? s(`Import into: project ${loadedCwd.value}`, `导入到：项目 ${loadedCwd.value}`)
+    : s('Import into: user configuration', '导入到：用户配置')
+}
 async function readImportPreview(document: string): Promise<void> {
-  const source = loadedCwd.value ? "project" as const : "user" as const
+  const source = importSource()
   const preview = await connection.client.call("mcp.import.preview", { ...scope(), source, document }, readMcpImportPreview)
   importPreview.value = {
     source,
@@ -420,7 +428,7 @@ onBeforeUnmount(() => {
 <template>
   <article class="settings-page">
     <header><h2 data-route-heading tabindex="-1">MCP</h2><p>{{ s('Manage command and remote MCP servers. Project servers stay disabled until you explicitly enable them locally.', '管理命令和远程 MCP 服务器。项目服务器默认禁用，只有您在本地明确启用后才会运行。') }}</p></header>
-    <form class="settings-card settings-form" @submit.prevent="load()"><label><span>{{ s('Configuration scope', '配置范围') }}</span><select :value="loadedCwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User configuration', '用户配置') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('Choose a workspace to include its project MCP servers alongside user and plugin servers. This does not change a server\'s working directory.', '选择工作区后，会同时显示该项目、用户和插件提供的 MCP 服务器。这不会更改服务器的运行目录。') }}</p><div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load / refresh', '加载 / 刷新') }}</button><button class="ui-button" data-size="md" data-variant="primary" type="button" :disabled="busy || !catalog || !connection.supports('mcp.save')" @click="create">{{ s('Add server', '添加服务器') }}</button><input ref="importFile" type="file" accept="application/json,.json" hidden :disabled="busy" @change="importFileChosen" /><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy || !!draft || !connection.supports('mcp.import.preview')" @click="chooseImportFile">{{ s('Import from file…', '从文件导入…') }}</button></div></form>
+    <form class="settings-card settings-form" @submit.prevent="load()"><label><span>{{ s('Configuration scope', '配置范围') }}</span><select :value="loadedCwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User configuration', '用户配置') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('Choose a workspace to include its project MCP servers alongside user and plugin servers. This does not change a server\'s working directory.', '选择工作区后，会同时显示该项目、用户和插件提供的 MCP 服务器。这不会更改服务器的运行目录。') }}</p><div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load / refresh', '加载 / 刷新') }}</button><button class="ui-button" data-size="md" data-variant="primary" type="button" :disabled="busy || !catalog || !connection.supports('mcp.save')" @click="create">{{ s('Add server', '添加服务器') }}</button><input ref="importFile" type="file" accept="application/json,.json" hidden :disabled="busy" @change="importFileChosen" /><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy || !!draft || !connection.supports('mcp.import.preview')" @click="chooseImportFile">{{ s('Import from file…', '从文件导入…') }}</button><span class="settings-meta">{{ importDestination() }}</span></div></form>
     <GeneralSettingsStatus :busy="busy" :error="error" @reload="load()" />
     <p v-if="importNotice" class="ui-banner settings-banner" data-tone="success" role="status">{{ importNotice }}</p>
     <section v-if="importPreview" class="settings-card" aria-live="polite">

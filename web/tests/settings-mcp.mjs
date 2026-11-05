@@ -315,6 +315,7 @@ test("an import preview shows every status and its fields without a value", asyn
     assert.match(shown, /broken: type is stdio, http or sse/)
     assert.match(shown, /Top-level members the import does not carry: otherTopLevel\./)
     assert.equal(shown.includes(secret), false)
+    assert.match(shown, /Import into: user configuration/)
     assert.equal(importSelects(root).length, 4)
     // No default action is a rename, so no entry asks for a new id.
     assert.equal(all(root).find((element) => element.type === "label" && text(element).startsWith("New id")), undefined)
@@ -385,6 +386,7 @@ test("a project import needs each literal entry confirmed before applying", asyn
   try {
     await field(root, "Configuration scope").props.onChange({ target: { value: "/project" } })
     await flush()
+    assert.match(text(root), /Import into: project \/project/)
     await chooseImportFile(root, "{}")
     const previewCall = calls.find((call) => call.method === "mcp.import.preview")
     assert.equal(previewCall.params.source, "project")
