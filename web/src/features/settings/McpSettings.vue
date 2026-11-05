@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useSettingsText } from "../../i18n/settings-general"
-import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpInspection, type McpInvalidEntry, type McpProbe, type McpServerInput, type McpView } from "../../rpc/general-settings"
+import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpImportApplied, readMcpImportPreview, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpImportEntry, type McpImportResolution, type McpInspection, type McpInvalidEntry, type McpProbe, type McpServerInput, type McpView } from "../../rpc/general-settings"
+import { RpcError } from "../../rpc/client"
 import { configuration, patch, type Draft } from "./mcp-form"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
@@ -26,6 +27,12 @@ const callback = ref("")
 const clientSecret = ref("")
 const detail = ref<{ server: McpEntry; inspection: McpInspection }>()
 const testResult = ref<{ id: string; probe: McpProbe }>()
+type ImportEntryState = McpImportEntry & { action: "import" | "skip" | "replace" | "rename"; newId: string; confirmed: boolean }
+type ImportState = { source: "user" | "project"; document: string; revision: string; entries: ImportEntryState[]; unknownTopLevel: string[] }
+const importPreview = ref<ImportState>()
+const importFile = ref<HTMLInputElement>()
+const importStale = ref(false)
+const importNotice = ref("")
 const editorForm = ref<HTMLFormElement>()
 const search = ref("")
 let mounted = true
@@ -89,8 +96,125 @@ async function load(path = loadedCwd.value): Promise<void> {
     clientSecret.value = ""
     callback.value = ""
     testResult.value = undefined
+    importPreview.value = undefined
+    importStale.value = false
+    importNotice.value = ""
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
+}
+function chooseImportFile(): void {
+  if (!busy.value) importFile.value?.click()
+}
+async function importFileChosen(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ""
+  if (!file || busy.value) return
+  busy.value = true
+  error.value = ""
+  importNotice.value = ""
+  try { await readImportPreview(await file.text()) }
+  catch (cause) { error.value = messageFrom(cause) }
+  finally { busy.value = false }
+}
+/// Previews `document` against the scope the selector names: the project when
+/// a workspace is loaded, otherwise the user source.
+async function readImportPreview(document: string): Promise<void> {
+  const source = loadedCwd.value ? "project" as const : "user" as const
+  const preview = await connection.client.call("mcp.import.preview", { ...scope(), source, document }, readMcpImportPreview)
+  importPreview.value = {
+    source,
+    document,
+    revision: preview.revision,
+    unknownTopLevel: preview.unknownTopLevel,
+    entries: preview.entries.map((entry) => ({
+      ...entry,
+      action: entry.status === "changed" || entry.status === "identical" ? "import" : "skip",
+      newId: "",
+      confirmed: false,
+    })),
+  }
+  importStale.value = false
+  error.value = ""
+}
+async function previewImportAgain(): Promise<void> {
+  const preview = importPreview.value
+  if (!preview || busy.value) return
+  busy.value = true
+  try { await readImportPreview(preview.document) }
+  catch (cause) { error.value = messageFrom(cause) }
+  finally { busy.value = false }
+}
+function closeImportPreview(): void {
+  if (!busy.value) importPreview.value = undefined
+}
+function importConfirmNeeded(entry: ImportEntryState): boolean {
+  return !!importPreview.value && importPreview.value.source === "project"
+    && entry.confirm.length > 0 && entry.action !== "skip"
+}
+const importReady = computed(() => {
+  const preview = importPreview.value
+  if (!preview || !preview.entries.length) return false
+  return preview.entries.every((entry) => {
+    if (entry.action === "rename" && !entry.newId.trim()) return false
+    return !importConfirmNeeded(entry) || entry.confirmed
+  })
+})
+async function applyImport(): Promise<void> {
+  const preview = importPreview.value
+  if (!preview || busy.value || !importReady.value) return
+  busy.value = true
+  error.value = ""
+  importStale.value = false
+  try {
+    const resolutions: McpImportResolution[] = preview.entries.map((entry) => ({
+      id: entry.id,
+      action: entry.action,
+      ...(entry.action === "rename" ? { newId: entry.newId.trim() } : {}),
+      ...(importConfirmNeeded(entry) ? { confirm: entry.confirm } : {}),
+    }))
+    await connection.client.call("mcp.import.apply", { ...scope(), source: preview.source, document: preview.document, expectedVersion: preview.revision, resolutions }, readMcpImportApplied)
+    importPreview.value = undefined
+    await read()
+    importNotice.value = importSummary(preview)
+  } catch (cause) {
+    if (cause instanceof RpcError && cause.appError === "mcp_settings_conflict") {
+      importStale.value = true
+      error.value = s('The MCP source changed since this preview. Preview again before applying.', '自本次预览后 MCP 源已更改。请重新预览后再应用。')
+    } else error.value = messageFrom(cause)
+  } finally { busy.value = false }
+}
+function importSummary(preview: ImportState): string {
+  const counts = { imported: 0, replaced: 0, renamed: 0, skipped: 0, unchanged: 0 }
+  for (const entry of preview.entries) {
+    if (entry.action === "skip") counts.skipped += 1
+    else if (entry.action === "replace") counts.replaced += 1
+    else if (entry.action === "rename") counts.renamed += 1
+    else if (entry.status === "identical") counts.unchanged += 1
+    else counts.imported += 1
+  }
+  return s(
+    `Imported ${counts.imported}, replaced ${counts.replaced}, renamed ${counts.renamed}, skipped ${counts.skipped}, unchanged ${counts.unchanged}. Imported entries start disabled: enable one with Enable, and enable project entries locally.`,
+    `已导入 ${counts.imported} 项，替换 ${counts.replaced} 项，重命名 ${counts.renamed} 项，跳过 ${counts.skipped} 项，未改变 ${counts.unchanged} 项。导入的条目默认禁用：请用“启用”开启，项目条目还需在本地启用。`,
+  )
+}
+function importChanged(entry: McpImportEntry): string {
+  return entry.changes.map((field) => `${field.field} (${field.kind})`).join(", ")
+}
+function importUnsupported(entry: McpImportEntry): string {
+  return entry.unsupported.map((field) => `${field.field} (${field.effect === "kept-unused" ? s('kept unused', '保留未用') : s('dropped', '丢弃')})`).join(", ")
+}
+function importUnknown(): string {
+  const names = importPreview.value?.unknownTopLevel ?? []
+  return names.length
+    ? s('Top-level members the import does not carry: ', '导入不会携带的顶层成员：') + names.join(", ") + "."
+    : s('Top-level members the import does not carry: none.', '导入不会携带的顶层成员：无。')
+}
+function importConfirmLabel(entry: McpImportEntry): string {
+  return s(
+    `Write this entry's literal ${entry.confirm.join(', ')} values to the workspace file.`,
+    `将此条目的字面值（${entry.confirm.join(', ')}）写入工作区文件。`,
+  )
 }
 function create(): void {
   if (dirty.value && !window.confirm(s('Discard unsaved MCP configuration?', '放弃未保存的 MCP 配置？'))) return
@@ -296,8 +420,27 @@ onBeforeUnmount(() => {
 <template>
   <article class="settings-page">
     <header><h2 data-route-heading tabindex="-1">MCP</h2><p>{{ s('Manage command and remote MCP servers. Project servers stay disabled until you explicitly enable them locally.', '管理命令和远程 MCP 服务器。项目服务器默认禁用，只有您在本地明确启用后才会运行。') }}</p></header>
-    <form class="settings-card settings-form" @submit.prevent="load()"><label><span>{{ s('Configuration scope', '配置范围') }}</span><select :value="loadedCwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User configuration', '用户配置') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('Choose a workspace to include its project MCP servers alongside user and plugin servers. This does not change a server\'s working directory.', '选择工作区后，会同时显示该项目、用户和插件提供的 MCP 服务器。这不会更改服务器的运行目录。') }}</p><div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load / refresh', '加载 / 刷新') }}</button><button class="ui-button" data-size="md" data-variant="primary" type="button" :disabled="busy || !catalog || !connection.supports('mcp.save')" @click="create">{{ s('Add server', '添加服务器') }}</button></div></form>
+    <form class="settings-card settings-form" @submit.prevent="load()"><label><span>{{ s('Configuration scope', '配置范围') }}</span><select :value="loadedCwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User configuration', '用户配置') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('Choose a workspace to include its project MCP servers alongside user and plugin servers. This does not change a server\'s working directory.', '选择工作区后，会同时显示该项目、用户和插件提供的 MCP 服务器。这不会更改服务器的运行目录。') }}</p><div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load / refresh', '加载 / 刷新') }}</button><button class="ui-button" data-size="md" data-variant="primary" type="button" :disabled="busy || !catalog || !connection.supports('mcp.save')" @click="create">{{ s('Add server', '添加服务器') }}</button><input ref="importFile" type="file" accept="application/json,.json" hidden :disabled="busy" @change="importFileChosen" /><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy || !!draft || !connection.supports('mcp.import.preview')" @click="chooseImportFile">{{ s('Import from file…', '从文件导入…') }}</button></div></form>
     <GeneralSettingsStatus :busy="busy" :error="error" @reload="load()" />
+    <p v-if="importNotice" class="ui-banner settings-banner" data-tone="success" role="status">{{ importNotice }}</p>
+    <section v-if="importPreview" class="settings-card" aria-live="polite">
+      <h3>{{ s('Import preview', '导入预览') }} · {{ importPreview.source }} · {{ importPreview.revision }}</h3>
+      <p>{{ s('Each entry is matched against the selected source. No value is shown: changed fields are named only. Imported and replaced entries start disabled.', '每个条目会与所选来源比对。此处不显示任何值，只列出变更字段名。导入和替换的条目默认禁用。') }}</p>
+      <p>{{ importUnknown() }}</p>
+      <p v-if="importStale" class="ui-banner settings-banner" data-tone="warning">{{ s('This preview is older than the source.', '此预览早于当前源。') }} <button class="ui-button" data-size="sm" data-variant="secondary" type="button" :disabled="busy" @click="previewImportAgain">{{ s('Preview again', '重新预览') }}</button></p>
+      <p v-if="!importPreview.entries.length" role="status">{{ s('The document holds no mcpServers entries.', '文档中没有 mcpServers 条目。') }}</p>
+      <div v-for="entry in importPreview.entries" :key="entry.id" class="runtime-detail">
+        <h4>{{ entry.id }} · {{ entry.status }}<template v-if="entry.transport"> · {{ entry.transport }}</template></h4>
+        <p v-if="entry.changes.length">{{ s('Changed fields', '变更字段') }}: {{ importChanged(entry) }}</p>
+        <p v-if="entry.unsupported.length">{{ s('Not carried', '不携带') }}: {{ importUnsupported(entry) }}</p>
+        <p v-if="entry.confirm.length">{{ s('Literal fields to confirm', '需要确认的字面值字段') }}: {{ entry.confirm.join(', ') }}</p>
+        <p v-if="entry.error">{{ entry.error }}</p>
+        <label><span>{{ s('Action', '操作') }}</span><select v-model="entry.action" class="ui-field" data-size="md" :disabled="busy" :aria-label="s('Import action', '导入操作')"><option value="import">{{ s('Import', '导入') }}</option><option value="skip">{{ s('Skip', '跳过') }}</option><option value="replace">{{ s('Replace the existing entry', '替换现有条目') }}</option><option value="rename">{{ s('Import under a new id', '以新 ID 导入') }}</option></select></label>
+        <label v-if="entry.action === 'rename'"><span>{{ s('New id', '新 ID') }}</span><input v-model="entry.newId" class="ui-field" data-size="md" :disabled="busy" :aria-label="s('New id for this entry', '此条目的新 ID')" required /></label>
+        <label v-if="importConfirmNeeded(entry)" class="checkbox-label"><input v-model="entry.confirmed" type="checkbox" :disabled="busy" />{{ importConfirmLabel(entry) }}</label>
+      </div>
+      <div class="settings-actions"><button class="ui-button" data-size="md" data-variant="primary" :disabled="busy || !importReady" @click="applyImport">{{ s('Apply import', '应用导入') }}</button><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy" @click="closeImportPreview">{{ s('Close preview', '关闭预览') }}</button></div>
+    </section>
     <p v-for="issue in catalog?.errors" :key="issue" class="ui-banner settings-banner" data-tone="warning">{{ issue }}</p>
     <section v-if="invalidEntries.length" class="settings-card">
       <h3>{{ s('Entries that did not decode', '无法解码的条目') }}</h3>

@@ -383,7 +383,7 @@ optional account feature must not prevent identity or usage from loading.
 | Appearance | Language, system/light/dark theme and text size, applied immediately |
 | Agent defaults | Persisted model and supported execution defaults; no accidental mutation of an active Session |
 | Modality | Operation defaults for image generation, editing, enhancement and understanding from `modality.capabilities`, written with `modality.configure` and its snapshot revision; understanding's Session consumer is a requirement on Agent/Prompt |
-| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal and user↔project scope migration; secret fields stay omitted from edits and a move never writes them into `.mcp.json` |
+| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal, user↔project scope migration and import of a standard `mcpServers` file through the owner's confirmed preview; secret fields stay omitted from edits, a move never writes them into `.mcp.json`, and no import value is rendered |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
 | Skills | Manage already installed skills: search, inspect details, enable/disable and reload discovery; choose user scope or an existing workspace without entering filesystem paths. Source installation and plugin-package controls are not part of this page |
 | Permissions | Process isolation and user-scope command-rule management (exact/prefix allow/deny; project scope, patterns and per-rule ask are rejected, [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds)), with confirmation for privilege increases. The isolation card follows [the CLI isolation choices](cli-commands.md#process-isolation-settings), reads `host.execution.backend` and shows the owner's reason when the host has none; the browser never infers the platform |
@@ -510,8 +510,41 @@ the move blindly because the destination id would answer `mcp_move_conflict`.
 └──────────────────────────────────────────────────────────┘
 ```
 
-Only `mcp.move` is added to the MCP page's admitted methods; no secret value is
-read from the owner or stored in the browser.
+Beyond the catalog and entry methods, `mcp.move`, `mcp.import.preview` and
+`mcp.import.apply` are the MCP page's added methods; no secret value is read
+from the owner or stored in the browser.
+
+#### MCP import
+
+The MCP page imports a standard `mcpServers` document, the shape other MCP
+clients write, from a local file. The browser reads the file's text and sends it
+with `mcp.import.preview` for the selected scope — the user source, or the
+workspace's project source when the scope selector names one (`cwd` included).
+The page decodes nothing itself: the owner's preview supplies each entry's id,
+status (`identical`, `changed`, `conflict` or `invalid`), transport, changed
+field names with their JSON kinds, members the decoder keeps unused or drops,
+the project fields whose literal values need confirmation, and the entry's
+error. The page shows the unknown top-level members and never renders a value,
+because the reply carries none.
+
+Each previewed entry has an action: Import, Skip, Replace the existing entry, or
+Import under a new id with a new-id field. The defaults match the CLI: `changed`
+and `identical` import, `conflict` and `invalid` skip. For a project preview, an
+entry whose confirm list is not empty shows a checkbox naming those fields;
+Apply stays disabled until every such entry is ticked, so a literal `args`,
+`env`, `headers` or URL value never reaches `.mcp.json` without an explicit
+confirmation. Rename also needs a nonempty new id before Apply is enabled.
+
+Apply sends `mcp.import.apply` with the previewed document, its `revision` as
+`expectedVersion`, and one resolution per entry. On success the page drops the
+preview, rereads `mcp.catalog` and states that imported entries start disabled:
+a user entry is written with `enabled: false`, and a project entry has no
+enablement record until the user enables it locally. On `mcp_settings_conflict`
+the page says the source changed, keeps the preview and offers Preview again,
+which re-previews the same document; it never retries the apply. The other owner
+codes (`mcp_import_conflict`, `mcp_import_unconfirmed`,
+`mcp_credentials_are_user_scoped`, `mcp_invalid_config`) are shown as the
+owner's message, and the preview stays open for a different selection.
 
 #### Diagnostics: the legacy logging controls
 
