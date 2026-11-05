@@ -72,12 +72,10 @@ async fn run(
     let snapshot = selection
         .capability_snapshot
         .ok_or_else(|| HostError::failed("Model capabilities are missing"))?;
-    let limit = snapshot.capabilities.max_output_tokens;
     let target = AuxiliaryTarget {
         model,
         config: selection.config.unwrap_or_default(),
         capability_snapshot: Some(snapshot),
-        max_output_tokens: limit,
     };
     auxiliary_model::complete(&host, &ProductResolver(owner), target, request, &cancel).await
 }

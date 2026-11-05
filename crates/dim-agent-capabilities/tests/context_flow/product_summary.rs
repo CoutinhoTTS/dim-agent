@@ -117,6 +117,7 @@ impl ModelDriver for Recorder {
             });
         }
         let calls = self.calls.lock().unwrap().pop_front().unwrap_or_default();
+        let invokes_tools = !calls.is_empty();
         Box::pin(async move {
             let mut chunks = vec![Ok(ModelChunk::MessageStart {
                 message_id: "reply".into(),
@@ -139,10 +140,10 @@ impl ModelDriver for Recorder {
             chunks.push(Ok(ModelChunk::Usage(reply_usage())));
             chunks.push(Ok(ModelChunk::MessageStop {
                 message_id: "reply".into(),
-                reason: if chunks.len() == 2 {
-                    ModelStopReason::EndTurn
-                } else {
+                reason: if invokes_tools {
                     ModelStopReason::ToolUse
+                } else {
+                    ModelStopReason::EndTurn
                 },
             }));
             Ok(Box::pin(futures_util::stream::iter(chunks)) as ModelStream)
@@ -241,6 +242,7 @@ async fn product_session_with(
         output,
         config,
         SessionConfig::default(),
+        None,
         Arc::new(Local),
         None,
     )
@@ -255,6 +257,7 @@ async fn product_session_on(
     output: u64,
     config: ProductSummaryStrategyConfig,
     config_session: SessionConfig,
+    stored_config: Option<ModelConfig>,
     connection: Arc<dyn ResolveModelConnection>,
     reasoning: Option<serde_json::Value>,
 ) -> (MinimalHost, dim_agent_runtime::Session) {
@@ -300,7 +303,7 @@ async fn product_session_on(
                 provider_id: "local".into(),
                 model_id: "small".into(),
                 capability_snapshot: Some(snapshot),
-                config: None,
+                config: stored_config,
                 metadata: None,
             }),
         }),
@@ -685,9 +688,10 @@ async fn a_retried_piece_carrying_a_long_summary_still_fits_the_input_budget() {
             .await
             .unwrap();
         let tokens = model.count_tokens(request);
+        let budget = model.context_window() - model.output_tokens();
         assert!(
-            tokens <= (WINDOW - output) as f64,
-            "summary request of {tokens} tokens exceeds the input budget"
+            tokens <= budget,
+            "summary request of {tokens} tokens exceeds the input budget of {budget}"
         );
     }
     assert!(!events.iter().any(|event| matches!(&event.kind,
@@ -714,6 +718,10 @@ async fn the_trigger_reserves_a_bounded_share_of_the_input_budget() {
         .unwrap();
         let request = ModelRequest {
             capability_snapshot: Some(snapshot),
+            config: Some(ModelConfig {
+                max_tokens: Some(output as f64),
+                ..Default::default()
+            }),
             ..ModelRequest::new("local", "small", Vec::new())
         };
         let model = ProductContextModel
@@ -1044,6 +1052,7 @@ async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
                 ..Default::default()
             },
             SessionConfig::default(),
+            None,
             Arc::new(Compatible),
             Some(declared),
         )
@@ -1107,6 +1116,7 @@ async fn startup_summaries_keep_selection_and_strategy_reasoning_without_narrowi
             OUTPUT,
             ProductSummaryStrategyConfig::default(),
             SessionConfig::default(),
+            None,
             Arc::new(Compatible),
             Some(serde_json::json!({
                 "supported": true,
@@ -1272,6 +1282,7 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
             },
             ..SessionConfig::default()
         },
+        None,
         Arc::new(Local),
         None,
     )
@@ -1348,13 +1359,14 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
     agent.close().await.unwrap();
 }
 
-/// A declared output limit at or above the context window leaves no input
-/// budget: every turn takes `provider_output_budget_exhausted` recovery, the
-/// summarizer's fit check has no room, and the turn fails before any model
-/// call (#1130). This reproduces the failure; it does not pin a fix.
+/// A declared output limit at or above the context window still leaves an
+/// input budget: Provider's adopted allowance keeps the budget positive, so
+/// the turn completes without a recovery compaction (#1130).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_output_limit_at_or_above_the_window_leaves_no_input_budget() {
-    for output in [WINDOW, WINDOW + 1_000] {
+async fn an_output_limit_at_or_above_the_window_still_leaves_an_input_budget() {
+    const WINDOW: u64 = 32_768;
+    let allowance = 16_768;
+    for output in [WINDOW, WINDOW + 7_232] {
         let recorder = Arc::new(Recorder::default());
         let (agent, session) = product_session_on(
             WINDOW,
@@ -1363,6 +1375,7 @@ async fn an_output_limit_at_or_above_the_window_leaves_no_input_budget() {
             output,
             ProductSummaryStrategyConfig::default(),
             SessionConfig::default(),
+            None,
             Arc::new(Local),
             None,
         )
@@ -1382,46 +1395,16 @@ async fn an_output_limit_at_or_above_the_window_leaves_no_input_budget() {
             })
             .expect("the preparation writes its budget");
         assert_eq!(budget.context_window, WINDOW as f64);
-        assert_eq!(budget.output_tokens, output as f64);
+        assert_eq!(budget.output_tokens, allowance as f64);
         assert!(budget.estimated_input_tokens > 0.);
 
-        let start = events
-            .iter()
-            .find_map(|event| match &event.kind {
-                EventKind::ContextCompactionStart(data) => Some(data),
-                _ => None,
-            })
-            .expect("an exhausted budget starts a recovery compaction");
-        assert_eq!(
-            start.trigger,
-            CompactionTrigger::ProviderOutputBudgetExhausted
+        assert!(
+            !events.iter().any(|event| matches!(
+                &event.kind,
+                EventKind::ContextCompactionStart(_) | EventKind::ContextCompaction(_)
+            )),
+            "a positive input budget starts no recovery"
         );
-
-        let compaction = events
-            .iter()
-            .find_map(|event| match &event.kind {
-                EventKind::ContextCompaction(data) => Some(data),
-                _ => None,
-            })
-            .expect("the recovery compaction commits its result");
-        let ContextCompactionResult::Failed { error, diagnostics } = &compaction.outcome else {
-            panic!(
-                "expected the summarizer's fit check to fail, got {:?}",
-                compaction.outcome
-            );
-        };
-        assert_eq!(
-            error,
-            "The summarizer request does not fit the model window"
-        );
-        assert_eq!(
-            diagnostics
-                .as_ref()
-                .expect("the failure carries its diagnostics")
-                .model_call_count,
-            0
-        );
-
         let end = events
             .iter()
             .find_map(|event| match &event.kind {
@@ -1429,50 +1412,115 @@ async fn an_output_limit_at_or_above_the_window_leaves_no_input_budget() {
                 _ => None,
             })
             .expect("the turn ends");
-        assert_eq!(
-            end.outcome,
-            TurnOutcome::Failed {
-                error: "The summarizer request does not fit the model window".into()
-            }
-        );
         assert!(
-            recorder.requests.lock().unwrap().is_empty(),
-            "no summarizer request was sent"
+            matches!(&end.outcome, TurnOutcome::Completed { .. }),
+            "the turn ended with {:?}",
+            end.outcome
         );
-
-        // A second input leaves a kept entry behind the latest turn's start,
-        // which is the manual step's candidate.
-        session
-            .submit("again".into(), InputMode::Queue, "main")
-            .await
-            .unwrap();
-        session.idle("main").await.unwrap();
-        let (command, events) = compact_now(&session).await;
-        let manual = events
-            .iter()
-            .find_map(|event| match &event.kind {
-                EventKind::ContextCompaction(data) if data.command == Some(command) => Some(data),
-                _ => None,
-            })
-            .expect("the manual step commits its result");
-        let ContextCompactionResult::Failed { error, diagnostics } = &manual.outcome else {
-            panic!(
-                "expected the manual step to fail the same way, got {:?}",
-                manual.outcome
-            );
-        };
-        assert_eq!(
-            error,
-            "The summarizer request does not fit the model window"
-        );
-        assert_eq!(
-            diagnostics
-                .as_ref()
-                .expect("the failure carries its diagnostics")
-                .model_call_count,
-            0
-        );
-        assert!(recorder.requests.lock().unwrap().is_empty());
         agent.close().await.unwrap();
     }
+}
+
+/// A Session adopted before the rule stored an allowance equal to its window.
+/// The request boundary repairs it from the same function, so the Session
+/// prepares a positive budget and compacts normally; the stored fact is not
+/// rewritten (#1130).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_allowance_from_before_the_rule_is_repaired_at_the_request() {
+    use dim_agent_capabilities::prompt_state::PromptSnapshot;
+
+    const WINDOW: u64 = 32_768;
+    let allowance = 16_768;
+    let recorder = Arc::new(Recorder::default());
+    let stored = ModelConfig {
+        max_tokens: Some(WINDOW as f64),
+        ..Default::default()
+    };
+    let (agent, session) = product_session_on(
+        WINDOW,
+        Arc::new(MockTools),
+        recorder.clone(),
+        WINDOW,
+        ProductSummaryStrategyConfig::default(),
+        SessionConfig::default(),
+        Some(stored.clone()),
+        Arc::new(Local),
+        None,
+    )
+    .await;
+    session
+        .submit("a".repeat(60_000), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+
+    let budget = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextBudget(data) => Some(data),
+            _ => None,
+        })
+        .expect("the preparation writes its budget");
+    assert_eq!(budget.output_tokens, allowance as f64);
+    assert!(budget.estimated_input_tokens > 0.);
+
+    let start = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompactionStart(data) => Some(data),
+            _ => None,
+        })
+        .expect("the full budget starts a recovery compaction");
+    assert_eq!(
+        start.trigger,
+        CompactionTrigger::ProviderOutputBudgetExhausted
+    );
+    let compaction = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data) => Some(data),
+            _ => None,
+        })
+        .expect("the recovery compaction commits its result");
+    assert!(
+        matches!(
+            &compaction.outcome,
+            ContextCompactionResult::Completed { .. }
+        ),
+        "expected a completed compaction, got {:?}",
+        compaction.outcome
+    );
+    let requests = recorder.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "one summarizer request");
+    assert_eq!(
+        requests[0].config.as_ref().unwrap().max_tokens,
+        Some(allowance as f64)
+    );
+
+    let end = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::TurnEnd(data) => Some(data),
+            _ => None,
+        })
+        .expect("the turn ends");
+    assert!(
+        matches!(&end.outcome, TurnOutcome::Completed { .. }),
+        "the turn ended with {:?}",
+        end.outcome
+    );
+
+    let adopted = session
+        .get::<PromptSnapshot>("main")
+        .unwrap()
+        .unwrap()
+        .configuration
+        .unwrap();
+    assert_eq!(
+        adopted.config.unwrap().max_tokens,
+        stored.max_tokens,
+        "the stored configuration keeps the value it adopted"
+    );
+    agent.close().await.unwrap();
 }

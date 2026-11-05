@@ -2,7 +2,8 @@
 //! owner of model selection.
 //!
 //! The owner resolves the model, the configuration it would send for a
-//! Session request and its declared output limit, then calls [`complete`].
+//! Session request (its adopted output allowance included), then calls
+//! [`complete`].
 //! Whoever owns model selection exports the operation with [`provide`], so a
 //! profile that serves a model offers the same `auxiliaryModel` name to
 //! Session parts ([AuxiliaryModel §4.3](../../../docs/design/appserver/auxiliary-model.md#43-named-binding)).
@@ -27,11 +28,10 @@ use tokio_util::sync::CancellationToken;
 pub struct AuxiliaryTarget {
     /// The model the caller named; the owner never substitutes another.
     pub model: ModelId,
-    /// The configuration the owner would send for a Session request.
+    /// The configuration the owner would send for a Session request, with the
+    /// model's adopted output allowance in `max_tokens`.
     pub config: ModelConfig,
     pub capability_snapshot: Option<ModelCapabilitySnapshot>,
-    /// The model's declared output limit.
-    pub max_output_tokens: u64,
 }
 
 /// Checks the caller's request before an owner admits it. Each owner calls
@@ -58,12 +58,14 @@ pub async fn complete(
     request: AuxiliaryRequest,
     cancel: &CancellationToken,
 ) -> Result<AuxiliaryReply, AuxiliaryError> {
-    let limit = target.max_output_tokens;
     let mut config = target.config;
+    let allowance = config.max_tokens.ok_or_else(|| {
+        invalid("The model output allowance is not adopted; select the model again")
+    })?;
     config.max_tokens = Some(
         request
             .max_output_tokens
-            .map_or(limit, |max| u64::from(max).min(limit)) as f64,
+            .map_or(allowance, |max| f64::from(max).min(allowance)),
     );
     let mut model_request = ModelRequest::new(
         target.model.provider_id,

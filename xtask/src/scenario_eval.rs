@@ -227,7 +227,7 @@ use crate::summary_eval::{
     Completion, Configuration, Judgement, Verdict, complete_detailed, parse_judgements,
 };
 use dim_agent_capabilities::{
-    context_model::window_facts,
+    context_model::{output_allowance, window_facts},
     host::{
         ModelHost, ModelSelectionHost, ModelStopReason, ProviderConnectionResolver,
         ResolveContextModel,
@@ -1297,7 +1297,7 @@ fn isolated_home(path: &Path) -> Result<PathBuf> {
 pub(crate) fn text_tokens(model: &ModelId, text: &str) -> f64 {
     let mut request = ModelRequest::new(&model.provider_id, &model.model_id, vec![]);
     request.system = Some(Arc::new(SystemPrompt::Text(text.into())));
-    window_facts(0, 0, &request).count_tokens(&request)
+    window_facts(0, 0., &request).count_tokens(&request)
 }
 
 #[derive(serde::Deserialize)]
@@ -2762,7 +2762,12 @@ async fn judge_export(
     let mut reasks = 0;
     let mut calls: Vec<JudgeCall> = Vec::new();
     let whole = judge_request(judge, &messages, &config);
-    let facts = window_facts(limits.window, limits.max_output, &whole);
+    let allowance = whole
+        .config
+        .as_ref()
+        .and_then(|config| config.max_tokens)
+        .unwrap_or_else(|| output_allowance(limits.window, limits.max_output) as f64);
+    let facts = window_facts(limits.window, allowance, &whole);
     let estimate = facts.count_tokens(&whole);
     let budget = facts.context_window() - facts.output_tokens();
     if estimate > budget {
@@ -6492,7 +6497,7 @@ mod tests {
                 &[Message::text(Role::User, text)],
                 &ModelConfig::default(),
             );
-            window_facts(VIEW_WINDOW, 200, &request).count_tokens(&request)
+            window_facts(VIEW_WINDOW, 200., &request).count_tokens(&request)
         };
         for arm in ["current", "candidate"] {
             let directory = options.out.join(arm).join("case").join("run-0");

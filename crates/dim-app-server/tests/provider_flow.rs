@@ -1168,6 +1168,97 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
 }
 
 #[tokio::test]
+async fn a_declared_output_limit_at_or_above_the_window_adopts_a_derived_allowance() {
+    use axum::http::StatusCode;
+    let app =
+        Router::new().fallback(|| async { (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))) });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-allowance-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    const PROVIDER: &str = "00000000-0000-4000-8000-000000000022";
+    let created = provider
+        .create(
+            input(
+                PROVIDER,
+                &format!("{base}/v1"),
+                StaticAuth::Bearer,
+                Some("allowance-key"),
+                "allowance",
+                32_000,
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    // A declared output above the window is accepted and the adopted
+    // configuration carries the derived allowance, not the declaration.
+    let above = provider
+        .update_model_config(
+            PROVIDER.into(),
+            created.version.unwrap(),
+            "same".into(),
+            serde_json::from_value(json!({"maxOutputTokens":40_000})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(above.models[0].capabilities.context_window, Some(32_000));
+    assert_eq!(above.models[0].capabilities.max_output_tokens, Some(40_000));
+    assert_eq!(above.models[0].config.max_tokens, Some(16_000.0));
+    let selection = provider
+        .configuration(
+            Some(target(PROVIDER)),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let snapshot = selection.capability_snapshot.unwrap();
+    assert_eq!(snapshot.capabilities.context_window, 32_000);
+    assert_eq!(snapshot.capabilities.max_output_tokens, 40_000);
+    assert_eq!(selection.config.unwrap().max_tokens, Some(16_000.0));
+    // Equal limits are accepted too, and the allowance follows the window.
+    let equal = provider
+        .update_model_config(
+            PROVIDER.into(),
+            above.version,
+            "same".into(),
+            serde_json::from_value(json!({"contextWindow":64_000,"maxOutputTokens":64_000}))
+                .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(equal.models[0].capabilities.context_window, Some(64_000));
+    assert_eq!(equal.models[0].capabilities.max_output_tokens, Some(64_000));
+    assert_eq!(equal.models[0].config.max_tokens, Some(48_000.0));
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
 async fn selectable_models_match_execution_and_hide_unavailable_models() {
     use axum::http::{StatusCode, Uri};
     use tokio::sync::{mpsc, oneshot};
