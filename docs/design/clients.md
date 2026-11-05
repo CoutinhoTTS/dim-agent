@@ -190,6 +190,7 @@ Desktop lives in its own repository. This repository owns the App Server contrac
 | Branch metadata, rename, per-branch model | From `branch/*` facts; rename client-local; per-branch model not built ([#280](https://github.com/arcships/dim/issues/280)) |
 | Local tools, edit/retry, usage, subagent relations | Client-run MCP server; `session.fork` + `session.submit`; client-side usage; `collaboration/*` facts ([#281](https://github.com/arcships/dim/issues/281)) |
 | MCP App views (widget document, a view's tool call, its message) | The Session's own MCP connection through `session.mcp.app.*`; rendering and sandboxing stay in the client ([MCP Apps](appserver/mcp-apps.md), [#451](https://github.com/arcships/dim/issues/451)) |
+| UI extension assets and Session media without a byte-stream entry | Protocol page reads `ui.extensions.read` and `session.ui.resources.read` ([client UI extensions](client-ui-extensions.md), [#1170](https://github.com/arcships/dim/issues/1170)) |
 
 Desktop's own feature coverage and UI acceptance are tracked in its repository. A capability that this repository's contracts cannot back becomes an issue here, under the same rule.
 

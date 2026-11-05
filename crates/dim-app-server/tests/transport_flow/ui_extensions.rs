@@ -520,6 +520,29 @@ fn decode(reply: &Value) -> Vec<u8> {
         .unwrap()
 }
 
+/// Waits until the Session's method table lists `method`, then returns the
+/// listing it matched.
+async fn wait_listed(client: &mut Client, session: &str, method: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let listed = client
+            .rpc("session.methods", json!({"sessionId":session}))
+            .await;
+        let methods = listed["result"]["methods"].clone();
+        if methods
+            .as_array()
+            .is_some_and(|methods| methods.iter().any(|entry| entry["name"] == method))
+        {
+            return methods;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{method} is listed: {listed}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_local_client_reads_snapshot_resources_by_generation() {
     let home = super::plugin_manager::home();
@@ -737,4 +760,354 @@ async fn a_local_client_reads_snapshot_resources_by_generation() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
     std::fs::remove_dir_all(assets).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_client_reads_session_resources_with_its_session() {
+    let home = super::plugin_manager::home();
+    let mut config = super::plugin_manager::config(&home);
+    config.product_home = None;
+    let home = home.canonicalize().unwrap();
+    config.target_home = Some(home.clone());
+    config.file_roots = vec![home.clone()];
+    let data: Vec<u8> = (0..300_000u32).map(|index| (index % 251) as u8).collect();
+    let media = home.join("media.bin");
+    std::fs::write(&media, &data).unwrap();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    let created = local.rpc("session.create", json!({"cwd":home})).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let methods = wait_listed(&mut local, &id, "session.ui.resources.read").await;
+    assert!(
+        methods
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "session.ui.resources.read"),
+        "{methods}"
+    );
+    let resources = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(service) = agent
+                .get_session(&id)
+                .and_then(|session| session.session_service::<UiResources>().ok())
+            {
+                break service;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "UiResources is provided"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let publisher = rutis::Ctx::root().unwrap();
+    let reference = resources
+        .publish_file(
+            &publisher,
+            PublishFile {
+                path: media.display().to_string(),
+                media_type: "application/octet-stream".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let page = local
+        .rpc(
+            "session.ui.resources.read",
+            json!({"sessionId":id,"id":reference.id,"offset":100_000,"limit":65_536}),
+        )
+        .await;
+    assert_ok(&page);
+    assert_eq!(page["result"]["offset"], 100_000);
+    assert_eq!(page["result"]["bytes"], 65_536);
+    assert_eq!(page["result"]["total"], 300_000);
+    assert_eq!(page["result"]["mediaType"], "application/octet-stream");
+    assert_eq!(decode(&page["result"]), &data[100_000..165_536]);
+    let past = local
+        .rpc(
+            "session.ui.resources.read",
+            json!({"sessionId":id,"id":reference.id,"offset":300_001}),
+        )
+        .await;
+    assert_eq!(
+        past["error"]["data"]["appError"], "invalid_params",
+        "{past}"
+    );
+    let unknown = local
+        .rpc(
+            "session.ui.resources.read",
+            json!({"sessionId":id,"id":reference.id,"ofset":100_000}),
+        )
+        .await;
+    assert_eq!(
+        unknown["error"]["data"]["appError"], "invalid_params",
+        "{unknown}"
+    );
+
+    let active = resources
+        .publish_file(
+            &publisher,
+            PublishFile {
+                path: media.display().to_string(),
+                media_type: "image/svg+xml".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let normalized = local
+        .rpc(
+            "session.ui.resources.read",
+            json!({"sessionId":id,"id":active.id,"limit":8}),
+        )
+        .await;
+    assert_ok(&normalized);
+    assert_eq!(
+        normalized["result"]["mediaType"],
+        "application/octet-stream"
+    );
+
+    resources
+        .withdraw(&publisher, reference.clone())
+        .await
+        .unwrap();
+    let withdrawn = local
+        .rpc(
+            "session.ui.resources.read",
+            json!({"sessionId":id,"id":reference.id}),
+        )
+        .await;
+    assert_eq!(
+        withdrawn["error"]["data"]["appError"], "resource_gone",
+        "{withdrawn}"
+    );
+
+    let other = local.rpc("session.create", json!({"cwd":home})).await;
+    assert_ok(&other);
+    let other_id = other["result"]["sessionId"].as_str().unwrap().to_owned();
+    wait_listed(&mut local, &other_id, "session.ui.resources.read").await;
+    let elsewhere = local
+        .rpc(
+            "session.ui.resources.read",
+            json!({"sessionId":other_id,"id":active.id}),
+        )
+        .await;
+    assert_eq!(
+        elsewhere["error"]["data"]["appError"], "resource_gone",
+        "a resource belongs to its own Session: {elsewhere}"
+    );
+
+    let second = resources
+        .publish_file(
+            &publisher,
+            PublishFile {
+                path: media.display().to_string(),
+                media_type: "application/octet-stream".into(),
+            },
+        )
+        .await
+        .unwrap();
+    publisher.shutdown().await.unwrap();
+    let unloaded = local
+        .rpc(
+            "session.ui.resources.read",
+            json!({"sessionId":id,"id":second.id}),
+        )
+        .await;
+    assert_eq!(
+        unloaded["error"]["data"]["appError"], "resource_gone",
+        "a publisher's resources end with it: {unloaded}"
+    );
+
+    let deleted = local.rpc("session.delete", json!({"sessionId":id})).await;
+    assert!(deleted.get("error").is_none(), "{deleted}");
+    let closed = local
+        .rpc(
+            "session.ui.resources.read",
+            json!({"sessionId":id,"id":second.id}),
+        )
+        .await;
+    assert_eq!(
+        closed["error"]["data"]["appError"], "session_closed",
+        "{closed}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawal_racing_a_page_read_never_returns_part_of_a_page() {
+    let home = super::plugin_manager::home();
+    let mut config = super::plugin_manager::config(&home);
+    config.product_home = None;
+    let home = home.canonicalize().unwrap();
+    config.target_home = Some(home.clone());
+    config.file_roots = vec![home.clone()];
+    let data: Vec<u8> = (0..(2 * 1024 * 1024u32))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let media = home.join("large.bin");
+    std::fs::write(&media, &data).unwrap();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    let created = local.rpc("session.create", json!({"cwd":home})).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    wait_listed(&mut local, &id, "session.ui.resources.read").await;
+    let resources = agent
+        .get_session(&id)
+        .unwrap()
+        .session_service::<UiResources>()
+        .unwrap();
+    let publisher = rutis::Ctx::root().unwrap();
+    let reference = resources
+        .publish_file(
+            &publisher,
+            PublishFile {
+                path: media.display().to_string(),
+                media_type: "application/octet-stream".into(),
+            },
+        )
+        .await
+        .unwrap();
+    // Send the page request without waiting, then withdraw. The withdrawal
+    // waits for the page's read token, so the reply is either the whole page
+    // or `resource_gone`, never part of one.
+    let request = local
+        .send(
+            "session.ui.resources.read",
+            json!({"sessionId":id,"id":reference.id,"limit":1024 * 1024}),
+        )
+        .await;
+    resources
+        .withdraw(&publisher, reference.clone())
+        .await
+        .unwrap();
+    let reply = local.response(request).await;
+    if reply.get("error").is_some() {
+        assert_eq!(
+            reply["error"]["data"]["appError"], "resource_gone",
+            "{reply}"
+        );
+    } else {
+        assert_eq!(reply["result"]["bytes"], 1024 * 1024, "{reply}");
+        assert_eq!(decode(&reply["result"]), &data[..1024 * 1024]);
+    }
+    publisher.shutdown().await.unwrap();
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemon_restart_ends_old_generations_and_session_resources() {
+    let home = super::plugin_manager::home();
+    let mut config = super::plugin_manager::config(&home);
+    config.product_home = None;
+    let home = home.canonicalize().unwrap();
+    config.target_home = Some(home.clone());
+    config.file_roots = vec![home.clone()];
+    let source = home.join("preview");
+    std::fs::create_dir_all(source.join("ui")).unwrap();
+    std::fs::write(source.join("dim-plugin.json"), manifest().to_string()).unwrap();
+    std::fs::write(source.join("ui/panel.js"), "export const revision = 1").unwrap();
+    let asset: Vec<u8> = (0..(1024 * 1024u32))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    std::fs::write(source.join("ui/asset.bin"), &asset).unwrap();
+    let media = home.join("media.bin");
+    std::fs::write(&media, &asset).unwrap();
+    std::fs::write(
+        home.join("plugins.json"),
+        r#"{"version":1,"installed":[],"names":{"unused":{"off":true}}}"#,
+    )
+    .unwrap();
+    let (generation, session, resource) = {
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+        let mut local = Client::new_version(&server, false, 3).await;
+        let installed = local
+            .rpc("plugin.install", json!({"source":{"path":source}}))
+            .await;
+        assert!(installed.get("error").is_none(), "{installed}");
+        let directory = local.rpc("ui.extensions.list", json!({})).await["result"].clone();
+        let generation = directory["extensions"][0]["generation"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let created = local.rpc("session.create", json!({"cwd":home})).await;
+        assert_ok(&created);
+        let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        wait_listed(&mut local, &session, "session.ui.resources.read").await;
+        let resources = agent
+            .get_session(&session)
+            .unwrap()
+            .session_service::<UiResources>()
+            .unwrap();
+        let publisher = rutis::Ctx::root().unwrap();
+        let reference = resources
+            .publish_file(
+                &publisher,
+                PublishFile {
+                    path: media.display().to_string(),
+                    media_type: "application/octet-stream".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let page = local
+            .rpc(
+                "ui.extensions.read",
+                json!({"generation":generation,"path":"asset.bin","limit":256 * 1024}),
+            )
+            .await;
+        assert_ok(&page);
+        assert_eq!(decode(&page["result"]), &asset[..256 * 1024]);
+        server.shutdown();
+        server.join().await.unwrap();
+        drop(agent);
+        drop(publisher);
+        (generation, session, reference.id)
+    };
+    let (server, _agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    let stale = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":generation,"path":"asset.bin","limit":256 * 1024}),
+        )
+        .await;
+    assert_eq!(
+        stale["error"]["data"]["appError"], "resource_gone",
+        "{stale}"
+    );
+    let directory = local.rpc("ui.extensions.list", json!({})).await["result"].clone();
+    let next_generation = directory["extensions"][0]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(next_generation, generation);
+    let fresh = local
+        .rpc(
+            "ui.extensions.read",
+            json!({"generation":next_generation,"path":"asset.bin","limit":256 * 1024}),
+        )
+        .await;
+    assert_ok(&fresh);
+    assert_eq!(decode(&fresh["result"]), &asset[..256 * 1024]);
+    let old_resource = super::session_typescript::when_served(
+        &mut local,
+        "session.ui.resources.read",
+        json!({"sessionId":session,"id":resource}),
+    )
+    .await;
+    assert_eq!(
+        old_resource["error"]["data"]["appError"], "resource_gone",
+        "{old_resource}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }

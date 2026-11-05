@@ -185,7 +185,7 @@ UI 资源读取需要当前服务入口的身份认证，不能成为匿名静�
 
 Web 使用当前已授权服务入口下的资源地址与原生动态 import，相对模块、CSS 和媒体地址也留在同一版本的资源根。模块不能要求额外 localhost 端口或扩大的 CSP。Desktop 的受控 scheme/资源入口必须支持同样的相对地址、模块 MIME 和版本语义，不能把插件放到有全权限 native 桥的页面里。
 
-没有字节流入口的宿主（Desktop、TUI 等非 Web 客户端）通过 `ui.extensions.read` 分页读取：请求 `{generation, path, offset?, limit?}`，返回 `{offset, bytes, total, mediaType, data}`，`data` 为标准 base64。默认页 1 MiB，最大 4 MiB，更大的 `limit` 截断为 4 MiB，`limit: 0` 为 `invalid_params`。资源不可变、`total` 固定：客户端在 `offset + bytes == total` 时读完，不需要额外的空页；`offset == total` 返回空页，`offset > total` 为 `invalid_params`（不截断，避免掩盖客户端错误）。线上开销约为原字节的 1.33 倍（base64 与 JSON）；一页占用该连接出站队列一帧的时间，页越大，其他回复与通知在该连接上被推迟得越久，4 MiB 的页面上限限制了这一推迟，所以交互尺寸的模块、CSS、图片与短音频可接受；有字节流入口的宿主（Web 的 HTTP 路由）继续用字节流，分页不是大视频等大文件的通用传输。错误语义见 §7。
+没有字节流入口的宿主（Desktop、TUI 等非 Web 客户端）通过 `ui.extensions.read` 分页读取：请求 `{generation, path, offset?, limit?}`，返回 `{offset, bytes, total, mediaType, data}`，`data` 为标准 base64。默认页 1 MiB，最大 4 MiB，更大的 `limit` 截断为 4 MiB，`limit: 0` 为 `invalid_params`。资源不可变、`total` 固定：客户端在 `offset + bytes == total` 时读完，不需要额外的空页；`offset == total` 返回空页，`offset > total` 为 `invalid_params`（不截断，避免掩盖客户端错误）。线上开销约为原字节的 1.33 倍（base64 与 JSON）；一页占用该连接出站队列一帧的时间，页越大，其他回复与通知在该连接上被推迟得越久，4 MiB 的最大页限制了这一推迟，所以交互尺寸的模块、CSS、图片与短音频可接受；有字节流入口的宿主（Web 的 HTTP 路由）继续用字节流，分页不是大视频等大文件的通用传输。错误语义见 §7。
 
 ### 6.2 Session 文件资源
 
@@ -203,7 +203,9 @@ UiResources 提供通用的**已完成文件发布**：受信任的后端 Sessio
 
 动态资源只内联栅格图片、音视频、纯文本与 PDF；HTML、SVG、JavaScript 等主动内容和未支持类型以 `application/octet-stream`、`Content-Disposition: attachment` 返回，并带 `nosniff`。插件程序与打包图标只从 §6.1 的可信内容入口加载。
 
-读取按传输背压拉取有界字节块，内存不随文件大小增长；客户端关闭连接、取消、Session closing 或资源撤下均停止文件读取。头部发出前失败返回结构化资源错误；发出后失败终止流，不能在媒体 body 后追加 JSON。文件字节不经过 Session JSON RPC，也不通过 TypeScript 回调逐块传输。
+读取按传输背压拉取有界字节块，内存不随文件大小增长；客户端关闭连接、取消、Session closing 或资源撤下均停止文件读取。头部发出前失败返回结构化资源错误；发出后失败终止流，不能在媒体 body 后追加 JSON。
+
+没有字节流入口的宿主通过 Session 方法 `session.ui.resources.read` 分页读取已发布资源：请求 `{sessionId, id, offset?, limit?}`，返回与 §6.1 相同的页形状和边界（标准 base64、1 MiB 默认、4 MiB 上限、`offset + bytes == total` 结束、`offset > total` 为 `invalid_params`）。它是普通 Session 方法：由 UiResources part 注册，经 `session.methods` 发现，并按 Session 方法的规则服务到各入口。按 ADR 021 D3，客户端读取要求活动 Session：资源 id 只在发布它的那个 Session 实例内有效，Session 卸载或 daemon 重启后，之前的每个 id 都回答 `resource_gone`；读取随 Session 路由进入，不为回答旧 id 跳过 Session。撤下与在途页竞争时，客户端收到整页或 `resource_gone`，绝不会收到半页；Session closing 与发布者卸载同样停止新读取并取消在途读取。
 
 Rust 和 TypeScript Session part 均可使用此服务。路径由已持有文件位置的业务 owner 提供，例如后端插件使用 Node 文件 I/O 在已授权工作目录生成文件，或由现有业务服务返回绝对路径。`pluginFiles` 只提供相对文本文件接口，不提供绝对路径，因此它的相对路径不能直接传给发布服务，也不能通过猜测产品 home 拼接。
 
@@ -227,6 +229,7 @@ Rust 和 TypeScript Session part 均可使用此服务。路径由已持有文�
 | 页读取的路径非法、`limit: 0` 或 `offset > total` | UiExtensions：`invalid_params`（-32602） | 修正参数 |
 | 页读取的 generation 未知或已替换、路径不在该快照内 | UiExtensions：`resource_gone` | 重新读取目录后取新 generation |
 | 页读取的文件 I/O 失败 | UiExtensions：`resource_unavailable` | 生产者修复资源；不返回空页成功 |
+| 页读取时 Session 已关闭、不可用，或引用不属于该 Session | Rpc 的 Session 路由先回答（如 `session_closed`）；UiResources 对不属于本 Session 的引用回答 `resource_gone` | 使用活动 Session 的新引用 |
 | 文件定位、打开或撤下清理失败 | UiResources：`ResourceError.code = resource_unavailable` | 生产者修复资源；不返回空文件成功结果 |
 | 内容 generation、文件或动态引用不可用 | WebEntry：HTTP 404，响应 `error.code = resource_gone` | 重新发现内容或取得新引用 |
 | 已开始的 HTTP 资源读取失败或取消 | WebEntry：响应流中断；已发送响应头后不追加 JSON 错误码 | 由展示方处理加载失败，不自动重放业务操作 |
@@ -314,7 +317,7 @@ Rust 和 TypeScript Session part 均可使用此服务。路径由已持有文�
 5. 未认证/无权访问、跨站请求、编码路径穿越、符号链接逃逸、旧 generation、原目录在懒加载前被修改；不能读到根外文件或混合版本。
 6. 文件读取的 GET/HEAD、单 Range、suffix、416、多 Range 的 200、慢消费者、取消、撤下与 Session closing；读取内存有界，文件可在撤下完成后删除。通过当前授权入口的外部浏览器访问不依赖浏览器本机端口。
 7. v1 安装记录迁移后保持选择、off、安装来源和目录；写入失败保留原记录；未知版本不覆盖。只使用临时 home 和可丢弃 fixture。
-8. 没有字节流入口的本地客户端按 generation 分页读取包内资源：两页衔接与 `offset + bytes == total`、`offset == total` 的空页、`offset > total` 与非法路径与 `limit: 0` 的 `invalid_params`、未知或已替换 generation 和快照外路径的 `resource_gone`；Web 入口上该方法为 `unknown_method` 且不出现在其 `hello.features`，HTTP 路由照常。
+8. 没有字节流入口的本地客户端按 generation 分页读取包内资源：两页衔接与 `offset + bytes == total`、`offset == total` 的空页、`offset > total` 与非法路径与 `limit: 0` 的 `invalid_params`、未知或已替换 generation 和快照外路径的 `resource_gone`；Web 入口上该方法为 `unknown_method` 且不出现在其 `hello.features`，HTTP 路由照常。Session 资源按 id 分页读取：未知或已撤下 id、发布者卸载后与其他 Session 的读取为 `resource_gone`，Session 删除后为 `session_closed`，重启后的旧 id 为 `resource_gone`，撤下与在途页竞争只返回整页或 `resource_gone`。
 
 消融结论：不增加通用前端插件容器、共享依赖机制、持久化面板状态服务或第二条 RPC 通路。UiExtensions 必须拥有内容版本和目录，UiResources 必须拥有 Session 资源与读取收尾，面板宿主必须拥有视图实例；这些状态不能分别推给 PluginManager、进程全局 Session 选择或业务组件。原型若无需某个公开能力，则从首期导出集合删除，不以占位接口保留。
 
@@ -431,6 +434,7 @@ type PreviewMethods = {
 | `uiResources` | Session，后端命名服务 | `publishFile({path, mediaType}) -> ResourceRef`；`withdraw(ref)` 等到读取结束；注册自动归调用者生命周期，调用者不能撤下其他注册 |
 | `ui.extensions.list` | 已授权客户端的精确只读方法 | `{}` → `{revision, extensions, errors}`；extension 包含插件名、generation 和面板声明，不含 URL；errors 仅含 UiExtensions 自己产生的内容错误且不含绝对路径 |
 | `ui.extensions.read` | 已授权客户端的精确只读方法（local） | `{generation, path, offset?, limit?}` → `{offset, bytes, total, mediaType, data}`；`data` 为标准 base64；默认 1 MiB、上限 4 MiB；不在 `WEB_MANAGEMENT_METHODS` |
+| `session.ui.resources.read` | UiResources part 注册的 Session 方法 | `{sessionId, id, offset?, limit?}` → `{offset, bytes, total, mediaType, data}`；同一页边界；经 `session.methods` 发现；id 只在发布它的 Session 实例内有效 |
 | `ui.extensions.changed` | 同一连接的控制通知 | `{revision}`；不是 Timeline 或 Session 广播事实 |
 | `ResourceRef` | 公开可序列化数据 | `{sessionId, id}`；id 不复用、定位一个发布注册，不包含文件路径或认证令牌 |
 

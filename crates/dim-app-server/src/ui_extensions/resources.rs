@@ -1,7 +1,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use dim_agent_capabilities::{
     file_storage::{FileReader, FileStorage, FileStorageError},
-    methods::RpcError,
+    methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
 };
 use dim_agent_runtime::{Names, PublicService, SessionIdentity, SessionLifecycle, SessionPhase};
 use rutis::{
@@ -156,6 +156,19 @@ impl ResourceError {
     pub(crate) fn wire(self) -> RpcError {
         RpcError::service(&self.code, self.message)
     }
+}
+
+/// The `session.ui.resources.read` request. Rpc routes the call on
+/// `sessionId`, which the handler does not need, but the request declares it
+/// so a mistyped member is `invalid_params` rather than silently ignored.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResourcePageRequest {
+    #[serde(rename = "sessionId")]
+    _session_id: String,
+    id: String,
+    offset: Option<u64>,
+    limit: Option<usize>,
 }
 
 struct Published {
@@ -359,6 +372,7 @@ pub(super) struct UiResourcesPlugin {
     identity: Key<SessionIdentity>,
     lifecycle: Key<SessionLifecycle>,
     files: Key<FileStorage>,
+    methods: Key<SessionMethods>,
     key: Key<UiResources>,
 }
 impl UiResourcesPlugin {
@@ -367,6 +381,7 @@ impl UiResourcesPlugin {
             identity: names.key()?,
             lifecycle: names.key()?,
             files: names.key()?,
+            methods: names.key()?,
             key: names.key()?,
         })
     }
@@ -380,6 +395,7 @@ impl DynPlugin for UiResourcesPlugin {
             self.identity.erase(),
             self.lifecycle.erase(),
             self.files.erase(),
+            self.methods.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -407,6 +423,33 @@ impl DynPlugin for UiResourcesPlugin {
                 let _ = task.await;
                 Ok(())
             })?;
+            let reader = service.clone();
+            ctx.require_at(&self.methods)?.register(
+                ctx,
+                "session.ui.resources",
+                vec![MethodDecl::new(
+                    "session.ui.resources.read",
+                    false,
+                    Interruption::Report,
+                )],
+                Arc::new(move |method, value, stop, _progress| {
+                    let reader = reader.clone();
+                    Box::pin(async move {
+                        match method.as_str() {
+                            "session.ui.resources.read" => {
+                                let request: ResourcePageRequest = params(value)?;
+                                let read = reader.read(&request.id).map_err(ResourceError::wire)?;
+                                reply(
+                                    read_page(read, request.offset, request.limit, stop)
+                                        .await
+                                        .map_err(ResourceError::wire)?,
+                                )
+                            }
+                            _ => unreachable!("registered session UI resource method"),
+                        }
+                    })
+                }),
+            )?;
             ctx.provide_at(self.key.clone(), service)?;
             Ok(Effect::Done)
         })

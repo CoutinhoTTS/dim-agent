@@ -3040,6 +3040,7 @@
         "matches",
         "tokio::select",
         "tracing::warn",
+        "unreachable",
         "vec"
       ]
     },
@@ -27453,7 +27454,15 @@
       "references": [
         "path RpcError",
         "path RpcError::service",
-        "use dim_agent_capabilities::methods::RpcError"
+        "path SessionMethods",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
       ]
     },
     {

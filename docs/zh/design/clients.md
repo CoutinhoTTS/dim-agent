@@ -156,6 +156,7 @@ Desktop 在独立仓库里。本仓库负责 Desktop 使用的 App Server 契约
 | 读取附件、归档、文件历史 | 附件路径来自 `attachment.put`；归档在客户端本地；回退用 `session.fork`（[#279](https://github.com/arcships/dim/issues/279)） |
 | 分支元数据、重命名、按分支设置模型 | 来自 `branch/*` 事实；重命名在客户端本地；按分支设置模型不做（[#280](https://github.com/arcships/dim/issues/280)） |
 | 本地工具、编辑/重试、用量、子 agent 关系 | 客户端运行的 MCP server；`session.fork` + `session.submit`；客户端统计用量；`collaboration/*` 事实（[#281](https://github.com/arcships/dim/issues/281)） |
+| 没有字节流入口时的 UI 扩展资源与 Session 媒体 | 协议分页读取 `ui.extensions.read` 与 `session.ui.resources.read`（[客户端 UI 扩展](../../design/client-ui-extensions.md)，[#1170](https://github.com/arcships/dim/issues/1170)） |
 
 Desktop 自己的能力覆盖和界面验收在它的仓库里跟踪。本仓库的契约支撑不了的能力，按同一规则在本仓库开 issue。
 
