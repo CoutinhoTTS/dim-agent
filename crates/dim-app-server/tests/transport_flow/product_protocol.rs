@@ -2545,7 +2545,6 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
     assert_ok(&created);
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
     let session = agent.get_session(&sid).unwrap();
-    let head = session.sequence("main").unwrap();
     assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
     let empty = json!({"sessionId":sid,"branchId":"main","turnId":null,"requestId":null,
         "text":"","textOffset":0,"thinking":"","thinkingOffset":0,"tools":[]});
@@ -2606,7 +2605,16 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         other.notice("session.model.progress").await["params"],
         empty
     );
-    assert_eq!(session.sequence("main").unwrap(), head);
+    let persisted = dim_agent_runtime::testing::chain_events(&session, "main", ..)
+        .await
+        .unwrap();
+    assert!(
+        persisted.iter().all(|event| matches!(
+            event.kind,
+            EventKind::BranchStart(_) | EventKind::InputMessage(_) | EventKind::InputApplied(_)
+        )),
+        "{persisted:?}"
+    );
 
     let mut legacy = Client::new_version(&server, false, 2).await;
     let created = legacy.rpc("session.create", create(json!([]))).await;

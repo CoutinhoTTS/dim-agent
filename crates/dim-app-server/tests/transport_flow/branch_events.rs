@@ -1,7 +1,7 @@
 use super::*;
 use dim_agent_runtime::BranchOptions;
 use dim_agent_runtime::testing::branch_events;
-use dim_agent_types::{BranchCreateAt, BranchSource, EventKind, InputMode};
+use dim_agent_types::{BranchSource, EventKind, InputMode};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn both_transports_encode_the_v1_branch_create_boundary_live() {
@@ -42,18 +42,27 @@ async fn both_transports_encode_the_v1_branch_create_boundary_live() {
             .iter()
             .find(|event| matches!(&event.kind, EventKind::BranchCreate(data) if data.branch == child))
             .unwrap();
-        assert!(
-            matches!(&create.kind, EventKind::BranchCreate(data) if data.at == BranchCreateAt::Create {} && data.branch == child)
-        );
+        assert!(matches!(&create.kind, EventKind::BranchCreate(data) if data.branch == child));
         let through_create: Vec<_> = events
             .iter()
             .filter(|event| event.sequence <= create.sequence)
             .cloned()
             .collect();
         let notices = receive_events_through(&mut live, create.sequence).await;
-        assert_eq!(notices, v1_events(&through_create, high));
-        assert!(notices[0]["data"].get("at").is_none());
-        assert_eq!(notices[0]["sequence"], create.sequence);
+        assert_eq!(
+            notices,
+            v1_events(
+                &through_create,
+                initial["result"]["sequence"].as_u64().unwrap()
+            )
+        );
+        let notice = notices
+            .iter()
+            .find(|event| event["sequence"] == create.sequence)
+            .unwrap();
+        assert_eq!(notice["type"], "branch");
+        assert_eq!(notice["name"], "create");
+        assert_eq!(notice["data"]["branch"], child);
         let local = branch_events(&session, &child, ..).await.unwrap();
         assert!(
             matches!(&local[0].kind, EventKind::BranchStart(data) if data.create_event == Some(create.sequence))

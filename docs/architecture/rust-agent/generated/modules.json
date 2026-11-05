@@ -352,6 +352,7 @@
       "file": "crates/dim-agent-capabilities/src/adapters.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "tokio::select",
         "vec"
       ]
@@ -7808,6 +7809,13 @@
     },
     {
       "from": "dim_agent_capabilities::adapters",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path crate::context_block::is_state_or_rule"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::adapters",
       "to": "dim_agent_capabilities::context_model",
       "references": [
         "path crate::context_model::adopted_config"
@@ -11869,6 +11877,13 @@
         "path PromptScope::Branch",
         "path PromptScope::Task",
         "path PromptScope::Turn"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_suggestion",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path crate::context_block::is_state_or_rule"
       ]
     },
     {
@@ -25574,6 +25589,13 @@
       "references": [
         "path name_of",
         "use dim_agent_runtime::names::name_of"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript::tests",
+      "to": "dim_app_server",
+      "references": [
+        "path crate::register_names"
       ]
     },
     {
@@ -41636,6 +41658,10 @@
     {
       "module": "dim_agent_aimux::recording",
       "path": "F::Output"
+    },
+    {
+      "module": "dim_agent_capabilities::adapters",
+      "path": "AsRef::as_ref"
     },
     {
       "module": "dim_agent_capabilities::file_storage::windows",

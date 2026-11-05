@@ -22,7 +22,7 @@ impl Connection {
             loop {
                 tokio::select! {
                     _ = connection.closed.cancelled() => break,
-                    _ = availability.changed() => {},
+                    result = availability.changed() => if result.is_err() { break; },
                     _ = async { match &mut revisions { Some(revisions) => { let _ = revisions.changed().await; }, None => std::future::pending().await } } => {},
                 }
                 let current = ctx.get::<UiExtensions>();

@@ -11,6 +11,7 @@ const SUMMARIZER: &str = "You summarize a coding session";
 #[derive(Default)]
 struct Provider {
     requests: std::sync::Mutex<Vec<Value>>,
+    summary: Option<String>,
     hold: AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
@@ -33,7 +34,10 @@ async fn completion(State(provider): State<Arc<Provider>>, Json(body): Json<Valu
         provider.release.notified().await;
     }
     let text = if summarizer {
-        "SUMMARY OF EARLIER TURNS"
+        provider
+            .summary
+            .as_deref()
+            .unwrap_or("SUMMARY OF EARLIER TURNS")
     } else {
         "ok"
     };
@@ -227,8 +231,7 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(overhead > 0.);
-        // One turn stays below the threshold; two cross it.
-        let size = (threshold - overhead) / 2.;
+        let size = (threshold - overhead) / 4.;
         let missing = client
             .rpc("session.context.compact", json!({"sessionId":sid}))
             .await;
@@ -728,7 +731,10 @@ async fn summary_reasoning_comes_from_factory_configuration() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_replacement() {
     tokio::time::timeout(Duration::from_secs(120), async {
-        let provider = Arc::new(Provider::default());
+        let provider = Arc::new(Provider {
+            summary: Some("summary ".repeat(256)),
+            ..Default::default()
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = listener.local_addr().unwrap();
         let app = Router::new()
@@ -750,7 +756,7 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
         // threshold at 0.8 × (window − output) while the window still leaves
         // room for the requested output, so the turn meets no output-budget
         // recovery and the threshold skip is what it measures.
-        let (context_window, max_output_tokens) = (2_900, 200);
+        let (context_window, max_output_tokens) = (4_000, 1_000);
         let capabilities = dim_agent_types::CatalogCapabilities::with_limits(
             context_window,
             max_output_tokens,

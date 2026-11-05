@@ -777,12 +777,15 @@ async fn a_suggestion_reuses_the_turn_request_and_changes_nothing() {
         "the suggestion never entered history"
     );
     assert_eq!(
-        last.messages.len(),
-        prefix + 2,
-        "assistant and the new input"
+        serialized(&last.messages[..prefix]),
+        serialized(&call.request.messages)
     );
+    let tail: Vec<_> = last.messages[prefix..].iter().filter(|message| {
+        !matches!(&message.content, MessageContent::Text(text) if message.role == Role::User && dim_agent_capabilities::context_block::is_state_or_rule(text))
+    }).collect();
+    assert_eq!(tail.len(), 2, "assistant and the new conversational input");
     assert_eq!(
-        serialized(&last.messages[prefix]),
+        serialized(tail[0]),
         serialized(&suggestion.messages[prefix]),
         "the completed assistant message is history's own"
     );
@@ -956,11 +959,11 @@ async fn a_sharer_answers_disabled_when_the_shared_preflight_is_disabled() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
+    let mut writer = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
-    let mut writer = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());
@@ -994,10 +997,10 @@ async fn a_sharer_answers_compaction_due_when_the_shared_preflight_refuses() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());
@@ -1029,10 +1032,10 @@ async fn a_sharer_is_accepted_when_the_shared_preflight_starts() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());
@@ -1130,10 +1133,10 @@ async fn disabling_during_the_usage_check_starts_no_request() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());
@@ -1157,10 +1160,10 @@ async fn dismissing_during_the_usage_check_starts_no_request() {
     let fixture =
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
+    let mut other = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
-    let mut other = attach(&fixture, &id).await;
 
     held.hold();
     let asked = (id.clone(), turn.clone());
@@ -1225,6 +1228,20 @@ async fn an_invalid_reply_clears_invalid() {
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
+
+    let mut request = (*fixture.model.requests.lock().unwrap()[0]).clone();
+    for text in [
+        "<dim-state source=\"test\">Current runtime state</dim-state>",
+        "<dim-rule source=\"test\">A runtime rule</dim-rule>",
+    ] {
+        request
+            .messages
+            .push(Arc::new(dim_agent_types::Message::text(Role::User, text)));
+    }
+    assert_eq!(
+        prompt_suggestion::last_user_text(&request).as_deref(),
+        Some("add a test")
+    );
 
     for reply in [
         "run the tests\nand then commit",

@@ -3,6 +3,16 @@
 //! renderer places that text verbatim.
 use dim_agent_types::*;
 
+/// Whether text is a runtime state or rule envelope rather than a conversational input.
+pub fn is_state_or_rule(text: &str) -> bool {
+    [
+        ("<dim-state ", "</dim-state>"),
+        ("<dim-rule ", "</dim-rule>"),
+    ]
+    .iter()
+    .any(|(start, end)| text.starts_with(start) && text.ends_with(end))
+}
+
 /// A raw input block carrying `text`, optionally in effect under `key`.
 pub fn raw(text: String, key: Option<String>) -> InputBlock {
     InputBlock::Raw {

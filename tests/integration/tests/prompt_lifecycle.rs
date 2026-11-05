@@ -2086,7 +2086,11 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
             .unwrap();
         assert_eq!(request.provider_id, selection.provider_id);
         assert_eq!(request.model_id, selection.model_id);
-        assert_eq!(request.config, selection.config);
+        let expected_config = selection.config.clone().or(Some(ModelConfig {
+            max_tokens: Some(6789.),
+            ..Default::default()
+        }));
+        assert_eq!(request.config, expected_config);
         assert_eq!(request.metadata, selection.metadata);
         assert_eq!(request.tools.as_deref(), tools.as_ref());
     }

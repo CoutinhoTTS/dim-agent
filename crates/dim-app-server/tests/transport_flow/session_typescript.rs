@@ -161,10 +161,13 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         "invalid calls must not reach the model"
     );
     let after = chain_events(&session, "main", ..).await.unwrap();
-    assert_eq!(
-        before.iter().map(|event| &event.id).collect::<Vec<_>>(),
-        after.iter().map(|event| &event.id).collect::<Vec<_>>()
-    );
+    assert_eq!(&after[..before.len()], before.as_slice());
+    assert!(after[before.len()..].iter().all(|event| match &event.kind {
+        EventKind::InputMessage(data) => data.user.is_none() && data.blocks.iter().all(|block| matches!(block,
+            dim_agent_types::InputBlock::Raw { text, .. } if dim_agent_capabilities::context_block::is_state_or_rule(text))),
+        EventKind::InputApplied(_) => true,
+        _ => false,
+    }), "{after:?}");
     let pending = client
         .send(
             "session.auxiliary.complete",
@@ -762,6 +765,7 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         call(&mut client, "session.observer.release_session", release).await,
         json!(false)
     );
+    session.idle("main").await.unwrap();
     assert!(session.unload_if_idle().await.unwrap());
 
     let id = new_session(&mut client, json!(["echo"])).await;
@@ -791,6 +795,7 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         call(&mut client, "session.observer.release_session", release).await,
         json!(false)
     );
+    session.idle("main").await.unwrap();
     assert!(session.unload_if_idle().await.unwrap());
     drop(client);
     server.shutdown();
@@ -1088,7 +1093,7 @@ impl ModelDriver for CheckedModel {
             .cloned()
             .collect();
         let _ = self.tools.send(tools);
-        let batch = request.messages.last().is_some_and(|message| {
+        let batch = EchoModel::input(&request).is_some_and(|message| {
             message.role == Role::User
                 && match &message.content {
                     MessageContent::Text(text) => text == "batch",

@@ -882,6 +882,8 @@ async fn reloading_workspace_tools_answers_the_page_method_with_service_reloadin
     // `exec/started` is the next one; the task this test pages is registered
     // after the reload, in the new generation.
     let held_task = next_exec_started(&mut shell).await;
+    let session = shell.server.agent().unwrap().get_session(&sid).unwrap();
+    session.idle("main").await.unwrap();
     let text = format!(
         "tool:exec {}",
         json!({"command":"echo after","runInBackground":true,"timeoutMs":-1})
@@ -1448,7 +1450,24 @@ async fn a_private_run_replies_exec_bounded_output_and_writes_nothing() {
     assert!(output.starts_with("line1001\n") && output.ends_with("line2999\n"));
     assert_eq!(reply["result"]["truncated"], true);
 
-    assert_eq!(shell.through().await, before);
+    let session = shell
+        .server
+        .agent()
+        .unwrap()
+        .get_session(&shell.sid)
+        .unwrap();
+    let added = chain_events(&session, "main", before + 1..).await.unwrap();
+    assert!(
+        added.iter().all(|event| match &event.kind {
+            EventKind::InputMessage(data) =>
+                data.user.is_none()
+                    && data.blocks.iter().all(|block| matches!(block,
+            dim_agent_types::InputBlock::Raw { text, .. } if text.starts_with("<dim-state "))),
+            EventKind::InputApplied(_) => true,
+            _ => false,
+        }),
+        "{added:?}"
+    );
     shell.shutdown().await;
 }
 

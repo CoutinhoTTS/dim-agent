@@ -2719,8 +2719,6 @@ mod tests {
         }
     }
 
-    /// The model the strategy tests run on: one target, its capabilities
-    /// known, and no configuration of its own.
     fn fake_selection() -> ModelSelection {
         let snapshot: ModelCapabilitySnapshot = serde_json::from_value(json!({
             "target": {"providerId": "fake", "modelId": "fake"},
@@ -2733,7 +2731,10 @@ mod tests {
             provider_id: "fake".into(),
             model_id: "fake".into(),
             capability_snapshot: Some(snapshot),
-            config: None,
+            config: Some(ModelConfig {
+                max_tokens: Some(16_384.),
+                ..Default::default()
+            }),
             metadata: None,
         }
     }

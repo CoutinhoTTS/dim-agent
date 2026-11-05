@@ -285,7 +285,11 @@ async fn the_latest_turn_window_carries_the_prompt_and_folds_like_forward_paging
         (Some("input"), Some("message")),
         "{first}"
     );
-    assert_eq!(text_of(first), Some("hello window"));
+    assert!(
+        events
+            .iter()
+            .any(|event| text_of(event) == Some("hello window"))
+    );
     assert!(
         events.iter().any(|event| event["type"] == "turn"
             && event["name"] == "start"

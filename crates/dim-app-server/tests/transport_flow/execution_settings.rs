@@ -117,8 +117,21 @@ async fn execution_settings_decide_the_next_process_boundary() {
         }};
     }
 
-    let unreadable = home.join("execution.json");
-    std::fs::create_dir(&unreadable).unwrap();
+    let database = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "settings.read",
+                json!({"source":"execution","scope":"user"}),
+            )
+            .await,
+    );
+    assert_eq!(database
+        .execute(
+            "UPDATE settings_documents SET document = 'invalid' WHERE source = 'user/execution'",
+            [],
+        )
+        .unwrap(), 1);
     let unconfigured = run!(json!({"command":"printf x"}));
     assert_eq!(unconfigured.is_error, Some(true));
     assert_eq!(
@@ -130,7 +143,12 @@ async fn execution_settings_decide_the_next_process_boundary() {
         Some("isolation_config_invalid"),
         "{unconfigured:?}"
     );
-    std::fs::remove_dir(&unreadable).unwrap();
+    database
+        .execute(
+            "UPDATE settings_documents SET document = '{}' WHERE source = 'user/execution'",
+            [],
+        )
+        .unwrap();
 
     let backend = client.rpc("host.execution.backend", json!({})).await;
     assert_ok(&backend);

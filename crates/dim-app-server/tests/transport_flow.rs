@@ -756,7 +756,9 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         assert_ok(&created);
         let sid = created["result"]["sessionId"].as_str().unwrap();
         let session = agent.get_session(sid).unwrap();
-        assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+        let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_ok(&attached);
+        let attached_at = attached["result"]["sequence"].as_u64().unwrap();
 
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         let idle_events = chain_events(&session, "main", ..).await.unwrap();
@@ -764,7 +766,11 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
             &event.kind,
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn
         )));
-        assert!(v1_events(&idle_events, 0).is_empty());
+        assert!(
+            v1_events(&idle_events, 0)
+                .iter()
+                .all(|event| event["type"] != "stop")
+        );
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
         assert_eq!(attached["result"]["sessionId"], sid);
 
@@ -791,7 +797,7 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
         let stopped = chain_events(&session, "main", ..).await.unwrap();
-        let expected = v1_events(&stopped, 0);
+        let expected = v1_events(&stopped, attached_at);
         let last_business = expected.last().unwrap()["sequence"].as_u64().unwrap();
         live.extend(receive_events_through(&mut client, last_business).await);
         assert_eq!(
@@ -803,12 +809,12 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
                 .any(|pair| pair[1]["sequence"].as_u64().unwrap()
                     > pair[0]["sequence"].as_u64().unwrap() + 1)
         );
-        let high = session.sequence("main").unwrap();
         drop(client);
 
         let mut client = Client::new(&server, ws).await;
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
         assert_eq!(attached["result"]["sessionId"], sid);
+        let high = attached["result"]["sequence"].as_u64().unwrap();
         assert_ok(
             &client
                 .rpc("session.submit", json!({"sessionId":sid,"text":"resumed"}))
@@ -1322,7 +1328,9 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
     assert_ok(&created);
     let sid = created["result"]["sessionId"].clone();
     let session = agent.get_session(sid.as_str().unwrap()).unwrap();
-    assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+    let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
+    assert_ok(&attached);
+    let attached_at = attached["result"]["sequence"].as_u64().unwrap();
     assert_ok(
         &client
             .rpc(
@@ -1355,7 +1363,7 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
         .filter(|event| !event.kind.key().starts_with("stop/"))
         .cloned()
         .collect();
-    assert_eq!(v1_events(&business, 0), observed);
+    assert_eq!(v1_events(&business, attached_at), observed);
     assert!(
         history
             .iter()
@@ -1571,11 +1579,16 @@ async fn attach_replies_the_record_the_listing_shows_for_that_session() {
             .find(|entry| entry["sessionId"] == sid.as_str())
             .expect("the Session is listed")
             .clone();
-        for field in ["preview", "updatedAt", "closed"] {
+        let mut attached_record = attached["result"].clone();
+        assert!(
+            attached_record["sequence"].as_u64().unwrap() <= entry["sequence"].as_u64().unwrap()
+        );
+        attached_record.as_object_mut().unwrap().remove("sequence");
+        for field in ["preview", "updatedAt", "closed", "sequence"] {
             entry.as_object_mut().unwrap().remove(field);
         }
         assert_eq!(
-            attached["result"], entry,
+            attached_record, entry,
             "the attach reply is the listed record"
         );
         assert_eq!(attached["result"]["attachedClients"], 1);

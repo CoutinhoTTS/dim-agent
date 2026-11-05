@@ -1190,7 +1190,6 @@ async fn stored_directories_outlive_idle_instances() {
         }
         drop(connection);
         let first = agent.get_session(&ids[0]).unwrap();
-        let before = first.sequence("main").unwrap();
         assert_ok(
             &client
                 .rpc("session.detach", json!({"sessionId":ids[0]}))
@@ -1201,6 +1200,8 @@ async fn stored_directories_outlive_idle_instances() {
                 .rpc("session.attach", json!({"sessionId":ids[1]}))
                 .await,
         );
+        first.idle("main").await.unwrap();
+        let before = first.sequence("main").unwrap();
         assert!(first.unload_if_idle().await.unwrap());
         assert!(first.is_unloading());
         let connection = Connection::open(&database).unwrap();
