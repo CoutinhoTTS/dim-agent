@@ -405,6 +405,7 @@ ProjectionCheckpoint = {
 - **为什么修**：v23 起这列跟着"最后一次提交的最后一个事件"走。`session.attach`/恢复写入的 `branch/resume`、分支生命周期事件、配置与压缩批次，都会在没有用户活动时把 Session 抬到最前；恢复选择面板于是把"只是被恢复过"的 Session 排在用户刚说过话的 Session 前面。活动事件才是列表要回答的次序。
 - **读取或转换路径**：在现有的 `IMMEDIATE` 启动准入事务内，对结构恰为 v33、标记相符的库执行 `catalog::backfill`：每个 Session 已有的行保留（v23 起创建即写行），`refresh` 按本条规则重写 `updated_at_ms`，行缺失的 Session 以创建时间补写；不触碰任何其他行。更早的受支持格式先执行既有各步，再执行本步。失败回滚，整库不变。
 - **写入方**：写 `main` 批次的同一事务只在批次含活动事件时更新这一行，写该批次最新一条活动事件的 `create_at`；只含家事事件的批次不碰这一行（热路径不加读）。`session.fork` 在分叉事务内写 `session/forked`（活动），`refresh` 与回填同一规则，`0` 处分叉取创建时间。没有原生存储的守护进程经 `AgentIndex::session_summary` 用同一谓词对已装载 Session 求最新活动事件，两条列表不会给出不同答案（[目录 §3.3](session-catalog.md#33-sessionsummaries)）。
+- **回填代价**：`refresh` 为每个 Session 在 `main` 上按 `(session_id, branch_id, sequence)` 主键倒序读，直到第一条活动事件，候选的 `input/message` 体上各做一次 `json_extract`——不是旧的"读最后一行"。预览仍未决定的少数 Session 再走 v23 的预览窗口。一次性库上（2,300 个 Session，各 5 条活动与 5 条家事事件，约 2% 已有预览）整步约 0.25 秒，每个 Session 的行都重算；只在升级的那次启动支付。
 - **单向**：v33 守护进程以现有"unsupported SQLite schema … preserved"错误拒绝 v34 库；不降级。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v33 to v34; earlier dimcode versions cannot open it.`
 - **验证**：`storage_flow.rs` 的一次性 v33 库核对结构、标记与其余行逐行不变，`updated_at_ms` 被重写为最新活动事件的 `create_at`（尾部的 `branch/resume` 不再抬高它），没有活动事件的 Session 落在创建时间（`a_v33_store_recomputes_the_catalog_activity_time_on_upgrade`）；`upgrades_in_place_once` 各版本仍逐行核对。`transport_flow` 核对用户消息、完成的 turn 与非零处分叉都移动这一行，恢复（`branch/resume`）不移动，`session.summaries` 与 `session.catalog` 就同一值作答（`catalog_activity_time_follows_user_activity_not_housekeeping`、`an_unload_writes_nothing_and_the_restore_only_resumes` 与目录流程测试）。
 
@@ -740,7 +741,7 @@ ProjectionCheckpoint = {
   - 标记相符的 v21、v20、v19、v18、v17、v16、v15 或 v13 库，在同一事务内先走已有各步，再走本步，直接成为 v23。
   - 恰为 v23 的库直接打开。
   - 其他库（标记不符的 v22 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
-- **回填的一次性代价**：回填为每个 Session 读一次 `main`：按上面的活动规则取最新一条活动事件给出 `updated_at_ms`，没有活动事件的 Session 得到 `created_at_ms`；起始于前 256 个事件内的批次里找第一条用户输入作为 `preview`，找不到时得到 NULL 预览，都与创建时写下的一行相同。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。[#1099 v34 格式决定](#1099-v34-格式决定) 复用同一个回填，只重写 `updated_at_ms`。
+- **回填的一次性代价**：回填为每个 Session 读一次 `main`：按上面的活动规则取最新一条活动事件给出 `updated_at_ms`，没有活动事件的 Session 得到 `created_at_ms`；起始于前 256 个事件内的批次里找第一条用户输入作为 `preview`，找不到时得到 NULL 预览，都与创建时写下的一行相同。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。[#1099 v34 格式决定](#1099-v34-格式决定) 复用这段预览回填与缺行补写，`updated_at_ms` 改取最新一条活动事件，代价见该节。
 - **单向**：不做备份，与之前各步相同。旧守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝升级后的库。
 - **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v22 to v23; earlier dimcode versions cannot open it.`
 - **验证**：
@@ -750,7 +751,7 @@ ProjectionCheckpoint = {
   - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最新一条活动事件走，`preview` 不被覆盖。
   - 预览的窗口与最终性：承载第 256 个事件的批次里紧接 256 之后的用户输入升级后即为预览；第一条用户消息在起始于 256 之后的批次里的 Session 升级后没有预览，此后的批次也不写它；第一条用户消息只有图片的 Session 保持 NULL，之后的消息不填它。
   - `session.create` 写下的一行有创建时间与 NULL 预览，创建回滚后没有这一行。
-  - 删除与分叉在各自的事务内维护这一行；非零处分叉的一行以该事务最后写入的 `session/forked` 的 `create_at` 为 `updated_at_ms`，`0` 处分叉的一行为创建时间与 NULL。
+  - 删除与分叉在各自的事务内维护这一行；非零处分叉的一行以该事务写入的最新一条活动事件——`at + 1` 处的 `session/forked`——的 `create_at` 为 `updated_at_ms`，`0` 处分叉的一行为创建时间与 NULL。
   - `withPreview` 的读取按 `EXPLAIN QUERY PLAN` 使用 `session_catalog_with_preview`，前面有多少无预览的行都不改变它的代价。
   - 从不打开用户已有的库。
 

@@ -1531,7 +1531,10 @@ command cannot see a closed Session; it therefore stops before any delete, print
 so a server that refuses one refuses both, and a delete that answers `invalid_params`
 before anything was deleted stops the same way. It
 selects with one of two selectors and reads both from the `updatedAt` of
-`session.summaries`, the Session's last activity:
+`session.summaries`, the Session's activity time ([session catalog](appserver/session-catalog.md#32-order-cursor-and-paging)),
+not the time of its last stored event: attaching, restoring and every other housekeeping
+event leave it alone, so a Session that was only attached or resumed keeps its earlier
+time and can become eligible for deletion:
 
 | Selector | Selection |
 | --- | --- |
