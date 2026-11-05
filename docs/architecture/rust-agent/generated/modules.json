@@ -34484,7 +34484,8 @@
         "path bordered",
         "use crate::ui::render::panel::IDLE_MARKER",
         "use crate::ui::render::panel::SELECTED_MARKER",
-        "use crate::ui::render::panel::bordered"
+        "use crate::ui::render::panel::bordered",
+        "use crate::ui::render::panel::visible_width"
       ]
     },
     {
