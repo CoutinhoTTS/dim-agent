@@ -89,9 +89,9 @@ Command completion remains authoritative through `exec/ended`. Its
 sanitized tail the live read shows (the last 2,000 lines within 50 KiB, with
 the existing terminal-newline behavior), and `previewTruncated` says those
 bounds left something out — bytes outside the captured tail buffer, or a
-sanitized tail the rule cut. Both come from the same settled capture as the
-result's model-readable `Preview:` section, so they cannot differ; a command
-that printed nothing carries `preview: ""`. A recovered end — a task whose
+sanitized tail the rule cut. Both are computed from the same settled capture as
+the result's model-readable `Preview:` section; a command that printed
+nothing carries `preview: ""`. A recovered end — a task whose
 owner restarted — carries neither member, because its final output is unknown
 and its file stays readable through `session.exec.output.page`. The members
 are additive `structuredContent` fields: no event, method, feature entry or
