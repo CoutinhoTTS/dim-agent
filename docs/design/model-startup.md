@@ -28,7 +28,7 @@ contracts; this document does not introduce a second model backend.
 | `DIM_AUTH_TOKEN` | Bearer authentication, independent of the message format. |
 | `DIM_CUSTOM_HEADERS` | Additional headers, one `Name: Value` per line. Parse names case-insensitively; reject invalid or repeated names and conflicting generated authentication headers. Split a line at its first colon only. |
 | `DIM_MAX_CONTEXT_TOKENS` | Positive safe integer declaring the adopted context capacity, not a promise that the server supports a larger window. |
-| `DIM_MAX_OUTPUT_TOKENS` | Positive safe integer declaring output capacity where the catalog does not declare it; it cannot exceed the adopted context capacity. |
+| `DIM_MAX_OUTPUT_TOKENS` | Positive safe integer declaring output capacity where the catalog does not declare it. It is a declared fact, so it may equal or exceed the adopted context capacity; the request output allowance is derived from the final declared pair (see [ContextCompaction §5.1](plugins/ContextCompaction.md#51-productcontextmodel)) and always leaves a positive input budget. |
 | `--autocompact auto\|TOKENS` / `DIM_AUTO_COMPACT_WINDOW` | Separate compaction window, not model capacity. The explicit flag wins. Accept positive token counts with optional `k`/`m` suffixes; `auto` uses the existing model-derived threshold. Do not impose Claude's vendor-specific 100K minimum or 1M maximum on Dim models. Reserve the existing output allowance. |
 
 Flags and environment overrides are read only for Session execution, not help,

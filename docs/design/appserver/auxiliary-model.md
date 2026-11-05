@@ -86,8 +86,9 @@ profile).
   text blocks form `text`.
 - `stopReason` has three values. The Rust `ModelStopReason` also has `ToolUse`; since no tool
   is offered, a tool stop is a provider defect and the call fails with `failed`.
-- `maxOutputTokens` caps the reply; the default is the model's limit, clamped to the model's
-  `max_output_tokens`.
+- `maxOutputTokens` caps the reply; the default and the cap are the model's adopted output
+  allowance (Provider's derivation from the declared window and maximum, so the input budget
+  stays positive), not the declared maximum itself.
 - Non-streaming: the consumer needs the whole text.
 - Cancellation: the consumer drops the call (or sends the bridge protocol's cancel request).
   The service has no timeout of its own; the budget is the consumer's.
@@ -245,6 +246,6 @@ takes it as a request parameter. It is decided with the `/settings` design, not 
    namespace remains unavailable.
 8. The model-config profile provides and runs the operation from its own catalog and the
    connection its provider names: a call sends the request to the configured model with
-   `maxTokens` clamped to the model's `max_output_tokens`; an undeclared model is
-   `model_unavailable` with no request sent; a Session part and a Session's automatic title
-   both reach it in that profile.
+   `maxTokens` clamped to the model's adopted output allowance (derived from the file's
+   declared pair); an undeclared model is `model_unavailable` with no request sent; a Session
+   part and a Session's automatic title both reach it in that profile.

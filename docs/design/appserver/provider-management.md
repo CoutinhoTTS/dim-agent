@@ -406,6 +406,19 @@ workspace that built a value through `ModelCapabilities::default()` or
 that also sets another field keeps the struct literal and takes that constructor
 as its base.
 
+The two declared limits are facts, not a request allowance. Provider derives the
+adopted output allowance as `max(1, min(declared maxOutputTokens, 131,072,
+contextWindow − min(16,000, contextWindow / 2)))`
+(`dim-agent-capabilities::context_model::output_allowance`), so a declaration at or
+above the window is accepted and still leaves a positive input budget. Every
+adoption writes that value to the configuration's `maxTokens`: the catalog read,
+static and managed selections, startup overrides and the model-file profile; the
+auxiliary target reads the same value. `capabilities.maxOutputTokens` keeps the
+declared fact. A stored `context/configured` configuration whose `maxTokens` is
+absent or above the rule is repaired when a request is built from it; the stored
+fact is not rewritten, so a Session adopted before this rule resumes and compacts
+normally.
+
 On the wire, `ProviderModel.capabilities` in `provider.catalog` and
 `models[].model.capabilities` in `provider.management` carry `contextWindow` and
 `maxOutputTokens` as optional numbers: an absent key is the undeclared value, and
@@ -900,7 +913,7 @@ formats retain their existing rejection and byte-preservation rules.
 | Credential, base URL, headers, proxy, timeout | Current connection is resolved on the next request; already-issued I/O uses its admitted connection |
 | Descriptor/capability edits or saved preferences | Adopted snapshot stays unchanged; changes apply on the next explicit adoption, preferences only when passed |
 | Disable/delete Provider or model | Next request/adoption fails unavailable/not found; no forced switch or cross-owner reference rewrite |
-| A limit declared, or its source removed | An adopted Session keeps its snapshot. With a limit undeclared, the next request fails before credentials or network I/O and names the missing limits; after both are declared, selecting the model adopts them (§3.5) |
+| A limit declared, or its source removed | An adopted Session keeps its snapshot. With a limit undeclared, the next request fails before credentials or network I/O and names the missing limits; after both are declared, selecting the model adopts them (§3.5). The request output allowance is re-derived from the kept snapshot at every request, never from a stored value above the rule |
 | Effective route change from refresh or an endpoint override | A different adopted route stamp fails with a diagnostic to select the model again. An unstamped Session uses the current route on its next request; either edit can break protocol-bound history or lose effort/tier options mapped for the old protocol |
 
 For static New API selection, Provider stamps the chosen `ModelProtocol` string
@@ -986,7 +999,7 @@ not reported. Source bytes remain unchanged.
 | Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, untargeted F3 and Collaboration inherit preserve absence; inherit copies without creation-time resolution and checks a present stamp at the first request; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
-| Model limits | A probed model the descriptor leaves without a limit is listed with `missingLimits`, refused by selection, adoption and preferences, and becomes selectable with its declared window in the adopted snapshot after the CLI declares both; a bundled match stays declared; a managed model without limits keeps its reason instead of a substitute window; the model-file profile still refuses an entry that lacks either value |
+| Model limits | A probed model the descriptor leaves without a limit is listed with `missingLimits`, refused by selection, adoption and preferences, and becomes selectable with its declared window in the adopted snapshot after the CLI declares both; a bundled match stays declared; a managed model without limits keeps its reason instead of a substitute window; the model-file profile still refuses an entry that lacks either value; an output declared at or above the window is accepted, the adopted configuration carries the derived allowance, and the snapshot keeps the declaration |
 | Selectable read | The read equals the set `select`/`configuration` accept at the same snapshot for the same providers; a disabled model, a disabled Provider, an unavailable model, a model with no `text` modality, a non-chat model on another driver, a route-less model and a signed-out account are absent while their Provider still answers; each returned `capabilities.modalities` equals the catalog model's declared set; a model with an undeclared limit is absent rather than making the read fail; managed and static providers both appear; a mock endpoint receives no request; a write changes the next read and not an earlier reply; cancelling the token and Provider close use the existing errors |
 | Stored selection | For one admitted static record and bundled catalog, `stored_selection` accepts exactly the model IDs `select`/`configuration` accept and returns the same protocol and adopted capabilities; fixed drivers and New API explicit, inferred, unsupported and ambiguous routes; missing, disabled, unavailable, non-text, disabled-Provider, missing-credential and undeclared-limit models are refused; an account-owned record is refused; a mock endpoint receives no request; the Migration provider/selection flow and `provider.import_legacy` report the same outcomes through the shared contract |
 | Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
