@@ -3,8 +3,10 @@
 //! generation owed before any live fact.
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use dim_agent_runtime::TimelineQueryDirection;
 use dim_agent_types::{BranchCreateAt, BranchCreateData, BranchSource, InputMode};
 use support::parts::*;
 use support::texts;
@@ -362,6 +364,238 @@ async fn pursuit_6_7_10_a_reload_creates_no_second_evaluator() {
             .iter()
             .all(|block| !block.text.contains(r#"by="evaluator""#)),
         "foreign or stale conclusions decide nothing"
+    );
+    env.close().await;
+}
+
+/// ADR 020 D3: the rebuild reads the kinds the fold consumes (A.6), never the
+/// whole branch. The restored branch's request and step facts stay unread, and
+/// the goal folded before them still decides the turn it ended.
+#[tokio::test]
+async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
+    // `branch.rs`'s `KEYS`: the fold's kinds and the Dispatcher's subscription.
+    const KEYS: [&str; 11] = [
+        "branch/start",
+        "session/forked",
+        "branch/create",
+        "branch/create-failed",
+        "branch/ended",
+        "input/message",
+        "input/consumed",
+        "input/deleted",
+        "turn/start",
+        "turn/end",
+        "stop/interrupt",
+    ];
+    let env = Env::start_refusing().await;
+    let mut seed = env.seed_new("load-kinds").await;
+    let (objective, status) = texts::set_blocks("main", "ship it");
+    let set = seed.append(
+        "main",
+        message(
+            vec![
+                raw(&objective, Some("goal:objective"), false),
+                raw(&status, Some("goal:status"), false),
+            ],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::TurnStart(dim_agent_types::TurnStartData {
+            turn_id: "work".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    // Facts the fold never reads: the request body and the step rows a turn
+    // leaves between its start and its end.
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::ModelCall(dim_agent_types::ModelCallData {
+            turn_id: "work".into(),
+            request_id: "r1".into(),
+            request: Arc::new(dim_agent_types::ModelRequest::new(
+                "test",
+                "test-model",
+                Vec::new(),
+            )),
+            configuration: None,
+            prompt: None,
+        }),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::Text(dim_agent_types::DeltaData {
+            turn_id: "work".into(),
+            request_id: "r1".into(),
+            delta: "checking".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::ToolResult(dim_agent_types::ToolResultData {
+            turn_id: "work".into(),
+            request_id: "r1".into(),
+            call_event_id: None,
+            results: Vec::new(),
+        }),
+    );
+    let end = seed.append(
+        "main",
+        dim_agent_types::EventKind::TurnEnd(dim_agent_types::TurnEndData {
+            turn_id: "work".into(),
+            outcome: dim_agent_types::TurnOutcome::Completed {
+                reason: "stop".into(),
+            },
+        }),
+    );
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-kinds").await;
+    // The continuation the goal owes the ended turn proves the rebuild folded
+    // the goal block and its status, which sit before the noise.
+    let continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    assert_eq!(
+        continuation.text,
+        texts::continuation("main", 1, 20, end.sequence),
+        "the fold is the one the kinds behind the noise leave"
+    );
+    let events = env.all_events("main").await;
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.key()).collect();
+    for kind in ["model/call", "step/text", "step/tool-result"] {
+        assert!(kinds.contains(&kind), "the history holds {kind}: {kinds:?}");
+    }
+
+    let expected: Vec<String> = KEYS.iter().map(|kind| (*kind).to_owned()).collect();
+    let rebuilds: Vec<Read> = env
+        .reads()
+        .into_iter()
+        .filter(|read| read.include_publishing)
+        .collect();
+    assert!(
+        !rebuilds.is_empty(),
+        "the restore ran the rebuild and the store saw its read"
+    );
+    for read in rebuilds {
+        assert_eq!(
+            read.branch, "main",
+            "the rebuild reads the branch it folds: {read:?}"
+        );
+        assert!(
+            !read.kinds.is_empty(),
+            "the rebuild names the kinds it folds: {read:?}"
+        );
+        assert_eq!(
+            read.kinds, expected,
+            "the rebuild reads exactly the fold's kinds: {read:?}"
+        );
+    }
+    env.close().await;
+}
+
+/// The inherited goal check reads one ancestor at a time, each page bounded
+/// below the one before it, so its reads stay proportional to the prefix
+/// rather than to its square, and none of them is keyed on the branch being
+/// opened (A11).
+#[tokio::test]
+async fn e2_an_inherited_check_reads_its_ancestor_page_by_page() {
+    let env = Env::start_refusing().await;
+    let mut seed = env.seed_new("load-inherited").await;
+    // More than three pages of inputs and no goal block anywhere: the check
+    // walks the whole prefix and finds nothing.
+    let mut inputs = Vec::new();
+    for index in 0..200 {
+        inputs.push(seed.append("main", user(&format!("note {index}"), InputMode::Queue)));
+    }
+    let cut = inputs.last().unwrap().sequence;
+    let create = seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchCreate(BranchCreateData {
+            at: BranchCreateAt::Sequence { sequence: cut },
+            source: BranchSource::Host {
+                operation_id: "test:child".into(),
+            },
+            branch: "child".into(),
+            prompt: "child work".into(),
+        }),
+    );
+    seed.append(
+        "child",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create.sequence),
+        }),
+    );
+    // The first Queue input a completed creation leaves on its line.
+    seed.append(
+        "child",
+        message(vec![raw("line work", None, false)], InputMode::Queue),
+    );
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-inherited").await;
+    // 200 inputs read 64 to a page, newest first from the cut: 64, 64, 64 and
+    // a short page of 8.
+    let pages = 200_usize.div_ceil(64);
+    let scan_read = |read: &Read| {
+        read.kinds == ["input/message".to_owned()]
+            && read.direction == TimelineQueryDirection::Descending
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if env.reads().iter().filter(|read| scan_read(read)).count() >= pages {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the inherited check finishes");
+    let writes = env.settled("child").await;
+    assert!(
+        writes.is_empty(),
+        "nothing is inherited, so the check writes nothing: {writes:?}"
+    );
+
+    let scan: Vec<Read> = env.reads().into_iter().filter(scan_read).collect();
+    assert_eq!(
+        scan.len(),
+        pages,
+        "one page per 64 facts, not one read per row: {scan:?}"
+    );
+    for read in &scan {
+        assert_eq!(
+            read.branch, "main",
+            "the check reads the ancestor, never the branch it opens: {read:?}"
+        );
+        assert_eq!(
+            read.offset, 0,
+            "a page starts at its own bound, not at an offset: {read:?}"
+        );
+        assert_eq!(read.limit, 64, "a page keeps 64 facts: {read:?}");
+        assert_eq!(
+            read.from, 1,
+            "a descending page is bounded by its through: {read:?}"
+        );
+        assert!(
+            !read.include_publishing,
+            "the check reads only what the ancestor published: {read:?}"
+        );
+    }
+    // Each page starts below the oldest fact of the one before it: the cut,
+    // then the fact before the 64th newest, the 128th, and the 192nd.
+    let bounds: Vec<u64> = scan.iter().map(|read| read.through).collect();
+    let expected: Vec<u64> = std::iter::once(cut)
+        .chain((1..pages).map(|page| inputs[199 - 64 * page].sequence))
+        .collect();
+    assert_eq!(
+        bounds, expected,
+        "the pages walk the prefix downward without skipping: {scan:?}"
     );
     env.close().await;
 }

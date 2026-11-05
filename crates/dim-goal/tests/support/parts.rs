@@ -19,7 +19,7 @@ use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BoxFuture, BranchOptions, Dispatcher, Feature,
     LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session, SessionConfig,
     StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQuery,
-    TimelineQueryPage, TimelineStore, TimelineTrace,
+    TimelineQueryDirection, TimelineQueryPage, TimelineStore, TimelineTrace,
 };
 use dim_agent_types::{
     AgentEvent, BranchSource, DeltaData, EventKind, InputBlock, InputMessageData, InputMode,
@@ -259,15 +259,35 @@ impl Seed {
     }
 }
 
-/// A store that can refuse [`TimelineStore::query`] for one branch while
-/// armed, returning the storage error a real store returns for a failed
-/// read; every other call delegates to a memory store.
+/// One read a [`RefusingStore`] saw: the branch it was keyed on, the
+/// request's selection and page, and the window the caller bounded it to. The
+/// store is below the chain composition, so every read here is one branch's
+/// own facts; a chain read shows as one entry per branch read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Read {
+    pub branch: String,
+    pub kinds: Vec<String>,
+    pub direction: TimelineQueryDirection,
+    pub include_publishing: bool,
+    /// The first sequence the window admits.
+    pub from: u64,
+    /// The last sequence the window admits.
+    pub through: u64,
+    pub offset: u64,
+    pub limit: u64,
+}
+
+/// A store that records every [`TimelineStore::query`] it receives, and that
+/// can refuse them for one branch while armed, returning the storage error a
+/// real store returns for a failed read; every other call delegates to a
+/// memory store.
 #[derive(Default)]
 pub struct RefusingStore {
     memory: MemoryTimelineStore,
     armed: AtomicBool,
     branch: Mutex<Option<String>>,
     refused: AtomicUsize,
+    reads: Mutex<Vec<Read>>,
 }
 
 impl RefusingStore {
@@ -284,6 +304,11 @@ impl RefusingStore {
     /// Queries refused since the store was created.
     pub fn refused(&self) -> usize {
         self.refused.load(Ordering::SeqCst)
+    }
+
+    /// Every read the store saw, in the order it received them.
+    pub fn reads(&self) -> Vec<Read> {
+        self.reads.lock().unwrap().clone()
     }
 }
 
@@ -344,12 +369,22 @@ impl TimelineStore for RefusingStore {
         from: u64,
         through: u64,
     ) -> BoxFuture<'a, dim_agent_runtime::Result<TimelineQueryPage>> {
+        self.reads.lock().unwrap().push(Read {
+            branch: key.branch_id.clone(),
+            kinds: query.kinds.clone(),
+            direction: query.direction,
+            include_publishing: query.include_publishing,
+            from,
+            through,
+            offset: query.offset,
+            limit: query.limit.get(),
+        });
         // The branch command also reads the parent; only the inherited goal
         // read has this shape (input messages, newest first).
         let refused = self.armed.load(Ordering::SeqCst)
             && self.branch.lock().unwrap().as_deref() == Some(key.branch_id.as_str())
             && query.kinds == ["input/message".to_owned()]
-            && query.direction == dim_agent_runtime::TimelineQueryDirection::Descending;
+            && query.direction == TimelineQueryDirection::Descending;
         if refused {
             self.refused.fetch_add(1, Ordering::SeqCst);
             return Box::pin(async move {
@@ -513,7 +548,8 @@ impl Env {
         Self::start_inner(None, None).await
     }
 
-    /// [`Self::start`] on a store that can refuse one branch's queries.
+    /// [`Self::start`] on a store that records every read Goal issues and can
+    /// refuse one branch's queries; nothing is refused unless a case arms it.
     pub async fn start_refusing() -> Self {
         Self::start_inner(Some(Arc::new(RefusingStore::default())), None).await
     }
@@ -525,6 +561,11 @@ impl Env {
 
     pub fn refusing(&self) -> &RefusingStore {
         self.refusing.as_ref().expect("a refusing store")
+    }
+
+    /// The reads the store recorded so far (empty on a store-less [`Self`]).
+    pub fn reads(&self) -> Vec<Read> {
+        self.refusing().reads()
     }
 
     pub fn gated(&self) -> &GatedStore {

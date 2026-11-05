@@ -3714,8 +3714,8 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
-             INSERT INTO agent_store_format VALUES (34);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 35));
+             INSERT INTO agent_store_format VALUES (35);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -3725,10 +3725,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v34"), "{note}");
-    assert!(note.contains("Daemon format: v33"), "{note}");
+    assert!(note.contains("Store format: v35"), "{note}");
+    assert!(note.contains("Daemon format: v34"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v34"), "{note}");
+    assert!(note.contains("Run a build supporting v35"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -3746,7 +3746,7 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29 (schema is v33)"), "{note}");
+    assert!(note.contains("Store format: v29 (schema is v34)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -3790,7 +3790,7 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v33 (format marker is missing or ambiguous)"),
+        note.contains("Store format: v34 (format marker is missing or ambiguous)"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -3954,11 +3954,22 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     if from >= 31 {
         write_documented_context_switches(&connection);
     }
-    if from >= 27 {
+    let member = from >= 27;
+    if member {
         connection
             .execute(
                 "INSERT INTO agent_sessions (session_id, config, created_at_ms, leader_session_id) \
                  SELECT 'member', config, created_at_ms, 's1' FROM agent_sessions WHERE session_id='s1'",
+                [],
+            )
+            .unwrap();
+        // A real store has a catalog row from creation for every Session, so
+        // the v34 data-only step's backfill leaves this one as it is.
+        connection
+            .execute(
+                "INSERT INTO session_catalog (session_id, updated_at_ms, preview, cwd) \
+                 SELECT 'member', created_at_ms, NULL, json_extract(config, '$.cwd') \
+                 FROM agent_sessions WHERE session_id='member'",
                 [],
             )
             .unwrap();
@@ -4034,7 +4045,10 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
             .query_row("SELECT count(*) FROM session_catalog", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        1
+        // The v34 data-only step keeps the `member` catalog row that exists
+        // from `from >= 27` (a real store has one per Session), so the count
+        // follows the same gate as the row's creation.
+        if member { 2 } else { 1 }
     );
 
     let db = SqliteStorage::open(database.0.clone()).unwrap();

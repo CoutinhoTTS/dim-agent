@@ -222,6 +222,18 @@ impl SettingsService {
             })
             .collect()
     }
+    /// The declarations of every registered JSON Schema source, by source
+    /// name, for the client's `settings.sources` listing.
+    pub fn declarations(&self) -> Vec<SourceDeclaration> {
+        self.sources
+            .all()
+            .iter()
+            .filter_map(|registered| match &registered.value.kind {
+                Kind::Declared(declared) => Some(declared.declaration().clone()),
+                Kind::Rust(_) => None,
+            })
+            .collect()
+    }
     /// Two sources sharing a name or a file would share a persisted document.
     fn insert(&self, ctx: &Ctx, name: &str, source: Source) -> rutis::Result<()> {
         let _guard = self.registering.lock().unwrap();
