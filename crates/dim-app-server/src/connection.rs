@@ -1209,7 +1209,7 @@ impl Connection {
                     return Err(RpcError::invalid("Model updates only support main"));
                 }
                 let mut startup_admission = None;
-                let model = if let Some(startup) = p.startup {
+                let mut model = if let Some(startup) = p.startup {
                     if self.entry != Entry::Local || rpc.config.product_home.is_none() {
                         return Err(RpcError::invalid(
                             "Model startup requires the protected-local product entry",
@@ -1304,6 +1304,19 @@ impl Connection {
                         }
                     }
                 };
+                // A model selection replaces the model, not the profile the
+                // branch adopted: the record names the profile whose prompt
+                // the branch runs, so it carries over until another adoption.
+                if let Some(agent_id) = session
+                    .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&p.branch_id)?
+                    .and_then(|state| state.configuration)
+                    .and_then(|configuration| configuration.metadata)
+                    .and_then(|metadata| metadata.agent_id)
+                {
+                    let mut metadata = model.metadata.take().unwrap_or_default();
+                    metadata.agent_id = Some(agent_id);
+                    model.metadata = Some(metadata);
+                }
                 let id = dim_agent_types::ModelId {
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),

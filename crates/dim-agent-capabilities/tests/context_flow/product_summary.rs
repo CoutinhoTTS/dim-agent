@@ -1192,6 +1192,7 @@ async fn startup_summaries_keep_selection_and_strategy_reasoning_without_narrowi
                 }),
                 auto_compact_window: Some(2_000),
             }),
+            agent_id: None,
             extensions: serde_json::from_value(
                 serde_json::json!({"providerRoute":"captured-route", "requestId":"turn-model-call"}),
             )

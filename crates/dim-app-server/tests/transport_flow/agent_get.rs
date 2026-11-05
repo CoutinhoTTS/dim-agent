@@ -218,10 +218,10 @@ async fn agent_get_reads_the_adopted_profile_by_branch_and_after_a_restart() {
     server.join().await.unwrap();
 }
 
-/// #1172: a preference-only update keeps the recorded profile, and a model
-/// reselection writes a configuration without it.
+/// #1172: a preference-only update and a model selection keep the recorded
+/// profile; both replace the model, not the prompt the branch runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_preference_update_keeps_the_profile_and_a_model_reselection_clears_it() {
+async fn a_preference_update_and_a_model_selection_keep_the_profile() {
     use dim_agent_capabilities::{
         model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
     };
@@ -313,7 +313,7 @@ async fn a_preference_update_keeps_the_profile_and_a_model_reselection_clears_it
     assert_eq!(preference["result"]["outcome"], "adopted");
     assert_eq!(
         adopted(&mut client, &id, "main").await,
-        Some(reviewer),
+        Some(reviewer.clone()),
         "a preference-only update keeps the profile"
     );
 
@@ -325,9 +325,13 @@ async fn a_preference_update_keeps_the_profile_and_a_model_reselection_clears_it
         .await;
     assert_ok(&reselected);
     assert_eq!(
+        reselected["result"]["model"]["modelId"], "beta",
+        "{reselected}"
+    );
+    assert_eq!(
         adopted(&mut client, &id, "main").await,
-        None,
-        "a model reselection writes no profile record"
+        Some(reviewer),
+        "a model selection keeps the profile whose prompt the branch runs"
     );
     drop(client);
     server.shutdown();

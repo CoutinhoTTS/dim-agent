@@ -323,13 +323,19 @@ cross-language exposure remains C4's work, not an assumed F3 prerequisite.
 
 **The record and its readback.** The adoption stamps the profile's id into
 `metadata` of the `context/configured` settings it publishes, materializing the
-previous configuration when the profile names no model. A model selection
-resolved by Provider writes a fresh metadata without the record; a preference-only
-update copies the metadata it keeps, so `/effort` and `/fast` retain it and a new
-model choice clears it. An identical adoption still writes nothing and reports
-`unchanged`: the record is part of the settings the comparison covers. The record
-is the adopted configuration's own metadata, not a new identity — `SessionInfo.agentId`
-stays the Session's creation agent.
+previous configuration when the profile names no model. The record names the
+profile this branch last adopted, whose prompt the branch runs. A model selection
+or a preference update carries it into the new configuration, so `/model`,
+`/effort` and `/fast` keep it; only another adoption replaces it, and a profile
+without a model keeps it too. An identical adoption still writes nothing and
+reports `unchanged`: the record is part of the settings the comparison covers.
+The record is the adopted configuration's own metadata, not a new identity —
+`SessionInfo.agentId` stays the Session's creation agent.
+
+The record can name a profile that has since been removed or closed: the branch
+still runs that profile's prompt, so `session.agent.get` still answers its id. A
+client that does not find the id in `agent.list` shows it as a removed profile,
+not as `SessionInfo.agentId`, whose prompt is not the one that runs.
 
 `session.agent.get` answers the record from the branch's published `PromptSnapshot`,
 the derived value `session.attach` reads its `model` from, so a child cut after the
@@ -365,7 +371,7 @@ inherit their cut, and existing branches do not follow later main changes.
 
 | # | Decision | Rejected alternative | Why |
 | --- | --- | --- | --- |
-| D1 | An adoption from a profile records the profile's id in the adopted configuration's `metadata`, and `session.agent.get` answers that record | A profile reference kept by the Agents Session entry, a new adoption event, or a write-only profile | Clients need a readback that survives another client, reconnect and restart, and the adopted configuration is already the branch's durable fact; its metadata is descriptive data on that fact, not a new identity beside `SessionInfo.agentId`. Entry state would be lost on unload and would need its own event, and a write-only profile leaves the client unable to tell which profile the branch runs |
+| D1 | An adoption from a profile records, in the adopted configuration's `metadata`, the id of the profile whose prompt the branch runs; a model selection or a preference update carries it and only another adoption replaces it, and `session.agent.get` answers it | A profile reference kept by the Agents Session entry, a new adoption event, or a write-only profile | Clients need a readback that survives another client, reconnect and restart, and the adopted configuration is already the branch's durable fact; its metadata is descriptive data on that fact, not a new identity beside `SessionInfo.agentId`. The record rides the configuration because the profile's prompt does: clearing it on a model change would label the branch with a creation agent whose prompt is not running. Entry state would be lost on unload and would need its own event, and a write-only profile leaves the client unable to tell which profile the branch runs |
 
 ## Ordering and failure
 
