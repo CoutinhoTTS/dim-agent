@@ -967,6 +967,17 @@ fn import_preview_project() -> Value {
     })
 }
 
+/// The rows [`import_preview`] prints, one per entry in the document's order.
+/// `--yes` prints them too, before the applied rows.
+const IMPORT_PREVIEW_ROWS: &str = "\"keeps\"\tidentical\tstdio\t—\t—\t—\t—\n\
+    \"docs\"\tchanged\tstdio\targs:array, enabled:boolean\tx-extra:kept-unused\t—\t—\n\
+    \"taken\"\tconflict\thttp\turl:string\t—\t—\t—\n\
+    \"broken\"\tinvalid\t—\t—\tauth.audience:dropped\t—\tbroken: type is stdio, http or sse\n";
+
+/// The rows [`import_preview_project`] prints.
+const IMPORT_PREVIEW_PROJECT_ROWS: &str = "\"keeps\"\tidentical\tstdio\t—\t—\t—\t—\n\
+    \"docs\"\tchanged\tstdio\targs:array, env:object\t—\targs, env\t—\n";
+
 /// `mcp import` previews through the owner: one row per entry with its
 /// status, changed and unsupported field names and error, then the unknown
 /// top-level members and the revision. The document's literal value goes to
@@ -998,13 +1009,7 @@ fn mcp_import_previews_every_status_without_printing_a_value() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(
-        stdout,
-        "\"keeps\"\tidentical\tstdio\t—\t—\t—\t—\n\
-         \"docs\"\tchanged\tstdio\targs:array, enabled:boolean\tx-extra:kept-unused\t—\t—\n\
-         \"taken\"\tconflict\thttp\turl:string\t—\t—\t—\n\
-         \"broken\"\tinvalid\t—\t—\tauth.audience:dropped\t—\tbroken: type is stdio, http or sse\n"
-    );
+    assert_eq!(stdout, IMPORT_PREVIEW_ROWS);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains("Columns: ID, status, transport, changed fields, unsupported fields, confirm fields, error."),
@@ -1022,8 +1027,9 @@ fn mcp_import_previews_every_status_without_printing_a_value() {
     assert!(!stderr.contains(IMPORT_TOKEN), "{stderr}");
 }
 
-/// `--yes` applies the default selection at the preview's revision: changed
-/// and identical entries import, conflict and invalid entries skip.
+/// `--yes` prints the preview first, then applies the default selection at
+/// the preview's revision: changed and identical entries import, conflict and
+/// invalid entries skip.
 #[test]
 fn mcp_import_yes_applies_the_default_selection() {
     let home = Home::new();
@@ -1063,12 +1069,18 @@ fn mcp_import_yes_applies_the_default_selection() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(
         stdout,
-        "\"keeps\"\tunchanged\tkeeps\n\
-         \"docs\"\timported\tdocs\n\
-         \"taken\"\tskipped\t—\n\
-         \"broken\"\tskipped\t—\n"
+        format!(
+            "{IMPORT_PREVIEW_ROWS}\"keeps\"\tunchanged\tkeeps\n\
+             \"docs\"\timported\tdocs\n\
+             \"taken\"\tskipped\t—\n\
+             \"broken\"\tskipped\t—\n"
+        )
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Applying the selection at this revision."),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("Imported 1, replaced 0, renamed 0, skipped 2, unchanged 1."),
         "{stderr}"
@@ -1126,10 +1138,12 @@ fn mcp_import_yes_applies_replace_and_rename() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(
         stdout,
-        "\"keeps\"\tunchanged\tkeeps\n\
-         \"docs\"\trenamed\tdocs2\n\
-         \"taken\"\treplaced\ttaken\n\
-         \"broken\"\tskipped\t—\n"
+        format!(
+            "{IMPORT_PREVIEW_ROWS}\"keeps\"\tunchanged\tkeeps\n\
+             \"docs\"\trenamed\tdocs2\n\
+             \"taken\"\treplaced\ttaken\n\
+             \"broken\"\tskipped\t—\n"
+        )
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -1138,9 +1152,9 @@ fn mcp_import_yes_applies_replace_and_rename() {
     );
 }
 
-/// A project import that needs literal confirmations stops before apply and
-/// names the entries and fields; `--confirm-literals` confirms exactly the
-/// fields the preview listed.
+/// A project import that needs literal confirmations prints the preview and
+/// then stops before apply, naming the entries and fields;
+/// `--confirm-literals` confirms exactly the fields the preview listed.
 #[test]
 fn mcp_import_project_needs_confirm_literals_before_applying() {
     let home = Home::new();
@@ -1168,7 +1182,11 @@ fn mcp_import_project_needs_confirm_literals_before_applying() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        IMPORT_PREVIEW_PROJECT_ROWS,
+        "the refusal follows the preview the user must act on"
+    );
 
     let home = Home::new();
     let path = home.0.join("mcp.json");
@@ -1204,13 +1222,15 @@ fn mcp_import_project_needs_confirm_literals_before_applying() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(
         stdout,
-        "\"keeps\"\tunchanged\tkeeps\n\
-         \"docs\"\timported\tdocs\n"
+        format!(
+            "{IMPORT_PREVIEW_PROJECT_ROWS}\"keeps\"\tunchanged\tkeeps\n\
+             \"docs\"\timported\tdocs\n"
+        )
     );
 }
 
-/// A source that changed since the preview refuses the apply; nothing is
-/// written and the command says to preview again.
+/// A source that changed since the preview refuses the apply; the preview it
+/// printed stays, nothing is written and the command says to preview again.
 #[test]
 fn mcp_import_reports_a_stale_revision() {
     let home = Home::new();
@@ -1242,7 +1262,10 @@ fn mcp_import_reports_a_stale_revision() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        IMPORT_PREVIEW_ROWS
+    );
 }
 
 /// A daemon that does not serve the import pair is refused before the file

@@ -251,8 +251,8 @@ pub async fn import(client: &mut Client, options: &Options, import: &McpImport) 
     let preview = mcp::preview_import(client, cwd, source, &document)
         .await
         .map_err(mcp::import_failure)?;
+    print_import_preview(&preview, source, *yes);
     if !*yes {
-        print_import_preview(&preview, source);
         return Ok(0);
     }
     let resolutions =
@@ -381,9 +381,11 @@ fn import_resolutions(
     Ok(resolutions.into_values().collect())
 }
 
-/// What a preview prints: one row per entry, then the top-level members the
-/// import would not carry and the revision the source was read at.
-fn print_import_preview(preview: &mcp::ImportPreview, source: &str) {
+/// What a preview prints: one row per entry, then the fields the owner's cap
+/// left out, the top-level members the import would not carry and the
+/// revision the source was read at. `--yes` prints the same rows before it
+/// applies, so a confirmation names fields the user has seen.
+fn print_import_preview(preview: &mcp::ImportPreview, source: &str, apply: bool) {
     let rows = preview
         .entries
         .iter()
@@ -416,6 +418,17 @@ fn print_import_preview(preview: &mcp::ImportPreview, source: &str) {
         )
         .to_owned());
     }
+    for entry in &preview.entries {
+        if entry.omitted > 0 {
+            notes.push(tf(
+                "{id} has {count} more field names than the lists above show.",
+                &[
+                    ("id", &format!("{:?}", entry.id)),
+                    ("count", &entry.omitted.to_string()),
+                ],
+            ));
+        }
+    }
     notes.push(match preview.unknown_top_level.as_slice() {
         [] => t("Top-level members the import does not carry: none.").to_owned(),
         names => tf(
@@ -427,6 +440,9 @@ fn print_import_preview(preview: &mcp::ImportPreview, source: &str) {
         "The {source} source was read at revision {}.",
         safe_line(&preview.revision)
     ));
+    if apply {
+        notes.push(t("Applying the selection at this revision.").to_owned());
+    }
     print_report(rows, notes);
 }
 

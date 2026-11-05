@@ -611,6 +611,10 @@ pub struct ImportEntryPreview {
     /// Members the decoder keeps unused or drops.
     #[serde(default)]
     pub unsupported: Vec<ImportUnsupported>,
+    /// How many field names the owner's cap left out of `changes` and
+    /// `unsupported`.
+    #[serde(default)]
+    pub omitted: usize,
     /// Project scope only: fields whose literal value needs confirmation.
     #[serde(default)]
     pub confirm: Vec<String>,
