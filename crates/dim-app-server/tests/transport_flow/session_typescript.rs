@@ -402,14 +402,6 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
     let second = new_session(&mut client, json!(["echo"])).await;
     let first_session = server.agent().unwrap().get_session(&first).unwrap();
-    let first_after = first_session.sequence("main").unwrap();
-    let second_after = server
-        .agent()
-        .unwrap()
-        .get_session(&second)
-        .unwrap()
-        .sequence("main")
-        .unwrap();
     let initial = when_served(
         &mut client,
         "session.observer.status",
@@ -417,6 +409,30 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     )
     .await;
     assert_ok(&initial);
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.second.status",
+            json!({"sessionId":first}),
+        )
+        .await,
+    );
+    let first_after = first_session.sequence("main").unwrap();
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.observer.status",
+            json!({"sessionId":second}),
+        )
+        .await,
+    );
+    let second_after = server
+        .agent()
+        .unwrap()
+        .get_session(&second)
+        .unwrap()
+        .sequence("main")
+        .unwrap();
     let initial_records = initial["result"]["records"].as_array().unwrap();
     let initial_through = initial_records
         .last()
@@ -838,7 +854,6 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         assert_ok(&client.rpc("session.attach", attach.clone()).await);
         assert_eq!(loads.of(&id), (round + 1, round == 1));
         let session = server.agent().unwrap().get_session(&id).unwrap();
-        let after = session.sequence("main").unwrap();
         let status = when_served(
             &mut client,
             "session.observer.status",
@@ -846,6 +861,15 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         )
         .await;
         assert_ok(&status);
+        assert_ok(
+            &when_served(
+                &mut client,
+                "session.second.status",
+                json!({"sessionId":id}),
+            )
+            .await,
+        );
+        let after = session.sequence("main").unwrap();
         submit(&mut client, &id, text).await;
         let through = session.sequence("main").unwrap();
         let expected: Vec<Value> = branch_events(&session, "main", after + 1..=through)
