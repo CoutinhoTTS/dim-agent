@@ -143,10 +143,13 @@ pub struct CreateResult {
 pub struct BarrierResult {
     pub sequence: u64,
 }
+/// `session.history`: a page of the branch's own facts. Each event is the
+/// encoded form the reply carries, so the byte budget in
+/// `connection::tree` counts the bytes the transport writes.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryResult {
-    pub events: Vec<ProductEvent>,
+    pub events: Vec<Box<serde_json::value::RawValue>>,
     pub through: u64,
     pub next_after: u64,
     pub done: bool,

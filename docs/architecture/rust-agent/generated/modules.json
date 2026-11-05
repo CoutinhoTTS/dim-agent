@@ -21186,7 +21186,6 @@
         "path wire::HistoryResult",
         "path wire::KeyEntry",
         "path wire::KeysResult",
-        "path wire::ProductEvent",
         "path wire::ProductEvent::new",
         "use crate::tree_protocol"
       ]

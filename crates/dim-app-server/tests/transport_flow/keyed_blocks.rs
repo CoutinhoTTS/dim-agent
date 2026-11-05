@@ -589,7 +589,7 @@ async fn a_v2_connection_cannot_read_keys() {
 }
 
 /// An ended line is served from the tree at its fixed head: the same entries
-/// the open line folded, now read through `WindowRead::Ended`.
+/// the open line folded, now read through `HistoryRead::Ended`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_ended_line_is_served_at_its_fixed_head() {
     let server = launch(Arc::new(MockTools), ServerConfig::default()).await;

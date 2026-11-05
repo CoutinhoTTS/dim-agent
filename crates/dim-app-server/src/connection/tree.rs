@@ -206,9 +206,9 @@ impl Connection {
             };
             let before = params.before.unwrap_or_else(|| through.saturating_add(1));
             let read = if session.ended_head(branch).is_some() {
-                WindowRead::Ended(&tree)
+                HistoryRead::Ended(&tree)
             } else {
-                WindowRead::Open(&session)
+                HistoryRead::Open(&session)
             };
             let reply = window_at(
                 &read,
@@ -231,7 +231,7 @@ impl Connection {
                         .is_some_and(|data| data.app_error == "branch_ended") =>
                 {
                     window_at(
-                        &WindowRead::Ended(&tree),
+                        &HistoryRead::Ended(&tree),
                         branch,
                         before,
                         limit,
@@ -250,18 +250,56 @@ impl Connection {
             .history_page(&params.session_id, branch, after, limit, through)
             .await
             .map_err(history_error)?;
-        let next_after = events.last().map_or(after, |event| event.sequence);
-        Ok(Reply::History(wire::HistoryResult {
-            events: events
-                .into_iter()
-                .filter_map(|event| wire::ProductEvent::new(event, self.protocol_version()))
-                .collect(),
-            through,
-            next_after,
-            done: next_after == through,
-            next_before: None,
-            turn_start: None,
-        }))
+        // The page's events come from the index; its batch edges come from the
+        // same owner, and a line that ends in between serves them through the
+        // tree at its fixed head (ADR 021 D2).
+        let reply = if session.ended_head(branch).is_some() {
+            let tree = session
+                .session_service::<TreeCommands>()
+                .map_err(history_error)?;
+            forward_at(
+                &HistoryRead::Ended(&tree),
+                branch,
+                events,
+                after,
+                through,
+                self.protocol_version(),
+            )
+            .await
+        } else {
+            match forward_at(
+                &HistoryRead::Open(&session),
+                branch,
+                events.clone(),
+                after,
+                through,
+                self.protocol_version(),
+            )
+            .await
+            {
+                Err(error)
+                    if error
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data.app_error == "branch_ended") =>
+                {
+                    let tree = session
+                        .session_service::<TreeCommands>()
+                        .map_err(history_error)?;
+                    forward_at(
+                        &HistoryRead::Ended(&tree),
+                        branch,
+                        events,
+                        after,
+                        through,
+                        self.protocol_version(),
+                    )
+                    .await
+                }
+                other => other,
+            }
+        };
+        reply.map(Reply::History)
     }
 
     /// The branch's live keyed blocks at `through` (keyed-blocks §2.2): the
@@ -286,9 +324,9 @@ impl Connection {
             let tree = session
                 .session_service::<TreeCommands>()
                 .map_err(history_error)?;
-            scan_keys(&WindowRead::Ended(&tree), branch, through).await?
+            scan_keys(&HistoryRead::Ended(&tree), branch, through).await?
         } else {
-            match scan_keys(&WindowRead::Open(&session), branch, through).await {
+            match scan_keys(&HistoryRead::Open(&session), branch, through).await {
                 // The line ended while the scan ran: the tree serves the same
                 // read at its fixed head (ADR 021 D2).
                 Err(error)
@@ -300,7 +338,7 @@ impl Connection {
                     let tree = session
                         .session_service::<TreeCommands>()
                         .map_err(history_error)?;
-                    scan_keys(&WindowRead::Ended(&tree), branch, through).await?
+                    scan_keys(&HistoryRead::Ended(&tree), branch, through).await?
                 }
                 other => other?,
             }
@@ -420,14 +458,14 @@ impl Connection {
 const HISTORY_PAGE_LIMIT: usize = 256;
 /// The default and largest page of a `latestTurn` read.
 const HISTORY_TURN_LIMIT: usize = 4096;
-/// Encoded `ProductEvent` bytes a `latestTurn` reply aims for. A Timeline
-/// batch is the smallest unit the window can trim, so a batch above this is
-/// returned whole rather than split.
+/// Encoded `ProductEvent` bytes a history reply aims for, in a `latestTurn`
+/// window and in forward paging alike. A Timeline batch is the smallest unit a
+/// page can trim, so a batch above this is returned whole rather than split.
 const HISTORY_TURN_BYTES: usize = 4 * 1024 * 1024;
 /// The largest reply a built-in read may produce: below the transport's
-/// 16 MiB frame, with room for the envelope. A `latestTurn` batch above it
-/// fails `history_too_large`; a `session.keys` reply above it fails
-/// `keys_too_large`.
+/// 16 MiB frame, with room for the envelope. The first batch of any history
+/// page above it fails `history_too_large`; a `session.keys` reply above it
+/// fails `keys_too_large`.
 const REPLY_FRAME_BYTES: usize = crate::outbound::MAX_FRAME_BYTES - 64 * 1024;
 /// Facts one page of the window's anchor read keeps.
 const TURN_WINDOW_PAGE: u64 = 256;
@@ -603,15 +641,15 @@ async fn turn_window(
     })
 }
 
-/// Where a window read's facts come from: a live line's own Timeline, through
-/// its Session, or an ended line's stored history, through the tree that owns
-/// its fixed head (ADR 021 D2).
-enum WindowRead<'a> {
+/// Where a history read's facts and batch edges come from: a live line's own
+/// Timeline, through its Session, or an ended line's stored history, through
+/// the tree that owns its fixed head (ADR 021 D2).
+enum HistoryRead<'a> {
     Open(&'a Session),
     Ended(&'a TreeCommands),
 }
 
-impl WindowRead<'_> {
+impl HistoryRead<'_> {
     async fn query(
         &self,
         branch: &str,
@@ -643,7 +681,7 @@ impl WindowRead<'_> {
 /// branch's own segment. Pages advance by sequence, never `offset` (ADR 019
 /// D2): the storage reader fetches `offset + limit` rows before skipping.
 async fn scan_keys(
-    read: &WindowRead<'_>,
+    read: &HistoryRead<'_>,
     branch: &str,
     through: u64,
 ) -> Result<Vec<wire::KeyEntry>, RpcError> {
@@ -744,7 +782,7 @@ async fn scan_keys(
 }
 
 async fn window_at(
-    read: &WindowRead<'_>,
+    read: &HistoryRead<'_>,
     branch: &str,
     before: u64,
     limit: usize,
@@ -762,7 +800,7 @@ async fn window_at(
 /// `before - 1` and starts at a batch start; `batch_end` settles both ends
 /// because a query page may begin and end inside an atomic batch (ADR 020 D4).
 async fn window_page(
-    read: &WindowRead<'_>,
+    read: &HistoryRead<'_>,
     branch: &str,
     before: u64,
     limit: usize,
@@ -804,7 +842,7 @@ async fn window_page(
 /// The greatest atomic-batch end at or below `top`, searching no lower than
 /// `floor`; `None` when the window holds none.
 async fn batch_end_at_or_below(
-    read: &WindowRead<'_>,
+    read: &HistoryRead<'_>,
     branch: &str,
     top: u64,
     floor: u64,
@@ -823,7 +861,7 @@ async fn batch_end_at_or_below(
 /// The first sequence of the batch holding `sequence`, searching no lower
 /// than `floor`, which is where a window that begins inside the batch starts.
 async fn batch_start(
-    read: &WindowRead<'_>,
+    read: &HistoryRead<'_>,
     branch: &str,
     sequence: u64,
     floor: u64,
@@ -841,7 +879,7 @@ async fn batch_start(
 
 /// `low..=end` through the source query.
 async fn window_events(
-    read: &WindowRead<'_>,
+    read: &HistoryRead<'_>,
     branch: &str,
     low: u64,
     end: u64,
@@ -870,84 +908,197 @@ async fn window_events(
         .events)
 }
 
-/// One event of a window page with its encoded visible form and size.
-struct WindowItem {
+/// One event of a history page with its encoded form, built once, and size.
+struct HistoryItem {
     sequence: u64,
     bytes: usize,
-    visible: Option<wire::ProductEvent>,
+    event: Option<Box<serde_json::value::RawValue>>,
+}
+
+/// The page's events as reply items, each visible form encoded once to size it
+/// and carried in that same form.
+fn history_items(
+    events: Vec<Arc<dim_agent_types::AgentEvent>>,
+    version: u32,
+) -> Result<Vec<HistoryItem>, RpcError> {
+    let mut items = Vec::with_capacity(events.len());
+    for event in events {
+        let sequence = event.sequence;
+        let encoded = match wire::ProductEvent::new(event, version) {
+            Some(product) => Some(
+                serde_json::value::to_raw_value(&product)
+                    .map_err(|error| RpcError::wire(-32603, error.to_string()))?,
+            ),
+            None => None,
+        };
+        let bytes = encoded.as_ref().map_or(0, |raw| raw.get().len());
+        items.push(HistoryItem {
+            sequence,
+            bytes,
+            event: encoded,
+        });
+    }
+    Ok(items)
+}
+
+/// Trims a page to whole batches within `HISTORY_TURN_BYTES`, walking the
+/// batches the reply carries first: newest first for a window, oldest first
+/// for a forward page. The first batch is always kept, and one above
+/// `REPLY_FRAME_BYTES` fails `history_too_large` rather than produce a frame
+/// the transport could drop. A page within the target asks for no batch edge.
+///
+/// The result is a suffix for a newest-first page and a prefix for a forward
+/// one. `items` must be batch-complete at both ends for a forward read and at
+/// its newer end for a window read. The byte budget names the last event that
+/// fits; only the two batches around it are walked, so the store's `batch_end`
+/// is asked for the batch edges the reply needs, not once per event.
+async fn bounded_batches(
+    read: &HistoryRead<'_>,
+    branch: &str,
+    items: &[HistoryItem],
+    newest_first: bool,
+) -> Result<std::ops::Range<usize>, RpcError> {
+    if items.iter().map(|item| item.bytes).sum::<usize>() <= HISTORY_TURN_BYTES {
+        return Ok(0..items.len());
+    }
+    let (first, first_bytes) = if newest_first {
+        let begin = batch_begin(read, branch, items, items.len()).await?;
+        (
+            begin,
+            items[begin..].iter().map(|item| item.bytes).sum::<usize>(),
+        )
+    } else {
+        let end = batch_end_from(read, branch, items, 0).await?;
+        (
+            end,
+            items[..end].iter().map(|item| item.bytes).sum::<usize>(),
+        )
+    };
+    if first_bytes > REPLY_FRAME_BYTES {
+        return Err(RpcError::app(
+            -32000,
+            "history_too_large",
+            format!(
+                "A history batch is {first_bytes} bytes; a reply frame allows {REPLY_FRAME_BYTES}"
+            ),
+        ));
+    }
+    if newest_first {
+        // The smallest start whose suffix fits; then the batch started at or
+        // above it. With no such batch the page starts at its first batch.
+        let mut start = items.len();
+        let mut bytes = 0;
+        for index in (0..items.len()).rev() {
+            if bytes + items[index].bytes > HISTORY_TURN_BYTES {
+                break;
+            }
+            bytes += items[index].bytes;
+            start = index;
+        }
+        let mut kept = start;
+        while kept < items.len() {
+            match read.batch_end(branch, items[kept - 1].sequence).await {
+                Ok(()) => return Ok(kept..items.len()),
+                Err(AgentError::InvalidInput(_)) => kept += 1,
+                Err(error) => return Err(history_error(error)),
+            }
+        }
+        return Ok(first..items.len());
+    }
+    // The most events whose prefix fits; then the batch ended at or below
+    // them. Keeping fewer events than the first batch cannot fit starts at it.
+    let mut end = 0;
+    let mut bytes = 0;
+    for item in items {
+        if bytes + item.bytes > HISTORY_TURN_BYTES {
+            break;
+        }
+        bytes += item.bytes;
+        end += 1;
+    }
+    if end <= first {
+        return Ok(0..first);
+    }
+    let mut kept = end - 1;
+    loop {
+        match read.batch_end(branch, items[kept].sequence).await {
+            Ok(()) => return Ok(0..kept + 1),
+            Err(AgentError::InvalidInput(_)) => kept -= 1,
+            Err(error) => return Err(history_error(error)),
+        }
+    }
+}
+
+/// The end of the batch that starts at `items[start]`: the first event from
+/// there whose `batch_end` check passes.
+async fn batch_end_from(
+    read: &HistoryRead<'_>,
+    branch: &str,
+    items: &[HistoryItem],
+    start: usize,
+) -> Result<usize, RpcError> {
+    let mut end = start;
+    loop {
+        match read.batch_end(branch, items[end].sequence).await {
+            Ok(()) => return Ok(end + 1),
+            Err(AgentError::InvalidInput(_)) => end += 1,
+            Err(error) => return Err(history_error(error)),
+        }
+    }
+}
+
+/// Builds a forward reply: the page's whole batches from its start within the
+/// byte target. A trimmed page is a short page, not the end: `done` is false
+/// and `nextAfter` is its last returned sequence, so the client continues as
+/// it does today.
+async fn forward_at(
+    read: &HistoryRead<'_>,
+    branch: &str,
+    events: Vec<Arc<dim_agent_types::AgentEvent>>,
+    after: u64,
+    through: u64,
+    version: u32,
+) -> Result<wire::HistoryResult, RpcError> {
+    let items = history_items(events, version)?;
+    let keep = bounded_batches(read, branch, &items, false).await?;
+    let next_after = keep
+        .end
+        .checked_sub(1)
+        .map_or(after, |last| items[last].sequence);
+    Ok(wire::HistoryResult {
+        events: items
+            .into_iter()
+            .take(keep.end)
+            .filter_map(|item| item.event)
+            .collect(),
+        through,
+        next_after,
+        done: next_after == through,
+        next_before: None,
+        turn_start: None,
+    })
 }
 
 /// Builds a newest-first window reply: the newest whole batches within the
-/// event and byte limits. The newest batch is always kept; one above the byte
-/// limit fails `history_too_large` rather than produce a frame the transport
-/// could drop. A page within the byte target needs no batch edges beyond its
-/// own ends; a larger one walks batches down from the newest, so the store's
-/// `batch_end` is asked only for the events the trim inspects.
+/// event and byte limits. A page within the byte target needs no batch edges
+/// beyond its own ends; a larger one walks batches down from the newest, so
+/// the store's `batch_end` is asked only for the events the trim inspects.
 async fn history_window(
-    read: &WindowRead<'_>,
+    read: &HistoryRead<'_>,
     branch: &str,
     events: Vec<Arc<dim_agent_types::AgentEvent>>,
     through: u64,
     turn: crate::storage::TurnWindow,
     version: u32,
 ) -> Result<wire::HistoryResult, RpcError> {
-    let mut items = Vec::with_capacity(events.len());
-    let mut total = 0;
-    for event in events {
-        let sequence = event.sequence;
-        let visible = wire::ProductEvent::new(event, version);
-        let bytes = match &visible {
-            Some(product) => serde_json::to_vec(product)
-                .map_err(|error| RpcError::wire(-32603, error.to_string()))?
-                .len(),
-            None => 0,
-        };
-        total += bytes;
-        items.push(WindowItem {
-            sequence,
-            bytes,
-            visible,
-        });
-    }
-    let keep_from = if total <= HISTORY_TURN_BYTES {
-        0
-    } else {
-        let mut end = items.len();
-        let mut total = 0;
-        let mut keep_from = items.len();
-        let mut newest = true;
-        while end > 0 {
-            let begin = batch_begin(read, branch, &items, end).await?;
-            let bytes: usize = items[begin..end].iter().map(|item| item.bytes).sum();
-            if newest {
-                if bytes > REPLY_FRAME_BYTES {
-                    return Err(RpcError::app(
-                        -32000,
-                        "history_too_large",
-                        format!(
-                            "The newest history batch is {bytes} bytes; a reply frame allows {REPLY_FRAME_BYTES}"
-                        ),
-                    ));
-                }
-                total = bytes;
-                keep_from = begin;
-                newest = false;
-            } else if total + bytes <= HISTORY_TURN_BYTES {
-                total += bytes;
-                keep_from = begin;
-            } else {
-                break;
-            }
-            end = begin;
-        }
-        keep_from
-    };
-    let kept = items.split_off(keep_from);
+    let mut items = history_items(events, version)?;
+    let keep = bounded_batches(read, branch, &items, true).await?;
+    let kept = items.split_off(keep.start);
     let next_before = kept.first().map(|item| item.sequence);
     let next_after = kept.last().map_or(through, |item| item.sequence);
     let done = next_before.is_none_or(|sequence| sequence <= turn.window_start);
     Ok(wire::HistoryResult {
-        events: kept.into_iter().filter_map(|item| item.visible).collect(),
+        events: kept.into_iter().filter_map(|item| item.event).collect(),
         through,
         next_after,
         done,
@@ -961,9 +1112,9 @@ async fn history_window(
 /// event below starts a batch of its own, and every event above it shares this
 /// one.
 async fn batch_begin(
-    read: &WindowRead<'_>,
+    read: &HistoryRead<'_>,
     branch: &str,
-    items: &[WindowItem],
+    items: &[HistoryItem],
     end: usize,
 ) -> Result<usize, RpcError> {
     let mut begin = end - 1;
