@@ -387,6 +387,18 @@ None to rutis: every loader operation used exists in rutis-loader 0.19.3.
 
 `status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor`, the services of `Loader::waits`; a row waiting for its runtime names the runtime's connection row, `session-node` or `py`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
 
+The client RPC boundary's projection of sources, status errors and content
+refusals, and every reason a refusal can carry, is in A.2.
+
+### A.2 Errors
+
+`plugin_exists`, `plugin_not_found`, `invalid_id`, `path_outside_plugins` (both before any file system change, §7), `plugin_locked`, `not_removable`, `not_reloadable`, `not_updatable`, `name_changed`, `invalid_manifest` (with the field and reason), `invalid_source` (scheme or argument refused), `acquire_failed` (Git's message), `record_unreadable` (startup). A loader or owner refusal after the configuration was written is not an error of the call: it is reported in the result and in `plugin.list`.
+
+The codes are stable across clients. Client RPC errors identify their code with a
+stable, actionable description without including the owner's raw diagnostic message
+or echoing request fields; the descriptions above identify the owner's error, not a
+permission to publish secrets.
+
 The client RPC boundary omits Git source userinfo, query and fragment, preserving
 the repository path, ref and commit. The persisted source is unchanged and remains
 available to update. Only catalog candidate sources, top-level status errors and
@@ -417,20 +429,11 @@ The table is the contract: a client matches a refusal by its exact message. The
 skills and UI kinds have no reasons, because their refusals name files and paths.
 A missing content file is not in the table: `Manifest::read` resolves every
 content path and refuses a missing one as `invalid_manifest` before PluginManager
-reads it. The table lists every reason a plugin's own content can produce. Dim's
-own registration state can also refuse a plugin, for example when the stored
-registration file of the owner is damaged; that refusal carries the owner's
-settings message, which is outside this contract, and a client shows a message it
-does not know as it shows the generic one.
-
-### A.2 Errors
-
-`plugin_exists`, `plugin_not_found`, `invalid_id`, `path_outside_plugins` (both before any file system change, §7), `plugin_locked`, `not_removable`, `not_reloadable`, `not_updatable`, `name_changed`, `invalid_manifest` (with the field and reason), `invalid_source` (scheme or argument refused), `acquire_failed` (Git's message), `record_unreadable` (startup). A loader or owner refusal after the configuration was written is not an error of the call: it is reported in the result and in `plugin.list`.
-
-The codes are stable across clients. Client RPC errors identify their code with a
-stable, actionable description without including the owner's raw diagnostic message
-or echoing request fields; the descriptions above identify the owner's error, not a
-permission to publish secrets.
+reads it. The table lists every reason a plugin's own content can produce; the
+wire can also carry a static message from Dim's own registration state — such as
+`invalid hook plugin registration` for a damaged `hooks-plugins.json` — which is
+outside this table, and a client must show any message it does not know as it
+shows the generic one.
 
 ## Appendix B. Conflict table
 
