@@ -132,6 +132,43 @@ fn plugin_install_reports_no_handlers_without_a_catalog() {
     assert!(!stdout.contains("Hook handlers"), "{stdout}");
 }
 
+/// A `hooks.catalog` read that fails after a successful install leaves the
+/// install alone: no handler report, one stderr line, exit 0.
+#[test]
+fn plugin_install_survives_a_failed_catalog_read() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["plugin.install", "hooks.catalog"]);
+        let request = wire.read("plugin.install");
+        wire.reply(&request, json!({"id":"mem","name":"mem","enabled":true}));
+        let request = wire.read("hooks.catalog");
+        assert_eq!(request["params"], json!({}));
+        // The connection closes here without a reply.
+    });
+    let output = home
+        .command()
+        .args(["plugin", "install", "/work/plugins/mem"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("install id=mem"), "{stdout}");
+    assert!(!stdout.contains("Hook handlers"), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line
+                .starts_with("The installed plugin's hook handlers could not be checked:")),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn hooks_enable_and_disable_send_the_workspace_and_the_revision() {
     let home = Home::new();
