@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use dim_agent_types::{
     BranchCreateAt, BranchCreateData, BranchCreateFailedData, BranchEndedData, BranchSource,
-    BranchStartData, EventKind, ExecStartedData, InputBlock, InputConsumedData, InputMode,
-    TurnStartData,
+    BranchStartData, EventKind, ExecEndedData, ExecStartedData, ExecStatus, InputBlock,
+    InputConsumedData, InputMode, ToolResult, TurnStartData,
 };
 use serde_json::json;
 use support::parts::*;
@@ -784,7 +784,7 @@ async fn pursuit_2_a_continue_conclusion_writes_one_continuation_or_pauses_at_th
 /// cancelled end writes nothing more (Pursuit §5).
 #[tokio::test]
 async fn pursuit_8_a_continue_conclusion_waits_for_a_cancelled_background_task() {
-    let env = Env::start().await;
+    let env = Env::start_gated().await;
     env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
         .await
         .expect("set writes");
@@ -799,6 +799,9 @@ async fn pursuit_8_a_continue_conclusion_waits_for_a_cancelled_background_task()
     .await;
     let end = env.end_turn("main", "work", "completed");
     let create = next_create(&env, "main", 0).await;
+    // Hold the continuation's publication so the settle retry runs while the
+    // fold has not seen the written input.
+    let (written, release) = env.gated().hold_continuation();
     write_conclusion(
         &env,
         &create.branch,
@@ -806,20 +809,24 @@ async fn pursuit_8_a_continue_conclusion_waits_for_a_cancelled_background_task()
         "continue",
         "CONTINUE:\n- still missing",
     );
-    let writes = env.settled("main").await;
-    assert!(
-        writes
-            .iter()
-            .all(|block| !block.marker.contains(r#"kind="continuation""#)),
-        "no continuation while the task is open: {writes:#?}"
-    );
-
     env.exec_ended("main", "task-1", "cancelled");
+    written.await.expect("the continuation write is committed");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    release.send(()).unwrap();
     let evaluated = wait_evaluated(&env, "main", end.sequence).await;
     assert_eq!(
         evaluated.text,
         texts::evaluated_continuation("main", 1, None, 0, end.sequence, end.sequence),
         "the cancelled end takes the deferred conclusion"
+    );
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="continuation""#))
+            .count(),
+        1,
+        "the settle retry writes no second continuation: {writes:#?}"
     );
 
     env.consume("main", &evaluated.id);
@@ -837,11 +844,10 @@ async fn pursuit_8_a_continue_conclusion_waits_for_a_cancelled_background_task()
     env.close().await;
 }
 
-/// The deferred conclusion is re-derived from the fold, so a reload between
-/// the conclusion and the cancelled end keeps it (Pursuit §5).
-#[tokio::test]
-async fn pursuit_8_a_reload_keeps_a_deferred_continue_conclusion() {
-    let env = Env::start().await;
+/// Seeds the history of a `continue` conclusion that arrived while a
+/// background task was open, optionally with the cancelled end already
+/// committed, and restores the Session. Returns the evaluation sequence.
+async fn deferred_conclusion(env: Env, cancelled: bool) -> (Env, u64) {
     let mut seed = env.seed_new("load-deferred").await;
     let (objective, status) = texts::evaluator_set_blocks("main", "ship it");
     let set = seed.append(
@@ -930,9 +936,27 @@ async fn pursuit_8_a_reload_keeps_a_deferred_continue_conclusion() {
             InputMode::Append,
         ),
     );
+    if cancelled {
+        seed.append(
+            "main",
+            EventKind::ExecEnded(ExecEndedData {
+                task_id: "task-1".into(),
+                status: ExecStatus::Cancelled,
+                result: ToolResult::default(),
+            }),
+        );
+    }
     seed.finish().await;
 
     let env = env.restore_seeded("load-deferred").await;
+    (env, end.sequence)
+}
+
+/// The deferred conclusion is re-derived from the fold, so a reload between
+/// the conclusion and the cancelled end keeps it (Pursuit §5).
+#[tokio::test]
+async fn pursuit_8_a_reload_keeps_a_deferred_continue_conclusion() {
+    let (env, evaluation) = deferred_conclusion(Env::start().await, false).await;
     let writes = env.settled("main").await;
     assert!(
         writes
@@ -942,11 +966,35 @@ async fn pursuit_8_a_reload_keeps_a_deferred_continue_conclusion() {
     );
 
     env.exec_ended("main", "task-1", "cancelled");
-    let evaluated = wait_evaluated(&env, "main", end.sequence).await;
+    let evaluated = wait_evaluated(&env, "main", evaluation).await;
     assert_eq!(
         evaluated.text,
-        texts::evaluated_continuation("main", 1, None, 0, end.sequence, end.sequence),
+        texts::evaluated_continuation("main", 1, None, 0, evaluation, evaluation),
         "the rebuild re-derives the deferred conclusion"
+    );
+    env.close().await;
+}
+
+/// A cancelled end committed before the reload leaves the pending conclusion
+/// in the fold; the rebuild takes the settle path and writes exactly one
+/// continuation (Pursuit §5).
+#[tokio::test]
+async fn pursuit_8_a_reload_after_a_cancelled_end_takes_the_conclusion() {
+    let (env, evaluation) = deferred_conclusion(Env::start().await, true).await;
+    let evaluated = wait_evaluated(&env, "main", evaluation).await;
+    assert_eq!(
+        evaluated.text,
+        texts::evaluated_continuation("main", 1, None, 0, evaluation, evaluation),
+        "the rebuild settles the pending conclusion"
+    );
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="continuation""#))
+            .count(),
+        1,
+        "exactly one continuation follows the reload: {writes:#?}"
     );
     env.close().await;
 }

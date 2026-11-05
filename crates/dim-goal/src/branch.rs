@@ -223,6 +223,11 @@ struct State {
     in_flight: HashSet<String>,
     /// What a key asked for while its work was running waits for.
     retry: HashMap<String, Retry>,
+    /// The evaluation whose `continue` conclusion Goal has answered with a
+    /// write the fold has not consumed yet. A retry that runs before that
+    /// input is folded must not answer the same evaluation again. A newer
+    /// turn end or an operator input clears it.
+    answered: Option<u64>,
 }
 
 struct Owner {
@@ -332,8 +337,21 @@ impl Owner {
         }
         let through = reply.through;
         // The decisions the previous generation owed are taken once, before
-        // any live event.
-        self.decide_end();
+        // any live event. A conclusion still pending from a cancelled end
+        // takes the settle path: decide_end alone skips it, because the
+        // evaluator's branch/create already decided the turn end.
+        let pending = self
+            .state
+            .lock()
+            .unwrap()
+            .fold
+            .pending_conclusion()
+            .is_some();
+        if pending {
+            self.settle_deferred();
+        } else {
+            self.decide_end();
+        }
         self.settle();
         let start = self.state.lock().unwrap().start;
         if let Some(start) = start {
@@ -382,11 +400,21 @@ impl Owner {
                     }
                 }
             }
-            EventKind::TurnEnd(data) => self.turn_decision(sequence, turn_start, data.clone()),
+            EventKind::TurnEnd(data) => {
+                self.state.lock().unwrap().answered = None;
+                self.turn_decision(sequence, turn_start, data.clone())
+            }
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn => {
                 self.interrupted(sequence)
             }
             EventKind::InputMessage(data) => {
+                let operator = data.user.is_some()
+                    && !data.blocks.first().is_some_and(|block| match block {
+                        InputBlock::Raw { text, .. } => text.starts_with("<dim-"),
+                    });
+                if operator {
+                    self.state.lock().unwrap().answered = None;
+                }
                 if let Some(conclusion) = data.blocks.first().and_then(|block| match block {
                     InputBlock::Raw { text, .. } => fold::conclusion_of(text),
                 }) {
@@ -881,6 +909,12 @@ impl Owner {
         sequence: u64,
         conclusion: Conclusion,
     ) -> Result<(), AgentError> {
+        let evaluation = conclusion.evaluation;
+        // The write for this evaluation is committed before the fold consumes
+        // it; a retry that runs in between must not answer it again.
+        if self.state.lock().unwrap().answered == Some(evaluation) {
+            return Ok(());
+        }
         let action = {
             let state = self.state.lock().unwrap();
             fold::decide_conclusion(&state.fold, sequence, &conclusion)
@@ -888,7 +922,6 @@ impl Owner {
         let Some(action) = action else {
             return Ok(());
         };
-        let evaluation = conclusion.evaluation;
         let named = evaluation.to_string();
         match action {
             ConclusionAction::Failed => {
@@ -937,15 +970,23 @@ impl Owner {
                 // C7 measures the branch's own continuations; the evaluator
                 // judged this turn, so this path reads no progress (Pursuit §5).
                 let decision = {
-                    let state = self.state.lock().unwrap();
-                    if fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                        != Some(ConclusionAction::Continue)
+                    let mut state = self.state.lock().unwrap();
+                    if state.answered == Some(evaluation)
+                        || fold::decide_conclusion(&state.fold, sequence, &conclusion)
+                            != Some(ConclusionAction::Continue)
                         || state.fold.turn_end.as_ref().map(|end| end.sequence)
                             != Some(end.sequence)
                     {
                         return Ok(());
                     }
-                    fold::decide_evaluated_continuation(&state.fold, limit)
+                    let decision = fold::decide_evaluated_continuation(&state.fold, limit);
+                    if decision.is_some() {
+                        // The write is committed before the fold consumes it;
+                        // a retry in between must not answer this evaluation
+                        // again.
+                        state.answered = Some(evaluation);
+                    }
+                    decision
                 };
                 let Some(decision) = decision else {
                     return Ok(());
@@ -963,7 +1004,10 @@ impl Owner {
                         text::automatic_pause(&self.branch_id, reason, evaluation)
                     }
                 };
-                self.tree.input(self.branch_id.clone(), input).await?;
+                if let Err(error) = self.tree.input(self.branch_id.clone(), input).await {
+                    self.state.lock().unwrap().answered = None;
+                    return Err(error);
+                }
             }
         }
         Ok(())
