@@ -1170,6 +1170,62 @@ fn a_first_prompt_is_submitted_once_and_the_interface_stays() {
     }
 }
 
+/// `-p` with `--image` submits the text and the image together through the
+/// same composer a typed message uses.
+#[test]
+fn a_first_prompt_submits_its_image_with_the_text() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let image = home.0.join("shot.png");
+    let bytes = image_fixture(image::ImageFormat::Png, 3, 2);
+    fs::write(&image, &bytes).unwrap();
+    let expected = json!([
+        {"type":"text","text":"hello "},
+        {"type":"image","source":{
+            "type":"base64","mediaType":"image/png","data":STANDARD.encode(&bytes)}},
+    ]);
+    let (submitted, seen) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["mode"], "queue");
+        assert!(
+            submit["params"].get("text").is_none(),
+            "the image must travel as user content: {submit}"
+        );
+        assert_eq!(submit["params"]["user"]["content"], expected);
+        wire.reply(&submit, json!({"event":{}}));
+        submitted.send(()).unwrap();
+        wire.hold();
+    });
+    let mut command = command(&home);
+    command.args([
+        "tui",
+        "--scrollback",
+        "-p",
+        "hello",
+        "--image",
+        image.to_str().unwrap(),
+    ]);
+    let mut terminal = Terminal::launch_tui(command);
+    seen.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
+}
+
 /// A first prompt on a resumed Session attaches first and submits into it.
 #[test]
 fn a_first_prompt_on_a_resumed_session_submits_into_it() {
