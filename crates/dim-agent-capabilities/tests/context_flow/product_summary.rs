@@ -5,7 +5,7 @@
 use super::*;
 use dim_agent_capabilities::{
     agent_loop::AgentLoop,
-    context_model::ProductContextModel,
+    context_model::{ProductContextModel, output_allowance},
     history::{context_messages, project_context_history},
     summary_strategy::{
         LengthSentence, ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin,
@@ -732,6 +732,38 @@ async fn the_trigger_reserves_a_bounded_share_of_the_input_budget() {
     }
 }
 
+/// The allowance leaves at least half the window as input budget, whatever a
+/// source declares, and never exceeds the reply ceiling (ContextCompaction
+/// §5.1).
+#[test]
+fn the_adopted_allowance_bounds_a_declaration_by_half_the_window() {
+    let cases = [
+        (128_000, 128_000, 64_000),
+        (131_072, 131_072, 65_536),
+        (131_072, 200_000, 65_536),
+        (256_000, 256_000, 128_000),
+        (262_144, 262_144, 131_072),
+        (500_000, 500_000, 131_072),
+        (32_768, 32_768, 16_384),
+        (32_768, 65_536, 16_384),
+        (4_000, 5_000, 2_000),
+        (8_192, 4_095, 4_095),
+        (8_192, 4_096, 4_096),
+        (8_192, 4_097, 4_096),
+        (2, 2, 1),
+        (1, 1, 1),
+        (200_000, 100_000, 100_000),
+        (400_000, 128_000, 128_000),
+    ];
+    for (window, declared, expected) in cases {
+        assert_eq!(
+            output_allowance(window, declared),
+            expected,
+            "window {window}, declared output {declared}"
+        );
+    }
+}
+
 /// The transcript of a summarizer request: the text between the strategy's
 /// `<transcript>` tags.
 fn transcript(request: &ModelRequest) -> String {
@@ -1365,7 +1397,7 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_output_limit_at_or_above_the_window_still_leaves_an_input_budget() {
     const WINDOW: u64 = 32_768;
-    let allowance = 16_768;
+    let allowance = 16_384;
     for output in [WINDOW, WINDOW + 7_232] {
         let recorder = Arc::new(Recorder::default());
         let (agent, session) = product_session_on(
@@ -1430,7 +1462,7 @@ async fn a_stored_allowance_from_before_the_rule_is_repaired_at_the_request() {
     use dim_agent_capabilities::prompt_state::PromptSnapshot;
 
     const WINDOW: u64 = 32_768;
-    let allowance = 16_768;
+    let allowance = 16_384;
     let recorder = Arc::new(Recorder::default());
     let stored = ModelConfig {
         max_tokens: Some(WINDOW as f64),

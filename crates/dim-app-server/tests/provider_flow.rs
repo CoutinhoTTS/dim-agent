@@ -1252,7 +1252,7 @@ async fn a_declared_output_limit_at_or_above_the_window_adopts_a_derived_allowan
         .unwrap();
     assert_eq!(equal.models[0].capabilities.context_window, Some(64_000));
     assert_eq!(equal.models[0].capabilities.max_output_tokens, Some(64_000));
-    assert_eq!(equal.models[0].config.max_tokens, Some(48_000.0));
+    assert_eq!(equal.models[0].config.max_tokens, Some(32_000.0));
     root.shutdown().await.unwrap();
     server.abort();
     std::fs::remove_dir_all(home).unwrap();

@@ -427,15 +427,6 @@
       "unexpandedMacros": []
     },
     {
-      "id": "dim_agent_capabilities::context_model::tests",
-      "crate": "dim_agent_capabilities",
-      "parent": "dim_agent_capabilities::context_model",
-      "file": "crates/dim-agent-capabilities/src/context_model.rs",
-      "unexpandedMacros": [
-        "assert_eq"
-      ]
-    },
-    {
       "id": "dim_agent_capabilities::context_policy",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -8407,13 +8398,6 @@
         "path ContextCompactionResult::Failed",
         "path ContextCompactionResult::Skipped",
         "path EventKind::ContextCompaction"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::context_model",
-      "to": "dim_agent_capabilities::context_model::tests",
-      "references": [
-        "mod tests"
       ]
     },
     {

@@ -20,14 +20,15 @@ const BYTES_PER_TOKEN: f64 = 4.;
 const IMAGE_TOKENS: f64 = 1_600.;
 
 /// The adopted output allowance of a model: its declared maximum output,
-/// bounded by [`OUTPUT_CEILING`] and by the least input budget a Session
-/// keeps, so `B = context_window − allowance` stays positive even when a
-/// source declares an output at or above the window (ContextCompaction §5.1).
-/// The declared maximum stays the capability fact it is.
+/// bounded by [`OUTPUT_CEILING`] and by half the window, so the input budget
+/// `B = context_window − allowance` is at least half the window even when a
+/// source declares an output at or above it (ContextCompaction §5.1). The
+/// declared maximum stays the capability fact it is.
 pub fn output_allowance(context_window: u64, declared_max_output: u64) -> u64 {
-    let input_floor = (RESERVE_MIN_TOKENS as u64).min(context_window / 2);
-    let room = context_window.saturating_sub(input_floor);
-    declared_max_output.min(OUTPUT_CEILING).min(room).max(1)
+    declared_max_output
+        .min(OUTPUT_CEILING)
+        .min(context_window / 2)
+        .max(1)
 }
 
 /// The configuration a stored adoption yields at a request boundary: the
@@ -164,35 +165,4 @@ impl ContextModel for WindowFacts {
 /// Serialized JSON size; request parts serialize by construction.
 fn size(value: &impl serde::Serialize) -> f64 {
     serde_json::to_vec(value).map_or(0, |bytes| bytes.len()) as f64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_allowance_reserves_an_input_budget_without_shrinking_a_healthy_limit() {
-        let cases = [
-            (32_768, 32_768, 16_768),
-            (32_768, 65_536, 16_768),
-            (8_192, 8_192, 4_096),
-            (4_000, 5_000, 2_000),
-            (2, 2, 1),
-            (1, 1, 1),
-            (128_000, 128_000, 112_000),
-            (262_144, 262_144, 131_072),
-            (500_000, 500_000, 131_072),
-            (131_072, 131_072, 115_072),
-            (8_192, 4_096, 4_096),
-            (200_000, 100_000, 100_000),
-            (400_000, 128_000, 128_000),
-        ];
-        for (window, declared, expected) in cases {
-            assert_eq!(
-                output_allowance(window, declared),
-                expected,
-                "window {window}, declared output {declared}"
-            );
-        }
-    }
 }

@@ -1091,7 +1091,7 @@ async fn an_output_limit_above_the_window_is_adopted_with_the_derived_allowance(
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
     submit(&mut client, &sid, "main").await;
     let body = seen.lock().unwrap().last().unwrap().2.clone();
-    assert_eq!(body["max_tokens"], 48000, "{body}");
+    assert_eq!(body["max_tokens"], 32000, "{body}");
     server.shutdown();
     server.join().await.unwrap();
     fixture.abort();
