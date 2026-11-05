@@ -174,9 +174,9 @@ Enter               submit                       queue the draft; empty draft:
                                                  steer the oldest queued message
 Tab                 pick an earlier message      pick an earlier message
                     (fullscreen)                 (fullscreen)
-Shift+Left          —                            empty draft: take the newest queued
-                                                 message back into the draft
-Esc                 keep the draft               interrupt; every queued message
+Shift+Left          —                            empty draft: recall the newest held
+                                                 message only if one text block
+Esc                 keep the draft               interrupt; every held message
                                                  returns to the draft, oldest first
 Ctrl+S              —                            draft not empty: steer the draft;
                                                  empty: steer the oldest queued message
