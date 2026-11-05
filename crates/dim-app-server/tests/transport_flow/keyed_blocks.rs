@@ -10,8 +10,13 @@ const OBJECTIVE: &str = "goal:objective";
 const STATUS: &str = "goal:status";
 const OBJECTIVE_TEXT: &str = "<dim-goal kind=\"goal\" op=\"set\">ship it</dim-goal>";
 const STATUS_TEXT: &str = "<dim-goal kind=\"status\" status=\"active\"></dim-goal>";
-/// Mirrors `connection::tree::REPLY_FRAME_BYTES`: the flow test cannot see
-/// the private constant.
+const PARENT_KEY: &str = "page:parent";
+const EARLY_KEY: &str = "page:early";
+const REPLACED_KEY: &str = "page:replaced";
+const RETIRED_KEY: &str = "page:retired";
+/// Mirrors `connection::tree::{KEYS_PAGE, REPLY_FRAME_BYTES}`: the flow test
+/// cannot see the private constants.
+const KEYS_PAGE: usize = 256;
 const REPLY_FRAME_BYTES: usize = 16 * 1024 * 1024 - 64 * 1024;
 
 fn goal(text: &str, key: &str) -> InputBlock {
@@ -386,6 +391,112 @@ async fn a_fork_and_a_child_branch_carry_no_parent_keys() {
         entries(&read_keys(&mut client, &fork_id, "main", json!({})).await),
         [entry(STATUS, &own, STATUS_TEXT)],
         "the fork's own segment opens at session/forked"
+    );
+}
+
+/// The scan advances by sequence across pages: keys set below the first page
+/// are found, a replace and a retire above it win, and the opening met on a
+/// later page stops the walk before the fork's copied facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_scan_advances_pages_and_stops_at_the_opening() {
+    let store = super::deletion::Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut params = create(json!(["branch"]));
+    params["interactive"] = json!(false);
+    let created = client.rpc("session.create", params).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session
+        .input(
+            message(vec![goal("<parent>", PARENT_KEY)], "parent"),
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let at = session.sequence("main").unwrap();
+    let forked = client
+        .rpc("session.fork", json!({"sessionId":id,"at":at}))
+        .await;
+    assert_ok(&forked);
+    let fork_id = forked["result"]["sessionId"].as_str().unwrap().to_owned();
+    let fork = agent.get_session(&fork_id).unwrap();
+
+    // The early keys sit below the first page; each filler carries its own
+    // key, so an input the walk skips shows up as a missing key.
+    let early = fork
+        .input(
+            appended(vec![
+                goal("<early>", EARLY_KEY),
+                goal("<replaced 1>", REPLACED_KEY),
+                goal("<retired>", RETIRED_KEY),
+            ]),
+            "main",
+        )
+        .await
+        .unwrap();
+    for index in 0..KEYS_PAGE + 44 {
+        fork.input(
+            appended(vec![goal("<filler>", &format!("page:filler/{index}"))]),
+            "main",
+        )
+        .await
+        .unwrap();
+    }
+    let late = fork
+        .input(
+            appended(vec![
+                goal("<replaced 2>", REPLACED_KEY),
+                retired("<retired late>", RETIRED_KEY),
+            ]),
+            "main",
+        )
+        .await
+        .unwrap();
+    // The read stops at the published head: let the Dispatcher reach the
+    // committed tail before reading.
+    fork.idle("main").await.unwrap();
+
+    let reply = read_keys(&mut client, &fork_id, "main", json!({})).await;
+    assert_eq!(reply["through"], json!(fork.sequence("main").unwrap()));
+    let listed = entries(&reply);
+    let by_key: std::collections::BTreeMap<&str, &Value> = listed
+        .iter()
+        .map(|entry| (entry["key"].as_str().unwrap(), entry))
+        .collect();
+    assert_eq!(
+        by_key.get(EARLY_KEY).copied(),
+        Some(&entry(EARLY_KEY, &early, "<early>")),
+        "a key below the first page is found"
+    );
+    assert_eq!(
+        by_key.get(REPLACED_KEY).copied(),
+        Some(&entry(REPLACED_KEY, &late, "<replaced 2>")),
+        "the replace above the page boundary wins"
+    );
+    assert!(
+        !by_key.contains_key(RETIRED_KEY),
+        "the retire above the page boundary closes the key"
+    );
+    assert!(
+        !by_key.contains_key(PARENT_KEY),
+        "the opening met on a later page stops the walk"
+    );
+    assert_eq!(
+        listed
+            .iter()
+            .filter(|entry| entry["key"].as_str().unwrap().starts_with("page:filler/"))
+            .count(),
+        KEYS_PAGE + 44,
+        "every filler input above the opening is walked"
+    );
+    assert!(
+        listed
+            .windows(2)
+            .all(|pair| pair[0]["sequence"].as_u64() <= pair[1]["sequence"].as_u64()),
+        "entries ascend by the carrying input's sequence"
     );
 }
 
