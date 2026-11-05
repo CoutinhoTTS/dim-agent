@@ -604,6 +604,106 @@ async fn mcp_import_replaces_a_withheld_record_without_an_entry() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_import_replaces_a_project_entry_and_starts_it_disabled() {
+    let home = scratch("dm-import-replace-enabled");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let first = servers_document(json!({"local": {"command":"echo","args":["--one"]}}));
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":first}),
+        )
+        .await;
+    assert_ok(&preview);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.import.apply",
+                json!({
+                    "source":"project",
+                    "cwd":project,
+                    "document":first,
+                    "expectedVersion":preview["result"]["revision"],
+                    "resolutions":[{"id":"local","action":"import"}]
+                }),
+            )
+            .await,
+    );
+    let revision = project_revision(&mut client, &project).await;
+    assert_ok(&client.rpc("mcp.set_enabled", json!({"source":"project","id":"local","cwd":project,"expectedVersion":revision,"enabled":true})).await);
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(catalog_entry(&catalog, "local")["enabled"], true);
+    let second = servers_document(json!({"local": {"command":"echo","args":["--two"]}}));
+    let revision = project_revision(&mut client, &project).await;
+    let conflicted = client
+        .rpc(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":second,
+                "expectedVersion":revision,
+                "resolutions":[{"id":"local","action":"import"}]
+            }),
+        )
+        .await;
+    assert_eq!(
+        conflicted["error"]["data"]["appError"], "mcp_import_conflict",
+        "a changed entry is replaced explicitly, never imported"
+    );
+    let replaced = client
+        .rpc(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":second,
+                "expectedVersion":revision,
+                "resolutions":[{"id":"local","action":"replace"}]
+            }),
+        )
+        .await;
+    assert_ok(&replaced);
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_eq!(
+        catalog_entry(&catalog, "local")["enabled"],
+        false,
+        "a replace starts disabled like an import (D24)"
+    );
+    let local = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"local","cwd":project}),
+        )
+        .await;
+    assert_ok(&local);
+    assert_eq!(local["result"]["secretsInUserScope"], true);
+    assert_eq!(local["result"]["configuration"]["argsCount"], 1);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 async fn project_revision(client: &mut Client, project: &std::path::Path) -> Value {
     let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
     assert_ok(&catalog);

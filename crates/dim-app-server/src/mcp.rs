@@ -1475,13 +1475,12 @@ async fn write_import(
             .revision);
     }
     let workspace = config::workspace(settings, source)?;
-    // An entry removed through an external `.mcp.json` edit leaves its
-    // `mcp-projects` record behind, and the entry this import writes would
-    // then start enabled. Withdraw the record before the write, so an import
-    // never enables anything (D24).
+    // Every id the import writes, an import or a replace, has its
+    // `mcp-projects` record withdrawn before the write, so an import never
+    // enables anything and a replace starts disabled like an import (D24).
     let project_enablement = enablement(settings, source, cancel).await;
     for id in changes.keys() {
-        if !target.contains(id) && project_enablement.contains(&workspace, id) {
+        if project_enablement.contains(&workspace, id) {
             set_project_enabled(settings, source, id, false, cancel).await?;
         }
     }
