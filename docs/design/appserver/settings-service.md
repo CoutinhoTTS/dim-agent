@@ -19,7 +19,7 @@ the source name, its files, a JSON Schema (with `default` values) and its user-o
 
 - the process service `settings`, which the owner uses: `register`, `read`, `update` (CAS on
   the revision) and `projects`;
-- the client management methods `settings.read` and `settings.update`;
+- the client management methods `settings.read`, `settings.update` and `settings.sources`;
 - the same rutis events as S8a, `settings.changed` and `settings.project_authorized`. Their
   payloads become serializable. There is no `subscribe(source)`.
 
@@ -104,6 +104,7 @@ depended on a store nobody owned. That service and the `*Ref` rule are withdrawn
  |         settings.project_authorized on settings/projects                |
  +------^-------------------------------^----------------------------------+
         | register/read/update/projects | settings.read / settings.update
+        |                               | settings.sources
         |                               |
   TypeScript owner (rutis runtime row)  Rpc  <--  local client
 ```

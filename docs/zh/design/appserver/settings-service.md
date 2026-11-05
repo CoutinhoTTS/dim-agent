@@ -17,7 +17,7 @@ Settings 为不是用 Rust 写的插件提供业务来源。这类插件在启�
 仅限用户的字段（§3.1）。随后 Settings 在 JSON 文档上提供三样东西：
 
 - 进程服务 `settings`，供所有者使用：`register`、`read`、`update`（按 revision 做 CAS）和 `projects`；
-- 客户端管理方法 `settings.read` 和 `settings.update`；
+- 客户端管理方法 `settings.read`、`settings.update` 和 `settings.sources`；
 - 与 S8a 相同的 rutis 事件 `settings.changed` 和 `settings.project_authorized`。它们的载荷改为
   可序列化。没有 `subscribe(source)`。
 
@@ -90,6 +90,7 @@ Settings 不赋予任何字段特殊含义，只有一个例外：schema 带 JSO
  |   在 settings/projects 上发出 settings.project_authorized               |
  +------^-------------------------------^----------------------------------+
         | register/read/update/projects | settings.read / settings.update
+        |                               | settings.sources
         |                               |
   TypeScript 所有者（rutis 运行时行）   Rpc  <--  本地客户端
 ```
