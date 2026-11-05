@@ -369,7 +369,7 @@ C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两�
 
 投递 `input/deleted` 时：去掉被删除的输入重新折叠；若最新的 `turn/end` 不是 `decided`，重新做它的决策（C4 与 C5 去重）。
 
-每次写入都是自有工作：处理器登记一个以做出决定的序号为键的任务，然后返回。同一序号的任务已在途时，不再登记。写入前，任务基于此刻已消费的折叠结果复核同样的条件（[time-bus](../../../architecture/rust-agent/time-bus.md) §4），条件不再成立就不写；已提交但尚未消费的事实不读，由其消费方按序号处理（§4.1）。Goal 的写入带 `after="N"`（或 `after="M"`），因此折叠结果记录了该决定，重载不会重复它。
+每次写入都是自有工作：处理器登记一个以做出决定的序号为键的任务，然后返回；若某个 turn-end 请求到达时，该 turn end 的任务已在途，则在任务结束时再回答一次。写入前，任务基于此刻已消费的折叠结果复核同样的条件（[time-bus](../../../architecture/rust-agent/time-bus.md) §4），条件不再成立就不写；已提交但尚未消费的事实不读，由其消费方按序号处理（§4.1）。没有变化时，C4 与 `decided` 标记会让这次重复决策成为空操作，因此通常不写任何内容。cancelled 的 `exec/ended` 需要它：它可能在 turn-end 工作已经读过折叠、带着推迟的决策返回之后才关闭最后一个开放任务，而此后没有 wake 再请求一次决策（见上文的 background precondition）。Goal 的写入带 `after="N"`（或 `after="M"`），因此折叠结果记录了该决定，重载不会重复它。
 
 投递位于 `S` 的 `branch/start` 时：若 `inherited_live` 且 `S` 未 `decided`，写入起始 `clear`（原因 `new_branch`，`after="S"`）；任务写入前复核 `inherited_live`（§3.4）。
 
