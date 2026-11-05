@@ -1312,3 +1312,41 @@ fn a_first_prompt_is_kept_when_the_resumed_session_cannot_attach() {
     );
     assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
 }
+
+/// A draft the user starts before the refusal returns keeps the composer,
+/// and the refused first message is reported instead of silently dropped.
+#[test]
+fn a_first_prompt_a_new_draft_keeps_out_is_reported() {
+    let home = Home::new();
+    let (created, refusing) = std::sync::mpsc::channel();
+    let (release, answered) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let create = wire.read("session.create");
+        created.send(()).unwrap();
+        // The user starts another draft while the creation is in flight.
+        answered.recv_timeout(PATIENCE).unwrap();
+        wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{
+            "code":-32000,"message":"No available model","data":{"appError":"provider_failed"}}}));
+        wire.hold();
+    });
+    let mut command = command(&home);
+    command.args(["tui", "--scrollback", "-p", "hello"]);
+    let mut terminal = Terminal::launch_tui(command);
+    refusing.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"later draft");
+    terminal.until("later draft");
+    release.send(()).unwrap();
+    terminal.until("The first message was not sent; your new draft was kept.");
+    // The newer draft still holds the composer; the refused message was
+    // reported, not restored over it.
+    terminal.until("later draft");
+    terminal.write(b"\x03");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
+}

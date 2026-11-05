@@ -567,6 +567,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "entradas fijadas",
         "digest" => "compendio",
         "summary" => "resumen",
+        "The first message was not sent; your new draft was kept." => {
+            "El primer mensaje no se envió; se conservó tu nuevo borrador."
+        }
         _ => return None,
     })
 }

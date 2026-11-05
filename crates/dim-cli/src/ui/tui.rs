@@ -2780,12 +2780,15 @@ impl App {
     }
 
     /// Puts a first message no Session took back into the draft, unless the
-    /// user has started another one.
+    /// user has started another one: that newer draft wins, and the loss of
+    /// the first message is reported so it is not silent.
     fn restore_unsent(&mut self) {
         let Some(initial) = self.unsent.take() else {
             return;
         };
         if !self.composer.is_empty() {
+            self.notices
+                .push(t("The first message was not sent; your new draft was kept.").to_owned());
             return;
         }
         self.composer.set_draft(&initial.text);

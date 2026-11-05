@@ -480,6 +480,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "钉住的输入",
         "digest" => "清单",
         "summary" => "摘要",
+        "The first message was not sent; your new draft was kept." => {
+            "首条消息未发送；已保留你的新草稿。"
+        }
         _ => return None,
     })
 }
