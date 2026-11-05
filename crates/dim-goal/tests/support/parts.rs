@@ -310,11 +310,6 @@ impl RefusingStore {
     pub fn reads(&self) -> Vec<Read> {
         self.reads.lock().unwrap().clone()
     }
-
-    /// Forgets the reads so far; later reads are the ones a case inspects.
-    pub fn clear_reads(&self) {
-        self.reads.lock().unwrap().clear();
-    }
 }
 
 impl TimelineStore for RefusingStore {
