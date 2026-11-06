@@ -10096,6 +10096,7 @@
         "path SessionIdentity",
         "path TimelineIdentity",
         "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::CollaborationRole",
         "use dim_agent_runtime::SessionConfig",
         "use dim_agent_runtime::SessionIdentity",
         "use dim_agent_runtime::TimelineIdentity"
