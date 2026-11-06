@@ -8,6 +8,7 @@ use base64::Engine as _;
 use dim_agent_capabilities::adapters::MockTools;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_app_server::{RunningServer, ServerConfig, serve};
+use futures_util::{SinkExt, StreamExt};
 use http::StatusCode;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -15,7 +16,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::net::{TcpListener, UnixStream};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{
+    Request as WsRequest, Response as WsResponse,
+};
 
 const CREDENTIAL: &str = "test-credential";
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR-stub-image";
@@ -266,6 +271,29 @@ impl Client {
     async fn rpc(&mut self, method: &str, params: Value) -> Value {
         let id = self.send(method, params).await;
         self.response(id).await
+    }
+    /// The next notification `method` names, buffering every other message.
+    async fn notice(&mut self, method: &str) -> Value {
+        if let Some(index) = self
+            .notices
+            .iter()
+            .position(|value| value["method"] == method)
+        {
+            return self.notices.remove(index);
+        }
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                self.stream.read_line(&mut line).await.unwrap(),
+                0,
+                "connection closed"
+            );
+            let value: Value = serde_json::from_str(&line).unwrap();
+            if value["method"] == method {
+                return value;
+            }
+            self.notices.push(value);
+        }
     }
 }
 
@@ -688,6 +716,91 @@ async fn cancel_is_local_for_an_image_and_unsupported_for_a_video() {
         "aimux exposes no cancel for a started video job: {task}"
     );
 
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_realtime_session_relays_its_frames_and_events_over_the_socket() {
+    // The provider side of one realtime session: the catalog entry's
+    // declaration says `/realtime`, and the connection adds the model id.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stub = tokio::spawn(async move {
+        // tungstenite's own `ErrorResponse` size is not ours to box.
+        #[allow(clippy::result_large_err)]
+        fn checked(
+            request: &WsRequest,
+            response: WsResponse,
+        ) -> Result<WsResponse, http::Response<Option<String>>> {
+            assert_eq!(
+                request.uri().path_and_query().unwrap().as_str(),
+                "/v1/realtime?model=stepaudio-2.5-realtime"
+            );
+            assert_eq!(
+                request.headers().get("authorization").unwrap(),
+                format!("Bearer {CREDENTIAL}").as_str()
+            );
+            Ok(response)
+        }
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_hdr_async(stream, checked)
+            .await
+            .unwrap();
+        let text = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = text else {
+            panic!("the client's first frame is a text frame")
+        };
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["type"], "session.update");
+        socket
+            .send(Message::Text(
+                r#"{"type":"session.created","session":{"id":"s"}}"#.into(),
+            ))
+            .await
+            .unwrap();
+        while let Some(message) = socket.next().await {
+            if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                break;
+            }
+        }
+    });
+
+    let home = home("realtime");
+    let server = start_in(home.clone()).await;
+    let mut client = Client::new(&server).await;
+    point_at_stub(&mut client, "step-plan", &format!("http://{address}/v1")).await;
+    let opened = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "voice", "model": model("step-plan", "stepaudio-2.5-realtime"), "params": {}}),
+        )
+        .await;
+    assert_ok(&opened);
+    let id = opened["result"]["connectionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(opened["result"]["transport"], "relay");
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "session.update", "session": {"instructions": "hi"}}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    let event = client.notice("modality.realtime.event").await;
+    assert_eq!(event["params"]["connectionId"], id);
+    assert_eq!(event["params"]["event"]["type"], "session.created");
+    assert_no_credential(&event);
+    let closed = client
+        .rpc("modality.realtime.close", json!({"connectionId": id}))
+        .await;
+    assert_ok(&closed);
+    let ended = client.notice("modality.realtime.ended").await;
+    assert_eq!(ended["params"]["reason"], "closed");
+    stub.await.unwrap();
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

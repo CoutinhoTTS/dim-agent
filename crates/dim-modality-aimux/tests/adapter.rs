@@ -480,11 +480,24 @@ async fn operations_follow_the_binding_table() {
     assert_eq!(
         names,
         vec![
+            ("realtime".to_owned(), "voice".to_owned()),
             ("image".to_owned(), "generate".to_owned()),
             ("image".to_owned(), "edit".to_owned()),
             ("speech".to_owned(), "synthesize".to_owned()),
             ("speech".to_owned(), "transcribe".to_owned()),
         ]
+    );
+    // The relay speaks the transport a catalog entry declares, so it serves
+    // a session for any provider; its schema refuses every parameter (D7).
+    let voice = adapter
+        .operations(&openai)
+        .into_iter()
+        .find(|operation| operation.category == "realtime")
+        .unwrap();
+    assert_eq!(voice.operation, "voice");
+    assert_eq!(
+        voice.params_schema,
+        json!({"type": "object", "maxProperties": 0})
     );
     // xAI's package refuses image models, so Grok Imagine reports no image
     // operation.
@@ -499,7 +512,12 @@ async fn operations_follow_the_binding_table() {
         .collect();
     assert_eq!(
         categories,
-        vec!["video.generate", "speech.synthesize", "speech.transcribe"]
+        vec![
+            "realtime.voice",
+            "video.generate",
+            "speech.synthesize",
+            "speech.transcribe"
+        ]
     );
     // A package that ignores an edit's input files serves generation alone.
     for (provider_id, model_id) in [
@@ -516,7 +534,11 @@ async fn operations_follow_the_binding_table() {
             .into_iter()
             .map(|operation| format!("{}.{}", operation.category, operation.operation))
             .collect();
-        assert_eq!(names, vec!["image.generate"], "{provider_id}");
+        assert_eq!(
+            names,
+            vec!["realtime.voice", "image.generate"],
+            "{provider_id}"
+        );
     }
     // A package that reports no file input for a model drops edit for it.
     let dall_e = ModelId {
@@ -529,6 +551,7 @@ async fn operations_follow_the_binding_table() {
         .map(|operation| format!("{}.{}", operation.category, operation.operation))
         .collect();
     assert!(names.contains(&"image.generate".to_owned()));
+    assert!(names.contains(&"realtime.voice".to_owned()));
     assert!(
         !names.contains(&"image.edit".to_owned()),
         "dall-e-3 takes no file input: {names:?}"
@@ -543,13 +566,23 @@ async fn operations_follow_the_binding_table() {
         .into_iter()
         .map(|operation| format!("{}.{}", operation.category, operation.operation))
         .collect();
-    assert_eq!(names, vec!["image.generate", "image.edit"]);
+    assert_eq!(
+        names,
+        vec!["realtime.voice", "image.generate", "image.edit"]
+    );
     // A created provider's UUID matches no row.
     let created = ModelId {
         provider_id: "6f1c2f9e-0000-4000-8000-000000000000".into(),
         model_id: "anything".into(),
     };
-    assert!(adapter.operations(&created).is_empty());
+    assert_eq!(
+        adapter
+            .operations(&created)
+            .into_iter()
+            .map(|operation| format!("{}.{}", operation.category, operation.operation))
+            .collect::<Vec<String>>(),
+        vec!["realtime.voice"]
+    );
 }
 
 #[tokio::test]

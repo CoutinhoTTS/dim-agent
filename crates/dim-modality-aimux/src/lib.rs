@@ -14,6 +14,7 @@
 
 mod job;
 mod media;
+mod realtime;
 pub mod vendor;
 
 use aimux_core::AiMuxError;
@@ -72,6 +73,8 @@ struct Pending {
 /// The process-scoped `modalityAdapter` the product serves.
 pub struct MediaAdapter {
     transport: media::Transport,
+    /// The openai-realtime relay's sessions (A.2 `realtimeOpen`).
+    relay: realtime::Relay,
     /// The jobs of blocking operations this generation is running: their
     /// `wait` carries no handle, so the job is kept from `submit` to `wait`
     /// and never across a generation. The map is bounded because the engine
@@ -84,6 +87,7 @@ impl MediaAdapter {
     pub fn new() -> Self {
         Self {
             transport: media::Transport::Shared(MediaTransport::new()),
+            relay: realtime::Relay::default(),
             jobs: Mutex::new(HashMap::new()),
         }
     }
@@ -91,6 +95,7 @@ impl MediaAdapter {
     pub fn scripted(fetch: FetchFunction) -> Self {
         Self {
             transport: media::Transport::Fixed(fetch),
+            relay: realtime::Relay::default(),
             jobs: Mutex::new(HashMap::new()),
         }
     }
@@ -134,11 +139,18 @@ impl ModalityAdapter for MediaAdapter {
     }
 
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation> {
+        // The relay speaks the openai-realtime protocol a catalog entry
+        // declares; the connection carries the base URL, headers and proxy,
+        // so any provider with such an entry opens through it (A.2).
+        let mut operations = vec![AdapterOperation {
+            category: "realtime".to_owned(),
+            operation: "voice".to_owned(),
+            params_schema: realtime_schema(),
+        }];
         let Some(vendor) = vendor::vendor(&model.provider_id) else {
-            return Vec::new();
+            return operations;
         };
         let edit = media::serves_edit(vendor, &model.model_id);
-        let mut operations = Vec::new();
         for (kind, category, operation) in vendor.statements(edit) {
             let schema = match (kind, operation) {
                 (Operation::Image, "edit") => image_edit_schema(),
@@ -305,36 +317,34 @@ impl ModalityAdapter for MediaAdapter {
 
     fn realtime_open(
         &self,
-        _connection: ModalityConnection,
+        connection: ModalityConnection,
         _params: Value,
-        _events: tokio::sync::mpsc::Sender<RealtimeEvent>,
-        _cancel: CancellationToken,
+        events: tokio::sync::mpsc::Sender<RealtimeEvent>,
+        cancel: CancellationToken,
     ) -> AdapterFuture<'_, RealtimeOpened> {
-        // The media statements carry no realtime operation, so Modality never
-        // calls this for a model this adapter serves.
-        Box::pin(async {
-            Err(AdapterError::unavailable(
-                "No realtime operation is served by this adapter",
-            ))
-        })
+        Box::pin(async move { self.relay.open(&connection, events, &cancel).await })
     }
 
     fn realtime_send(
         &self,
-        _channel_id: &str,
-        _frame: RealtimeFrame,
-        _cancel: CancellationToken,
+        channel_id: &str,
+        frame: RealtimeFrame,
+        cancel: CancellationToken,
     ) -> AdapterFuture<'_, ()> {
-        Box::pin(async {
-            Err(AdapterError::unavailable(
-                "No realtime session is served by this adapter",
-            ))
-        })
+        let channel = channel_id.to_owned();
+        Box::pin(async move { self.relay.send(&channel, frame, &cancel).await })
     }
 
-    fn realtime_close(&self, _channel_id: &str) -> AdapterFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    fn realtime_close(&self, channel_id: &str) -> AdapterFuture<'_, ()> {
+        let channel = channel_id.to_owned();
+        Box::pin(async move { self.relay.close(&channel).await })
     }
+}
+
+/// A realtime session's parameters: the relay takes none; a client configures
+/// the provider session with its first text frame (A.3, D7).
+fn realtime_schema() -> Value {
+    json!({"type": "object", "maxProperties": 0})
 }
 
 impl MediaAdapter {
