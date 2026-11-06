@@ -19,6 +19,7 @@
 //! Settings service and management methods; a host installs it with
 //! [`install`].
 mod adapter;
+pub mod task;
 pub use adapter::{
     AdapterError, AdapterErrorCode, AdapterFuture, AdapterOperation, AdapterOutput,
     AdapterProgress, Job, JobFile, ModalityAdapter, ProgressSink, RemoteCancel, Submitted,
@@ -31,6 +32,7 @@ use dim_agent_runtime::{AgentBuilder, Names};
 use dim_agent_types::{ModalityModelSnapshot, ModelCapabilitySnapshot, ModelId};
 use dim_app_server::{
     methods::ManagementMethods,
+    plugin_files::PluginFileTransactions,
     protocol::Empty,
     settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
 };
@@ -816,6 +818,7 @@ pub struct ModalityPlugin {
     methods: Key<ManagementMethods>,
     selection: Key<ModelSelectionHost>,
     selectable: Key<SelectableModelsHost>,
+    files: Key<PluginFileTransactions>,
 }
 impl ModalityPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -824,6 +827,7 @@ impl ModalityPlugin {
             methods: names.key()?,
             selection: names.key()?,
             selectable: names.key()?,
+            files: names.key()?,
         })
     }
 }
@@ -837,6 +841,7 @@ impl DynPlugin for ModalityPlugin {
             self.methods.erase(),
             self.selection.erase(),
             self.selectable.erase(),
+            self.files.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -845,6 +850,7 @@ impl DynPlugin for ModalityPlugin {
             let methods = ctx.require_at(&self.methods)?;
             let selection = ctx.require_at(&self.selection)?;
             let selectable = ctx.require_at(&self.selectable)?;
+            let _files = ctx.require_at(&self.files)?;
             settings.register::<ModalitySettings>(ctx)?;
             let context = ctx.clone();
             methods.register(

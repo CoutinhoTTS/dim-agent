@@ -54,6 +54,7 @@ flowchart TB
     Rec["tasks/id/task.json：记录 v1，含 revision"]
     In["tasks/id/input/：内联输入文件（二进制）"]
     Res["tasks/id/result/：结果文件（二进制）"]
+    Work["tasks/id/work/：适配器的工作目录"]
   end
   subgraph SET["Settings 业务来源 modality"]
     Cfg["操作默认值 modality.image.*，<br/>每节点 OCR 组件路径，<br/>并发与保留上限"]
@@ -67,6 +68,7 @@ flowchart TB
   Mod["Modality"] -->|"在每任务锁下原子替换"| Rec
   Mod --> In
   Mod --> Res
+  Mod -->|"每个任务一个工作目录"| Work
   Mod -->|"modality.configure 经 Settings 所有者写入（CAS）"| Cfg
   Rec -->|"apply 时重建"| Idx
   Cfg -->|"使用时读取"| Mod
@@ -414,6 +416,8 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `created_at`、`updated_at`、`finished_at` | RFC 3339 |
 
 记录与结果文件使用 `pluginFiles`（扩展）：每插件根目录、UTF-8 与二进制原子替换、锁、格式版本。保留：终态任务在 30 天后或超出 200 个终态任务时连同文件删除，最旧的先删（A2）；非终态任务从不删除。
+
+记录是 `modality/tasks/<task_id>/task.json`，采用宿主的版本 1 文本信封。每次写入都持有该文件的锁并比较 `revision`：第一个终态写入获胜，较晚的终态结果连同它写出的结果文件一起丢弃。`params` 以 `files` 数组携带输入文件的元数据；内联文件存放在 `input/` 下，调用方的 `node_path` 只记录路径并就地读取。`wait` 把适配器返回的文件从任务的工作目录流式写入 `result/<name>`，同时计算 `bytes` 与 `sha256`，随后删除工作目录。
 
 ### A.5 CLI
 

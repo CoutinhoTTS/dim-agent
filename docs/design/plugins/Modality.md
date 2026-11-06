@@ -54,6 +54,7 @@ flowchart TB
     Rec["tasks/id/task.json: record v1 with revision"]
     In["tasks/id/input/: inline input files (binary)"]
     Res["tasks/id/result/: result files (binary)"]
+    Work["tasks/id/work/: the adapter's work directory"]
   end
   subgraph SET["Settings business source modality"]
     Cfg["Operation defaults modality.image.*,<br/>OCR component path per node,<br/>concurrency and retention limits"]
@@ -67,6 +68,7 @@ flowchart TB
   Mod["Modality"] -->|"atomic replace under per-task lock"| Rec
   Mod --> In
   Mod --> Res
+  Mod -->|"one work directory per job"| Work
   Mod -->|"modality.configure via Settings owner write (CAS)"| Cfg
   Rec -->|"rebuilt on apply"| Idx
   Cfg -->|"read at use time"| Mod
@@ -414,6 +416,8 @@ Boundary validation: files at most 100 MiB per submission and 25 MiB per inline 
 | `created_at`, `updated_at`, `finished_at` | RFC 3339 |
 
 Records and result files use `pluginFiles` (extended): per-plugin root, UTF-8 and binary atomic replace, lock, format version. Retention: terminal tasks deleted with their files after 30 days or beyond 200 terminal tasks, oldest first (A2); non-terminal tasks never.
+
+The record is `modality/tasks/<task_id>/task.json` in the host's version 1 text envelope. Every write takes that file's lock and compares `revision`: the first terminal write wins, and a later terminal outcome is discarded together with the result files it wrote. `params` carries the input files as a `files` array of their metadata; an inline file is stored under `input/` and a caller's `node_path` is recorded by its path and read in place. `wait` streams the files an adapter returns from the job's work directory into `result/<name>` while computing `bytes` and `sha256`, and the work directory is removed afterwards.
 
 ### A.5 CLI
 
