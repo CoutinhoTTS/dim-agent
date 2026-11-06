@@ -2318,6 +2318,13 @@
       ]
     },
     {
+      "id": "dim_app_server::mcp::import::testing",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::import",
+      "file": "crates/dim-app-server/src/mcp/import.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_app_server::mcp::management",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -22046,6 +22053,14 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::import::testing",
+      "references": [
+        "path import::testing::pause",
+        "use import::testing"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::management",
       "references": [
         "mod management",
@@ -22427,6 +22442,13 @@
         "use super::config::McpSettings",
         "use super::config::OAUTH_MEMBERS",
         "use super::config::RemoteTransport"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::mcp::import::testing",
+      "references": [
+        "mod testing"
       ]
     },
     {

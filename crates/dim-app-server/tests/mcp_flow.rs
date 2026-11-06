@@ -174,13 +174,12 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
             .applied_revision,
         Some(catalog.user_revision)
     );
-    assert_eq!(
-        fixture
-            .mcp
-            .application(SettingsScope::Project(1))
-            .applied_revision,
-        catalog.project_revision
-    );
+    // A project application names the document revision it applied, while the
+    // catalog's `projectRevision` is the source token over that revision and
+    // the withheld records; the application record is whether one exists.
+    let project = fixture.mcp.application(SettingsScope::Project(1));
+    assert!(project.applied_revision.is_some());
+    assert!(project.error.is_none());
     let rows = fixture.loader.layers()[0].patches[0]
         .insert
         .clone()
@@ -235,8 +234,16 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
         fixture.mcp.server(Some(1), "shared".into(), &cancel).await,
         Err(McpError::Disabled)
     ));
+    // The application names the document revision it applied; the token `revision`
+    // also covers the withheld records.
+    let document_revision = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::Project(1), &cancel)
+        .await
+        .unwrap()
+        .revision;
     let application = fixture.mcp.application(SettingsScope::Project(1));
-    assert_eq!(application.applied_revision, Some(revision.clone()));
+    assert_eq!(application.applied_revision, Some(document_revision));
     fixture
         .mcp
         .update(
@@ -992,7 +999,7 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
 }
 
 #[tokio::test]
-async fn scope_move_partial_is_recoverable_and_remove_cleans_the_overlay() {
+async fn scope_move_needs_readable_records_and_remove_cleans_the_overlay() {
     let fixture = Fixture::new().await;
     let cancel = CancellationToken::new();
     let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
@@ -1009,17 +1016,16 @@ async fn scope_move_partial_is_recoverable_and_remove_cleans_the_overlay() {
             &cancel,
         )
         .await;
-    assert!(matches!(
-        result,
-        Err(McpError::MovePartial { into_project: true })
-    ));
+    // The source token covers the withheld records, so a move that cannot read
+    // them refuses before it writes anything: no half-changed scope is left.
+    assert!(result.is_err(), "{result:?}");
     let project = fixture
         .settings
         .read::<McpSettings>(SettingsScope::Project(1), &cancel)
         .await
         .unwrap()
         .document;
-    assert!(project.contains("user-only"));
+    assert!(!project.contains("user-only"));
     let user = fixture
         .settings
         .read::<McpSettings>(SettingsScope::User, &cancel)
@@ -1027,36 +1033,10 @@ async fn scope_move_partial_is_recoverable_and_remove_cleans_the_overlay() {
         .unwrap()
         .document;
     assert!(user.contains("user-only"));
-    let enablement = fixture
-        .settings
-        .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
-        .await
-        .unwrap()
-        .document;
-    assert!(
-        !enablement
-            .enabled
-            .values()
-            .any(|ids| ids.contains("user-only"))
-    );
 
     fs::remove_dir(&secrets_path).unwrap();
     let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
-    assert_eq!(catalog.servers["user-only"].source, McpSource::Project(1));
-    fixture
-        .mcp
-        .update(
-            SettingsScope::Project(1),
-            catalog.project_revision.clone().unwrap(),
-            "user-only".into(),
-            McpChange::Remove,
-            &cancel,
-        )
-        .await
-        .unwrap();
-    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
     assert_eq!(catalog.servers["user-only"].source, McpSource::User);
-
     fixture
         .mcp
         .move_entry(
@@ -1069,6 +1049,8 @@ async fn scope_move_partial_is_recoverable_and_remove_cleans_the_overlay() {
         )
         .await
         .unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert_eq!(catalog.servers["user-only"].source, McpSource::Project(1));
     let project = fixture
         .settings
         .read::<McpSettings>(SettingsScope::Project(1), &cancel)
@@ -1413,22 +1395,35 @@ async fn a_conflicting_remove_keeps_the_project_entry_and_its_overlay() {
         .unwrap()
         .project_revision
         .unwrap();
-    let mut document = fixture
+    let snapshot = fixture
         .settings
         .read::<McpSettings>(SettingsScope::Project(1), &cancel)
         .await
-        .unwrap()
-        .document;
+        .unwrap();
+    let mut document = snapshot.document;
     let Some(McpServerSettings::Remote { extra, .. }) = document.configure_mut("user-only") else {
         panic!("the moved entry is remote");
     };
     extra.insert("note".into(), json!(1));
-    let patched = fixture
+    // A writer outside Mcp takes Settings' revision for the document, not the
+    // source token a client holds.
+    fixture
         .settings
-        .update(SettingsScope::Project(1), &revision, document, &cancel)
+        .update(
+            SettingsScope::Project(1),
+            &snapshot.revision,
+            document,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let patched = fixture
+        .mcp
+        .catalog(Some(1), &cancel)
         .await
         .unwrap()
-        .revision;
+        .project_revision
+        .unwrap();
 
     assert!(matches!(
         fixture
@@ -1508,24 +1503,29 @@ async fn a_conflicting_remove_keeps_the_project_entry_and_its_overlay() {
 async fn an_into_project_partial_is_finished_after_a_restart() {
     let fixture = Fixture::new().await;
     let cancel = CancellationToken::new();
-    let secrets_path = fixture.home.join("mcp-secrets.json");
-    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
-    fs::create_dir(&secrets_path).unwrap();
-    assert!(matches!(
-        fixture
-            .mcp
-            .move_entry(
-                McpSource::User,
-                McpSource::Project(1),
-                "user-only".into(),
-                catalog.user_revision,
-                catalog.project_revision.unwrap(),
-                &cancel,
-            )
-            .await,
-        Err(McpError::MovePartial { into_project: true })
-    ));
-    fs::remove_dir(&secrets_path).unwrap();
+    // The state a move into project leaves when its record write fails after
+    // the destination committed: the public skeleton is in the project, the
+    // source entry is still in user scope, and no withheld record exists.
+    let snapshot = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::Project(1), &cancel)
+        .await
+        .unwrap();
+    let mut project = snapshot.document;
+    project.insert(
+        "user-only",
+        serde_json::from_value(json!({"type":"http","url":"https://example.test"})).unwrap(),
+    );
+    fixture
+        .settings
+        .update(
+            SettingsScope::Project(1),
+            &snapshot.revision,
+            project,
+            &cancel,
+        )
+        .await
+        .unwrap();
 
     fixture.publication.close().await;
     fixture.root.shutdown().await.unwrap();
@@ -2807,3 +2807,4 @@ async fn unread_entry_members_are_kept_and_a_reserved_generation_is_broken() {
 
     fixture.close().await;
 }
+

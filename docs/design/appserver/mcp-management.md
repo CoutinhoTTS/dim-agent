@@ -129,14 +129,21 @@ creating an entry, or replacing one whose withheld values the user re-enters; a 
 use it to round-trip an existing entry, because a complete configuration would have to carry the
 secrets the read withholds.
 
-### D5. One revision per source document, and a conflict is a reread
+### D5. One revision per source, and a conflict is a reread
 
-The revision is Settings' opaque revision for the entry's source document
-([Settings service](settings-service.md#33-persistence-and-revisions)): the same string
-`mcp.catalog` reports as `userRevision` or `projectRevision`, and the same one every write takes
-as `expectedVersion`. All entries of one source share it, so a write to another entry of that
-source makes the token stale and the next write answers `mcp_settings_conflict`. A client then
-re-reads the entry it is editing and shows the conflict; it does not retry the same write. A
+The revision is an opaque value the owner computes and the client only carries. For a user source
+it is Settings' revision for that document
+([Settings service](settings-service.md#33-persistence-and-revisions)); for a project source it is
+a digest over that same revision and the workspace's withheld records, as `(id, generation)` pairs
+(D23). A project entry is served from two documents, so one token names both: a record another
+writer renewed makes it stale exactly as a source edit does. A generation is random and renewed on
+every record write (D15), so the digest identifies a record version without deriving from its
+values, and another workspace's records are not part of it.
+
+`mcp.catalog` reports the value as `userRevision` or `projectRevision`, and the same one every
+write takes as `expectedVersion`. All entries of one source share it, so a write to another entry
+of that source makes the token stale and the next write answers `mcp_settings_conflict`. A client
+then re-reads the entry it is editing and shows the conflict; it does not retry the same write. A
 remove whose `expectedVersion` is stale when it arrives writes nothing. A source change that
 lands while the remove runs, after that check, can still leave the entry withdrawn: it is then
 off, which fails closed, and the reply is the conflict. A remove needs a readable source; a
@@ -536,7 +543,10 @@ and 32 in `unsupported`, and `omitted` counts the distinct names those caps left
 `mcp.import.apply` takes the document, the preview's revision and one resolution per entry
 (`import`, `skip`, `replace` or `rename` with a new id), with `skip` as the default. It re-parses
 the document and re-checks every resolution against the source it reads at `expectedVersion`; it
-never trusts a preview result sent back. Every accepted entry enters that one snapshot and is
+never trusts a preview result sent back. For a project target that source is the file and the
+workspace's withheld records (D5), so the token names the pair the preview compared against: a
+record another writer renewed in between answers `mcp_settings_conflict` before any write, exactly
+as a changed file does. Every accepted entry enters that one snapshot and is
 committed by one source update: one revision check, one source write, and no entry visible before
 the commit. A project import withdraws the enablement record of every entry it writes before the
 source update and writes its withheld records after it (D24, D25).
@@ -544,6 +554,12 @@ A refused resolution answers before either write, so the request changes nothing
 answers `mcp_settings_conflict` and leaves the source as it was, though an entry the import would
 have replaced may be left disabled (D24); a request that accepts no entry writes nothing. Entries
 it does not touch keep their stored value, broken entries included (D18).
+
+The record write is the last step and cannot join the source compare-and-set: it runs after the
+source commits. It therefore replaces a record only while that record still carries the generation
+the plan saw, and keeps one another writer renewed in between. The source entries are already
+written at that point, so the reply is `mcp_import_partial` (D25, §4.8); replacing the entries
+again writes both.
 
 ### D24. An import never enables anything
 
@@ -650,7 +666,7 @@ without reading a document for a client (§4.9).
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `revision` | string, absent for a plugin entry | The source document's revision, the token `expectedVersion` takes (D5) |
+| `revision` | string, absent for a plugin entry | The source's revision, the token `expectedVersion` takes (D5): Settings' revision for a user entry, and for a project entry a digest of that revision and this workspace's withheld records |
 | `enabled` | boolean | The enablement the entry runs with: for a user or plugin entry its own field, enabled when absent; for a project entry the user's record (D2) |
 | `secretsInUserScope` | boolean | True when the project entry has an `mcp-secrets` overlay; its withheld fields are edited in user scope (D13, D14) |
 | `configuration` | `Configuration` | The declared configuration projection below; `enabled` is reported above and is not part of it |
@@ -748,14 +764,14 @@ skeleton only; the overlay-held fields stay in `mcp-secrets` and are never copie
 | --- | --- |
 | `mcp_unknown_server` | The target source holds no entry with that id, for a read or a write; a move whose source lacks the id. A broken entry answers its own error instead |
 | `mcp_invalid_config` | The patched or saved document, an import document that is not JSON or exceeds the size, entry or id limits, a named store that is `too-large` or `malformed`, an empty `id`, an unauthorized workspace, or an operation on a broken entry is refused; a broken entry's error names its id and field |
-| `mcp_settings_conflict` | `expectedVersion` is not the source's current revision (D5), an overlay/enablement compare-and-set lost, or an import's `expectedSourceRevision` differs from the store it re-read (D26) |
+| `mcp_settings_conflict` | `expectedVersion` is not the source's current revision (D5), including a project entry's withheld record renewed since the token was read, an overlay/enablement compare-and-set lost, or an import's `expectedSourceRevision` differs from the store it re-read (D26) |
 | `mcp_settings_read` | The source could not be read, or a named store is `absent` or `unreadable` (§4.9) |
 | `mcp_move_conflict` | The destination source already holds an entry with that id; nothing is written |
 | `mcp_move_partial` | A destination-side write committed and the source removal did not; the client rereads and follows the direction's recovery: into project remove the destination and retry, into user remove the project source (D11, §4.6) |
 | `mcp_credentials_are_user_scoped` | A patch on a moved project entry sets a field held in `mcp-secrets`, or a save targets that entry; move the entry back to user scope (D14) |
 | `mcp_stale_secret_record` | A project save finds a withheld record whose project entry is absent; call `mcp.remove` with that id and the project revision to delete it, then retry (D17) |
 | `mcp_import_conflict` | An import resolution cannot apply to the source read at `expectedVersion`: `import` on an id the source holds with different content or as a broken entry, `replace` on an id it does not hold, a `rename` destination already taken, or a non-skip resolution on an invalid entry; no entry is written and no record changes (§4.8) |
-| `mcp_import_partial` | A project import's source write committed and its withheld records did not; the source entries stay as written and their `mcp-secrets` records are missing or old, so the entries run without the document's withheld values until they are replaced again (D25, §4.8) |
+| `mcp_import_partial` | A project import's source write committed and its withheld records did not: the update failed, or a record it planned was renewed by another writer since the plan and is kept. The source entries stay as written and their `mcp-secrets` records are missing or old, so the entries run without the document's withheld values until they are replaced again (D25, §4.8) |
 | `invalid_params` (`-32602`) | A field of the wrong transport, a project target without `cwd`, a plugin source, the same `from` and `to`, an import that names both or neither of `document` and `from`, an unknown `from`, a project-scoped `from` without `cwd`, `expectedSourceRevision` with `document` or without `from`, an import resolution naming an entry the document does not contain, a `newId` on another action, or a write to a plugin entry, which answers `plugin MCP entries change through their plugin` |
 | `local_transport_required` | The connection is not local |
 | `service_reloading` / `service_unavailable` | Mcp or its row is not serving; from [management methods](management-methods.md#dispatch-and-lifecycle) |
@@ -1031,7 +1047,7 @@ It replies:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `revision` | string | The target source revision, the token `mcp.import.apply` takes as `expectedVersion`; `missing` when the source has no document |
+| `revision` | string | The target source's revision, the token `mcp.import.apply` takes as `expectedVersion` (D5); `missing` when a user source has no document, while a project source's token is a digest and never that sentinel |
 | `sourceRevision` | string, present with `from` | The digest of the converted store document, the token the apply takes as `expectedSourceRevision` (D26); absent with `document`, which the apply carries itself |
 | `entries` | `ImportEntry[]` | One row per entry in the document's order |
 | `unknownTopLevel` | string[] | Top-level members other than `mcpServers`, ascending; an import does not carry them |
