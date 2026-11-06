@@ -341,8 +341,10 @@ async fn errors_release_transport_and_do_not_expose_request_or_tool_input() {
     api_error.provider_code = Some("rate_limit_exceeded".into());
     api_error.response_body = Some(secret.into());
     let cases = [
-        (Err(AiMuxError::ApiCall(Box::new(api_error))), "429"),
-        (Ok(tool(secret)), "InvalidToolInput"),
+        (
+            Err(AiMuxError::ApiCall(Box::new(api_error))),
+            "rate limiting",
+        ),
         (Ok(tool("[1, 2]")), "JSON object"),
         (
             Ok(StreamPart::Error {
@@ -376,6 +378,40 @@ async fn errors_release_transport_and_do_not_expose_request_or_tool_input() {
         cancel.cancel();
         assert!(stream.next().await.is_none());
     }
+
+    // A tool argument failure names the tool and never its input.
+    let (mut stream, cancel, abort, dropped) = fixture(vec![
+        Ok(start()),
+        Ok(tool(secret)),
+        Ok(finish(FinishReasonUnified::Stop, NativeUsage::default())),
+    ]);
+    stream.next().await.unwrap().unwrap();
+    let Some(Err(HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    })) = stream.next().await
+    else {
+        panic!("missing failure")
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert!(
+        model
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("'lookup'")),
+        "{model:?}"
+    );
+    assert!(
+        message.contains("invalid arguments for tool 'lookup'"),
+        "{message}"
+    );
+    let boundary = format!("{message:?} {message} {model:?}");
+    assert!(!boundary.contains(secret), "{boundary}");
+    assert!(abort.is_aborted());
+    assert!(dropped.load(Ordering::SeqCst));
+    cancel.cancel();
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
@@ -475,10 +511,13 @@ async fn malformed_tool_lifecycles_fail_and_release_transport() {
                 ..
             }
         ));
-        assert!(
-            failure.to_string().contains("invalid_response_data"),
-            "{failure}"
-        );
+        let HostError::Failed {
+            model: Some(model), ..
+        } = failure
+        else {
+            panic!("{failure:?}");
+        };
+        assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
         assert!(failure.to_string().contains(diagnostic), "{failure}");
         assert!(abort.is_aborted());
         assert!(dropped.load(Ordering::SeqCst));
@@ -601,4 +640,176 @@ async fn a_text_block_can_reopen_after_its_end() {
         Some(ModelChunk::MessageStop { .. })
     ));
     assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_timeout_is_unknown_and_not_retried() {
+    let failure = error(
+        AiMuxError::Timeout("model response timed out".into()),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::Unknown);
+    assert_eq!(model.status, None);
+    assert_eq!(model.cause, Vec::<String>::new());
+    assert_eq!(model.reason.as_deref(), Some("model response timed out"));
+    assert_eq!(
+        message,
+        "The model request failed: model response timed out. See the details."
+    );
+}
+
+#[test]
+fn a_deep_transport_chain_keeps_its_innermost_frame_as_the_reason() {
+    let mut cause = aimux_core::SourceError {
+        message: "frame 8".into(),
+        cause: None,
+    };
+    for frame in (1..8).rev() {
+        cause = aimux_core::SourceError {
+            message: format!("frame {frame}"),
+            cause: Some(Box::new(cause)),
+        };
+    }
+    let detail = aimux_core::ApiCallError {
+        status_code: None,
+        is_retryable: true,
+        cause: Some(ErrorCause::Source(cause)),
+        origin: aimux_core::ApiCallErrorOrigin::Transport,
+        ..aimux_core::ApiCallError::new("frame 0", "http://example.test/v1", serde_json::json!({}))
+    };
+    let failure = error(
+        AiMuxError::ApiCall(Box::new(detail)),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(model.reason.as_deref(), Some("frame 8"));
+    assert_eq!(model.cause.len(), FAILURE_CAUSE_FRAMES);
+    assert_eq!(model.cause.first().map(String::as_str), Some("frame 0"));
+    assert_eq!(model.cause.last().map(String::as_str), Some("frame 5"));
+}
+
+#[test]
+fn an_unknown_tool_names_the_tool_without_the_available_list() {
+    let failure = error(
+        AiMuxError::NoSuchTool {
+            tool_name: "ghost".into(),
+            available_tools: Some(vec!["read".into(), "write".into()]),
+            tool_input: Some("private tool input".into()),
+        },
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("the model called an unknown tool 'ghost'")
+    );
+    let boundary = format!("{model:?} {message}");
+    assert!(boundary.contains("ghost"), "{boundary}");
+    assert!(!boundary.contains("read"), "{boundary}");
+    assert!(!boundary.contains("write"), "{boundary}");
+    assert!(!boundary.contains("private tool input"), "{boundary}");
+}
+
+#[test]
+fn a_repair_failure_classifies_as_its_inner_failure() {
+    let inner = AiMuxError::InvalidToolInput {
+        tool_name: "lookup".into(),
+        tool_input: "private tool input".into(),
+        cause: ErrorCause::Source(aimux_core::SourceError {
+            message: "expected value".into(),
+            cause: None,
+        }),
+    };
+    let failure = error(
+        AiMuxError::ToolCallRepair {
+            original_error: Box::new(inner.clone()),
+            cause: Box::new(inner.clone()),
+        },
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    let bare = error(inner, &CancellationToken::new());
+    let HostError::Failed {
+        message: bare_message,
+        model: Some(bare),
+        ..
+    } = bare
+    else {
+        panic!("unexpected failure: {bare:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(model.kind, bare.kind);
+    assert_eq!(model.reason, bare.reason);
+    assert_eq!(message, bare_message);
+    assert!(!message.contains("private tool input"));
+}
+
+#[test]
+fn provider_codes_and_request_ids_are_one_bounded_line() {
+    let mut detail = aimux_core::ApiCallError::new(
+        "request rejected",
+        "https://test.invalid",
+        serde_json::json!({}),
+    );
+    detail.status_code = Some(400);
+    detail.provider_code = Some(format!("code\n{}", "p".repeat(1_000)));
+    let mut headers = std::collections::HashMap::new();
+    headers.insert(
+        "x-request-id".into(),
+        format!("first\r\n{}", "r".repeat(1_000)),
+    );
+    detail.response_headers = Some(headers);
+    let failure = error(
+        AiMuxError::ApiCall(Box::new(detail)),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    let provider_code = model.provider_code.expect("a code");
+    assert!(!provider_code.contains(['\n', '\r']), "{provider_code}");
+    assert!(
+        provider_code.chars().count() <= FAILURE_CAUSE_CHARS,
+        "{provider_code}"
+    );
+    assert!(provider_code.starts_with("code "), "{provider_code}");
+    let request_id = model.request_id.expect("a request id");
+    assert!(!request_id.contains(['\n', '\r']), "{request_id}");
+    assert!(
+        request_id.chars().count() <= FAILURE_CAUSE_CHARS,
+        "{request_id}"
+    );
+    assert!(request_id.starts_with("first "), "{request_id}");
 }

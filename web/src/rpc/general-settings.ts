@@ -237,12 +237,17 @@ export type McpImportEntry = {
 }
 /** The owner's preview of a standard `mcpServers` document: names and kinds,
  * never a value. */
-export type McpImportPreview = { revision: string; sourceRevision: string | undefined; entries: McpImportEntry[]; unknownTopLevel: string[] }
+export type McpImportPreviewSource = { id: string; client: string; scope: string; path: string }
+export type McpImportPreview = { revision: string; sourceRevision: string | undefined; store: McpImportPreviewSource | undefined; entries: McpImportEntry[]; unknownTopLevel: string[] }
 export function readMcpImportPreview(value: unknown): McpImportPreview {
   const source = object(value)
   return {
     revision: string(source.revision),
     sourceRevision: optionalString(source.sourceRevision),
+    store: source.store === undefined ? undefined : (() => {
+      const row = object(source.store)
+      return { id: string(row.id), client: string(row.client), scope: string(row.scope), path: string(row.path) }
+    })(),
     entries: array(source.entries, (item) => {
       const entry = object(item)
       return {

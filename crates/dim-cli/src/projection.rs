@@ -583,6 +583,7 @@ impl Projection {
                     error,
                     presentation,
                     budget,
+                    ..
                 } = &data.outcome
                     && (budget.is_none() || presentation.is_some())
                 {

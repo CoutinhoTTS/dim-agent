@@ -3,7 +3,7 @@ mod content;
 use std::collections::{HashMap, HashSet};
 
 use aimux_core::{
-    AbortSignal, AiMuxError, ErrorCause,
+    AbortSignal, AiMuxError, ApiCallErrorOrigin, ErrorCause,
     parse_tool_call::parse_json_input,
     result::StreamResult,
     shared::SharedProviderMetadata,
@@ -12,10 +12,13 @@ use aimux_core::{
     types::{FinishReasonUnified, Usage as NativeUsage, Warning},
 };
 use dim_agent_capabilities::host::{
-    HostError, HostErrorKind, ModelChunk, ModelFailureFacts, ModelFailureOrigin, ModelProtocol,
-    ModelStopReason, ModelStream,
+    HostError, HostErrorKind, ModelChunk, ModelFailureFacts, ModelProtocol, ModelStopReason,
+    ModelStream,
 };
-use dim_agent_types::{MessagePart, ToolCall, Usage};
+use dim_agent_types::{
+    FAILURE_CAUSE_CHARS, FAILURE_CAUSE_FRAMES, FAILURE_REASON_CHARS, MessagePart, ModelFailureKind,
+    ToolCall, Usage, one_line,
+};
 use futures_util::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -303,18 +306,45 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
     if matches!(failure, AiMuxError::Aborted(_)) && cancel.is_cancelled() {
         return HostError::Cancelled("Model request cancelled".into());
     }
-    // The strict stream reports its failures as `Other` caused by the
-    // `InvalidResponseData` it found; that has to classify as
-    // `InvalidResponseData` itself, not as a transport failure.
-    let failure = match failure {
+    // Classify and describe the same inner failure: a repair callback's
+    // failure, a retry wrapper's last attempt and anything wrapped in `Other`
+    // caused by another aimux error are unwrapped first.
+    let failure = unwrap_failure(failure);
+    let (classification, facts) = classify(&failure);
+    tracing::debug!(
+        failure_kind = ?facts.kind,
+        status = facts.status,
+        provider_code = facts.provider_code.as_deref(),
+        "aimux request failed"
+    );
+    let message = facts.kind.line(facts.reason.as_deref());
+    HostError::Failed {
+        kind: classification,
+        message,
+        budget: None,
+        model: Some(Box::new(facts)),
+        presentation: None,
+    }
+}
+
+fn unwrap_failure(failure: AiMuxError) -> AiMuxError {
+    match failure {
         AiMuxError::Other {
-            message: _,
             cause: Some(ErrorCause::AiMux(inner)),
-        } if matches!(inner.as_ref(), AiMuxError::InvalidResponseData { .. }) => *inner,
+            ..
+        } => unwrap_failure(*inner),
+        AiMuxError::ToolCallRepair { cause, .. } => unwrap_failure(*cause),
+        AiMuxError::Retry(mut retry) => match retry.errors.pop() {
+            Some(error) => unwrap_failure(error),
+            None => AiMuxError::Retry(retry),
+        },
         failure => failure,
-    };
-    let mut model = None;
-    let classification = match &failure {
+    }
+}
+
+/// The internal host kind and the durable facts of one provider failure.
+fn classify(failure: &AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
+    match failure {
         AiMuxError::ApiCall(detail) => {
             let view = detail.data.as_ref().map(|data| {
                 data.pointer("/response/error")
@@ -331,160 +361,249 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
             };
             let code = field("code").and_then(normalize);
             let error_type = field("type").and_then(normalize);
-            let provider_code = detail.provider_code.as_deref().and_then(normalize);
-            let origin = match detail.origin {
-                aimux_core::ApiCallErrorOrigin::Transport => Some(ModelFailureOrigin::Transport),
-                aimux_core::ApiCallErrorOrigin::HttpResponse => {
-                    Some(ModelFailureOrigin::HttpResponse)
-                }
-                aimux_core::ApiCallErrorOrigin::StreamEvent => {
-                    Some(ModelFailureOrigin::StreamEvent)
-                }
-                _ => None,
+            let provider_code = detail
+                .provider_code
+                .as_deref()
+                .and_then(normalize)
+                .and_then(|code| one_line(&code, FAILURE_CAUSE_CHARS));
+            let origin = detail.origin;
+            let codes = [
+                code.as_deref(),
+                error_type.as_deref(),
+                provider_code.as_deref(),
+            ];
+            let kind = classify_kind(origin, detail.status_code, &codes);
+            let chain = cause_chain(detail);
+            let reason = if origin == ApiCallErrorOrigin::Transport {
+                chain
+                    .innermost
+                    .clone()
+                    .or_else(|| one_line(&detail.message, FAILURE_REASON_CHARS))
+            } else {
+                one_line(&detail.message, FAILURE_REASON_CHARS).or_else(|| chain.innermost.clone())
             };
-            if let Some(origin) = origin {
-                let codes = [
-                    code.as_deref(),
-                    error_type.as_deref(),
-                    provider_code.as_deref(),
-                ];
-                let permanent = codes.iter().flatten().any(|code| {
-                    matches!(
-                        *code,
-                        "insufficient_quota"
-                            | "quota_exceeded"
-                            | "billing_error"
-                            | "credit_exhausted"
-                            | "invalid_api_key"
-                            | "authentication_error"
-                            | "invalid_request_error"
-                            | "context_length_exceeded"
-                            | "context_too_long"
-                            | "max_tokens_exceeded"
-                            | "content_policy_violation"
-                            | "safety_block"
-                            | "moderation_block"
-                    )
-                });
-                let transient_code = codes.iter().flatten().any(|code| {
-                    matches!(
-                        *code,
-                        "rate_limit_exceeded"
-                            | "rate_limit_error"
-                            | "request_timeout"
-                            | "timeout"
-                            | "server_error"
-                            | "api_error"
-                            | "service_unavailable"
-                            | "engine_overloaded"
-                            | "model_overloaded"
-                            | "server_busy"
-                            | "overloaded_error"
-                    )
-                });
-                let transient = if origin == ModelFailureOrigin::StreamEvent {
-                    // A stream-event failure carries the response's HTTP status,
-                    // not the event's. The tag synthesizes a status from the
-                    // event code, so only the codes may decide.
-                    !permanent && transient_code
-                } else {
-                    !permanent
-                        && !matches!(detail.status_code, Some(409 | 501 | 505))
-                        && (origin == ModelFailureOrigin::Transport
-                            || transient_code
-                            || matches!(
-                                detail.status_code,
-                                Some(408 | 429 | 500 | 502..=504 | 520..=527 | 529)
-                            ))
-                };
-                let request_id = detail.response_headers.as_ref().and_then(|headers| {
-                    ["x-request-id", "request-id", "x-amzn-requestid"]
-                        .iter()
-                        .find_map(|name| headers.get(*name))
-                        .cloned()
-                });
-                model = Some(Box::new(ModelFailureFacts {
-                    origin,
-                    error_type,
-                    message: field("message")
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|_| detail.message.clone()),
-                    request_id,
-                    transient,
-                    retry_after: failure
-                        .retry_after_hint()
-                        .map(|ms| std::time::Duration::from_millis(ms as u64)),
-                }));
-            }
-            HostErrorKind::Http {
+            let request_id = detail.response_headers.as_ref().and_then(|headers| {
+                ["x-request-id", "request-id", "x-amzn-requestid"]
+                    .iter()
+                    .find_map(|name| headers.get(*name))
+                    .and_then(|id| one_line(id, FAILURE_CAUSE_CHARS))
+            });
+            let facts = ModelFailureFacts {
+                kind,
+                reason,
                 status: detail.status_code,
-                code,
-            }
+                provider_code,
+                request_id,
+                cause: chain.frames,
+                retry_after: failure
+                    .retry_after_hint()
+                    .map(|ms| std::time::Duration::from_millis(ms as u64)),
+                attempts: 1,
+                waited: std::time::Duration::ZERO,
+                retry_after_stop: None,
+            };
+            (
+                HostErrorKind::Http {
+                    status: detail.status_code,
+                    code,
+                },
+                facts,
+            )
         }
-        AiMuxError::InvalidArgument { .. } | AiMuxError::InvalidPrompt { .. } => {
-            HostErrorKind::InvalidRequest
+        failure => {
+            let (kind, classification) = match failure {
+                AiMuxError::InvalidArgument { .. } | AiMuxError::InvalidPrompt { .. } => (
+                    ModelFailureKind::InvalidRequest,
+                    HostErrorKind::InvalidRequest,
+                ),
+                AiMuxError::UnsupportedFunctionality(_) => {
+                    (ModelFailureKind::InvalidRequest, HostErrorKind::Unsupported)
+                }
+                AiMuxError::InvalidResponseData { .. }
+                | AiMuxError::JsonParse { .. }
+                | AiMuxError::InvalidToolInput { .. }
+                | AiMuxError::NoSuchTool { .. }
+                | AiMuxError::TypeValidation { .. } => {
+                    (ModelFailureKind::MalformedResponse, HostErrorKind::Other)
+                }
+                AiMuxError::NoSuchModel { .. } | AiMuxError::NoSuchProvider { .. } => {
+                    (ModelFailureKind::NotFound, HostErrorKind::Other)
+                }
+                AiMuxError::TokenExpired(_) => {
+                    (ModelFailureKind::AuthRejected, HostErrorKind::Other)
+                }
+                AiMuxError::Timeout(_) => (ModelFailureKind::Unknown, HostErrorKind::Transport),
+                AiMuxError::Other { .. } => (ModelFailureKind::Unknown, HostErrorKind::Transport),
+                _ => (ModelFailureKind::Unknown, HostErrorKind::Other),
+            };
+            let facts = ModelFailureFacts {
+                kind,
+                reason: reason_of(failure),
+                status: None,
+                provider_code: None,
+                request_id: None,
+                cause: Vec::new(),
+                retry_after: None,
+                attempts: 1,
+                waited: std::time::Duration::ZERO,
+                retry_after_stop: None,
+            };
+            (classification, facts)
         }
-        AiMuxError::UnsupportedFunctionality(_) => HostErrorKind::Unsupported,
-        AiMuxError::Other { .. } | AiMuxError::Timeout(_) => HostErrorKind::Transport,
-        _ => HostErrorKind::Other,
-    };
-    let (kind, message) = error_message(failure);
-    tracing::debug!(error_kind = kind, "aimux request failed");
-    HostError::Failed {
-        kind: classification,
-        message,
-        budget: None,
-        model,
-        presentation: None,
     }
 }
 
-fn error_message(failure: AiMuxError) -> (&'static str, String) {
+/// The reason of a failure with no provider boundary. A JSON parse error
+/// carries the serde diagnosis as its cause; its message embeds the response
+/// text, so the cause is the only safe source and a missing cause means no
+/// reason.
+fn reason_of(failure: &AiMuxError) -> Option<String> {
     match failure {
-        AiMuxError::ApiCall(detail) => {
-            tracing::debug!(
-                status = detail.status_code,
-                provider_code = detail.provider_code.as_deref(),
-                "aimux API call failed"
-            );
-            let mut message = format!("ApiCall: {detail}");
-            if let Some(code) = detail.provider_code {
-                message.push_str(&format!(" (provider code: {code})"));
-            }
-            ("api_call", message)
+        AiMuxError::JsonParse { cause, .. } => cause.as_ref().and_then(source_diagnosis),
+        AiMuxError::InvalidToolInput { tool_name, .. } => one_line(
+            &format!("invalid arguments for tool '{tool_name}'"),
+            FAILURE_REASON_CHARS,
+        ),
+        AiMuxError::NoSuchTool { tool_name, .. } => one_line(
+            &format!("the model called an unknown tool '{tool_name}'"),
+            FAILURE_REASON_CHARS,
+        ),
+        // Its message embeds the validated value.
+        AiMuxError::TypeValidation { .. } => None,
+        // The inner text only; `Display` adds the variant prefix.
+        AiMuxError::Timeout(message) => one_line(message, FAILURE_REASON_CHARS),
+        AiMuxError::Other {
+            cause: Some(ErrorCause::AiMux(error)),
+            ..
         }
-        AiMuxError::InvalidToolInput { tool_name, .. } => (
-            "invalid_tool_input",
-            format!("InvalidToolInput: invalid arguments for tool '{tool_name}'"),
-        ),
-        AiMuxError::ToolCallRepair { cause, .. } => (
-            "tool_call_repair",
-            format!("ToolCallRepair: {}", error_message(*cause).1),
-        ),
-        AiMuxError::Retry(mut retry) => (
-            "retry",
-            match retry.errors.pop() {
-                Some(failure) => format!("Retry: {}", error_message(failure).1),
-                None => "Retry: failed without recorded errors".into(),
-            },
-        ),
-        failure => {
-            let kind = match &failure {
-                AiMuxError::JsonParse { .. } => "json_parse",
-                AiMuxError::InvalidResponseData { .. } => "invalid_response_data",
-                AiMuxError::NoSuchTool { .. } => "no_such_tool",
-                AiMuxError::InvalidArgument { .. } => "invalid_argument",
-                AiMuxError::InvalidPrompt { .. } => "invalid_prompt",
-                AiMuxError::TokenExpired(_) => "token_expired",
-                AiMuxError::UnsupportedFunctionality(_) => "unsupported_functionality",
-                AiMuxError::NoSuchModel { .. } => "no_such_model",
-                AiMuxError::NoSuchProvider { .. } => "no_such_provider",
-                AiMuxError::Timeout(_) => "timeout",
-                AiMuxError::Aborted(_) => "aborted",
-                AiMuxError::Other { .. } => "other",
-                _ => "other",
-            };
-            (kind, format!("{kind}: {failure}"))
+        | AiMuxError::ToolCallRepair { cause: error, .. } => reason_of(error),
+        AiMuxError::Retry(retry) => retry.errors.last().and_then(reason_of),
+        _ => one_line(&failure.to_string(), FAILURE_REASON_CHARS),
+    }
+}
+
+fn source_diagnosis(cause: &ErrorCause) -> Option<String> {
+    match cause {
+        ErrorCause::Source(source) => one_line(&source.message, FAILURE_REASON_CHARS),
+        ErrorCause::AiMux(error) => reason_of(error),
+    }
+}
+
+/// The user-facing kind, from the origin, status and normalized codes only.
+fn classify_kind(
+    origin: ApiCallErrorOrigin,
+    status: Option<u16>,
+    codes: &[Option<&str>],
+) -> ModelFailureKind {
+    if let Some(kind) = codes.iter().flatten().find_map(|code| permanent_kind(code)) {
+        return kind;
+    }
+    if origin != ApiCallErrorOrigin::StreamEvent && matches!(status, Some(409 | 501 | 505)) {
+        // These statuses were never retried, whatever code came with them.
+        return ModelFailureKind::InvalidRequest;
+    }
+    let transient = codes.iter().flatten().find_map(|code| transient_kind(code));
+    if origin == ApiCallErrorOrigin::StreamEvent {
+        // A stream-event failure carries the response's status, not the
+        // event's; only the event's code may decide.
+        return transient.unwrap_or(ModelFailureKind::Unknown);
+    }
+    if origin == ApiCallErrorOrigin::Transport {
+        return ModelFailureKind::Network;
+    }
+    if let Some(kind) = transient {
+        return kind;
+    }
+    status_kind(status)
+}
+
+fn permanent_kind(code: &str) -> Option<ModelFailureKind> {
+    Some(match code {
+        "insufficient_quota" | "quota_exceeded" | "billing_error" | "credit_exhausted" => {
+            ModelFailureKind::QuotaExhausted
+        }
+        "invalid_api_key" | "authentication_error" => ModelFailureKind::AuthRejected,
+        "invalid_request_error" | "max_tokens_exceeded" => ModelFailureKind::InvalidRequest,
+        "context_length_exceeded" | "context_too_long" => ModelFailureKind::ContextTooLong,
+        "content_policy_violation" | "safety_block" | "moderation_block" => {
+            ModelFailureKind::ContentFiltered
+        }
+        _ => return None,
+    })
+}
+
+fn transient_kind(code: &str) -> Option<ModelFailureKind> {
+    Some(match code {
+        "rate_limit_exceeded" | "rate_limit_error" => ModelFailureKind::RateLimited,
+        "request_timeout"
+        | "timeout"
+        | "server_error"
+        | "api_error"
+        | "service_unavailable"
+        | "engine_overloaded"
+        | "model_overloaded"
+        | "server_busy"
+        | "overloaded_error" => ModelFailureKind::ServerError,
+        _ => return None,
+    })
+}
+
+fn status_kind(status: Option<u16>) -> ModelFailureKind {
+    match status {
+        Some(401 | 403) => ModelFailureKind::AuthRejected,
+        Some(402) => ModelFailureKind::QuotaExhausted,
+        Some(404) => ModelFailureKind::NotFound,
+        Some(408) => ModelFailureKind::ServerError,
+        Some(413) => ModelFailureKind::ContextTooLong,
+        Some(429) => ModelFailureKind::RateLimited,
+        Some(400 | 409 | 422 | 501 | 505) => ModelFailureKind::InvalidRequest,
+        Some(500..=599) => ModelFailureKind::ServerError,
+        Some(400..=499) => ModelFailureKind::InvalidRequest,
+        _ => ModelFailureKind::Unknown,
+    }
+}
+
+/// The cause chain, outermost first: the failure's own message, then the
+/// error it was built from. Frames are bounded; `innermost` is the last
+/// non-empty frame of the whole chain, whether or not the frame list kept it.
+struct CauseChain {
+    frames: Vec<String>,
+    innermost: Option<String>,
+}
+
+fn cause_chain(detail: &aimux_core::ApiCallError) -> CauseChain {
+    let mut chain = CauseChain {
+        frames: Vec::new(),
+        innermost: None,
+    };
+    chain.push(&detail.message);
+    if let Some(cause) = &detail.cause {
+        chain.push_cause(cause);
+    }
+    chain
+}
+
+impl CauseChain {
+    fn push(&mut self, text: &str) {
+        if let Some(line) = one_line(text, FAILURE_CAUSE_CHARS) {
+            self.innermost = Some(line.clone());
+            if self.frames.len() < FAILURE_CAUSE_FRAMES {
+                self.frames.push(line);
+            }
+        }
+    }
+
+    fn push_cause(&mut self, cause: &ErrorCause) {
+        match cause {
+            ErrorCause::Source(source) => self.push_source(source),
+            ErrorCause::AiMux(error) => self.push(&error.to_string()),
+        }
+    }
+
+    fn push_source(&mut self, source: &aimux_core::SourceError) {
+        self.push(&source.message);
+        if let Some(cause) = &source.cause {
+            self.push_source(cause);
         }
     }
 }
