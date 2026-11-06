@@ -2905,6 +2905,7 @@ impl DynPlugin for ProviderPlugin {
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
             ctx.provide(ModelSelectionHost(resolver.clone()))?;
+            ctx.provide(ModalityConnectionHost(resolver.clone()))?;
             ctx.provide(SelectableModelsHost(resolver))?;
             let auxiliary = Arc::new(auxiliary::AuxiliaryModel {
                 owner: service.clone(),

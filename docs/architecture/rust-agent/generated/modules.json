@@ -6889,6 +6889,9 @@
         "path HostErrorKind::OwnerClosed",
         "path HostFuture",
         "path HttpModelConnection",
+        "path ModalityConnection",
+        "path ModalityConnectionHost",
+        "path ModalityTarget",
         "path ModelConnection::Http",
         "path ModelHost",
         "path ModelSelectionHost",
@@ -6897,11 +6900,13 @@
         "path PrepareModel",
         "path PrepareModelHost",
         "path ProviderConnectionResolver",
+        "path ResolveModalityConnection",
         "path ResolveModelConnection",
         "path ResolveModelSelection",
         "path ResolvedModelConnection",
         "path SelectableModels",
-        "path SelectableModelsHost"
+        "path SelectableModelsHost",
+        "path undeclared_modality_operation"
       ]
     },
     {
@@ -24243,6 +24248,9 @@
         "path HostErrorKind::Unsupported",
         "path HostFuture",
         "path HttpModelConnection",
+        "path ModalityConnection",
+        "path ModalityConnectionHost",
+        "path ModalityTarget",
         "path ModelConnection::Bedrock",
         "path ModelConnection::Http",
         "path ModelHost",
@@ -24252,12 +24260,14 @@
         "path ProviderConnectionResolver",
         "path RecoverModelConnection",
         "path RecoveredModelConnection",
+        "path ResolveModalityConnection",
         "path ResolveModelConnection",
         "path ResolveModelSelection",
         "path ResolvedModelConnection",
         "path SelectableModels",
         "path SelectableModelsHost",
-        "path dim_agent_capabilities::host::adopted_preferences"
+        "path dim_agent_capabilities::host::adopted_preferences",
+        "path undeclared_modality_operation"
       ]
     },
     {
