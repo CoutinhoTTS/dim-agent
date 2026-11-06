@@ -11,7 +11,6 @@ use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use serde_json::Map;
 
 /// What the provider of a test records between calls.
-#[derive(Default)]
 struct ChannelState {
     /// The caller of the last call that kept one.
     caller: std::sync::Mutex<Option<Caller>>,
@@ -22,8 +21,27 @@ struct ChannelState {
     /// `channel.fill` finished: the first code the full allowance returned
     /// and the code of one more notification after it.
     filled: std::sync::Mutex<Option<(&'static str, &'static str)>>,
+    /// `channel.hold` calls that reached their wait, and the gate that
+    /// lets them reply.
+    holding: AtomicUsize,
+    holding_changed: Arc<tokio::sync::Notify>,
+    release_held: Arc<tokio::sync::Semaphore>,
     /// The Session provider generations mounted so far, the newest last.
     views: std::sync::Mutex<Vec<rutis::host::FiberView>>,
+}
+impl Default for ChannelState {
+    fn default() -> Self {
+        Self {
+            caller: std::sync::Mutex::new(None),
+            closed: Arc::default(),
+            release: Arc::default(),
+            filled: std::sync::Mutex::new(None),
+            holding: AtomicUsize::new(0),
+            holding_changed: Arc::default(),
+            release_held: Arc::new(tokio::sync::Semaphore::new(0)),
+            views: std::sync::Mutex::new(Vec::new()),
+        }
+    }
 }
 impl ChannelState {
     fn caller(&self) -> Caller {
@@ -63,9 +81,10 @@ fn notification(name: &str, notifications: &[&str]) -> MethodDecl {
 
 /// The handler both test providers serve: `stream` sends one notification
 /// inside the call and one from a task after it, `start` keeps the caller,
-/// `fill` holds more notifications than the connection's allowance, and
-/// `attempt` sends through the kept one.
-fn serve(call: MethodCall, state: Arc<ChannelState>) -> Result<Value, RpcError> {
+/// `fill` holds more notifications than the connection's held allowance,
+/// `hold` holds a fixed number until the test releases it, and `attempt`
+/// sends through the kept one.
+async fn serve(call: MethodCall, state: Arc<ChannelState>) -> Result<Value, RpcError> {
     let caller = call
         .origin
         .caller
@@ -117,6 +136,23 @@ fn serve(call: MethodCall, state: Arc<ChannelState>) -> Result<Value, RpcError> 
             *state.filled.lock().unwrap() = Some((first, later));
             Ok(json!({}))
         }
+        "channel.hold" => {
+            let count = call.params["count"].as_u64().unwrap_or(0) as usize;
+            let tag = call.params["tag"].as_str().unwrap_or_default().to_owned();
+            for step in 0..count {
+                caller
+                    .notify(names.0, map(json!({"tag": tag, "step": step})))
+                    .map_err(|error| RpcError::service(error.code(), "notification refused"))?;
+            }
+            state.holding.fetch_add(1, Ordering::SeqCst);
+            state.holding_changed.notify_waiters();
+            let _permit = state
+                .release_held
+                .acquire()
+                .await
+                .map_err(|_| RpcError::wire(-32603, "the held call's gate closed"))?;
+            Ok(json!({"tag": tag}))
+        }
         "channel.attempt" | "session.channel.attempt" => {
             let name = call.params["method"]
                 .as_str()
@@ -166,10 +202,11 @@ impl DynPlugin for ChannelMethods {
                     notification("channel.start", &[]),
                     notification("channel.attempt", &[]),
                     notification("channel.fill", &[]),
+                    notification("channel.hold", &[]),
                 ],
                 Arc::new(move |call, _, _| {
                     let state = state.clone();
-                    Box::pin(async move { serve(call, state) })
+                    Box::pin(async move { serve(call, state).await })
                 }),
             )?;
             Ok(Effect::Done)
@@ -236,7 +273,7 @@ impl DynPlugin for ChannelSession {
                 ],
                 Arc::new(move |call, _, _| {
                     let state = state.clone();
-                    Box::pin(async move { serve(call, state) })
+                    Box::pin(async move { serve(call, state).await })
                 }),
             )?;
             Ok(Effect::Done)
@@ -523,6 +560,67 @@ async fn a_closed_connection_does_not_hide_an_undeclared_name() {
         .rpc("channel.attempt", json!({"method": "channel.first"}))
         .await;
     assert_eq!(declared["result"], json!({"code": "gone"}), "{declared}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: the notifications a call holds have their own allowance, so two
+/// unfinished calls holding 512 each never take a reply's room. Both replies
+/// arrive, each call's notifications follow its reply in order, and the
+/// connection stays open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_notifications_do_not_take_the_replys_room() {
+    let (server, mut client, state) = launch_channel().await;
+    let a = client
+        .send("channel.hold", json!({"count": 512, "tag": "a"}))
+        .await;
+    let b = client
+        .send("channel.hold", json!({"count": 512, "tag": "b"}))
+        .await;
+    // Both calls hold their frames before either reply is written.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while state.holding.load(Ordering::SeqCst) < 2 {
+            state.holding_changed.notified().await;
+        }
+    })
+    .await
+    .expect("both calls hold their notifications before their replies");
+    state.release_held.add_permits(2);
+    let mut replied: Vec<u64> = Vec::new();
+    let mut steps: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut notes = 0;
+    while notes < 1024 {
+        let value = client.read("a reply or a held notification").await;
+        if let Some(id) = value["id"].as_u64() {
+            assert!(id == a || id == b, "{value}");
+            assert!(!replied.contains(&id), "a reply arrived twice: {value}");
+            replied.push(id);
+            continue;
+        }
+        assert_eq!(value["method"], "channel.first", "{value}");
+        let tag = value["params"]["tag"].as_str().unwrap_or_default();
+        let step = value["params"]["step"].as_u64().unwrap_or_default();
+        let tag_reply = replied
+            .iter()
+            .any(|id| *id == a && tag == "a" || *id == b && tag == "b");
+        assert!(
+            tag_reply,
+            "a notification arrived before its own reply: {value}"
+        );
+        let next = steps.entry(tag.to_owned()).or_insert(0);
+        assert_eq!(
+            step, *next,
+            "a call's notifications are out of order: {value}"
+        );
+        *next += 1;
+        notes += 1;
+    }
+    assert_eq!(replied.len(), 2, "both calls reply");
+    assert!(
+        steps.values().all(|next| *next == 512),
+        "each call's notifications all arrive: {steps:?}"
+    );
+    assert_ok(&client.rpc("daemon.ping", json!({})).await);
     server.shutdown();
     server.join().await.unwrap();
 }

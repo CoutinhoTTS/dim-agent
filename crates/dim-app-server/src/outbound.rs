@@ -36,10 +36,13 @@ impl Allowance {
     }
 }
 /// A connection's single ordered outbound queue. Replies and notices share
-/// one allowance; call progress has its own, so it never takes their room.
+/// one allowance; a call's held notifications have their own, so they never
+/// take a reply's room; call progress has its own too.
 ///
 /// ```text
 /// send(reply | notice) --> reliable allowance --+--> FIFO queue --> writer
+///                          full: close          |
+/// hold(notification) ----> held allowance ------+
 ///                          full: close          |
 /// offer(progress) -------> progress allowance --+
 ///                          full: drop the frame
@@ -47,6 +50,10 @@ impl Allowance {
 pub(crate) struct Sender {
     queue: mpsc::UnboundedSender<Frame>,
     reliable: Allowance,
+    /// The room unfinished calls' held notifications take until they are
+    /// queued behind their calls' replies: the same limits as `reliable`,
+    /// separate, so a held frame never refuses a reply.
+    held: Allowance,
     progress: Allowance,
     closed: CancellationToken,
 }
@@ -57,6 +64,7 @@ impl Sender {
             Self {
                 queue,
                 reliable: Allowance::new(MAX_QUEUED_FRAMES, MAX_OUTPUT_BYTES),
+                held: Allowance::new(MAX_QUEUED_FRAMES, MAX_OUTPUT_BYTES),
                 progress: Allowance::new(MAX_PROGRESS_FRAMES, MAX_PROGRESS_BYTES),
                 closed,
             },
@@ -89,14 +97,14 @@ impl Sender {
             self.push(frame);
         }
     }
-    /// Encodes `value` once and takes its room now, without queueing it: a
-    /// call's held notifications (methods contract A.2) are bounded by the
-    /// same allowance as the queue they are written to after the reply. A
-    /// frame the allowance cannot take is a slow consumer and closes the
+    /// Encodes `value` once and takes room in the held allowance now,
+    /// without queueing it: a call's held notifications (methods contract
+    /// A.2) never take the room a reply is admitted against. A frame the
+    /// held allowance cannot take is a slow consumer and closes the
     /// connection; one over the frame limit leaves it open.
     pub fn hold(&self, value: Outbound) -> Result<Frame, Admission> {
         let result = self
-            .admit(&self.reliable, &value, false)
+            .admit(&self.held, &value, false)
             .map(|(frame, _)| frame);
         if matches!(result, Err(Admission::Full)) {
             self.closed.cancel();
