@@ -45,6 +45,24 @@ struct ModelState {
     closed: bool,
 }
 
+/// The terminal fact's durable failure: the host facts, including the attempt
+/// count the recovery loop recorded.
+fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
+    ModelFailure {
+        kind: facts.kind,
+        status: facts.status,
+        provider_code: facts.provider_code,
+        request_id: facts.request_id,
+        reason: facts.reason,
+        cause: facts.cause,
+        attempts: facts.attempts.max(1),
+        waited_ms: u64::try_from(facts.waited.as_millis()).unwrap_or(u64::MAX),
+        retry_after_ms: facts
+            .retry_after_stop
+            .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
+    }
+}
+
 pub struct ModelProvider {
     state: Mutex<ModelState>,
     tasks: TaskTracker,
@@ -72,8 +90,11 @@ impl ModelProvider {
                 message,
                 budget,
                 presentation,
+                model,
                 ..
             }) => {
+                let facts = model
+                    .unwrap_or_else(|| Box::new(ModelFailureFacts::unknown(Some(message.clone()))));
                 tracing::error!(
                     session_id = %self.identity.session_id,
                     branch_id = %self.identity.branch_id,
@@ -82,12 +103,18 @@ impl ModelProvider {
                     provider_id = %call.request.provider_id,
                     model_id = %call.request.model_id,
                     error = %message,
+                    failure_kind = ?facts.kind,
+                    status = facts.status,
+                    provider_code = facts.provider_code.as_deref(),
+                    attempts = facts.attempts,
+                    waited_ms = facts.waited.as_millis(),
                     "Model request failed"
                 );
                 ModelOutputOutcome::Failed {
                     error: message,
                     budget,
                     presentation: presentation.map(|value| *value),
+                    failure: Some(Box::new(model_failure(*facts))),
                 }
             }
         };

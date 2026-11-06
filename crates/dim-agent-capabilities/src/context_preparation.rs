@@ -452,6 +452,7 @@ impl ContextPreparation {
                         error: message,
                         budget,
                         presentation: presentation.map(|value| *value),
+                        failure: None,
                     },
                 },
             }),
