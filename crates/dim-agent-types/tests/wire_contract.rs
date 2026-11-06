@@ -236,6 +236,49 @@ fn model_failure_roundtrips_and_rejects_invalid_contracts() {
 }
 
 #[test]
+fn failure_chain_roundtrips_and_rejects_invalid_contracts() {
+    use std::sync::Arc;
+    // A binary without `failure_chain` cannot decode a record that carries
+    // it: `ContextPrepareData` and `ModelCallData` deny unknown fields. The
+    // frozen fixtures stay unchanged.
+    for kind in ["context/prepare", "model/call"] {
+        let old = fixture(kind, None);
+        let old_event: AgentEvent = serde_json::from_value(old.clone()).unwrap();
+        equal_json(&serde_json::to_value(old_event).unwrap(), &old);
+
+        let mut event = old;
+        event["data"]["failure_chain"] = json!({
+            "from_request_id": "request-1",
+            "attempts": 5,
+            "waited_ms": 1500
+        });
+        let decoded: AgentEvent = serde_json::from_value(event.clone()).unwrap();
+        equal_json(&serde_json::to_value(&decoded).unwrap(), &event);
+        let outbound =
+            serde_json::to_value(v1::SharedEvent::new(Arc::new(decoded)).unwrap()).unwrap();
+        assert!(
+            outbound["data"].get("failure_chain").is_none(),
+            "{outbound}"
+        );
+    }
+
+    for chain in [
+        json!(null),
+        json!({"from_request_id": "request-1", "attempts": 5}),
+        json!({"from_request_id": 1, "attempts": 5, "waited_ms": 0}),
+        json!({"from_request_id": "request-1", "attempts": 300, "waited_ms": 0}),
+        json!({"from_request_id": "request-1", "attempts": 5, "waited_ms": 0, "unexpected": true}),
+    ] {
+        let mut invalid = fixture("context/prepare", None);
+        invalid["data"]["failure_chain"] = chain;
+        assert!(
+            serde_json::from_value::<AgentEvent>(invalid.clone()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn omitted_modes_and_safe_integer_limits_keep_the_contract() {
     let mut value = fixture("input/message", None);
     value["sequence"] = json!(JS_MAX_SAFE_INTEGER);
@@ -271,6 +314,7 @@ fn request_events_preserve_draft_encoding() {
         request,
         configuration: None,
         prompt: None,
+        failure_chain: None,
     };
     let draft = EventDraft::new(EventKind::ModelCall(call));
     assert_eq!(

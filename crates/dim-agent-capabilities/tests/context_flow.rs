@@ -1081,6 +1081,7 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
                         configuration: None,
                         prompt: None,
                         recovery: None,
+                        failure_chain: None,
                     })
                     .into(),
                 )
@@ -1095,6 +1096,7 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
                         request,
                         configuration: None,
                         prompt: None,
+                        failure_chain: None,
                     })
                     .into(),
                 )

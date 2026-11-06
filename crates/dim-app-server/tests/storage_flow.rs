@@ -707,6 +707,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
         configuration: None,
         prompt: None,
         recovery: None,
+        failure_chain: None,
     });
     let call = EventKind::ModelCall(ModelCallData {
         turn_id: "turn".into(),
@@ -714,6 +715,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
         request,
         configuration: None,
         prompt: None,
+        failure_chain: None,
     });
     let mut first = record(1, prepare.clone());
     first.batch_end = 2;
@@ -1913,6 +1915,7 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
             configuration: None,
             prompt: None,
             recovery: None,
+            failure_chain: None,
         })
     };
     let call = |request: &Arc<ModelRequest>| {
@@ -1922,6 +1925,7 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
             request: request.clone(),
             configuration: None,
             prompt: None,
+            failure_chain: None,
         })
     };
     let created = |branch: &str, at| {
@@ -2397,6 +2401,7 @@ fn model_call(sequence: u64, messages: Vec<Message>) -> StoredEvent {
             request: Arc::new(ModelRequest::new("mock", "test", messages)),
             configuration: None,
             prompt: None,
+            failure_chain: None,
         }),
     )
 }
@@ -3059,6 +3064,7 @@ async fn recovery_rejects_corrupt_records_and_preserves_them() {
                 configuration: None,
                 prompt: None,
                 recovery: None,
+                failure_chain: None,
             }),
         )
     };
@@ -3071,6 +3077,7 @@ async fn recovery_rejects_corrupt_records_and_preserves_them() {
                 request: request.clone(),
                 configuration: None,
                 prompt: None,
+                failure_chain: None,
             }),
         )
     };
@@ -3351,6 +3358,7 @@ async fn restore_validation_checks_references_and_reads_check_bodies() {
                 configuration: None,
                 prompt: None,
                 recovery: None,
+                failure_chain: None,
             }),
         );
         let call = record(
@@ -3361,6 +3369,7 @@ async fn restore_validation_checks_references_and_reads_check_bodies() {
                 request: request(),
                 configuration: None,
                 prompt: None,
+                failure_chain: None,
             }),
         );
         store
@@ -3448,6 +3457,7 @@ async fn restore_validation_checks_references_across_batches() {
                 configuration: None,
                 prompt: None,
                 recovery: None,
+                failure_chain: None,
             }),
         ));
         records.push(record(
@@ -3458,6 +3468,7 @@ async fn restore_validation_checks_references_across_batches() {
                 request,
                 configuration: None,
                 prompt: None,
+                failure_chain: None,
             }),
         ));
     }
@@ -3537,6 +3548,7 @@ async fn restore_validation_refuses_a_missing_middle_node() {
                     configuration: None,
                     prompt: None,
                     recovery: None,
+                    failure_chain: None,
                 }),
             ),
             record(
@@ -3547,6 +3559,7 @@ async fn restore_validation_refuses_a_missing_middle_node() {
                     request: request(),
                     configuration: None,
                     prompt: None,
+                    failure_chain: None,
                 }),
             ),
         ],
@@ -3616,6 +3629,7 @@ async fn restore_validation_refuses_a_missing_parent_across_batches() {
                 configuration: None,
                 prompt: None,
                 recovery: None,
+                failure_chain: None,
             }),
         )],
     )
@@ -4427,6 +4441,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
             request: Arc::new(request),
             configuration: None,
             prompt: None,
+            failure_chain: None,
         }),
     );
     let content = rows(&connection, "timeline_content").len();
@@ -4570,6 +4585,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
             request: Arc::new(request),
             configuration: None,
             prompt: None,
+            failure_chain: None,
         }),
     );
     let db = SqliteStorage::open(database.0.clone()).unwrap();
@@ -4669,6 +4685,7 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
             request: Arc::new(request),
             configuration: None,
             prompt: None,
+            failure_chain: None,
         }),
     );
     let database = Database::new();
@@ -6191,6 +6208,7 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
                     request: request.clone(),
                     configuration: None,
                     prompt: None,
+                    failure_chain: None,
                 }),
             )
         })
@@ -6681,6 +6699,7 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
                         )),
                         configuration: None,
                         prompt: None,
+                        failure_chain: None,
                     }),
                 ),
                 record(
@@ -6800,6 +6819,7 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
                 )),
                 configuration: None,
                 prompt: None,
+                failure_chain: None,
             }),
         )
     };

@@ -868,10 +868,63 @@ impl Plugin for RecoveryHosts {
     }
 }
 
+/// Attaches `chain` to the committed request of `kind`.
+struct ChainHook {
+    timeline: Key<Timeline>,
+    kind: &'static str,
+    chain: FailureChain,
+}
+impl ChainHook {
+    fn new(names: &Names<'_>, kind: &'static str, chain: FailureChain) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline: names.key()?,
+            kind,
+            chain,
+        })
+    }
+}
+impl DynPlugin for ChainHook {
+    fn name(&self) -> &str {
+        "test.failure-chain"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let chain = self.chain.clone();
+            timeline.before(
+                ctx,
+                "attach-failure-chain",
+                &[self.kind],
+                move |mut draft| {
+                    match &mut draft.kind {
+                        EventKind::ContextPrepare(data) => data.failure_chain = Some(chain.clone()),
+                        EventKind::ModelCall(call) => call.failure_chain = Some(chain.clone()),
+                        _ => {}
+                    }
+                    Ok(draft)
+                },
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
 /// A Session whose only model host is a [`RecoveryProbe`] in `mode`.
 async fn recovery_agent(
     mode: u8,
     resume: Option<Arc<Notify>>,
+) -> (MinimalHost, dim_agent_runtime::Session, RecoveryProbe) {
+    recovery_agent_with(mode, resume, None).await
+}
+
+/// A Session whose committed requests of the named kind carry a chain.
+async fn recovery_agent_with(
+    mode: u8,
+    resume: Option<Arc<Notify>>,
+    chain: Option<(&'static str, FailureChain)>,
 ) -> (MinimalHost, dim_agent_runtime::Session, RecoveryProbe) {
     let probe = RecoveryProbe {
         mode,
@@ -898,6 +951,13 @@ async fn recovery_agent(
     defaults::install_with_process_model(&mut builder);
     let hosts = probe.clone();
     builder.plugin(move |_| Ok(Box::new(RecoveryHosts(hosts.clone()))));
+    if let Some((kind, chain)) = chain {
+        builder.require_feature(
+            Feature::new("FailureChain").branch("FailureChain", move |names| {
+                Ok(Box::new(ChainHook::new(names, kind, chain.clone())?))
+            }),
+        );
+    }
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -924,6 +984,41 @@ async fn model_failure(session: &dim_agent_runtime::Session) -> ModelFailure {
         })
         .expect("a failed model output with facts")
 }
+
+#[tokio::test(start_paused = true)]
+async fn context_preparation_copies_a_failure_chain_into_the_call() {
+    let chain = FailureChain {
+        from_request_id: "request-before".into(),
+        attempts: 2,
+        waited_ms: 1_500,
+    };
+    let (agent, session, _) =
+        recovery_agent_with(0, None, Some(("context/prepare", chain.clone()))).await;
+    session
+        .submit("continue".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let prepare = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextPrepare(data) => Some(data),
+            _ => None,
+        })
+        .expect("a committed preparation");
+    assert_eq!(prepare.failure_chain.as_ref(), Some(&chain));
+    let call = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data),
+            _ => None,
+        })
+        .expect("a committed call");
+    assert_eq!(call.failure_chain.as_ref(), Some(&chain));
+    agent.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
     tokio::time::timeout(Duration::from_secs(15), async {
