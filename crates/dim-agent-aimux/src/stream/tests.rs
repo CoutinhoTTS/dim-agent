@@ -341,8 +341,11 @@ async fn errors_release_transport_and_do_not_expose_request_or_tool_input() {
     api_error.provider_code = Some("rate_limit_exceeded".into());
     api_error.response_body = Some(secret.into());
     let cases = [
-        (Err(AiMuxError::ApiCall(Box::new(api_error))), "429"),
-        (Ok(tool(secret)), "InvalidToolInput"),
+        (
+            Err(AiMuxError::ApiCall(Box::new(api_error))),
+            "rate limiting",
+        ),
+        (Ok(tool(secret)), "The model request failed"),
         (Ok(tool("[1, 2]")), "JSON object"),
         (
             Ok(StreamPart::Error {
@@ -475,10 +478,13 @@ async fn malformed_tool_lifecycles_fail_and_release_transport() {
                 ..
             }
         ));
-        assert!(
-            failure.to_string().contains("invalid_response_data"),
-            "{failure}"
-        );
+        let HostError::Failed {
+            model: Some(model), ..
+        } = failure
+        else {
+            panic!("{failure:?}");
+        };
+        assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
         assert!(failure.to_string().contains(diagnostic), "{failure}");
         assert!(abort.is_aborted());
         assert!(dropped.load(Ordering::SeqCst));
@@ -601,4 +607,69 @@ async fn a_text_block_can_reopen_after_its_end() {
         Some(ModelChunk::MessageStop { .. })
     ));
     assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_timeout_is_a_timeout_failure_with_its_own_line() {
+    let failure = error(
+        AiMuxError::Timeout("model response timed out".into()),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::Timeout);
+    assert_eq!(model.origin, None);
+    assert_eq!(model.status, None);
+    assert_eq!(model.cause, Vec::<String>::new());
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("request timed out: model response timed out")
+    );
+    assert_eq!(
+        message,
+        "The provider did not respond in time: request timed out: model response timed out. \
+         Check the network or proxy; try again later."
+    );
+}
+
+#[test]
+fn a_deep_transport_chain_keeps_its_innermost_frame_as_the_reason() {
+    let mut cause = aimux_core::SourceError {
+        message: "frame 8".into(),
+        cause: None,
+    };
+    for frame in (1..8).rev() {
+        cause = aimux_core::SourceError {
+            message: format!("frame {frame}"),
+            cause: Some(Box::new(cause)),
+        };
+    }
+    let detail = aimux_core::ApiCallError {
+        status_code: None,
+        is_retryable: true,
+        cause: Some(ErrorCause::Source(cause)),
+        origin: aimux_core::ApiCallErrorOrigin::Transport,
+        ..aimux_core::ApiCallError::new("frame 0", "http://example.test/v1", serde_json::json!({}))
+    };
+    let failure = error(
+        AiMuxError::ApiCall(Box::new(detail)),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(model.reason.as_deref(), Some("frame 8"));
+    assert_eq!(model.cause.len(), FAILURE_CAUSE_FRAMES);
+    assert_eq!(model.cause.first().map(String::as_str), Some("frame 0"));
+    assert_eq!(model.cause.last().map(String::as_str), Some("frame 5"));
 }

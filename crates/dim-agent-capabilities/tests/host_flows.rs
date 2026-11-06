@@ -519,6 +519,16 @@ impl RecoveryProbe {
         }
     }
     fn failure(&self, status: u16, retry_after: Option<Duration>) -> HostError {
+        let kind = match status {
+            401 | 403 => ModelFailureKind::AuthRejected,
+            402 => ModelFailureKind::QuotaExhausted,
+            404 => ModelFailureKind::NotFound,
+            408 | 500..=599 => ModelFailureKind::ServerError,
+            413 => ModelFailureKind::ContextTooLong,
+            429 => ModelFailureKind::RateLimited,
+            400..=499 => ModelFailureKind::InvalidRequest,
+            _ => ModelFailureKind::Unknown,
+        };
         HostError::Failed {
             message: "fixture rejection".into(),
             budget: None,
@@ -527,12 +537,17 @@ impl RecoveryProbe {
                 code: None,
             },
             model: Some(Box::new(ModelFailureFacts {
-                origin: ModelFailureOrigin::HttpResponse,
-                error_type: Some("fixture_error".into()),
-                message: Some("fixture rejection".into()),
+                kind,
+                origin: Some(ModelFailureOrigin::HttpResponse),
+                reason: Some("fixture rejection".into()),
+                status: Some(status),
+                provider_code: None,
                 request_id: Some("fixture-request".into()),
-                transient: status != 401,
+                cause: Vec::new(),
                 retry_after,
+                attempts: 1,
+                waited: Duration::ZERO,
+                retry_after_stop: None,
             })),
             presentation: None,
         }

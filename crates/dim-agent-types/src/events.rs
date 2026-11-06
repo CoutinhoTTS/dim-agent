@@ -534,6 +534,120 @@ pub struct ToolUseData {
     pub call: ToolCall,
 }
 
+/// What a failed model request calls for, decided where the provider error is
+/// read. Clients word the line from the kind through their own i18n;
+/// [`Self::line`] is the fallback the terminal fact's `error` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFailureKind {
+    Network,
+    Timeout,
+    RateLimited,
+    ServerError,
+    MalformedResponse,
+    AuthRejected,
+    QuotaExhausted,
+    NotFound,
+    ContextTooLong,
+    ContentFiltered,
+    InvalidRequest,
+    OutputLimit,
+    Unknown,
+}
+
+impl ModelFailureKind {
+    /// The one-line meaning, without a final full stop.
+    #[must_use]
+    pub const fn meaning(self) -> &'static str {
+        match self {
+            Self::Network => "Could not reach the provider, or the connection dropped",
+            Self::Timeout => "The provider did not respond in time",
+            Self::RateLimited => "The provider is rate limiting requests",
+            Self::ServerError => "The provider reported a server error",
+            Self::MalformedResponse => "The provider sent a response Dim could not read",
+            Self::AuthRejected => "The provider rejected the credentials",
+            Self::QuotaExhausted => "The account has no quota left",
+            Self::NotFound => "The provider did not find the model or endpoint",
+            Self::ContextTooLong => "The conversation is longer than the model accepts",
+            Self::ContentFiltered => "The provider's content filter blocked the response",
+            Self::InvalidRequest => "The provider rejected the request",
+            Self::OutputLimit => "The model stopped at its output limit",
+            Self::Unknown => "The model request failed",
+        }
+    }
+
+    /// What the user can do about it.
+    #[must_use]
+    pub const fn action(self) -> &'static str {
+        match self {
+            Self::Network => "Check the network or proxy.",
+            Self::Timeout => "Check the network or proxy; try again later.",
+            Self::RateLimited => "Wait and try again.",
+            Self::ServerError => "Try again later or choose another model.",
+            Self::MalformedResponse => "If it repeats, check the proxy or gateway.",
+            Self::AuthRejected => "Sign in again or check the API key.",
+            Self::QuotaExhausted => "Check the plan or billing.",
+            Self::NotFound => "Check the model and the provider's base URL.",
+            Self::ContextTooLong => "Compact the conversation or start a new session.",
+            Self::ContentFiltered => "Rephrase the request.",
+            Self::InvalidRequest => "See the details.",
+            Self::OutputLimit => "Increase the output token limit and retry.",
+            Self::Unknown => "See the details.",
+        }
+    }
+
+    /// `<meaning>: <reason>. <action>`, or `<meaning>. <action>` without a
+    /// reason. `reason` is one sanitized sentence.
+    #[must_use]
+    pub fn line(self, reason: Option<&str>) -> String {
+        let reason = reason
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(|reason| reason.strip_suffix('.').unwrap_or(reason));
+        match reason {
+            Some(reason) => format!("{}: {reason}. {}", self.meaning(), self.action()),
+            None => format!("{}. {}", self.meaning(), self.action()),
+        }
+    }
+}
+
+/// The most characters a [`ModelFailure::reason`] keeps.
+pub const FAILURE_REASON_CHARS: usize = 300;
+/// The most characters one [`ModelFailure::cause`] frame keeps.
+pub const FAILURE_CAUSE_CHARS: usize = 200;
+/// The most [`ModelFailure::cause`] frames kept.
+pub const FAILURE_CAUSE_FRAMES: usize = 6;
+
+/// `value` as one line: runs of whitespace and control characters collapse to
+/// one space, and at most `max_chars` characters are kept. `None` when nothing
+/// is left.
+#[must_use]
+pub fn one_line(value: &str, max_chars: usize) -> Option<String> {
+    let mut out = String::new();
+    let mut pending_space = false;
+    let mut characters = 0;
+    for character in value.chars() {
+        if character.is_whitespace() || character.is_control() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            if characters == max_chars {
+                break;
+            }
+            out.push(' ');
+            characters += 1;
+            pending_space = false;
+        }
+        if characters == max_chars {
+            break;
+        }
+        out.push(character);
+        characters += 1;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelOutputOutcome {

@@ -31,13 +31,50 @@ pub enum ModelFailureOrigin {
 }
 #[derive(Debug, Clone)]
 pub struct ModelFailureFacts {
-    pub origin: ModelFailureOrigin,
+    /// Decided where the provider error is read; retry reads it.
+    pub kind: ModelFailureKind,
+    /// Where the failure was built; absent for errors with no provider boundary.
+    pub origin: Option<ModelFailureOrigin>,
+    /// One specific sentence: the provider's message, or the innermost
+    /// transport cause. One line.
+    pub reason: Option<String>,
+    /// The HTTP status, when a response arrived.
+    pub status: Option<u16>,
     /// Trimmed, ASCII lowercase, and nonempty when present; normalized at ingress.
-    pub error_type: Option<String>,
-    pub message: Option<String>,
+    pub provider_code: Option<String>,
     pub request_id: Option<String>,
-    pub transient: bool,
+    /// The cause chain, outermost first; each one line.
+    pub cause: Vec<String>,
+    /// The provider's `Retry-After`, when it sent a usable one.
     pub retry_after: Option<std::time::Duration>,
+    /// How many attempts the request took, at least 1.
+    pub attempts: u8,
+    /// The total backoff slept.
+    pub waited: std::time::Duration,
+    /// Set only when the provider asked to wait longer than the budget left,
+    /// which is why the request stopped.
+    pub retry_after_stop: Option<std::time::Duration>,
+}
+impl ModelFailureFacts {
+    /// A failure from a host with no provider boundary: nothing is known
+    /// beyond the message it already carries.
+    pub fn unknown(reason: Option<String>) -> Self {
+        Self {
+            kind: dim_agent_types::ModelFailureKind::Unknown,
+            origin: None,
+            reason: reason.as_deref().and_then(|text| {
+                dim_agent_types::one_line(text, dim_agent_types::FAILURE_REASON_CHARS)
+            }),
+            status: None,
+            provider_code: None,
+            request_id: None,
+            cause: Vec::new(),
+            retry_after: None,
+            attempts: 1,
+            waited: std::time::Duration::ZERO,
+            retry_after_stop: None,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostErrorKind {
@@ -923,5 +960,21 @@ impl PrepareContext for IdentityContext {
                 Ok(request)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_failure_bounds_its_reason_to_one_line() {
+        let message = format!("first line\n{}\nlast line", "x".repeat(1_000));
+        let facts = ModelFailureFacts::unknown(Some(message));
+        let reason = facts.reason.expect("a reason");
+        assert!(!reason.contains('\n'), "{reason}");
+        assert!(reason.chars().count() <= dim_agent_types::FAILURE_REASON_CHARS);
+        assert!(reason.starts_with("first line "), "{reason}");
+        assert_eq!(facts.kind, dim_agent_types::ModelFailureKind::Unknown);
     }
 }

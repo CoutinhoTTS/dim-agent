@@ -1,5 +1,5 @@
 use crate::{context_policy::check_cancel, host::*};
-use dim_agent_types::ModelRequest;
+use dim_agent_types::{ModelFailureKind, ModelRequest};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -111,6 +111,13 @@ pub async fn invoke<S: Send, T>(
                 *presentation = display.map(Box::new);
             }
         }
+        if let HostError::Failed { message, model, .. } = &mut error {
+            let facts = model
+                .get_or_insert_with(|| Box::new(ModelFailureFacts::unknown(Some(message.clone()))));
+            facts.attempts = recovery_state.attempts.max(1);
+            facts.waited = recovery_state.waited;
+            facts.retry_after_stop = recovery_state.retry_after_stop;
+        }
         error
     })
 }
@@ -120,6 +127,8 @@ pub async fn invoke<S: Send, T>(
 struct RecoveryState {
     pub attempts: u8,
     pub waited: Duration,
+    /// The provider's wait that did not fit in the budget left.
+    pub retry_after_stop: Option<Duration>,
     pub phase: CredentialRecoveryPhase,
 }
 
@@ -132,7 +141,7 @@ enum FailureAction {
 
 impl RecoveryState {
     pub fn decide(
-        &self,
+        &mut self,
         facts: Option<&ModelFailureFacts>,
         rejection: CredentialRejection,
         forbidden: bool,
@@ -150,21 +159,23 @@ impl RecoveryState {
             if self.phase == CredentialRecoveryPhase::Recovered {
                 return FailureAction::Stop;
             }
-        } else if !facts.is_some_and(|facts| facts.transient) {
+        } else if !facts.is_some_and(|facts| retryable(facts.kind)) {
             return FailureAction::Stop;
         }
-        let delay = facts
-            .and_then(|facts| facts.retry_after)
-            .unwrap_or_else(|| {
-                if recovering {
-                    Duration::ZERO
-                } else {
-                    Duration::from_secs_f64(
-                        0.5 * f64::from(self.attempts) * (0.75 + 0.25 * f64::from(jitter) / 255.0),
-                    )
-                }
-            });
+        let hint = facts.and_then(|facts| facts.retry_after);
+        let delay = hint.unwrap_or_else(|| {
+            if recovering {
+                Duration::ZERO
+            } else {
+                Duration::from_secs_f64(
+                    0.5 * f64::from(self.attempts) * (0.75 + 0.25 * f64::from(jitter) / 255.0),
+                )
+            }
+        });
         if delay > Duration::from_secs(60).saturating_sub(self.waited) {
+            if hint.is_some() {
+                self.retry_after_stop = hint;
+            }
             return FailureAction::Stop;
         }
         if recovering {
@@ -173,4 +184,16 @@ impl RecoveryState {
             FailureAction::Retry(delay)
         }
     }
+}
+
+/// The kinds retried before the policy redesign: exactly the kinds that were
+/// transient before, so the retry numbers do not change yet.
+fn retryable(kind: ModelFailureKind) -> bool {
+    matches!(
+        kind,
+        ModelFailureKind::Network
+            | ModelFailureKind::Timeout
+            | ModelFailureKind::RateLimited
+            | ModelFailureKind::ServerError
+    )
 }
