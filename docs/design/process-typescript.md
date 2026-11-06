@@ -442,14 +442,37 @@ a product home or `--home` ([PluginManager §2.1](plugins/PluginManager.md#21-th
 so the plugin files root and the plugin manager never disagree. A host started
 with only a database file therefore runs no PluginManager either.
 
-This changes only native composition. Keep `pluginFiles.open`, the scope/lease
-API, S10 outer v1, errors, FileStorage authority and provider lifetime unchanged.
-No row field, SDK method, dependency registry, optional lookup or rutis/core
-mechanism is added. The managed plugin keeps its existing binding; public rows
-use their own ordinary runtime and declarations, without a managed-plugin slot.
-The provider depends only on FileStorage, preserving §5.1's stable boundary.
-Session and branch parts resolve this same shared service through the existing
-catalog; a Session-only configuration must not require a dummy process row.
+This changes only native composition: `pluginFiles.open`, S10 outer v1,
+FileStorage authority and provider lifetime are unchanged, and the scope and
+lease offer the operations below. No row field, dependency registry, optional
+lookup or rutis/core mechanism is added. The managed plugin keeps its existing
+binding; public rows use their own ordinary runtime and declarations, without a
+managed-plugin slot. The provider depends only on FileStorage, preserving §5.1's
+stable boundary. Session and branch parts resolve this same shared service
+through the existing catalog; a Session-only configuration must not require a
+dummy process row.
+
+The scope offers `withLock`, `list(prefix)` and `remove(name)`; the lease offers
+`read`, `replace`, `backup`, `readBytes` and `replaceBytes`. `list` returns one
+level of a directory prefix, sorted, each entry its name relative to the
+authorized root and its kind, and never enters a directory entry; a returned
+name is the resolved components joined by `/`, so it can be passed straight to
+another operation, and on Unix a backslash is part of a name while on Windows
+it separates. `remove` takes a file or a directory tree and reports `locked`
+while a lease holds it or a file beneath it. Text and binary are separate operations on the same names:
+`read` and `replace` use the v1 text envelope, `readBytes` and `replaceBytes`
+carry raw bytes. A text read of a raw file fails `invalid_data` and leaves it
+untouched, and a binary read of a text file returns its envelope bytes. The byte
+operations are whole-buffer and capped at 8 MiB, below the 12 MiB raw ceiling
+the base64-encoded runtime frame implies; there is no streaming in JavaScript.
+A buffer large enough that its call message would exceed the runtime's 16 MiB
+frame is refused by the plugin's own runtime before it is sent, failing only
+that call with a `RangeError` coded `bad-value` while the row and the file
+store stay up, and the same holds for any call argument, a large text
+`replace` included.
+Streaming and work directories belong to the typed Rust API and have no
+JavaScript binding: `directory` creates missing parents for a helper process,
+while `withLock` still does not, so provisioning stays with installation.
 
 All trusted consumers use that same host-authorized root. A FileScope owns
 operations and cleanup; it is not a per-package directory sandbox. Consumers
