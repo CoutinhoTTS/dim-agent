@@ -12,6 +12,9 @@ mod catalog;
 #[path = "cli_flow/context.rs"]
 mod context;
 
+#[path = "cli_flow/daemon_replace.rs"]
+mod daemon_replace;
+
 #[path = "cli_flow/exit.rs"]
 mod exit;
 

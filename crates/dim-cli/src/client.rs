@@ -140,6 +140,71 @@ pub const SERVER_NAME: &str = if cfg!(windows) {
     "dimcode-server"
 };
 
+/// How long a spawned daemon may take to answer `hello`.
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a verified `daemon.shutdown` may take to settle.
+const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a client waits for another client's start decision. The holder
+/// may spend a verified shutdown and a startup before it releases the lock,
+/// plus a margin for the handshakes and the Session check between them; it is
+/// derived from the two budgets so the three cannot drift apart.
+const START_LOCK_TIMEOUT: Duration =
+    Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT.as_secs() + DAEMON_START_TIMEOUT.as_secs() + 10);
+
+/// The file one client at a time holds to decide reuse, replacement or a
+/// start: `<native_home>/daemon.start.lock`, a private file owned by the
+/// current user like the daemon log and never a link. The OS releases the
+/// lock when its holder exits.
+fn open_start_lock(native_home: &Path) -> io::Result<std::fs::File> {
+    let path = native_home.join("daemon.start.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.mode() & 0o077 != 0
+            || metadata.uid() != unsafe { libc::geteuid() }
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Daemon start lock must be a private file owned by the current user",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+/// Waits for the start lock, polling every 50 ms as the spawn wait does. A
+/// waiter that outlasts the holder's budget fails and names the daemon log;
+/// it never spawns without the lock.
+async fn start_lock(native_home: &Path) -> Result<std::fs::File> {
+    let file = open_start_lock(native_home)?;
+    let deadline = tokio::time::Instant::now() + START_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "Another client is starting or replacing the App Server and has not finished; see {}",
+                native_home.join("daemon.log").display()
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// `<native_home>/dimcode-server`, a link to `exe`, kept pointing at the
 /// executable that starts the daemon: a hard link, whose name the kernel
 /// takes as the process name, else a symbolic one, which still names the
@@ -181,7 +246,7 @@ pub async fn shutdown(mut client: Client) -> Result<()> {
     if !client.offers("daemon.shutdown.completed") {
         return Err("Daemon does not support verified shutdown completion; stop the older daemon with its matching CLI before restarting".into());
     }
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(DAEMON_SHUTDOWN_TIMEOUT, async {
         client.rpc("daemon.shutdown", json!({})).await?;
         client.wait_closed().await?;
         Ok::<_, crate::Error>(())
@@ -255,6 +320,15 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         } else {
             "dimcode"
         },
+    };
+    // One client at a time decides whether to reuse, replace or start the
+    // daemon; everyone else waits here and then runs the same decision, which
+    // normally finds the successor at its own version. `--server` daemons are
+    // never started or replaced, so they take no lock.
+    let _start_lock = if start && server.embedded {
+        Some(start_lock(&native_home).await?)
+    } else {
+        None
     };
     match Client::open(&connection, false).await {
         Ok(mut client) => {
@@ -367,7 +441,7 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     }
     let _ = std::fs::remove_file(&startup_note);
     let mut child = command.spawn()?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + DAEMON_START_TIMEOUT;
     loop {
         match Client::open(&connection, true).await {
             Ok(mut client) => {
