@@ -5,7 +5,7 @@ use dim_agent_capabilities::input_queue::{
     append_blocks,
 };
 use dim_agent_capabilities::timeline_tree::TreeCommands;
-use dim_agent_runtime::{BranchOptions, TimelineQuery};
+use dim_agent_runtime::{BranchDirectoryState, BranchOptions, TimelineQuery};
 use dim_agent_types::{BranchSource, EventKind, InputBlock, InputMode};
 
 impl Connection {
@@ -351,6 +351,30 @@ impl Connection {
             return Err(keys_too_large(bytes));
         }
         Ok(Reply::Keys(result))
+    }
+
+    pub(super) async fn branches(
+        &self,
+        rpc: &RpcService,
+        params: Branches,
+    ) -> Result<Reply, RpcError> {
+        let session = self.session(rpc, &params.session_id)?;
+        let branches = session
+            .directory()
+            .into_iter()
+            .map(|entry| wire::BranchDirectoryView {
+                branch: wire::BranchInfo::from(entry.info.clone()),
+                source: entry.info.source,
+                state: match entry.state {
+                    BranchDirectoryState::Open => "open",
+                    BranchDirectoryState::Ending => "ending",
+                    BranchDirectoryState::Ended => "ended",
+                },
+                head: entry.head,
+                end_event: entry.end_event,
+            })
+            .collect();
+        Ok(Reply::Branches(wire::BranchesResult { branches }))
     }
 
     pub(super) async fn end_branch(

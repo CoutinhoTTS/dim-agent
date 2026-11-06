@@ -37,6 +37,9 @@ mod tool_cleanup;
 #[path = "transport_flow/branch_events.rs"]
 mod branch_events;
 
+#[path = "transport_flow/branches.rs"]
+mod branches;
+
 #[path = "transport_flow/branch_end.rs"]
 mod branch_end;
 

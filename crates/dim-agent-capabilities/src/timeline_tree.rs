@@ -4,11 +4,11 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
-    AgentError, Branch, BranchLifecycle, BranchOptions, Dispatcher, Names, Result, SessionIdentity,
-    StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
-    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPredicate, TimelineQueryReply, TimelineQueryScope, TimelineStore,
-    TimelineTreeControl, rebuild_facts,
+    AgentError, Branch, BranchDirectoryEntry, BranchDirectoryState, BranchLifecycle, BranchOptions,
+    Dispatcher, Names, Result, SessionIdentity, StoredBranch, StoredEvent, Timeline,
+    TimelineContext, TimelineFactory, TimelineIdentity, TimelineInfo, TimelineKey, TimelineQuery,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply,
+    TimelineQueryScope, TimelineStore, TimelineTreeControl, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -64,8 +64,8 @@ struct LineFacts {
     failed_creates: BTreeSet<u64>,
     /// Each child it created, with the source that create recorded.
     sources: BTreeMap<String, BranchSource>,
-    /// The children whose end it recorded.
-    ended: BTreeSet<String>,
+    /// The children whose end it recorded, with the `branch/end` sequence.
+    ended: BTreeMap<String, u64>,
 }
 
 struct Node {
@@ -80,6 +80,7 @@ struct Node {
 struct EndedLine {
     head: u64,
     info: TimelineInfo,
+    end_event: Option<u64>,
 }
 /// A line whose `branch/end` is committed and whose close has not completed.
 struct PendingEnd {
@@ -746,7 +747,7 @@ impl TimelineTree {
                                         facts.sources.insert(data.branch.clone(), data.source.clone());
                                     }
                                     EventKind::BranchEnded(data) => {
-                                        facts.ended.insert(data.branch.clone());
+                                        facts.ended.insert(data.branch.clone(), data.end_event);
                                     }
                                     _ => unreachable!("the read selects the line facts"),
                                 }
@@ -1152,7 +1153,8 @@ impl TimelineTree {
                 _ => None,
             }))
     }
-    /// The stored head of an ended line, `None` for an open or unknown one.
+    /// The stored head of an ended line, `None` for an open, ending or unknown
+    /// one.
     fn ended_head(&self, id: &str) -> Option<u64> {
         self.state
             .lock()
@@ -1200,21 +1202,25 @@ impl TimelineTree {
             source,
             ancestor: None,
         };
-        context
-            .timeline()
-            .append_registered(EventKind::BranchEnd(data.clone()).into(), |_| {
+        context.timeline().append_registered(
+            EventKind::BranchEnd(data.clone()).into(),
+            |event| {
                 if context.ended() {
                     return Err(AgentError::BranchEnded(id.into()));
                 }
-                context.mark_ended();
+                context.mark_ended(event.sequence);
                 Ok(())
-            })?;
+            },
+        )?;
         loop {
             let notified = self.end_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
                 let state = self.state.lock().unwrap();
+                // After the commit above, `on_end` parks a tool-sourced end of
+                // a running line in `pending`; the tool call belongs to the
+                // turn the close waits for, so `end()` returns there.
                 if state.ended.contains_key(id) || state.pending.contains_key(id) {
                     return Ok(());
                 }
@@ -1354,16 +1360,16 @@ impl TimelineTree {
             source: source.clone(),
             ancestor: Some(ancestor.into()),
         };
-        let sequence =
-            context
-                .timeline()
-                .append_registered(EventKind::BranchEnd(data.clone()).into(), |_| {
-                    if context.ended() {
-                        return Err(AgentError::BranchEnded(id.into()));
-                    }
-                    context.mark_ended();
-                    Ok(())
-                });
+        let sequence = context.timeline().append_registered(
+            EventKind::BranchEnd(data.clone()).into(),
+            |event| {
+                if context.ended() {
+                    return Err(AgentError::BranchEnded(id.into()));
+                }
+                context.mark_ended(event.sequence);
+                Ok(())
+            },
+        );
         let sequence = match sequence {
             Ok(event) => event.sequence,
             Err(AgentError::BranchEnded(_)) => return self.wait_ended(id).await,
@@ -1447,6 +1453,7 @@ impl TimelineTree {
                 EndedLine {
                     head,
                     info: info.clone(),
+                    end_event: Some(end_event),
                 },
             );
         }
@@ -1618,7 +1625,7 @@ impl TimelineTreeControl for TimelineTree {
                 .collect();
             let mut failed_creates = BTreeSet::new();
             let mut sources = BTreeMap::new();
-            let mut recorded_ends = BTreeSet::new();
+            let mut recorded_ends: BTreeMap<String, u64> = BTreeMap::new();
             let mut inactive = BTreeSet::new();
             while !remaining.is_empty() {
                 let stored = remaining
@@ -1636,12 +1643,13 @@ impl TimelineTreeControl for TimelineTree {
                     })?;
                 let mut next: TimelineInfo = stored.info.into();
                 next.source = sources.get(&next.id).cloned();
-                if recorded_ends.contains(&next.id) {
+                if recorded_ends.contains_key(&next.id) {
                     self.state.lock().unwrap().ended.insert(
                         next.id.clone(),
                         EndedLine {
                             head: stored.sequence,
                             info: next.clone(),
+                            end_event: recorded_ends.get(&next.id).copied(),
                         },
                     );
                     remaining.remove(&next.id);
@@ -1667,11 +1675,19 @@ impl TimelineTreeControl for TimelineTree {
                         {
                             next.source = self.creation_source(parent, &next.id, anchor).await?;
                         }
+                        // A cascade-ended line's `branch/end` sits on the
+                        // line itself; one page reads it (limit 1). The
+                        // result, if any, is what the directory reports.
+                        let end_event = self
+                            .own_end(&next.id, stored.sequence)
+                            .await?
+                            .map(|(sequence, _)| sequence);
                         self.state.lock().unwrap().ended.insert(
                             next.id.clone(),
                             EndedLine {
                                 head: stored.sequence,
                                 info: next.clone(),
+                                end_event,
                             },
                         );
                     }
@@ -1693,6 +1709,7 @@ impl TimelineTreeControl for TimelineTree {
                         EndedLine {
                             head,
                             info: next.clone(),
+                            end_event: Some(end_event),
                         },
                     );
                     remaining.remove(&next.id);
@@ -1884,6 +1901,52 @@ impl TimelineTreeControl for TimelineTree {
             .filter(|node| matches!(&*node.ready.borrow(), Some(Ok(_))))
             .map(|node| node.info.clone())
             .collect()
+    }
+    fn directory(&self) -> Vec<BranchDirectoryEntry> {
+        // Collect the records under the lock, then resolve heads through
+        // `head()`, which takes the lock itself.
+        let mut entries: Vec<BranchDirectoryEntry> = {
+            let state = self.state.lock().unwrap();
+            let mut entries: Vec<BranchDirectoryEntry> = state
+                .nodes
+                .values()
+                .filter(|node| matches!(&*node.ready.borrow(), Some(Ok(_))))
+                .map(|node| {
+                    let end_event = node
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.end_event());
+                    BranchDirectoryEntry {
+                        info: node.info.clone(),
+                        head: 0,
+                        state: match end_event {
+                            Some(_) => BranchDirectoryState::Ending,
+                            None => BranchDirectoryState::Open,
+                        },
+                        end_event,
+                    }
+                })
+                .collect();
+            for ended in state.ended.values() {
+                entries.push(BranchDirectoryEntry {
+                    info: ended.info.clone(),
+                    head: ended.head,
+                    state: BranchDirectoryState::Ended,
+                    end_event: ended.end_event,
+                });
+            }
+            entries
+        };
+        for entry in &mut entries {
+            if entry.state != BranchDirectoryState::Ended {
+                entry.head = self.head(&entry.info.id).unwrap_or(0);
+            }
+        }
+        entries.sort_by(|a, b| {
+            let order = |id: &str| id != "main";
+            (order(&a.info.id), &a.info.id).cmp(&(order(&b.info.id), &b.info.id))
+        });
+        entries
     }
     fn close(&self) -> BoxFuture<'_, Result<()>> {
         self.start_close();

@@ -27,6 +27,27 @@ impl From<TimelineInfo> for BranchInfo {
     }
 }
 
+/// One entry of `session.branches`: the directory record of one line.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchDirectoryView {
+    #[serde(flatten)]
+    pub branch: BranchInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<dim_agent_types::BranchSource>,
+    pub state: &'static str,
+    pub head: u64,
+    /// The line's `branch/end` sequence; absent while open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_event: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchesResult {
+    pub branches: Vec<BranchDirectoryView>,
+}
+
 #[derive(Debug)]
 pub struct ProductEvent(Arc<AgentEvent>);
 impl ProductEvent {
