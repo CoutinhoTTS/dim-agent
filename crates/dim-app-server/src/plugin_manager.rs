@@ -14,7 +14,7 @@ use crate::methods::ManagementMethods;
 use crate::settings::{SettingsError, SettingsService, SourceDeclaration};
 use crate::ui_extensions::UiExtensions;
 use acquire::PluginsDir;
-use dim_agent_capabilities::methods::{Interruption, MethodDecl, Progress, RpcError};
+use dim_agent_capabilities::methods::{Interruption, MethodCall, MethodDecl, Progress, RpcError};
 use dim_agent_capabilities::skills::{SkillIssue, SkillsCatalog};
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
 pub use record::Defaults;
@@ -1871,7 +1871,8 @@ impl DynPlugin for PluginManagerPlugin {
                         ..MethodDecl::new(name, *name != "plugin.list", Interruption::Report)
                     })
                     .collect(),
-                Arc::new(move |method, params, _stopping, progress| {
+                Arc::new(move |call, _stopping, progress| {
+                    let MethodCall { method, params, .. } = call;
                     let manager = handler.clone();
                     Box::pin(async move {
                         manager

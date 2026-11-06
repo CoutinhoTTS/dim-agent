@@ -1641,6 +1641,7 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
             .accept(
                 "permissions.branch".into(),
                 at.clone(),
+                None,
                 CancellationToken::new(),
                 |_| {},
             )

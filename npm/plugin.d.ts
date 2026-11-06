@@ -310,11 +310,16 @@ export interface MethodDeclaration {
   mutating: boolean;
   interruption: 'report' | 'drain';
   progress: boolean;
+  /** Notification names inside the namespace, unique across the declaration
+   * set. A row may send only names a namespace it registered declares. */
+  notifications?: string[];
 }
 export interface MethodCall {
   callId: string;
   method: string;
   params: JsonValue;
+  /** The connection that called, when a client connection made the call. */
+  origin?: { connectionId: string };
 }
 export interface SessionMethodCall extends MethodCall {
   params: JsonObject & { sessionId: string; branchId?: string };
@@ -338,4 +343,26 @@ export interface ManagementMethods {
  * namespaces, which stays registered until the row unloads. */
 export interface SessionMethods {
   register(namespace: string, declarations: SessionMethodDeclaration[], call: SessionMethodHandler): Promise<void>;
+}
+
+export type CallChannelErrorCode = 'undeclared' | 'gone' | 'too_large';
+/** The error `notify` rejects with: `undeclared` names a notification no
+ * namespace that served the connection declared, `gone` a connection that
+ * has closed, a load that has unloaded, or one the row received no call
+ * from, and `too_large` one over the frame limit. */
+export interface CallChannelError extends Error { code: CallChannelErrorCode }
+/** Process service `callChannel`, provided by App Server (session boundary A.2): the
+ * notifications a row sends to a connection that called one of its
+ * namespaces, and the wait for that connection to close. `connectionId` is
+ * the `origin.connectionId` of a call, and stays valid until the connection
+ * closes. */
+export interface CallChannel {
+  /** The notification is written to that connection only, after the reply of
+   * the call named by `callId`, the `MethodCall.callId` of the work it
+   * reports. Once that reply is written, a notification with its id is
+   * written directly. */
+  notify(request: { connectionId: string; callId: string; method: string; params: JsonObject }): Promise<Record<string, never>>;
+  /** Resolves when the connection closes or the Rpc load that admitted the
+   * call unloads. An id the row never received a call from rejects `gone`. */
+  closed(request: { connectionId: string }): Promise<void>;
 }

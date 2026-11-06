@@ -965,6 +965,7 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .accept(
                 "session.observer.status".into(),
                 json!({"sessionId":session.id()}),
+                None,
                 CancellationToken::new(),
                 |_| {},
             )
@@ -1593,6 +1594,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
             .accept(
                 "session.typescript.status".into(),
                 json!({}),
+                None,
                 CancellationToken::new(),
                 |_| {}
             )
@@ -2474,6 +2476,321 @@ async fn node_session_typescript_tool_result_carries_declared_effects() {
             },
         ])
     );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Methods contract A.2 and the C4 binding: a TypeScript method provider
+/// declares a notification, keeps `origin.connectionId`, replies, then sends
+/// the notification through `callChannel`; the client receives it after the
+/// reply. An undeclared name rejects with `undeclared`, and `closed` resolves
+/// after the client disconnects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_sends_connection_bound_notifications() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut creator = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut creator, json!(["echo"])).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = client
+        .send("session.typescript.channel", json!({"sessionId": session}))
+        .await;
+    let reply = client.read("the method reply").await;
+    assert_eq!(reply["id"], id, "{reply}");
+    assert_eq!(reply["result"]["code"], "undeclared", "{reply}");
+    assert!(reply["result"]["connectionId"].is_string(), "{reply}");
+    let note = client.read("the connection-bound notification").await;
+    assert_eq!(note["method"], "session.typescript.changed", "{note}");
+    assert_eq!(note["params"], json!({"ok": true}));
+    drop(client);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = creator
+            .rpc(
+                "session.typescript.channel_state",
+                json!({"sessionId": session}),
+            )
+            .await;
+        if state["result"]["closed"] == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the caller's closed is recorded: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// F1: a notification for a call that has replied is written before a later
+/// call's reply, not held behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_notification_of_a_replied_call_precedes_a_later_reply() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    let first = client
+        .send(
+            "session.typescript.channel_after_b",
+            json!({"sessionId": session}),
+        )
+        .await;
+    let blocked = client
+        .send(
+            "session.typescript.channel_block",
+            json!({"sessionId": session}),
+        )
+        .await;
+    let reply = client.response(first).await;
+    assert!(reply["result"]["connectionId"].is_string(), "{reply}");
+    let note = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.read("the notification of the replied call"),
+    )
+    .await
+    .expect("the replied call's notification is not held behind the blocked call");
+    assert_eq!(note["method"], "session.typescript.changed", "{note}");
+    assert_eq!(note["params"], json!({"call":"A"}), "{note}");
+    assert_ok(
+        &client
+            .rpc(
+                "session.typescript.channel_release",
+                json!({"sessionId": session}),
+            )
+            .await,
+    );
+    let reply = client.response(blocked).await;
+    assert_eq!(reply["id"], blocked, "{reply}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// F1: a call's notification follows that call's reply, not the newest
+/// call's, when two calls are in flight and the later one replies first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_notification_follows_its_own_call_not_the_newest() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    let held = client
+        .send(
+            "session.typescript.channel_hold_after_b",
+            json!({"sessionId": session}),
+        )
+        .await;
+    let fast = client
+        .send("session.typescript.channel", json!({"sessionId": session}))
+        .await;
+    let reply = client.response(fast).await;
+    assert_eq!(reply["id"], fast, "{reply}");
+    let note = client.notice("session.typescript.changed").await;
+    assert_eq!(note["params"], json!({"ok": true}), "{note}");
+    let release = client
+        .send(
+            "session.typescript.channel_release",
+            json!({"sessionId": session}),
+        )
+        .await;
+    loop {
+        let value = client.read("the held call's reply").await;
+        if value["id"] == json!(held) {
+            break;
+        }
+        assert_ne!(
+            value["method"], "session.typescript.changed",
+            "a notification of the held call preceded its reply: {value}"
+        );
+        if value["id"] == json!(release) {
+            continue;
+        }
+        panic!("unexpected message before the held call's reply: {value}");
+    }
+    let note = client.notice("session.typescript.changed").await;
+    assert_eq!(note["params"], json!({"call": "A"}), "{note}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// F1: a notification names its call (`callId` is required) and a connection
+/// the row received no call from is `gone`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_call_channel_checks_the_call_and_the_connection() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    let bad = client
+        .rpc(
+            "session.typescript.channel_bad_request",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_eq!(bad["result"]["code"], "bad-value", "{bad}");
+    assert!(
+        bad["result"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("callId")),
+        "{bad}"
+    );
+    let unknown = client
+        .rpc(
+            "session.typescript.channel_unknown",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_eq!(unknown["result"]["code"], "gone", "{unknown}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: an oversized notification from another language writes nothing and
+/// keeps the connection open. The bridge that carries the payload already
+/// refuses any message over 16 MiB, the same limit as the notification
+/// frame, so the refusal a foreign provider can actually observe is the
+/// bridge's (`bad-value`), not `too_large`: a request the App Server would
+/// encode past its frame limit cannot reach it. `too_large` itself is
+/// covered by the Rust binding's flow test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_oversized_notification_writes_nothing_and_keeps_the_connection() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    let reply = client
+        .rpc(
+            "session.typescript.channel_too_large",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_eq!(reply["result"]["code"], "bad-value", "{reply}");
+    assert!(
+        reply["result"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("16 MiB")),
+        "{reply}"
+    );
+    assert_ok(&client.rpc("daemon.ping", json!({})).await);
+    assert!(
+        client.notices.is_empty(),
+        "an oversized notification was written: {:?}",
+        client.notices
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: a notification for a call that has already replied is written
+/// directly, in order after that reply and before the next reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_notification_after_the_reply_goes_out_in_order() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    let replied = client
+        .rpc(
+            "session.typescript.channel_after_reply",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_ok(&replied);
+    let next = client
+        .send(
+            "session.typescript.channel_notify_after_reply",
+            json!({"sessionId": session}),
+        )
+        .await;
+    let note = client.read("the notification of the replied call").await;
+    assert_eq!(note["method"], "session.typescript.changed", "{note}");
+    assert_eq!(note["params"], json!({"after": "reply"}), "{note}");
+    let reply = client.response(next).await;
+    assert_eq!(reply["id"], next, "{reply}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: after its connection closes, the foreign binding answers a name the
+/// generation did not declare `undeclared`, and a declared name `gone`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_closed_connection_does_not_hide_an_undeclared_name() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut creator = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut creator, json!(["echo"])).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.typescript.channel_remember",
+                json!({"sessionId": session}),
+            )
+            .await,
+    );
+    drop(client);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = creator
+            .rpc(
+                "session.typescript.channel_state",
+                json!({"sessionId": session}),
+            )
+            .await;
+        if state["result"]["closed"] == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the caller's closed is recorded: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let codes = creator
+        .rpc(
+            "session.typescript.channel_after_close_codes",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_eq!(codes["result"]["undeclared"], "undeclared", "{codes}");
+    assert_eq!(codes["result"]["declared"], "gone", "{codes}");
     server.shutdown();
     server.join().await.unwrap();
 }
