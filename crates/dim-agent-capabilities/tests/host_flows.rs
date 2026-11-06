@@ -118,10 +118,12 @@ async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit()
     session.idle("main").await.unwrap();
     let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(history.iter().any(|event| matches!(&event.kind,
-        EventKind::ModelOutputEnd(ModelOutputEndData { outcome: ModelOutputOutcome::Failed { error, budget: None, presentation: Some(presentation) }, .. })
+        EventKind::ModelOutputEnd(ModelOutputEndData { outcome: ModelOutputOutcome::Failed { error, budget: None, presentation: Some(presentation), failure: Some(failure) }, .. })
         if error.contains(&model.provider_id) && error.contains(&model.model_id)
             && presentation.source == model.provider_id && presentation.reason == "max_tokens"
-            && presentation.action.as_deref().is_some_and(|action| action.contains("output token limit")))));
+            && presentation.action.as_deref().is_some_and(|action| action.contains("output token limit"))
+            && failure.kind == ModelFailureKind::OutputLimit
+            && failure.reason.as_deref().is_some_and(|reason| reason.contains("max_tokens")))));
     assert!(matches!(
         &history.last().unwrap().kind,
         EventKind::TurnEnd(TurnEndData {
@@ -153,6 +155,65 @@ async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit()
             ..
         })
     ));
+    agent.close().await.unwrap();
+}
+
+struct LongFailure;
+impl ModelDriver for LongFailure {
+    fn invoke(
+        &self,
+        _: Arc<ModelRequest>,
+        _: ModelConnection,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        Box::pin(async {
+            Err(HostError::failed(format!(
+                "first line\n{}\nlast line",
+                "x".repeat(1_000)
+            )))
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_failure_without_facts_keeps_its_message_and_bounds_the_reason() {
+    let agent = MinimalHost::start(&builder(Arc::new(LongFailure), Arc::new(MockTools)))
+        .await
+        .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("long failure".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let message = format!("first line\n{}\nlast line", "x".repeat(1_000));
+    let ModelOutputOutcome::Failed {
+        error,
+        failure: Some(failure),
+        ..
+    } = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => Some(&data.outcome),
+            _ => None,
+        })
+        .expect("a terminal model output")
+    else {
+        panic!("the terminal is not a failure");
+    };
+    assert_eq!(
+        error, &message,
+        "the host's message is passed through unchanged"
+    );
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    let reason = failure.reason.as_deref().expect("a reason");
+    assert!(!reason.contains('\n'), "{reason}");
+    assert!(reason.chars().count() <= 300, "{reason}");
+    assert!(reason.starts_with("first line "), "{reason}");
     agent.close().await.unwrap();
 }
 
@@ -519,6 +580,16 @@ impl RecoveryProbe {
         }
     }
     fn failure(&self, status: u16, retry_after: Option<Duration>) -> HostError {
+        let kind = match status {
+            401 | 403 => ModelFailureKind::AuthRejected,
+            402 => ModelFailureKind::QuotaExhausted,
+            404 => ModelFailureKind::NotFound,
+            408 | 500..=599 => ModelFailureKind::ServerError,
+            413 => ModelFailureKind::ContextTooLong,
+            429 => ModelFailureKind::RateLimited,
+            400..=499 => ModelFailureKind::InvalidRequest,
+            _ => ModelFailureKind::Unknown,
+        };
         HostError::Failed {
             message: "fixture rejection".into(),
             budget: None,
@@ -527,12 +598,16 @@ impl RecoveryProbe {
                 code: None,
             },
             model: Some(Box::new(ModelFailureFacts {
-                origin: ModelFailureOrigin::HttpResponse,
-                error_type: Some("fixture_error".into()),
-                message: Some("fixture rejection".into()),
+                kind,
+                reason: Some("fixture rejection".into()),
+                status: Some(status),
+                provider_code: None,
                 request_id: Some("fixture-request".into()),
-                transient: status != 401,
+                cause: Vec::new(),
                 retry_after,
+                attempts: 1,
+                waited: Duration::ZERO,
+                retry_after_stop: None,
             })),
             presentation: None,
         }
@@ -893,6 +968,38 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 .collect();
             assert_eq!(ends.len(), 1, "mode {mode}");
             if !completed {
+                let ModelOutputOutcome::Failed {
+                    error,
+                    failure: Some(failure),
+                    ..
+                } = ends[0]
+                else {
+                    panic!("mode {mode}: {ends:?}");
+                };
+                let expected_kind = match mode {
+                    7 | 10 | 11 | 13 => ModelFailureKind::ServerError,
+                    8 => ModelFailureKind::RateLimited,
+                    _ => ModelFailureKind::AuthRejected,
+                };
+                assert_eq!(failure.kind, expected_kind, "mode {mode}");
+                assert_eq!(usize::from(failure.attempts), expected_calls, "mode {mode}");
+                if matches!(mode, 7 | 8 | 16 | 19) {
+                    assert!(failure.waited_ms > 0, "mode {mode}");
+                } else {
+                    assert_eq!(failure.waited_ms, 0, "mode {mode}");
+                }
+                if mode == 21 {
+                    assert_eq!(failure.retry_after_ms, Some(61_000), "mode {mode}");
+                }
+                assert_eq!(error.as_str(), "fixture rejection", "mode {mode}");
+                let turn_error = events.iter().find_map(|event| match &event.kind {
+                    EventKind::TurnEnd(TurnEndData {
+                        outcome: TurnOutcome::Failed { error },
+                        ..
+                    }) => Some(error.as_str()),
+                    _ => None,
+                });
+                assert_eq!(turn_error, Some(error.as_str()), "mode {mode}");
                 assert!(
                     matches!(ends[0], ModelOutputOutcome::Failed {
                     presentation: Some(value), ..

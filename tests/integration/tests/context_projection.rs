@@ -254,6 +254,7 @@ fn input_consumed_during_a_failed_model_output_keeps_its_position() {
                     error: "aborted".into(),
                     budget: None,
                     presentation: None,
+                    failure: None,
                 },
             }),
         ),

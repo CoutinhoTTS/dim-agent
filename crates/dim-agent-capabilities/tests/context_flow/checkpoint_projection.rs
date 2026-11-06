@@ -1201,6 +1201,7 @@ fn an_interrupted_output_keeps_its_text_and_started_calls_and_drops_its_thinking
         error: "aborted".into(),
         budget: None,
         presentation: None,
+        failure: None,
     };
     let text_only = fixed(vec![
         start("r1"),
