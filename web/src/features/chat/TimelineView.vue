@@ -205,7 +205,7 @@ onMounted(() => void toEnd())
       </div>
       <div v-if="running" class="processing-row" role="status">
         <LoaderCircle :size="14" class="is-spinning" aria-hidden="true" />
-        <span aria-hidden="true">{{ retry === undefined ? t("work.processing") : retryText }}</span>
+        <span :aria-hidden="retry === undefined ? false : 'true'">{{ retry === undefined ? t("work.processing") : retryText }}</span>
         <span class="sr-only">{{ retryLive }}</span>
       </div>
     </div>
