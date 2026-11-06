@@ -148,16 +148,25 @@ not the user source.
 - `mcp.test` probes one configuration without attaching a Session; the
   [MCP configuration management](../../docs/design/appserver/mcp-management.md#45-probe-mcptest)
   contract defines its outcome, latency, tools and auth report.
-- `mcp.import.preview({source, document, cwd?})` decodes a client-supplied standard
+- `mcp.import.sources({cwd?})` reports the known MCP stores of other local clients — Claude Code,
+  Codex and OMP — with each store's id, client, scope, display path, state (`ready`, `absent`,
+  `unreadable`, `too-large` or `malformed`) and entry count, or the owner's message. Each request
+  reads the fixed files its scope names once; it never returns an entry or a value, and writes
+  nothing. The
+  [MCP configuration management](../../docs/design/appserver/mcp-management.md#49-discovery-mcpimportsources-and-from)
+  contract owns the source table, the Codex mapping and the bounds.
+- `mcp.import.preview({source, document? | from?, cwd?})` decodes a client-supplied standard
   `mcpServers` document and reports each entry's `id`, `transport`, `status` (`identical`,
   `changed`, `conflict` or `invalid`), the changed field names and JSON kinds, the `unsupported`
   members (`kept-unused` or `dropped`) and the entry's error, plus `unknownTopLevel` and the
-  target `revision`; it writes nothing. `mcp.import.apply` takes the same document, the preview's
-  revision as `expectedVersion` and one resolution per entry (`import`, `skip`, `replace` or
-  `rename` with `newId`), re-validates them against the source and writes every accepted entry
-  with one compare-and-set; an import never enables an entry, and a project import writes each
-  entry as its public skeleton and puts the withheld values in the user-scope `mcp-secrets`
-  record, as a move into project does. The
+  target `revision`; it writes nothing. With `from` the owner reads one known store itself and
+  the converted text never leaves the daemon; the reply then also carries `sourceRevision`.
+  `mcp.import.apply` takes the same input, the preview's revision as `expectedVersion` (and, with
+  `from`, `sourceRevision` as `expectedSourceRevision`) and one resolution per entry (`import`,
+  `skip`, `replace` or `rename` with `newId`), re-validates them against the source and writes
+  every accepted entry with one compare-and-set; an import never enables an entry, and a project
+  import writes each entry as its public skeleton and puts the withheld values in the user-scope
+  `mcp-secrets` record, as a move into project does. The
   [MCP configuration management](../../docs/design/appserver/mcp-management.md#48-import-mcpimportpreview-mcpimportapply)
   contract defines the statuses, the resolutions and the errors.
 - `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.

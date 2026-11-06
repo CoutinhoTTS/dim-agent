@@ -2280,6 +2280,33 @@
       ]
     },
     {
+      "id": "dim_app_server::mcp::discovery",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/discovery.rs",
+      "unexpandedMacros": [
+        "cfg",
+        "format",
+        "json",
+        "matches",
+        "unreachable"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::discovery::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::discovery",
+      "file": "crates/dim-app-server/src/mcp/discovery.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json",
+        "panic",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::mcp::import",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -2296,6 +2323,7 @@
       "parent": "dim_app_server::mcp",
       "file": "crates/dim-app-server/src/mcp/management.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "serde_json::json",
         "unreachable"
@@ -21998,6 +22026,13 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::discovery",
+      "references": [
+        "mod discovery"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::import",
       "references": [
         "mod import",
@@ -22315,6 +22350,47 @@
       ]
     },
     {
+      "from": "dim_app_server::mcp::discovery",
+      "to": "dim_app_server::mcp::discovery::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::discovery",
+      "to": "dim_app_server::mcp::import",
+      "references": [
+        "path MAX_DOCUMENT_BYTES",
+        "path MAX_ENTRIES",
+        "use super::import::MAX_DOCUMENT_BYTES",
+        "use super::import::MAX_ENTRIES"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::discovery::tests",
+      "to": "dim_app_server::mcp::discovery",
+      "references": [
+        "path Environment",
+        "path Environment::from_vars",
+        "path MAX_SOURCE_BYTES",
+        "path Prepared",
+        "path StoreId::ClaudeUser",
+        "path StoreId::CodexProject",
+        "path StoreId::OmpUser",
+        "path Workspace",
+        "path claude_local",
+        "path claude_user",
+        "path codex_entries",
+        "path document",
+        "path omp",
+        "path parse_claude",
+        "path prepared",
+        "path read_claude",
+        "path read_json",
+        "path sources"
+      ]
+    },
+    {
       "from": "dim_app_server::mcp::import",
       "to": "dim_app_server::mcp",
       "references": [
@@ -22374,6 +22450,7 @@
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
+        "path RpcError::interrupted",
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path params",
@@ -22469,6 +22546,19 @@
         "use super::config::McpServerSettings",
         "use super::config::McpSettings",
         "use super::config::RemoteTransport"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp::discovery",
+      "references": [
+        "path StoreId::parse",
+        "path discovery::Environment::from_process",
+        "path discovery::Workspace",
+        "path discovery::document",
+        "path discovery::sources",
+        "use super::discovery",
+        "use super::discovery::StoreId"
       ]
     },
     {
@@ -29927,14 +30017,18 @@
         "path mcp::ImportAction::Replace",
         "path mcp::ImportAction::Skip",
         "path mcp::ImportField",
+        "path mcp::ImportInput::Document",
+        "path mcp::ImportInput::Store",
         "path mcp::ImportPreview",
         "path mcp::ImportResolution",
+        "path mcp::ImportSource",
         "path mcp::ImportStatus::Identical",
         "path mcp::ImportUnsupported",
         "path mcp::apply_import",
         "path mcp::apply_named",
         "path mcp::editable",
         "path mcp::import_failure",
+        "path mcp::import_sources",
         "path mcp::preview_import",
         "path mcp::seed",
         "path mcp::target",
@@ -42422,6 +42516,22 @@
     {
       "module": "dim_app_server::mcp::config",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_app_server::mcp::discovery",
+      "path": "A::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::discovery",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::discovery",
+      "path": "M::Error"
+    },
+    {
+      "module": "dim_app_server::mcp::discovery",
+      "path": "S::Error"
     },
     {
       "module": "dim_app_server::mcp::management",
