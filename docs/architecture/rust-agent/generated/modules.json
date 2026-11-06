@@ -1777,6 +1777,16 @@
       ]
     },
     {
+      "id": "dim_agent_types::events::failure_kind_tests",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types::events",
+      "file": "crates/dim-agent-types/src/events.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_agent_types::finite_number",
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
@@ -4182,6 +4192,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::de::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::de",
+      "file": "crates/dim-cli/src/ui/i18n/de/failures.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::de::management",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::de",
@@ -4228,6 +4245,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::es",
       "file": "crates/dim-cli/src/ui/i18n/es/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::es::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::es",
+      "file": "crates/dim-cli/src/ui/i18n/es/failures.rs",
       "unexpandedMacros": []
     },
     {
@@ -4280,6 +4304,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::fr::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::fr",
+      "file": "crates/dim-cli/src/ui/i18n/fr/failures.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::fr::management",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::fr",
@@ -4326,6 +4357,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::id",
       "file": "crates/dim-cli/src/ui/i18n/id/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::id::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::id",
+      "file": "crates/dim-cli/src/ui/i18n/id/failures.rs",
       "unexpandedMacros": []
     },
     {
@@ -4378,6 +4416,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::ja::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ja",
+      "file": "crates/dim-cli/src/ui/i18n/ja/failures.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::ja::management",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::ja",
@@ -4424,6 +4469,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::ko",
       "file": "crates/dim-cli/src/ui/i18n/ko/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ko::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ko",
+      "file": "crates/dim-cli/src/ui/i18n/ko/failures.rs",
       "unexpandedMacros": []
     },
     {
@@ -4476,6 +4528,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::pt_br::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_br",
+      "file": "crates/dim-cli/src/ui/i18n/pt_br/failures.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::pt_br::management",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::pt_br",
@@ -4522,6 +4581,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::pt_pt",
       "file": "crates/dim-cli/src/ui/i18n/pt_pt/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_pt::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_pt",
+      "file": "crates/dim-cli/src/ui/i18n/pt_pt/failures.rs",
       "unexpandedMacros": []
     },
     {
@@ -4585,6 +4651,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::zh_cn::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_cn",
+      "file": "crates/dim-cli/src/ui/i18n/zh_cn/failures.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::zh_cn::management",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::zh_cn",
@@ -4631,6 +4704,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::zh_hant",
       "file": "crates/dim-cli/src/ui/i18n/zh_hant/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::zh_hant::failures",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_hant",
+      "file": "crates/dim-cli/src/ui/i18n/zh_hant/failures.rs",
       "unexpandedMacros": []
     },
     {
@@ -5501,7 +5581,8 @@
       "file": "crates/dim-cli/src/ui/transcript/blocks.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "vec"
       ]
     },
     {
@@ -6314,6 +6395,8 @@
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
+        "path dim_agent_types::ModelFailureKind::OutputLimit",
+        "path dim_agent_types::ModelOutputOutcome::Failed",
         "use dim_agent_types::TurnOutcome"
       ]
     },
@@ -17390,6 +17473,7 @@
         "path PluginFileError::InvalidData",
         "path PluginFileError::InvalidPath",
         "path PluginFileError::Io",
+        "path PluginFileError::Locked",
         "path PluginFileTransactions",
         "use dim_app_server::plugin_files::PluginFileError",
         "use dim_app_server::plugin_files::PluginFileTransactions"
@@ -17858,6 +17942,13 @@
     },
     {
       "from": "dim_agent_types::events",
+      "to": "dim_agent_types::events::failure_kind_tests",
+      "references": [
+        "mod failure_kind_tests"
+      ]
+    },
+    {
+      "from": "dim_agent_types::events",
       "to": "dim_agent_types::model",
       "references": [
         "path BaselineSource",
@@ -17908,6 +17999,26 @@
       "to": "dim_agent_types::events",
       "references": [
         "use super::context_flags"
+      ]
+    },
+    {
+      "from": "dim_agent_types::events::failure_kind_tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ModelFailureKind::ALL",
+        "path ModelFailureKind::AuthRejected",
+        "path ModelFailureKind::ContentFiltered",
+        "path ModelFailureKind::ContextTooLong",
+        "path ModelFailureKind::InvalidRequest",
+        "path ModelFailureKind::MalformedResponse",
+        "path ModelFailureKind::Network",
+        "path ModelFailureKind::NotFound",
+        "path ModelFailureKind::OutputLimit",
+        "path ModelFailureKind::QuotaExhausted",
+        "path ModelFailureKind::RateLimited",
+        "path ModelFailureKind::ServerError",
+        "path ModelFailureKind::Unknown",
+        "use super::ModelFailureKind"
       ]
     },
     {
@@ -23914,8 +24025,11 @@
       "from": "dim_app_server::plugin_files",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
+        "path DirectoryEntry",
+        "path EntryKind",
         "path FileLease",
         "path FilePath",
+        "path FileReader",
         "path FileStorage",
         "path FileStorageError",
         "path FileStorageError::Cancelled",
@@ -23924,8 +24038,11 @@
         "path FileStorageError::Io",
         "path FileStorageError::Locked",
         "path FileStorageError::Worker",
+        "use dim_agent_capabilities::file_storage::DirectoryEntry",
+        "use dim_agent_capabilities::file_storage::EntryKind",
         "use dim_agent_capabilities::file_storage::FileLease",
         "use dim_agent_capabilities::file_storage::FilePath",
+        "use dim_agent_capabilities::file_storage::FileReader",
         "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
       ]
@@ -29116,9 +29233,24 @@
     },
     {
       "from": "dim_cli::display",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::failure_phrase",
+        "path crate::projection::retry_seconds"
+      ]
+    },
+    {
+      "from": "dim_cli::display",
       "to": "dim_cli::sanitize",
       "references": [
         "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::display",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::tf"
       ]
     },
     {
@@ -30815,6 +30947,13 @@
     },
     {
       "from": "dim_cli::model::view",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::ModelFailureKind"
+      ]
+    },
+    {
+      "from": "dim_cli::model::view",
       "to": "dim_agent_types::member_approval",
       "references": [
         "path dim_agent_types::MemberApprovalDescriptor"
@@ -31196,6 +31335,8 @@
         "path ExecStatus::Failed",
         "path InputMode",
         "path InputMode::Steer",
+        "path ModelFailure",
+        "path ModelFailureKind",
         "path ModelOutputOutcome::Failed",
         "path ReplacementParts",
         "path TurnOutcome",
@@ -31204,6 +31345,7 @@
         "path TurnOutcome::Failed",
         "path UserInput",
         "path dim_agent_types::InputBlock::Raw",
+        "path dim_agent_types::ProviderPresentation",
         "use dim_agent_types::BranchCreateAt",
         "use dim_agent_types::BranchCreateFailedData",
         "use dim_agent_types::BranchSource",
@@ -31213,6 +31355,8 @@
         "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::ExecStatus",
         "use dim_agent_types::InputMode",
+        "use dim_agent_types::ModelFailure",
+        "use dim_agent_types::ModelFailureKind",
         "use dim_agent_types::ModelOutputOutcome",
         "use dim_agent_types::ReplacementParts",
         "use dim_agent_types::TurnOutcome",
@@ -31299,6 +31443,7 @@
         "path CompactionState::Running",
         "path CompactionState::Skipped",
         "path CompactionView",
+        "path FailureDetail",
         "path LineCut",
         "path LineState::CreationFailed",
         "path LineState::EndedByOperation",
@@ -31312,6 +31457,7 @@
         "path MemberTarget::Session",
         "path MemberTarget::Starting",
         "path QueuedInput",
+        "path RetryView",
         "path RowKind",
         "path RowKind::AssistantMessage",
         "path RowKind::Compaction",
@@ -31344,6 +31490,7 @@
         "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState",
         "use crate::model::view::CompactionView",
+        "use crate::model::view::FailureDetail",
         "use crate::model::view::LineCut",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
@@ -31351,6 +31498,7 @@
         "use crate::model::view::MemberConversationState",
         "use crate::model::view::MemberTarget",
         "use crate::model::view::QueuedInput",
+        "use crate::model::view::RetryView",
         "use crate::model::view::RowKind",
         "use crate::model::view::RowTone",
         "use crate::model::view::TaskFinish",
@@ -31374,6 +31522,7 @@
       "from": "dim_cli::projection",
       "to": "dim_cli::ui::i18n",
       "references": [
+        "path crate::ui::i18n::t",
         "path crate::ui::i18n::tf"
       ]
     },
@@ -31450,7 +31599,8 @@
       "from": "dim_cli::projection::tests",
       "to": "dim_cli::model::view",
       "references": [
-        "path CompactionState"
+        "path CompactionState",
+        "path RowKind::Error"
       ]
     },
     {
@@ -33770,6 +33920,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::de",
+      "to": "dim_cli::ui::i18n::de::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::de",
       "to": "dim_cli::ui::i18n::de::management",
       "references": [
         "mod management",
@@ -33814,6 +33972,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::es",
+      "to": "dim_cli::ui::i18n::es::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
       ]
     },
     {
@@ -33866,6 +34032,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::fr",
+      "to": "dim_cli::ui::i18n::fr::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::fr",
       "to": "dim_cli::ui::i18n::fr::management",
       "references": [
         "mod management",
@@ -33910,6 +34084,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::id",
+      "to": "dim_cli::ui::i18n::id::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
       ]
     },
     {
@@ -33962,6 +34144,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::ja",
+      "to": "dim_cli::ui::i18n::ja::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ja",
       "to": "dim_cli::ui::i18n::ja::management",
       "references": [
         "mod management",
@@ -34006,6 +34196,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ko",
+      "to": "dim_cli::ui::i18n::ko::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
       ]
     },
     {
@@ -34058,6 +34256,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::pt_br",
+      "to": "dim_cli::ui::i18n::pt_br::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_br",
       "to": "dim_cli::ui::i18n::pt_br::management",
       "references": [
         "mod management",
@@ -34106,6 +34312,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::pt_pt",
+      "to": "dim_cli::ui::i18n::pt_pt::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_pt",
       "to": "dim_cli::ui::i18n::pt_pt::management",
       "references": [
         "mod management",
@@ -34146,13 +34360,102 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::ModelFailureKind::ALL"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
         "path LOCALES",
+        "path Locale",
+        "path Locale::De",
         "path Locale::En",
+        "path Locale::Es",
+        "path Locale::Fr",
+        "path Locale::Id",
+        "path Locale::Ja",
+        "path Locale::Ko",
+        "path Locale::PtBr",
+        "path Locale::PtPt",
+        "path Locale::ZhCn",
+        "path Locale::ZhHant",
         "path Locale::from_env_value",
         "path active",
-        "path set"
+        "path set",
+        "path tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::de",
+      "references": [
+        "path de::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::es",
+      "references": [
+        "path es::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::fr",
+      "references": [
+        "path fr::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::id",
+      "references": [
+        "path id::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::ja",
+      "references": [
+        "path ja::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::ko",
+      "references": [
+        "path ko::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::pt_br",
+      "references": [
+        "path pt_br::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::pt_pt",
+      "references": [
+        "path pt_pt::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::zh_cn",
+      "references": [
+        "path zh_cn::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::zh_hant",
+      "references": [
+        "path zh_hant::lookup"
       ]
     },
     {
@@ -34161,6 +34464,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::zh_cn",
+      "to": "dim_cli::ui::i18n::zh_cn::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
       ]
     },
     {
@@ -34209,6 +34520,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::zh_hant",
+      "to": "dim_cli::ui::i18n::zh_hant::failures",
+      "references": [
+        "mod failures",
+        "path failures::lookup"
       ]
     },
     {
@@ -38256,6 +38575,7 @@
         "path RowTone::Danger",
         "path RowTone::Warning",
         "path ViewRow",
+        "path crate::model::view::FailureDetail",
         "path crate::model::view::INTERRUPT_REASON",
         "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState",
@@ -38283,6 +38603,7 @@
       "to": "dim_cli::ui::transcript::tool_group",
       "references": [
         "path Detail",
+        "path Detail::Collapsed",
         "path Detail::Expanded",
         "path ToolGroup",
         "path project_group",
@@ -38414,6 +38735,7 @@
         "path CompactionState::Failed",
         "path CompactionState::Running",
         "path CompactionState::Skipped",
+        "path crate::model::view::FailureDetail",
         "use crate::model::view::CompactionPart",
         "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState"
@@ -38423,7 +38745,8 @@
       "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::sanitize",
       "references": [
-        "path crate::sanitize::safe"
+        "path crate::sanitize::safe",
+        "path crate::sanitize::safe_line"
       ]
     },
     {
@@ -38556,9 +38879,17 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::ModelFailureKind::ServerError"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks::tests",
       "to": "dim_cli::ui::transcript::blocks",
       "references": [
         "path UserStyle",
+        "path detail_rows",
         "path render_user"
       ]
     },
@@ -39031,6 +39362,14 @@
       "to": "dim_cli::permission",
       "references": [
         "path crate::permission::name"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::failure_phrase",
+        "path crate::projection::retry_seconds"
       ]
     },
     {
@@ -39654,6 +39993,7 @@
         "path Block::Banner",
         "path Block::Boundary",
         "path Block::Compaction",
+        "path Block::Error",
         "path Block::Failure",
         "path Block::Line",
         "path Block::LoadMore",
@@ -39925,6 +40265,7 @@
         "path LineState::Waiting",
         "path LineState::Working",
         "path RowKind::AssistantMessage",
+        "path RowKind::Error",
         "path RowKind::Status",
         "path RowKind::Thinking",
         "path RowKind::ToolCall",
@@ -39934,6 +40275,7 @@
         "path ViewSnapshot",
         "path ViewSnapshot::default",
         "path crate::model::view::QueuedInput",
+        "path crate::model::view::RowTone::Danger",
         "path crate::model::view::TurnEnd::Completed"
       ]
     },
@@ -43529,6 +43871,18 @@
       "path": "char::is_whitespace"
     },
     {
+      "module": "dim_cli::ui::transcript::blocks::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::transcript::blocks::tests",
+      "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::transcript::blocks::tests",
+      "path": "Theme::system"
+    },
+    {
       "module": "dim_cli::ui::transcript::split",
       "path": "char::is_ascii_digit"
     },
@@ -43655,6 +44009,14 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "ManagementView::default"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "ModelFailureKind::Network"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "ModelFailureKind::ServerError"
     },
     {
       "module": "dim_cli::ui::tui::tests",

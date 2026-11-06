@@ -1186,6 +1186,97 @@ fn daemon_stop_never_treats_old_protocol_eof_or_cleanup_failure_as_completion() 
 }
 
 #[test]
+fn line_mode_reports_each_retry_attempt_once_on_stderr() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let retry_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 60_000;
+        for attempt in [2, 2, 3] {
+            wire.notice("session.model.progress", json!({
+                "sessionId": "session", "branchId": "main", "requestId": "model-request",
+                "textOffset": 0, "text": "", "thinking": "", "thinkingOffset": 0,
+                "retry": {
+                    "attempt": attempt, "maxAttempts": 8, "retryAtMs": retry_at,
+                    "kind": "server_error", "reason": "The server is overloaded",
+                },
+            }));
+        }
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(2, "model-output-end", json!({"turn_id":"turn","request_id":"model-request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":3}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["--prompt", "go"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("retrying ").count(), 2, "{stderr}");
+    assert!(stderr.contains("retrying 2/8 in"), "{stderr}");
+    assert!(stderr.contains("retrying 3/8 in"), "{stderr}");
+    assert!(
+        stderr.contains("The provider reported a server error: The server is overloaded"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn exec_prints_the_model_failure_line_not_the_daemon_sentence() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(
+            9,
+            "model-output-end",
+            json!({
+                "turn_id": "turn", "request_id": "model-request", "status": "failed",
+                "error": "fixture error",
+                "failure": {
+                    "kind": "server_error", "status": 503, "providerCode": "overloaded",
+                    "reason": "The server is overloaded", "attempts": 3, "waitedMs": 4200,
+                },
+            }),
+        );
+        wire.end(json!({"turn_id":"turn","status":"failed","error":"fixture error"}));
+        wire.reply(&idle, json!({"sequence":2}));
+        wire.detach();
+    });
+    let output = home.command().args(["exec", "-p", "go"]).output().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[failed] The provider reported a server error: The server is overloaded. Try again later or choose another model. Tried 3 times over 4 s."),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Model or turn failed; see the private daemon log"),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("[failed]").count(), 1, "{stderr}");
+}
+
+#[test]
 fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
