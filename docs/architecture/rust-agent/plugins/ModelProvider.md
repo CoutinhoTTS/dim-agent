@@ -76,6 +76,24 @@ same string. A `presentation` from the host or from `ModelFailurePolicy` wins
 over the client's kind table; it is an override, not the default form. The full
 contract is [Model failures](../../../design/model-failures.md).
 
+## Failure chain
+
+A continuation request continues one failure chain. Its `context/prepare` and
+`model/call` carry `failure_chain {from_request_id, attempts, waited_ms}`: the
+failed request it continues, the attempts that request spent and the backoff it
+slept. ModelProvider seeds the new request's retry state with those values, so
+the continuation's first call is the chain's next attempt and the chain keeps
+one budget of 8 calls and 300 s of sleep. When no attempt or wait budget
+remains, the request settles failed without a call. The continuation's terminal
+`failure` reports the chain totals, so `Tried N times over M s` covers the whole
+chain. A request without `failure_chain` gets a fresh budget; a normal request
+after a tool step is never part of a chain.
+
+The 8 calls and 300 s are ModelProvider's documented public limits: a disposer
+reads them and declines a spent chain without reading ModelProvider's state. A
+production failure policy that forbids a retry adds a forbidden bit to
+`ModelFailure` in the same format decision as `failure_chain`.
+
 ## Tests
 
 [host_flows.rs](../../../../crates/dim-agent-capabilities/tests/host_flows.rs):

@@ -174,9 +174,36 @@ starts, the call ends, or the sleep is cancelled. It is not a Timeline fact: no
 later decision reads it, and the terminal fact keeps `attempts` and
 `waitedMs`.
 
+### The failure chain
+
+A continuation request continues the request that failed before it. Its
+`context/prepare` and `model/call` carry
+`failure_chain {from_request_id, attempts, waited_ms}`: the failed request, the
+attempts it spent and the backoff it slept. ModelProvider seeds the
+continuation's retry state from them, so its first call is the chain's next
+attempt and the chain keeps one budget of 8 calls and 300 s of sleep. With no
+attempt or wait budget left, the request settles failed without a call. The
+continuation's terminal `failure` reports the chain totals, so the failed
+line's `Tried N times over M s` covers the whole chain. A request without the
+field gets a fresh budget; a normal request after a tool step is never part of
+a chain.
+
+The 8 attempts and the 300 s are ModelProvider's public limits: a disposer
+reads them and declines a spent chain without reading ModelProvider's state. A
+production failure policy that forbids a retry adds a forbidden bit to
+`ModelFailure` in the same format decision as this field.
+
 ## 5. Compatibility
 
 The fields are additive. A binary without `failure` cannot decode an event
 written with it, because `ModelOutputOutcome` denies unknown fields. That is the
 same forward-compatibility limit `presentation` has, so a downgrade across this
 change is unsupported, as it already was for `presentation`.
+
+The same decision covers the continuation fields and the new kind. The optional
+`failure_chain` on `ContextPrepareData` and `ModelCallData`, the optional
+`handover` on `InputMessageData`, and the new `step/disposition` kind are
+additive, and a binary without them cannot read a record that carries them, so
+a downgrade across this change is unsupported. Each addition registers the
+decision in the contract tests with its compatibility cases; the frozen
+fixtures stay unchanged.
