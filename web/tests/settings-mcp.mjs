@@ -248,8 +248,8 @@ test("changing MCP scope keeps cancelled or failed drafts and saves only to the 
 })
 
 /// The owner's import preview for `entries`, read at `revision`.
-function importPreviewReply(entries, revision = "user:1", unknownTopLevel = [], sourceRevision, source) {
-  return { revision, entries, unknownTopLevel, ...(sourceRevision === undefined ? {} : { sourceRevision }), ...(source === undefined ? {} : { source }) }
+function importPreviewReply(entries, revision = "user:1", unknownTopLevel = [], sourceRevision, store) {
+  return { revision, entries, unknownTopLevel, ...(sourceRevision === undefined ? {} : { sourceRevision }), ...(store === undefined ? {} : { store }) }
 }
 const importEntry = (overrides) => ({ id: "docs", transport: "stdio", status: "changed", changes: [], unsupported: [], omitted: 0, ...overrides })
 function mountImport({ preview, catalogs, apply, sources = [] }) {
@@ -465,6 +465,33 @@ test("discovery lists known stores and previews a ready one by id", async () => 
     assert.equal(applied.params.expectedSourceRevision, "9f2c")
     assert.equal("document" in applied.params, false)
     assert.equal(applied.params.expectedVersion, "user:1")
+  } finally { closeImport(app) }
+})
+
+test("a preview from a store keeps its line when the daemon sends no store row", async () => {
+  // A daemon older than the reply's `store` row answers the digest only. The
+  // page still knows the id it asked for and names it, without the details.
+  const preview = importPreviewReply([importEntry({ id: "docs" })], "user:1", [], "9f2c")
+  const sources = [{ id: "claude-code:user", client: "claude-code", scope: "user", path: "~/.claude.json", state: "ready", entries: 2 }]
+  const { root, app } = await mountImport({ preview, catalogs: [catalog(undefined)], sources })
+  try {
+    await button(root, "Discover…").props.onClick()
+    await flush()
+    await button(root, "Preview").props.onClick()
+    await flush()
+    const shown = text(root)
+    assert.match(shown, /From store claude-code:user · its text stays in the daemon\./)
+    assert.equal(shown.includes("~/.claude.json · its text stays"), false)
+  } finally { closeImport(app) }
+})
+
+test("discovery with no known store says so", async () => {
+  const preview = importPreviewReply([importEntry({ id: "docs" })])
+  const { root, app } = await mountImport({ preview, catalogs: [catalog(undefined)] })
+  try {
+    await button(root, "Discover…").props.onClick()
+    await flush()
+    assert.match(text(root), /No known store was found\./)
   } finally { closeImport(app) }
 })
 

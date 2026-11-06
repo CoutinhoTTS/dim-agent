@@ -354,7 +354,8 @@ fn store_source(
 /// A store's identity: the id, client, scope and display path. Every row of
 /// `mcp.import.sources` and the store an import preview read report it, and
 /// one builder keeps the two from naming the same store differently.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Identity {
     pub(crate) id: &'static str,
     pub(crate) client: &'static str,

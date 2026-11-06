@@ -3276,7 +3276,7 @@ fn mcp_import_names_the_store_it_read() {
             json!({
                 "revision": "user:1",
                 "sourceRevision": "digest:1",
-                "source": {
+                "store": {
                     "id": "claude-code:user",
                     "client": "claude-code",
                     "scope": "user",

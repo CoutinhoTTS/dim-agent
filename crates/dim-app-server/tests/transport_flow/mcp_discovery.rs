@@ -292,7 +292,7 @@ fn entry_ids(preview: &Value) -> Vec<&str> {
 fn preview_result(mut preview: Value) -> Value {
     if let Some(result) = preview["result"].as_object_mut() {
         result.remove("sourceRevision");
-        result.remove("source");
+        result.remove("store");
     }
     preview["result"].clone()
 }
@@ -766,7 +766,7 @@ async fn a_preview_names_the_store_it_read() {
         )
         .await;
     assert_ok(&preview);
-    let store = &preview["result"]["source"];
+    let store = &preview["result"]["store"];
     assert_eq!(store["id"], codex["id"], "{preview}");
     assert_eq!(store["client"], codex["client"], "{preview}");
     assert_eq!(store["scope"], codex["scope"], "{preview}");
@@ -785,7 +785,7 @@ async fn a_preview_names_the_store_it_read() {
         )
         .await;
     assert_ok(&preview);
-    let store = &preview["result"]["source"];
+    let store = &preview["result"]["store"];
     assert_eq!(store["id"], local["id"], "{preview}");
     assert_eq!(store["client"], local["client"], "{preview}");
     assert_eq!(store["scope"], local["scope"], "{preview}");
@@ -804,7 +804,7 @@ async fn a_preview_names_the_store_it_read() {
         .await;
     assert_ok(&document);
     assert!(
-        document["result"].get("source").is_none(),
+        document["result"].get("store").is_none(),
         "a document preview names no store: {document}"
     );
 }
@@ -835,7 +835,7 @@ async fn a_preview_reads_only_the_store_it_names() {
         )
         .await;
     assert_ok(&preview);
-    let store = &preview["result"]["source"];
+    let store = &preview["result"]["store"];
     assert_eq!(store["id"], codex["id"], "{preview}");
     assert_eq!(store["client"], codex["client"], "{preview}");
     assert_eq!(store["scope"], codex["scope"], "{preview}");

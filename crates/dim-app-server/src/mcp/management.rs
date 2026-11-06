@@ -588,7 +588,7 @@ async fn import_document(
     from: Option<String>,
     workspace: Option<&(usize, discovery::Workspace)>,
     stopping: &CancellationToken,
-) -> Result<(String, Option<String>, Option<import::ImportSourceRef>), RpcError> {
+) -> Result<(String, Option<String>, Option<discovery::Identity>), RpcError> {
     match (document, from) {
         (Some(document), None) => Ok((document, None, None)),
         (None, Some(id)) => {
@@ -602,19 +602,7 @@ async fn import_document(
                 let environment = discovery::Environment::from_process();
                 // The identity row comes from the one read of the store the
                 // preview converts, so naming it reads nothing else.
-                discovery::document(store, &environment, workspace.as_ref()).map(
-                    |(document, identity)| {
-                        (
-                            document,
-                            import::ImportSourceRef {
-                                id: identity.id.to_owned(),
-                                client: identity.client.to_owned(),
-                                scope: identity.scope.to_owned(),
-                                path: identity.path,
-                            },
-                        )
-                    },
-                )
+                discovery::document(store, &environment, workspace.as_ref())
             })
             .await
             .map_err(|_| RpcError::app(-32000, "mcp_unavailable", "MCP worker failed"))?;
@@ -1095,7 +1083,7 @@ pub(super) fn provide(
                             .await
                             .map_err(error)?;
                         preview.source_revision = source_revision;
-                        preview.source = store;
+                        preview.store = store;
                         return reply(preview);
                     }
                     "mcp.import.apply" => {

@@ -652,7 +652,7 @@ pub struct ImportPreview {
     /// With `from`: the known store the preview read, named as
     /// `mcp.import.sources` names it; absent for a client-supplied document.
     #[serde(default)]
-    pub source: Option<ImportSourceRef>,
+    pub store: Option<ImportSourceRef>,
 }
 
 /// One known store's identity and display path, without its entries or state.

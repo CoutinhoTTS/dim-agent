@@ -420,7 +420,7 @@ fn print_import_preview(preview: &mcp::ImportPreview, source: &str, apply: bool)
         })
         .collect::<Vec<_>>();
     let mut notes = Vec::new();
-    if let Some(store) = &preview.source {
+    if let Some(store) = &preview.store {
         notes.push(format!(
             "{} · {} · {} · {}",
             store.id,

@@ -22446,6 +22446,14 @@
     },
     {
       "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::mcp::discovery",
+      "references": [
+        "path discovery::Identity",
+        "use super::discovery"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
       "to": "dim_app_server::mcp::import::testing",
       "references": [
         "mod testing"
@@ -22578,6 +22586,7 @@
       "references": [
         "path StoreId::parse",
         "path discovery::Environment::from_process",
+        "path discovery::Identity",
         "path discovery::Workspace",
         "path discovery::document",
         "path discovery::sources",
@@ -22590,7 +22599,6 @@
       "to": "dim_app_server::mcp::import",
       "references": [
         "path ImportResolution",
-        "path import::ImportSourceRef",
         "path import::check_resolutions",
         "path import::parse_document",
         "use super::import",
