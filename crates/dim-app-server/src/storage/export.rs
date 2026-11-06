@@ -79,7 +79,7 @@ async fn write(
     }
     let mut reader = Reader::new(CONTENT_BUDGET);
     let directory = read_directory(db, session).await?;
-    let branches = validate_session(db, &mut reader, session, &directory).await?;
+    let branches = validate_session(db, session, &directory).await?;
     line(
         out,
         &Line::Header {

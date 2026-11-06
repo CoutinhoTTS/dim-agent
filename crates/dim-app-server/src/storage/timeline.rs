@@ -2791,9 +2791,7 @@ impl TimelineStore for SqliteTimelineStore {
                     }
                 };
             }
-            let mut reader = self.reader(RequestBodies::Rebuild);
-            let result = validate_session(&self.db, &mut reader, session_id, &directory).await;
-            self.finish(reader);
+            let result = validate_session(&self.db, session_id, &directory).await;
             match result {
                 Ok(branches) => {
                     self.validated
@@ -3146,12 +3144,56 @@ pub(super) async fn read_directory(
         .await
 }
 
-/// Checks every row of `session` with one reader, which carries its content
-/// cache and kept request across the pass. `directory` is the read this pass
-/// validates and, on success, records.
+/// The batch and content references of one validation pass over a branch.
+/// `references` holds what the batch's rows name, checked on the batch's
+/// connection and emptied once checked.
+#[derive(Default)]
+struct ValidationPass {
+    rows: Option<Rows>,
+    references: BTreeSet<String>,
+}
+
+/// Fails unless every content row `references` names exists in `session`,
+/// reading hashes only: one statement on the caller's connection, no body
+/// loaded or parsed, and the set is emptied once checked. A batch of 64
+/// physical rows bounds the set, so memory does not grow with the Session.
+fn check_references(
+    connection: &Connection,
+    session: &str,
+    references: &mut BTreeSet<String>,
+) -> Result<()> {
+    if references.is_empty() {
+        return Ok(());
+    }
+    let names = serde_json::to_string(references).map_err(error)?;
+    let mut query = connection
+        .prepare_cached(
+            "SELECT c.hash FROM timeline_content c JOIN json_each(?2) AS r \
+             ON r.value = c.hash WHERE c.session_id = ?1",
+        )
+        .map_err(error)?;
+    let found: BTreeSet<String> = query
+        .query_map(params![session, names], |row| row.get(0))
+        .map_err(error)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(error)?;
+    if let Some(missing) = references
+        .iter()
+        .find(|reference| !found.contains(*reference))
+    {
+        return Err(error(format!("missing request content {missing}")));
+    }
+    references.clear();
+    Ok(())
+}
+
+/// Validates `session`'s stored rows and returns its branch directory. The
+/// pass decodes every event without its request bodies and checks that each
+/// content reference a record names resolves to a content row; a body is
+/// loaded, decoded and hash-checked only by the reads that use it (§7 of the
+/// request storage design).
 pub(super) async fn validate_session(
     db: &Arc<SqliteStorage>,
-    reader: &mut Reader,
     session: &str,
     directory: &ValidatedDirectory,
 ) -> Result<Vec<StoredBranch>> {
@@ -3176,6 +3218,7 @@ pub(super) async fn validate_session(
     let mut event_ids = BTreeSet::new();
     let mut created = BTreeSet::new();
     let mut completions = vec![];
+    let mut reader = Reader::without_request_bodies(CONTENT_BUDGET);
     for (id, _info, sequence) in &directory.branches {
         let mut next = 1;
         let mut batch_end = 0;
@@ -3184,23 +3227,29 @@ pub(super) async fn validate_session(
                 session_id: session.into(),
                 branch_id: id.clone(),
             };
-            let rows = holds(db, reader, None, move |connection, reader, rows: &mut Option<Rows>| {
-                let rows = match rows {
+            let pass = holds(db, &mut reader, ValidationPass::default(), move |connection, reader, pass: &mut ValidationPass| {
+                let rows = match pass.rows.as_mut() {
                     Some(rows) => rows,
                     None => {
                         let mut query = connection.prepare_cached("SELECT sequence, last_sequence, kind, body, event_id FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 ORDER BY sequence LIMIT 64").map_err(error)?;
+                        let mut references = BTreeSet::new();
                         let fetched = query.query_map(params![key.session_id, key.branch_id, sql_sequence(next)?], |row| Ok((
                             read_sequence(row,0)?, read_sequence(row,1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<String>>(4)?
                         ))).map_err(error)?.map(|row| {
                             let (first, last, kind, body, event_id) = row.map_err(error)?;
-                            Fetched::parse(first, last, kind, &body, event_id)
+                            let fetched = Fetched::parse(first, last, kind, &body, event_id)?;
+                            references.extend(fetched.wires.iter().flat_map(|wire| wire.references().map(str::to_owned)));
+                            Ok(fetched)
                         }).collect::<Result<_>>()?;
-                        rows.insert(Rows { fetched, decoded: vec![] })
+                        pass.references = references;
+                        pass.rows.insert(Rows { fetched, decoded: vec![] })
                     }
                 };
-                rows.advance(connection, &key.session_id, reader)
+                let done = rows.advance(connection, &key.session_id, reader)?;
+                check_references(connection, &key.session_id, &mut pass.references)?;
+                Ok(done)
             }).await?;
-            let page = rows.expect("a finished pass fetched its rows").decoded;
+            let page = pass.rows.expect("a finished pass fetched its rows").decoded;
             if page.is_empty() {
                 break;
             }
@@ -3288,7 +3337,7 @@ pub(super) async fn validate_session(
             session_id: session.into(),
             branch_id: parent.clone(),
         };
-        let create = read_range(db, reader, &parent_key, anchor..=anchor, false)
+        let create = read_range(db, &mut reader, &parent_key, anchor..=anchor, false)
             .await?
             .pop()
             .ok_or_else(|| error("branch create event is missing"))?;
@@ -3312,7 +3361,7 @@ pub(super) async fn validate_session(
             branch_id: branch.clone(),
         };
         if through > 0 {
-            read_range(db, reader, &key, through..=through, true)
+            read_range(db, &mut reader, &key, through..=through, true)
                 .await
                 .map_err(|_| error("compaction preparation boundary is inside an atomic batch"))?;
         }
