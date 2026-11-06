@@ -37,7 +37,7 @@ type Block =
   | { kind: "objective-retire"; input: string }
   | { kind: "status"; input: string; status: GoalStatus; byEvaluator: boolean }
   | { kind: "status-retire"; input: string }
-  | { kind: "state"; input: string; retire: boolean; after: number | undefined; objective: string | undefined; status: GoalStatus | undefined; evaluator: boolean }
+  | { kind: "state"; input: string; retire: boolean; objective: string | undefined; status: GoalStatus | undefined; evaluator: boolean }
 
 /**
  * The goal of one branch: the latest live block of each key decides, `clear`
@@ -114,7 +114,6 @@ export class GoalFold {
         kind: "state",
         input,
         retire: block.retire ?? false,
-        after: numberAttribute(text, "after"),
         objective: block.retire ? undefined : objectiveOf(text),
         status: block.retire ? undefined : stateOf(text),
         evaluator: attribute(text, "judge") === "evaluator",
@@ -152,20 +151,20 @@ function stateOf(text: string): GoalStatus | undefined {
   }
 }
 
-/** The objective a live `goal:state` record carries: its body puts the status section after the objective policy, so the objective ends at the policy line. */
+/** The objective a live `goal:state` record carries: its own element, read between the tags and unescaped, so a value that contains a heading, a closing tag or a blank line round-trips byte for byte (R1). */
 function objectiveOf(text: string): string | undefined {
-  let split = -1
-  for (const label of ["Result:", "Blocker:"]) {
-    const at = text.indexOf(`\n\n${label}\n`)
-    if (at !== -1 && (split === -1 || at < split)) split = at
-  }
-  return split === -1 ? value(text, "Objective:") : value(text.slice(0, split), "Objective:")
+  return tagged(text, "objective")
 }
 
-function numberAttribute(text: string, name: string): number | undefined {
-  const raw = attribute(text, name)
-  if (raw === undefined || !/^[1-9][0-9]*$/.test(raw)) return undefined
-  return Number(raw)
+/** The escaped content between `<tag>` and `</tag>`, unescaped; `undefined` when the element is absent. */
+function tagged(text: string, tag: string): string | undefined {
+  const open = `<${tag}>\n`
+  const start = text.indexOf(open)
+  if (start === -1) return undefined
+  const from = start + open.length
+  const end = text.indexOf(`\n</${tag}>`, from)
+  if (end === -1) return undefined
+  return unescape(text.slice(from, end))
 }
 
 /** The status a live `goal:status` block sets (Goal A.3). */

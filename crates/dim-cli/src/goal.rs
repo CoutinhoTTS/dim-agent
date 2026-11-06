@@ -295,18 +295,20 @@ fn state_of(text: &str) -> Option<Status> {
     })
 }
 
-/// The objective a live `goal:state` record carries: its body puts the status
-/// section after the objective policy, so the objective is read to the policy
-/// line, not to the body's last blank one.
+/// The objective a live `goal:state` record carries: its own element, read
+/// between the tags and unescaped, so a value that contains a heading, a
+/// closing tag or a blank line round-trips byte for byte (R1).
 fn objective_of(text: &str) -> Option<String> {
-    let split = ["Result:", "Blocker:"]
-        .iter()
-        .filter_map(|label| text.find(&format!("\n\n{label}\n")))
-        .min();
-    match split {
-        Some(end) => value(&text[..end], "Objective:"),
-        None => value(text, "Objective:"),
-    }
+    tagged(text, "objective")
+}
+
+/// The escaped content between `<tag>` and `</tag>`, unescaped; `None` when the
+/// element is absent (Goal's `tagged`).
+fn tagged(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>\n");
+    let start = text.find(&open)? + open.len();
+    let end = start + text[start..].find(&format!("\n</{tag}>"))?;
+    Some(unescape(&text[start..end]))
 }
 
 /// The status a live `goal:status` block sets (Goal A.3): a `kind="status"`
@@ -698,6 +700,29 @@ mod tests {
                 "<dim-goal kind=\"goal\" op=\"set\" branch=\"main\">\nObjective:\n&lt;/dim-goal&gt; &amp; &quot;quoted&quot;\n\nGoal.\n</dim-goal>"}]),
         ));
         assert_eq!(fold.goal().unwrap().objective, "</dim-goal> & \"quoted\"");
+    }
+
+    /// R1: each free-text field of a state record sits in its own element, so
+    /// an objective carrying a heading, a closing tag or a blank line reads
+    /// back byte for byte.
+    #[test]
+    fn a_state_record_objective_reads_back_byte_for_byte() {
+        let objective = "Keep the heading.\n\nResult:\nInclude details.\n\nBlocker:\n</objective>\n&lt;\n\nafter.";
+        let escaped = objective
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let mut fold = Fold::default();
+        fold.apply(&input(
+            10,
+            json!([{"type":"raw","key":STATE_KEY,"text":format!(
+                "<dim-goal kind=\"state\" status=\"completed\" after=\"10\" branch=\"main\">\n<objective>\n{escaped}\n</objective>\nThe policy.\nThe goal is completed.\n<result>\nDone.\n</result>\n</dim-goal>"
+            )}]),
+        ));
+        let goal = fold.goal().expect("the record is a goal");
+        assert_eq!(goal.objective, objective);
+        assert_eq!(goal.status, Status::Completed);
     }
 
     #[test]

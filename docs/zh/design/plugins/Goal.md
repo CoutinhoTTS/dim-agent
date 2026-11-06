@@ -350,7 +350,7 @@ ToolRegistry 即提供它（[Session 边界 A.5](../contracts/session-boundary.m
 
 ### A.3 读取目标
 
-没有 `get` 方法，也没有分支服务。分支部分、客户端与模型读到同一个事实：分支本地事件中 key 为 `goal:state` 的最新存活块；在记录出现之前写成的历史上，则是 key 为 `goal:objective` 的最新存活块和 key 为 `goal:status` 的最新存活块。状态记录的标记陈述状态——`status="active"`、`status="paused" reason=...`、正文带 summary 的 `status="completed"` / `status="blocked"`，或用于"有目标文本但没有状态"的 `status="none"`——一条退役的 `status="cleared"` 记录表示分支没有目标。其正文带目标文本与策略文本；其 `after` 写名它回答的变更触发器。只有目标文本存活时目标才存在（A16）。标记格式与 A.5 的可逆编码就是契约；读取的值都先解码。续跑计数以及（设置时）上限在每个续跑标记中（`count`、`limit`）。在旧历史上、[Pursuit](Pursuit.md) 的评审裁判下，不带 `by="evaluator"` 的干活模型 `op="completed"` 块是请求，不改变状态（A16）；记录路径不需要这条规则，因为评审路径留下的记录陈述 `active`。
+没有 `get` 方法，也没有分支服务。分支部分、客户端与模型读到同一个事实：分支本地事件中 key 为 `goal:state` 的最新存活块；在记录出现之前写成的历史上，则是 key 为 `goal:objective` 的最新存活块和 key 为 `goal:status` 的最新存活块。状态记录的标记陈述状态——`status="active"`、`status="paused" reason=...`、正文带 summary 的 `status="completed"` / `status="blocked"`，或用于"有目标文本但没有状态"的 `status="none"`——一条退役的 `status="cleared"` 记录表示分支没有目标。其正文以独立元素承载目标文本（`<objective>`）与策略文本，已完成或受阻时再以 `<result>` / `<blocker>` 承载 summary；其 `after` 写名它回答的变更触发器。只有目标文本存活时目标才存在（A16）。标记格式与 A.5 的可逆编码就是契约；读取的值都先解码。续跑计数以及（设置时）上限在每个续跑标记中（`count`、`limit`）。在旧历史上、[Pursuit](Pursuit.md) 的评审裁判下，不带 `by="evaluator"` 的干活模型 `op="completed"` 块是请求，不改变状态（A16）；记录路径不需要这条规则，因为评审路径留下的记录陈述 `active`。
 
 ### A.4 续跑决策
 
@@ -387,7 +387,7 @@ C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两�
 `<dim-goal kind="..." ...>`、换行、转义后的正文、换行、`</dim-goal>`（A2）。变更触发器
 带 `kind="goal"` 且没有 key；状态记录带 `kind="state"` 和 key `goal:state`；续跑不带 key，也不是变更。一条 `InputWrite` 可携带任意多个 `RawBlock`（[session access A.1](../contracts/session-access.md#a1-sessions-服务)）；起始 clear 只把它用于与记录一同退役的旧 key。
 
-编码：目标文本、summary 与每个属性值中的 `&`、`<`、`>`、`"` 写成 `&amp;`、`&lt;`、`&gt;`、`&quot;`，因此用户或模型的文本无法伪造模型会当作 Goal 的标记。该编码可逆：折叠与客户端依次把 `&quot;`、`&gt;`、`&lt;`、`&amp;` 替换回原字符来解码。目标文本是 `Objective:` 行与开始状态部分的下一个空行之间的正文（策略行，或 `Result:` / `Blocker:` 标签），summary 是该标签与最后一个空行之间的正文；空行之后的固定文本不含空行。模型读到的是编码后的形式。
+编码：目标文本、summary 与每个属性值中的 `&`、`<`、`>`、`"` 写成 `&amp;`、`&lt;`、`&gt;`、`&quot;`，因此用户或模型的文本无法伪造模型会当作 Goal 的标记。该编码可逆：折叠与客户端依次把 `&quot;`、`&gt;`、`&lt;`、`&amp;` 替换回原字符来解码。每个自由文本字段各占一个元素：目标文本位于 `<objective>` 与 `</objective>` 之间，已完成目标的结果位于 `<result>` 与 `</result>` 之间，受阻目标的阻碍位于 `<blocker>` 与 `</blocker>` 之间。元素内容经过转义，而编码会映射 `<` 与 `>`，因此内容中不可能出现闭合标签，边界是精确的：值里的标题行、闭合标签或空行都能逐字节往返。折叠与两个客户端都读取标签之间的内容再解码；它们都不再按标题行切分正文。模型读到的是编码后的形式。
 
 **变更触发器**（无 key，无状态句子）：
 
@@ -403,14 +403,14 @@ C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两�
 **状态记录**（`kind="state"`，key `goal:state`，Append）。属性按此顺序：`kind`、
 `status`、`reason`（仅暂停：`user`、`interrupted`、`limit`、`turn_failed`、`no_progress`、
 `evaluation_failed`）、仅在选择时带 `judge="evaluator"`、`after`（触发器的序号）、
-`branch`。正文：`Objective:`、转义后的目标文本、空行、目标策略文本，然后是状态句子。记录只陈述模型与客户端读取的内容；Goal 的其他东西都不在其中，因为整个块进入模型上下文。
+`branch`。正文：`<objective>`、转义后的目标文本、`</objective>`、目标策略文本，然后是状态句子；已完成或受阻的目标再跟 `<result>` 或 `<blocker>` 元素及其转义后的 summary，每个元素的标签各占一行。记录只陈述模型与客户端读取的内容；Goal 的其他东西都不在其中，因为整个块进入模型上下文。
 
 | 记录 | 策略行之后的正文 |
 | --- | --- |
 | `status="active"` | `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` |
 | `status="paused" reason="user"` | `The user set the goal status for branch B to paused. Do not continue working toward a goal for branch B on your own; respond only to the user's latest input.` |
 | `status="paused"`（其他原因） | `The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
-| `status="completed"` / `"blocked"` | 空行 / `Result:` 或 `Blocker:` / `<summary>` / 空行 / `goal_update set the goal status for branch B to completed.`（或 `blocked`）` Do not continue working toward a goal for branch B on your own.`；评审裁判下为 `An evaluator verified that the goal for branch B is completed.` 或 `An evaluator found that the goal for branch B cannot proceed without the user.` + ` Do not continue working toward it on your own.` |
+| `status="completed"` / `"blocked"` | `goal_update set the goal status for branch B to completed.`（或 `blocked`）` Do not continue working toward a goal for branch B on your own.`；评审裁判下为 `An evaluator verified that the goal for branch B is completed.` 或 `An evaluator found that the goal for branch B cannot proceed without the user.` + ` Do not continue working toward it on your own.` 然后是 `<result>` 或 `<blocker>`、转义后的 summary 及其闭合标签，各占一行 |
 | `status="none"` | `The goal for branch B has no status.` |
 | 退役，`status="cleared"` | `The goal for branch B is not in effect.`，或起始 clear 的 `Any goal above belongs to another branch, not to branch B. Disregard it; branch B has no goal.`（带 `reason="new_branch"`） |
 

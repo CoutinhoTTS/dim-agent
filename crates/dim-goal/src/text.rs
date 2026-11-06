@@ -217,9 +217,11 @@ fn result_sentence(branch: &str, state: &State, judge: Judge) -> String {
 ///
 /// The body names the objective and its policy, then states the status; the
 /// attributes carry only what a reader parses, because the block's whole text
-/// enters the model's context (D2). The old keys the fold still holds live are
-/// retired in the same input (R1): the record is the branch's only state, so a
-/// compaction baseline copied after it carries no stale old block.
+/// enters the model's context (D2). Each free-text field sits in its own
+/// element with escaped content, so a value that contains a heading or a
+/// closing tag cannot be read short (R1). The old keys the fold still holds
+/// live are retired in the same input (R1): the record is the branch's only
+/// state, so a compaction baseline copied after it carries no stale old block.
 pub fn state(
     branch: &str,
     objective: Option<&str>,
@@ -245,25 +247,24 @@ pub fn state(
     attrs.push(("after", after.to_string()));
     attrs.push(("branch", branch.to_owned()));
     let mut body = vec![
-        "Objective:".to_owned(),
+        "<objective>".to_owned(),
         escape(objective),
-        String::new(),
+        "</objective>".to_owned(),
         branch_text(&texts.objective, branch),
     ];
     match &state {
         State::Active => body.push(active_sentence(branch)),
         State::Paused(reason) => body.push(paused_sentence(branch, reason)),
         State::Completed(summary) | State::Blocked(summary) => {
-            let label = if matches!(state, State::Completed(_)) {
-                "Result:"
+            let (open, close) = if matches!(state, State::Completed(_)) {
+                ("<result>", "</result>")
             } else {
-                "Blocker:"
+                ("<blocker>", "</blocker>")
             };
-            body.push(String::new());
-            body.push(label.to_owned());
-            body.push(escape(summary));
-            body.push(String::new());
             body.push(result_sentence(branch, &state, judge));
+            body.push(open.to_owned());
+            body.push(escape(summary));
+            body.push(close.to_owned());
         }
         State::None => body.push(format!("The goal for branch {branch} has no status.")),
     }
@@ -709,18 +710,24 @@ pub fn body(text: &str, label: &str) -> String {
     unescape(&text[start + marker.len()..end])
 }
 
-/// The objective and the result summary a state record's body carries. The
-/// status section follows the policy line after a blank line, so the body is
-/// split there before each part is read to its last blank line (A.5).
+/// The objective and the result summary a state record's body carries: each
+/// free-text field is read between its own element's tags and unescaped, so a
+/// value that contains a heading, a closing tag or a blank line round-trips
+/// byte for byte (R1).
 pub fn state_parts(text: &str) -> (Option<String>, Option<String>) {
-    let Some((pos, label)) = ["Result:", "Blocker:"]
-        .into_iter()
-        .filter_map(|label| text.find(&format!("\n\n{label}\n")).map(|pos| (pos, label)))
-        .min_by_key(|(pos, _)| *pos)
-    else {
-        return (value(text, "Objective:"), None);
-    };
-    let objective = value(&text[..pos], "Objective:");
-    let summary = value(&format!("\n{}", &text[pos + 2..]), label);
-    (objective, summary)
+    (
+        tagged(text, "objective"),
+        tagged(text, "result").or_else(|| tagged(text, "blocker")),
+    )
+}
+
+/// The escaped content between `<tag>` and `</tag>`, unescaped; `None` when the
+/// element is absent. `escape` maps `<` and `>`, so content can never hold a
+/// literal closing tag and the boundary is exact.
+fn tagged(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>\n");
+    let close = format!("\n</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = start + text[start..].find(&close)?;
+    Some(unescape(&text[start..end]))
 }

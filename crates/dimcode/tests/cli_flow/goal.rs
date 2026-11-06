@@ -52,7 +52,7 @@ fn paused(sequence: u64, text: &str) -> Value {
     change(
         sequence,
         vec![json!({"type":"raw","key":"goal:state","text":format!(
-            "<dim-goal kind=\"state\" status=\"paused\" reason=\"user\" after=\"{sequence}\" branch=\"main\">\nObjective:\n{text}\n\nGoal text.\n</dim-goal>"
+            "<dim-goal kind=\"state\" status=\"paused\" reason=\"user\" after=\"{sequence}\" branch=\"main\">\n<objective>\n{text}\n</objective>\nGoal text.\n</dim-goal>"
         )})],
     )
 }
@@ -1258,7 +1258,7 @@ fn state(sequence: u64, status: &str, text: &str) -> Value {
 /// [`state`] for a branch of its own.
 fn state_on(branch: &str, sequence: u64, status: &str, text: &str) -> Value {
     json!({"type":"raw","key":"goal:state","text":format!(
-        "<dim-goal kind=\"state\" status=\"{status}\" after=\"{sequence}\" branch=\"{branch}\">\nObjective:\n{text}\n\nGoal text.\n</dim-goal>"
+        "<dim-goal kind=\"state\" status=\"{status}\" after=\"{sequence}\" branch=\"{branch}\">\n<objective>\n{text}\n</objective>\nGoal text.\n</dim-goal>"
     )})
 }
 

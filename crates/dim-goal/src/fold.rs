@@ -959,4 +959,42 @@ mod tests {
         assert_eq!(report("done", "😀abcd").result_text(), "d");
         assert_eq!(report("blocked", "完成").result_text(), "");
     }
+
+    /// R1: each free-text field of a state record sits in its own element with
+    /// escaped content, so an objective and a result carrying a heading, a
+    /// closing tag, an escaped `&lt;` and a blank line read back byte for byte.
+    #[test]
+    fn a_state_record_round_trips_its_fields_byte_for_byte() {
+        let objective = "Keep the heading.\n\nResult:\nInclude details.\n\nBlocker:\n</objective>\n&lt;\n\nafter.";
+        let summary = "Done.\n\nResult:\nall good\n\nBlocker:\nblocked later\n</objective>\n&lt;\n";
+        let live = text::Live::default();
+        let input = text::state(
+            "main",
+            Some(objective),
+            text::State::Completed(summary.to_owned()),
+            text::Judge::Model,
+            41,
+            live,
+            &text::GoalTexts::default(),
+        );
+        let [InputBlock::Raw { text: raw, key, .. }] = &input.blocks[..] else {
+            panic!("a record is one raw block while no old key is live");
+        };
+        assert_eq!(key.as_deref(), Some(text::STATE_KEY));
+        let (read_objective, read_summary) = text::state_parts(raw);
+        assert_eq!(read_objective.as_deref(), Some(objective));
+        assert_eq!(read_summary.as_deref(), Some(summary));
+
+        let event = dim_agent_types::AgentEvent {
+            id: "record".into(),
+            sequence: 41,
+            create_at: 0,
+            tags: None,
+            kind: dim_agent_types::EventKind::InputMessage(input),
+        };
+        let mut fold = Fold::default();
+        fold.apply(&event);
+        assert_eq!(fold.objective.as_deref(), Some(objective));
+        assert_eq!(fold.state, text::State::Completed(summary.to_owned()));
+    }
 }

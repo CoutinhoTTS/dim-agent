@@ -30,7 +30,17 @@ fn paused_sentence(branch: &str, reason: &str, phrase: &str) -> String {
 }
 
 fn objective_body(branch: &str, objective: &str) -> String {
-    format!("Objective:\n{}\n\n{}", escaped(objective), policy(branch))
+    format!(
+        "<objective>\n{}\n</objective>\n{}",
+        escaped(objective),
+        policy(branch)
+    )
+}
+
+/// One free-text field in its own element (R1): the escaped content between
+/// the tags.
+fn tagged(tag: &str, content: &str) -> String {
+    format!("<{tag}>\n{}\n</{tag}>", escaped(content))
 }
 
 fn judge_attr(evaluator: bool) -> &'static str {
@@ -210,25 +220,25 @@ pub fn report(branch: &str, status: &str, summary: &str) -> String {
 
 /// The state record that answers a report goal_update wrote.
 pub fn reported(branch: &str, objective: &str, status: &str, summary: &str, after: u64) -> String {
-    let (label, sentence) = if status == "completed" {
+    let (tag, sentence) = if status == "completed" {
         (
-            "Result:",
+            "result",
             format!(
                 "goal_update set the goal status for branch {branch} to completed. Do not continue working toward a goal for branch {branch} on your own."
             ),
         )
     } else {
         (
-            "Blocker:",
+            "blocker",
             format!(
                 "goal_update set the goal status for branch {branch} to blocked. Do not continue working toward a goal for branch {branch} on your own."
             ),
         )
     };
     format!(
-        "<dim-goal kind=\"state\" status=\"{status}\" after=\"{after}\" branch=\"{branch}\">\n{}\n\n{label}\n{}\n\n{sentence}\n</dim-goal>",
+        "<dim-goal kind=\"state\" status=\"{status}\" after=\"{after}\" branch=\"{branch}\">\n{}\n{sentence}\n{}\n</dim-goal>",
         objective_body(branch, objective),
-        escaped(summary)
+        tagged(tag, summary)
     )
 }
 
@@ -322,25 +332,25 @@ pub fn conclusion(
 
 /// The state record that answers an evaluator's conclusion.
 pub fn evaluated(branch: &str, objective: &str, op: &str, text: &str, after: u64) -> String {
-    let text = escaped(text);
-    let (label, sentence) = if op == "completed" {
+    let (tag, sentence) = if op == "completed" {
         (
-            "Result:",
+            "result",
             format!(
                 "An evaluator verified that the goal for branch {branch} is completed. Do not continue working toward it on your own."
             ),
         )
     } else {
         (
-            "Blocker:",
+            "blocker",
             format!(
                 "An evaluator found that the goal for branch {branch} cannot proceed without the user. Do not continue working toward it on your own."
             ),
         )
     };
     format!(
-        "<dim-goal kind=\"state\" status=\"{op}\" judge=\"evaluator\" after=\"{after}\" branch=\"{branch}\">\n{}\n\n{label}\n{text}\n\n{sentence}\n</dim-goal>",
-        objective_body(branch, objective)
+        "<dim-goal kind=\"state\" status=\"{op}\" judge=\"evaluator\" after=\"{after}\" branch=\"{branch}\">\n{}\n{sentence}\n{}\n</dim-goal>",
+        objective_body(branch, objective),
+        tagged(tag, text)
     )
 }
 

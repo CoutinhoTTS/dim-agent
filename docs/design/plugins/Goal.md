@@ -362,8 +362,9 @@ written before that record existed, the latest live block keyed `goal:objective`
 block keyed `goal:status`. A state record's marker states the status — `status="active"`,
 `status="paused" reason=...`, `status="completed"` / `status="blocked"` with the summary in its body,
 or `status="none"` for an objective without a status — and a retired `status="cleared"` record says
-the branch has no goal. Its body carries the objective and the policy text; its `after` names the
-change trigger it answers. A goal exists only while an objective is live (A16). The marker formats
+the branch has no goal. Its body carries the objective in its own `<objective>` element and the
+policy text, and for a completed or blocked goal the summary in a `<result>` or `<blocker>` element;
+its `after` names the change trigger it answers. A goal exists only while an objective is live (A16). The marker formats
 and the reversible encoding in A.5 are the contract; values are read decoded. The continuation count
 and, when one is set, its limit are in each continuation marker (`count`, `limit`). On an old
 history, under [Pursuit](Pursuit.md)'s evaluator judge, a worker `op="completed"` block without
@@ -411,10 +412,13 @@ start clear uses that only for the old keys it retires with the record.
 Encoding: the objective, the summary and every attribute value are written with `&`, `<`, `>` and
 `"` as `&amp;`, `&lt;`, `&gt;` and `&quot;`, so user or model text cannot forge a marker the model
 would read as Goal's. The encoding is reversible: the fold and clients decode a value by replacing
-`&quot;`, `&gt;`, `&lt;` and then `&amp;`. An objective is the body between the `Objective:` line
-and the next blank line that starts the status section (the policy line, or the `Result:` /
-`Blocker:` label), and a summary the body between that label and the last blank line; the fixed text
-after that blank line contains none. The model reads the encoded form.
+`&quot;`, `&gt;`, `&lt;` and then `&amp;`. Each free-text field sits in its own element: the
+objective between `<objective>` and `</objective>`, a completed goal's result between `<result>` and
+`</result>`, a blocked goal's blocker between `<blocker>` and `</blocker>`. An element's content is
+escaped, and because the encoding maps `<` and `>`, it can contain no closing tag, so the
+boundaries are exact and a heading, a closing tag or a blank line in a value round-trips byte for
+byte. The fold and both clients read between the tags and unescape; none of them splits the body on
+a heading. The model reads the encoded form.
 
 **Change triggers** (no key, no status sentence):
 
@@ -430,16 +434,18 @@ after that blank line contains none. The model reads the encoded form.
 **State records** (`kind="state"`, key `goal:state`, Append). Attributes in this order: `kind`,
 `status`, `reason` (paused only: `user`, `interrupted`, `limit`, `turn_failed`, `no_progress`,
 `evaluation_failed`), `judge="evaluator"` only when chosen, `after` (the trigger's sequence),
-`branch`. Body: `Objective:`, the escaped objective, blank, the objective policy, then the status
-sentence. The record states only what the model and clients read; nothing else of Goal's is in it,
-because the whole block enters the model's context.
+`branch`. Body: `<objective>`, the escaped objective, `</objective>`, the objective policy, then the
+status sentence, then for a completed or blocked goal the `<result>` or `<blocker>` element with the
+escaped summary; each element's tags sit on their own lines. The record states only what the model
+and clients read; nothing else of Goal's is in it, because the whole block enters the model's
+context.
 
 | Record | Body after the policy line |
 | --- | --- |
 | `status="active"` | `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` |
 | `status="paused" reason="user"` | `The user set the goal status for branch B to paused. Do not continue working toward a goal for branch B on your own; respond only to the user's latest input.` |
 | `status="paused"` (other reasons) | `The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
-| `status="completed"` / `"blocked"` | blank / `Result:` or `Blocker:` / `<summary>` / blank / `goal_update set the goal status for branch B to completed.` (or `blocked`) ` Do not continue working toward a goal for branch B on your own.`; under the evaluator judge, `An evaluator verified that the goal for branch B is completed.` or `An evaluator found that the goal for branch B cannot proceed without the user.` + ` Do not continue working toward it on your own.` |
+| `status="completed"` / `"blocked"` | `goal_update set the goal status for branch B to completed.` (or `blocked`) ` Do not continue working toward a goal for branch B on your own.`; under the evaluator judge, `An evaluator verified that the goal for branch B is completed.` or `An evaluator found that the goal for branch B cannot proceed without the user.` + ` Do not continue working toward it on your own.` Then `<result>` or `<blocker>`, the escaped summary, and its closing tag, one per line |
 | `status="none"` | `The goal for branch B has no status.` |
 | retired, `status="cleared"` | `The goal for branch B is not in effect.`, or the start clear's `Any goal above belongs to another branch, not to branch B. Disregard it; branch B has no goal.` (with `reason="new_branch"`) |
 
