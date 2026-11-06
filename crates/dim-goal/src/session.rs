@@ -5,7 +5,7 @@
 use crate::text::{self, OBJECTIVE_LIMIT, SUMMARY_LIMIT};
 use dim_agent_capabilities::{
     host::{HostFuture, ToolExecutionContext},
-    methods::{Interruption, MethodDecl, RpcError, SessionMethods, reply},
+    methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, reply},
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     timeline_tree::TreeCommands,
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
@@ -89,7 +89,8 @@ impl DynPlugin for GoalSession {
                         MethodDecl::new(&format!("session.goal.{name}"), true, Interruption::Report)
                     })
                     .collect(),
-                Arc::new(move |method, params, _cancel, _progress| {
+                Arc::new(move |call, _cancel, _progress| {
+                    let MethodCall { method, params, .. } = call;
                     let owner = owner.clone();
                     Box::pin(async move { owner.call(&method, params).await })
                 }),

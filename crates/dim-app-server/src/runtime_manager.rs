@@ -5,7 +5,9 @@
 //! starts it then.
 use crate::methods::ManagementMethods;
 use crate::session_typescript::{ForeignRuntime, RuntimeState, RuntimeStatus};
-use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
+use dim_agent_capabilities::methods::{
+    Interruption, MethodCall, MethodDecl, RpcError, params, reply,
+};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::Disposer;
@@ -1170,7 +1172,12 @@ impl DynPlugin for RuntimeManagerPlugin {
                     MethodDecl::new("runtime.install", true, Interruption::Report),
                     MethodDecl::new("runtime.configure", true, Interruption::Report),
                 ],
-                Arc::new(move |method, value, _stopping, _| {
+                Arc::new(move |call, _stopping, _| {
+                    let MethodCall {
+                        method,
+                        params: value,
+                        ..
+                    } = call;
                     let service = handler.clone();
                     Box::pin(async move {
                         match method.as_str() {

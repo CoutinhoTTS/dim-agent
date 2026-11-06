@@ -1,6 +1,6 @@
 use crate::{
     host::HostFuture,
-    methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
+    methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
@@ -537,7 +537,8 @@ impl DynPlugin for InputMethodsPlugin {
                     true,
                     Interruption::Report,
                 )],
-                Arc::new(move |_, value, cancel, _| {
+                Arc::new(move |call, cancel, _| {
+                    let MethodCall { params: value, .. } = call;
                     let tree = tree.clone();
                     let checks = checks.clone();
                     Box::pin(async move {
