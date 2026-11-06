@@ -1,5 +1,5 @@
 use crate::{host::*, steer::REPLACED_BY_STEER};
-use dim_agent_runtime::{ModelProgress, StateCell, Timeline, ToolProgress};
+use dim_agent_runtime::{ModelProgress, RetryProgress, StateCell, Timeline, ToolProgress};
 use dim_agent_types::*;
 use futures_util::StreamExt;
 use std::{
@@ -500,6 +500,20 @@ impl Output {
     }
 }
 
+impl crate::model_provider::RetryObserver for Output {
+    fn waiting(&mut self, retry: Option<crate::model_provider::RetryWaiting<'_>>) {
+        self.show(|progress| {
+            progress.retry = retry.map(|retry| RetryProgress {
+                attempt: retry.attempt,
+                max_attempts: retry.max_attempts,
+                retry_at_ms: retry.retry_at_ms,
+                kind: retry.kind,
+                reason: retry.reason.map(str::to_owned),
+            });
+        });
+    }
+}
+
 pub(crate) async fn consume_output(
     stream: ModelStream,
     output: &mut Output,
@@ -735,5 +749,3 @@ async fn parse_output(
         "Provider stream ended without message_stop",
     ))
 }
-
-impl crate::model_provider::RetryObserver for Output {}

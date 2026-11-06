@@ -1456,6 +1456,76 @@ async fn malformed_responses_are_retried_once() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_running_retry_is_progress_and_clears_when_the_attempt_starts() {
+    let resume = Arc::new(Notify::new());
+    let (agent, session, probe) = recovery_agent(25, Some(resume.clone())).await;
+    session
+        .submit("retry progress".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+    progress
+        .wait_for(|progress| progress.retry.is_some())
+        .await
+        .unwrap();
+    let retry = session
+        .get::<ModelProgress>("main")
+        .unwrap()
+        .unwrap()
+        .retry
+        .expect("a retry while sleeping");
+    assert_eq!((retry.attempt, retry.max_attempts), (2, 8));
+    assert_eq!(retry.kind, ModelFailureKind::ServerError);
+    assert_eq!(retry.reason.as_deref(), Some("fixture rejection"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(retry.retry_at_ms > now, "{retry:?} {now}");
+    tokio::time::advance(Duration::from_secs(1)).await;
+    progress
+        .wait_for(|progress| progress.retry.is_none())
+        .await
+        .unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    resume.notify_one();
+    session.stop("main", "done".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    assert!(
+        session
+            .get::<ModelProgress>("main")
+            .unwrap()
+            .unwrap()
+            .retry
+            .is_none()
+    );
+    agent.close().await.unwrap();
+
+    // A cancelled wait leaves no retry behind.
+    let (agent, session, _) = recovery_agent(25, None).await;
+    session
+        .submit("cancelled retry".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+    progress
+        .wait_for(|progress| progress.retry.is_some())
+        .await
+        .unwrap();
+    session.stop("main", "user stopped".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    assert!(
+        session
+            .get::<ModelProgress>("main")
+            .unwrap()
+            .unwrap()
+            .retry
+            .is_none()
+    );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_interrupt_cancels_a_thirty_second_sleep_promptly() {
     let (agent, session, probe) = recovery_agent(25, None).await;
     session

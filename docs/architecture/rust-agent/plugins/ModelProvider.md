@@ -43,7 +43,8 @@ Cleanup cancels, joins tasks and aggregates failures. Replay fails unended
 historical calls without invoking the model again. Retry is bounded by kind:
 `network`, `rate_limited`, `server_error` and once `malformed_response` back off
 1 s doubling to a 30 s cap within a 300 s budget, over at most 8 attempts, and
-it cannot repeat irreversible output.. The process-model constructor also injects the
+it cannot repeat irreversible output. While a retry sleeps, `ModelProgress.retry`
+shows the pending attempt; that is display state, not a Timeline fact. The process-model constructor also injects the
 process `ProviderConnectionResolver` to resolve each request's connection; this
 profile does not.
 

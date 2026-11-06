@@ -128,6 +128,14 @@ attempts ride out about 90 s, comparable agents allow 3 to 10 stream retries, a
 keeps the last attempts from being minutes apart, and a server's own advice
 sets the timing without being able to extend the budget.
 
+While it sleeps, the retry is display state: `ModelProgress.retry` carries
+`attempt` (the attempt about to run, at least 2), `maxAttempts`, `retryAtMs`
+(unix milliseconds at which it starts), `kind` and the failure's bounded
+`reason`. ModelProvider sets it before the sleep and clears it when the attempt
+starts, the call ends, or the sleep is cancelled. It is not a Timeline fact: no
+later decision reads it, and the terminal fact keeps `attempts` and
+`waitedMs`.
+
 ## 5. Compatibility
 
 The fields are additive. A binary without `failure` cannot decode an event

@@ -80,6 +80,8 @@ ModelFailure {
 
 名义退避为 1、2、4、8、16、30、30 秒，合计约 91 秒。这些数字来自 #1197 的故障，它持续了数十秒：8 次尝试可撑过约 90 秒；同类 agent 允许 3 到 10 次流重试；1 秒基数避免亚秒级的尝试再次撞上同一故障；30 秒上限让最后几次尝试不会相隔数分钟；服务端自己的建议决定等待时长，但不能延长预算。
 
+睡眠期间，重试是展示状态：`ModelProgress.retry` 携带 `attempt`（即将运行的尝试，至少为 2）、`maxAttempts`、`retryAtMs`（开始时刻的 Unix 毫秒）、`kind` 和失败的受限 `reason`。ModelProvider 在睡眠前设置它，并在尝试开始、调用结束或等待被取消时清除它。它不是 Timeline 事实：后续决策不读它，终端事实保留 `attempts` 和 `waitedMs`。
+
 ## 5. 兼容性
 
 字段是增量的。没有 `failure` 的二进制无法解码带它的事件，因为 `ModelOutputOutcome` 拒绝未知字段。这与 `presentation` 的前向兼容限制相同，因此跨此变更的降级不受支持，正如它此前对 `presentation` 也不受支持。
