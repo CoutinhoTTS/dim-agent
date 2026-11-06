@@ -133,6 +133,25 @@ test("a failure after a text row starts with the incomplete sentence", () => {
   assert.ok(row.text.startsWith("The response above is incomplete. The provider reported a server error"), row.text)
 })
 
+test("a shown model failure is forgotten at every turn end", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "model-end", requestId: "r1", error: "boom", failure: failure() }))
+  projection.apply(event(3, { kind: "turn-end", outcome: "completed" }))
+  projection.apply(event(4, { kind: "turn-end", outcome: "failed", error: "boom" }))
+  assert.equal(projection.rows.filter((row) => row.kind === "error").length, 2)
+})
+
+test("a cancelled turn end forgets the model failure too", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "model-end", requestId: "r1", error: "boom", failure: failure() }))
+  projection.apply(event(3, { kind: "turn-end", outcome: "cancelled" }))
+  projection.apply(event(4, { kind: "turn-end", outcome: "failed", error: "boom" }))
+  assert.deepEqual(
+    projection.rows.filter((row) => row.kind === "error" || row.kind === "stopped").map((row) => row.kind),
+    ["error", "stopped", "error"],
+  )
+})
+
 test("the turn repeat of a model failure is dropped", () => {
   const projection = new Projection()
   projection.apply(event(2, { kind: "model-end", requestId: "r1", error: "boom", failure: failure() }))

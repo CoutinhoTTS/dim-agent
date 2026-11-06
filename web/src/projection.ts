@@ -187,19 +187,21 @@ export class Projection {
         }
         break
       }
-      case "turn-end":
+      case "turn-end": {
         this.lastTurnEnd = event.sequence
         for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId)
         for (const requestId of [...this.answers.keys()]) this.closeAnswer(requestId)
         this.requestStarts.clear()
+        // The marker belongs to this turn only, whatever the outcome.
+        const shown = this.shownFailure
+        this.shownFailure = undefined
         if (content.outcome === "failed") {
-          const shown = this.shownFailure
-          this.shownFailure = undefined
           const error = content.error ?? ""
           if (shown !== error) this.push({ kind: "error", key: `error-${event.sequence}`, text: error })
         }
         if (content.outcome === "cancelled") this.push({ kind: "stopped", key: `stopped-${event.sequence}` })
         break
+      }
       case "context-configured":
         this.model = content.model
         break

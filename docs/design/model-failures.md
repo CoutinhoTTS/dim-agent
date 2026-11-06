@@ -116,8 +116,11 @@ client derives from the rows it holds rather than storing. An event written
 before the fact existed keeps the `error` line and its prefix.
 
 The turn's own `failed` outcome does not repeat the model failure: an error equal
-to the one the turn's model failure already showed prints nothing. A turn
-failure that is not a model failure still prints.
+to the one the turn's model failure already showed prints nothing. The
+suppression is per turn: every turn end forgets what a previous turn showed,
+whether that turn completed, failed or was cancelled, so a later turn's failure
+with the same text still prints. A turn failure that is not a model failure
+still prints.
 
 The CLI line mode and `exec` print that one line. The TUI and the Web keep its
 details one step away: the kind, the HTTP status, the provider code, the request
