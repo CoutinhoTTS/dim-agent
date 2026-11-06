@@ -7,7 +7,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 /// The most attempts one request makes, the first included: eight attempts
-/// ride out an outage of tens of seconds, like comparable agents' retries.
+/// ride out an outage of tens of seconds.
 const MAX_ATTEMPTS: u8 = 8;
 /// A malformed response is retried once: a repeat of the same unusable
 /// output is likely deterministic.
@@ -16,8 +16,8 @@ const MALFORMED_RETRIES: u8 = 1;
 const BASE_DELAY: Duration = Duration::from_secs(1);
 /// A wait is capped at 30 s, so the last attempts are not minutes apart.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// The wait budget of one request: a server's advice cannot hold a turn for
-/// minutes.
+/// The wait budget of one request: it sleeps at most five minutes in all, and
+/// advice that does not fit in what is left stops the request at once.
 const WAIT_BUDGET: Duration = Duration::from_secs(300);
 
 /// Reports the wait a retry is about to sleep through. A consumer without a
