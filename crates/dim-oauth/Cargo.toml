@@ -28,4 +28,5 @@ getrandom = "0.3"
 
 [dev-dependencies]
 rutis-loader.workspace = true
+dim-agent-types.workspace = true
 axum = { workspace = true, features = ["json"] }

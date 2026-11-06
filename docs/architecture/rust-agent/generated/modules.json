@@ -24387,10 +24387,12 @@
         "path ManagedModel",
         "path ManagedProviders",
         "path crate::managed_provider::ManagedProviderError",
+        "path reason_excludes_modality",
         "use crate::managed_provider::AccountSnapshot",
         "use crate::managed_provider::CredentialLease",
         "use crate::managed_provider::ManagedModel",
-        "use crate::managed_provider::ManagedProviders"
+        "use crate::managed_provider::ManagedProviders",
+        "use crate::managed_provider::reason_excludes_modality"
       ]
     },
     {

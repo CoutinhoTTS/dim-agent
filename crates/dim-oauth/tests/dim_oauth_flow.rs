@@ -7,14 +7,26 @@ mod oauth;
 
 use dim_agent_capabilities::{
     file_storage::{FileStorage, FileStoragePlugin},
-    host::ModelProtocol,
+    host::{
+        HostError, HostFuture, ModalityConnectionHost, ModalityTarget, ModelConnection,
+        ModelDriver, ModelHost, ModelProtocol, ModelStream, ProviderConnectionResolver,
+        SelectableModelsHost,
+    },
 };
 use dim_agent_runtime::Names;
-use dim_app_server::managed_provider::{
-    AccountSnapshot, ManagedProviderBinding, ManagedProviders, ManagedProvidersPlugin,
-    management::{
-        BrowserLoginBegin, LoginBegin, LoginState, ManagedBrowserLoginComplete, ManagedLoginAttempt,
+use dim_agent_types::{
+    Message, ModelCapabilities, ModelCapabilitySnapshot, ModelId, ModelRequest, Role,
+};
+use dim_app_server::{
+    managed_provider::{
+        AccountSnapshot, ManagedProviderBinding, ManagedProviders, ManagedProvidersPlugin,
+        management::{
+            BrowserLoginBegin, LoginBegin, LoginState, ManagedBrowserLoginComplete,
+            ManagedLoginAttempt,
+        },
     },
+    provider::{ProviderPlugin, ProviderService},
+    storage::SqliteStoragePlugin,
 };
 use dim_oauth::{ClientIds, DimOAuthPlugin};
 use rutis::Ctx;
@@ -419,10 +431,19 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
         Some("unsupported_endpoint")
     );
 
-    let unavailable = providers
+    // A non-chat model still leases: its stored reason excludes a
+    // conversational use, not a non-conversational one.
+    let image = providers
         .credential(PROVIDER, "fixture-image", &cancel())
-        .await;
-    assert!(unavailable.is_err());
+        .await
+        .unwrap();
+    assert_eq!(image.protocol, ModelProtocol::OpenaiCompatible);
+    let endpoint = providers
+        .credential(PROVIDER, "fixture-gemini", &cancel())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(endpoint.code, "account_unavailable");
     let lease = providers
         .credential(PROVIDER, "fixture-model", &cancel())
         .await
@@ -1052,6 +1073,118 @@ async fn fresh_credential_lookup_benchmark() {
     let per_lookup = started.elapsed().as_secs_f64() * 1e6 / LOOKUPS as f64;
     eprintln!("fresh credential lookup: {per_lookup:.1} us over {LOOKUPS} lookups");
     assert_eq!(fixture.service.refreshes.load(Ordering::SeqCst), 0);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Provider's process-level model host is never invoked by these flows.
+struct UnusedModel;
+impl ModelDriver for UnusedModel {
+    fn invoke(
+        &self,
+        _: Arc<ModelRequest>,
+        _: ModelConnection,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        Box::pin(async { Err(HostError::failed("the test never invokes a model")) })
+    }
+}
+struct ModelHostFixture;
+impl DynPlugin for ModelHostFixture {
+    fn name(&self) -> &str {
+        "test.model-host"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            ctx.provide(ModelHost(Arc::new(UnusedModel)))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// A managed bundle's media model leases for its non-conversational use, and
+/// a chat request for the same model is refused before the lease.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn managed_media_model_leases_for_modality_and_chat_refuses_it() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    login(&providers, &fixture.base).await;
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
+    let views = [
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names, 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names, 0).unwrap()),
+        root.plugin(ModelHostFixture),
+        root.plugin(ProviderPlugin::new(&names).unwrap()),
+    ];
+    for view in &views {
+        active(view).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    provider
+        .refresh_for(PROVIDER.into(), &cancel())
+        .await
+        .unwrap();
+    let operations = root
+        .get::<SelectableModelsHost>()
+        .unwrap()
+        .0
+        .selectable_for_modality(cancel())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|model| {
+            model.target.provider_id == PROVIDER && model.target.model_id == "fixture-image"
+        })
+        .expect("the managed media model is a modality option");
+    assert_eq!(operations.operations, ["image.generate"]);
+    let connection = root
+        .get::<ModalityConnectionHost>()
+        .unwrap()
+        .0
+        .resolve_for_modality(
+            ModalityTarget {
+                target: ModelId {
+                    provider_id: PROVIDER.into(),
+                    model_id: "fixture-image".into(),
+                },
+                operation: "image.generate".into(),
+            },
+            cancel(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(connection.model, "fixture-image");
+    assert_eq!(connection.protocol, ModelProtocol::OpenaiCompatible);
+    assert!(connection.resolved.recovery.is_some());
+    let request = Arc::new(ModelRequest {
+        capability_snapshot: Some(ModelCapabilitySnapshot {
+            target: ModelId {
+                provider_id: PROVIDER.into(),
+                model_id: "fixture-image".into(),
+            },
+            capabilities: ModelCapabilities::with_limits(32000, 1000),
+            reasoning: None,
+            service_tier: None,
+        }),
+        ..ModelRequest::new(
+            PROVIDER,
+            "fixture-image",
+            vec![Message::text(Role::User, "hello")],
+        )
+    });
+    let refused = root
+        .get::<ProviderConnectionResolver>()
+        .unwrap()
+        .0
+        .resolve(request, cancel())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(refused.to_string(), "Model is unavailable");
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

@@ -692,7 +692,9 @@ requires the model's catalog entry to declare `operation` in its
 before any network call: the availability cases with the reason execution reports
 for that model, and an undeclared operation as an invalid request that names it.
 The read and the connection cannot disagree, because they share the catalog and
-its selection predicate.
+its selection predicate. The managed account's credential lease reads the same
+rule: it refuses only a reason that excludes every use, so a media model the
+catalog marks as non-chat still leases for this call.
 
 **Credential rule and lifetime.** The connection lives for that one call. Provider
 never persists it, never returns it to a client and never writes it to a task

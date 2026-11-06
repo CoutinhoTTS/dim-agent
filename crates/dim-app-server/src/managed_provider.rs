@@ -57,6 +57,18 @@ pub struct ManagedCatalog {
     pub account: AccountSnapshot,
     pub models: Vec<ManagedModel>,
 }
+
+/// Whether a stored `unavailableReason` excludes a non-conversational use too.
+/// `unsupported_model_type` says the entry is not a chat model and
+/// `limits_undeclared` that it declares no chat limits; both leave a
+/// non-conversational use open. Every other stored reason — the model's
+/// status, a missing route, a disabled provider, a missing credential, a
+/// signed-out account — means the entry serves no use at all. The catalog's
+/// classification of an entry and a managed account's credential lease read
+/// this one rule.
+pub fn reason_excludes_modality(reason: &str) -> bool {
+    !matches!(reason, "unsupported_model_type" | "limits_undeclared")
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebSearchRequest {

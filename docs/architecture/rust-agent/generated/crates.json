@@ -272,6 +272,10 @@
     "to": "rutis"
   },
   {
+    "from": "dim-oauth",
+    "to": "dim-agent-types"
+  },
+  {
     "from": "dim-session-title",
     "to": "dim-agent-capabilities"
   },

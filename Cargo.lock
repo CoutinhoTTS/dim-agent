@@ -1336,6 +1336,7 @@ dependencies = [
  "base64 0.22.1",
  "dim-agent-capabilities",
  "dim-agent-runtime",
+ "dim-agent-types",
  "dim-app-server",
  "dim-session-title",
  "getrandom 0.3.4",

@@ -29,7 +29,9 @@ use crate::{
     codex_oauth::OpenAICodexOAuthService,
     grok_oauth::GrokOAuthService,
     managed_oauth,
-    managed_provider::{AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders},
+    managed_provider::{
+        AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders, reason_excludes_modality,
+    },
     model_catalog::{
         BundledCatalog, CatalogCapabilities, CatalogProvider, ModelEdit, ModelEntry, ModelMetadata,
         ModelSource, NewApiEndpoint, ProviderProjection, declarations_hold, declare,
@@ -560,20 +562,12 @@ impl Unavailable {
         }
     }
 
-    /// The class of a reason a managed record stored. Discovery names a reason
-    /// once, for a conversational use; the two it stores that leave a
-    /// non-conversational use open are `unsupported_model_type` (the non-chat
-    /// kind) and `limits_undeclared` (the text limits). A new reason that
-    /// excludes only a conversational use is added here, so it reaches
-    /// modality instead of dropping the model.
+    /// The class of a reason a managed record stored, through the one rule the
+    /// managed contract states.
     fn of(reason: String) -> Self {
-        let excludes_modality = !matches!(
-            reason.as_str(),
-            "unsupported_model_type" | "limits_undeclared"
-        );
         Self {
+            excludes_modality: reason_excludes_modality(&reason),
             reason,
-            excludes_modality,
         }
     }
 

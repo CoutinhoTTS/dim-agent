@@ -24,6 +24,7 @@ use dim_app_server::{
             ManagedBrowserLoginComplete, ManagedLoginAttempt, Referral, ResetApplied, ResetBatches,
             Usage,
         },
+        reason_excludes_modality,
     },
     model_catalog::BundledCatalog,
 };
@@ -947,7 +948,12 @@ impl Inner {
         let model = catalog
             .models
             .iter()
-            .find(|m| m.entry.model_id == model && m.unavailable_reason.is_none())
+            .find(|m| {
+                m.entry.model_id == model
+                    && m.unavailable_reason
+                        .as_deref()
+                        .is_none_or(|reason| !reason_excludes_modality(reason))
+            })
             .cloned()
             .ok_or(ManagedError::UnknownModel)?;
         if !same_account(&catalog.account, &current.account) {
