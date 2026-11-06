@@ -718,9 +718,7 @@ impl McpService {
                     SettingsScope::Project(_) => {
                         let overlays = workspace
                             .as_ref()
-                            .and_then(|workspace| secrets.entries.get(workspace))
-                            .cloned()
-                            .unwrap_or_default();
+                            .map_or_else(BTreeMap::new, |workspace| secrets.overlays(workspace));
                         catalog.project_revision =
                             Some(source_revision(scope, &snapshot.revision, &overlays));
                     }
@@ -1609,10 +1607,7 @@ async fn overlays(
         .read::<McpSecrets>(SettingsScope::User, cancel)
         .await?
         .document
-        .entries
-        .get(&workspace)
-        .cloned()
-        .unwrap_or_default())
+        .overlays(&workspace))
 }
 
 fn partial(_error: McpError, into_project: bool) -> McpError {

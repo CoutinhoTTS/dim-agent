@@ -174,11 +174,10 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
             .applied_revision,
         Some(catalog.user_revision)
     );
-    // A project application names the document revision it applied, while the
-    // catalog's `projectRevision` is the source token over that revision and
-    // the withheld records; the application record is whether one exists.
+    // The applied token is the catalog's token for the same source, so a
+    // client holding both never reads a matching configuration as not applied.
     let project = fixture.mcp.application(SettingsScope::Project(1));
-    assert!(project.applied_revision.is_some());
+    assert_eq!(project.applied_revision, catalog.project_revision);
     assert!(project.error.is_none());
     let rows = fixture.loader.layers()[0].patches[0]
         .insert
@@ -234,16 +233,11 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
         fixture.mcp.server(Some(1), "shared".into(), &cancel).await,
         Err(McpError::Disabled)
     ));
-    // The application names the document revision it applied; the token `revision`
-    // also covers the withheld records.
-    let document_revision = fixture
-        .settings
-        .read::<McpSettings>(SettingsScope::Project(1), &cancel)
-        .await
-        .unwrap()
-        .revision;
-    let application = fixture.mcp.application(SettingsScope::Project(1));
-    assert_eq!(application.applied_revision, Some(document_revision));
+    // The application carries the token the update returned, which is the
+    // catalog's token for the source: the document revision alone never
+    // matches a project source's token.
+    let application = settled_at(&fixture, SettingsScope::Project(1), &revision).await;
+    assert_eq!(application.applied_revision, Some(revision.clone()));
     fixture
         .mcp
         .update(
@@ -303,6 +297,76 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
             .is_err()
     );
     restarted.close().await;
+}
+
+/// A project source is served from `.mcp.json` and the workspace's withheld
+/// records, so its applied token covers both, exactly as the catalog's
+/// `projectRevision` does (D5, D23). A records-only write renews both without
+/// touching the project file, and the publisher refreshes to it.
+#[tokio::test]
+async fn a_project_application_follows_a_records_only_change() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let project_file = fixture.home.join("project/.mcp.json");
+    fs::write(
+        &project_file,
+        json!({"mcpServers":{"shared":{"command":"project-server"}}}).to_string(),
+    )
+    .unwrap();
+    let workspace = fs::canonicalize(fixture.home.join("project")).unwrap();
+    let secrets_path = fixture.home.join("mcp-secrets.json");
+    fs::write(
+        &secrets_path,
+        json!({"entries":{(workspace.to_str().unwrap()):{"shared":{"$generation":"one","args":["--first"]}}}})
+            .to_string(),
+    )
+    .unwrap();
+    let document = fs::read(&project_file).unwrap();
+
+    let token = fixture
+        .mcp
+        .catalog(Some(1), &cancel)
+        .await
+        .unwrap()
+        .project_revision
+        .unwrap();
+    let application = settled_at(&fixture, SettingsScope::Project(1), &token).await;
+    assert_eq!(application.applied_revision, Some(token.clone()));
+
+    // The record changes alone; the project document is not written.
+    let snapshot = fixture
+        .settings
+        .read::<McpSecrets>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let revision = snapshot.revision;
+    let mut records = snapshot.document;
+    let record = records
+        .entries
+        .get_mut(workspace.to_str().unwrap())
+        .and_then(|servers| servers.get_mut("shared"))
+        .expect("the workspace's record is stored");
+    record.generation = "two".into();
+    record.args = Some(vec!["--second".into()]);
+    fixture
+        .settings
+        .update(SettingsScope::User, &revision, records, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&project_file).unwrap(), document);
+
+    let next = fixture
+        .mcp
+        .catalog(Some(1), &cancel)
+        .await
+        .unwrap()
+        .project_revision
+        .unwrap();
+    assert_ne!(next, token, "a record write renews the source token");
+    let application = settled_at(&fixture, SettingsScope::Project(1), &next).await;
+    assert_eq!(application.applied_revision, Some(next));
+
+    fixture.close().await;
 }
 
 #[tokio::test]
@@ -530,6 +594,28 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
     assert!(mcp.catalog(Some(0), &cancel).await.unwrap().servers["shared"].enabled());
     drop((connection, retained));
     restarted.close().await;
+}
+
+/// Waits until `source` is applied at `token`, which the publisher announces
+/// after the refresh a settings write wakes. A published state is a separate
+/// task's answer, so a read of it races the write without this wait.
+async fn settled_at(
+    fixture: &Fixture,
+    source: SettingsScope,
+    token: &str,
+) -> dim_app_server::mcp::McpApplication {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let application = fixture.mcp.application(source);
+            if application.error.is_some() || application.applied_revision.as_deref() == Some(token)
+            {
+                return application;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the source settles at its token")
 }
 
 async fn set_project(

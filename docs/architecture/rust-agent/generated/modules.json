@@ -22750,12 +22750,14 @@
         "path McpSource::User",
         "path Result",
         "path daemon_environment",
+        "path source_revision",
         "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
         "use super::Result",
         "use super::daemon_environment",
+        "use super::source_revision",
         "use super::sources_in_precedence"
       ]
     },

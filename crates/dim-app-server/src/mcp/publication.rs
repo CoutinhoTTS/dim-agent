@@ -6,7 +6,7 @@ use super::config::{
 use super::{
     McpAuth, McpConnection, McpError, McpSource, Result, daemon_environment,
     server::{McpRuntime, McpServer, McpServerError, McpServerPlugin, McpServerState},
-    sources_in_precedence,
+    source_revision, sources_in_precedence,
 };
 use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_capabilities::host::{CredentialVariables, CredentialVariablesHost};
@@ -514,15 +514,28 @@ impl Projection {
                     continue;
                 }
             };
+            let workspace = match source.scope() {
+                Some(scope @ SettingsScope::Project(_)) => config::workspace(settings, scope).ok(),
+                _ => None,
+            };
+            // A project source is served from `.mcp.json` and the workspace's
+            // withheld records, so its applied token names both (D5, D23). An
+            // `appliedRevision` over the document alone would never match the
+            // catalog's `projectRevision` once a record exists, and a client
+            // holding both would read the source as not applied. An unresolved
+            // workspace keeps the document revision, as `read_source_revision`
+            // does when the records cannot be read.
+            let revision = match (source.scope(), &workspace) {
+                (Some(scope @ SettingsScope::Project(_)), Some(workspace)) => {
+                    source_revision(scope, &revision, &secrets.overlays(workspace))
+                }
+                _ => revision,
+            };
             self.disconnected
                 .retain(|(owner, _), disconnected| *owner != source || *disconnected == revision);
             let configured = servers.keys().cloned().collect();
             let mut current = BTreeMap::new();
             let mut error = None;
-            let workspace = match source.scope() {
-                Some(scope @ SettingsScope::Project(_)) => config::workspace(settings, scope).ok(),
-                _ => None,
-            };
             let project_unresolved = matches!(source, McpSource::Project(_)) && workspace.is_none();
             if project_unresolved {
                 error = Some("MCP configuration could not be resolved");

@@ -659,6 +659,13 @@ listed in §6 and keep their references: `mcp.catalog`, `mcp.inspect`, `mcp.remo
 and `mcp.temporary.capabilities` in [TemporaryMcp](../plugins/TemporaryMcp.md). §3 D5 states the
 revision every write takes.
 
+`mcp.catalog` reports one revision and one application record per source:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `userRevision`, `projectRevision` | string | The source's revision token (D5); `projectRevision` is absent without a project |
+| `userApplication`, `pluginApplication`, `projectApplication` | `{appliedRevision?, error?, cleanupError?}` | The publisher's state for that source. `appliedRevision` is the source token of the configuration that is applied: `userRevision` for a user source and `projectRevision` for a project one, so a client comparing the two sees whether the configuration it read is the one applied. A plugin source has no catalog token; its `appliedRevision` is its own `mcp-plugins` document revision. It is absent when the source is not applied, and `error` names why |
+
 `mcp.catalog` returns `invalid: [{id, source, error}]` beside `servers` (D18). `mcp.configuration`,
 `mcp.inspect`, `mcp.test` and `mcp.set_enabled` answer a broken entry with its error and
 `mcp_invalid_config`; `mcp.save` replaces it, and `mcp.remove` deletes it. Each server row also
