@@ -363,6 +363,18 @@ fn read_records(path: &Path) -> BTreeMap<String, Record> {
         .unwrap_or_default()
 }
 
+/// Whether `record` has `plan` installed (§2.4): the record is this plan's
+/// with `version`, and the directories it names are present. An acquisition
+/// skips the download on it, and `runtime.list` reports `path` on it.
+fn is_installed(plan: &Plan, version: &str, record: Option<&Record>) -> bool {
+    record.is_some_and(|record| *record == Record::of(plan, version, record.sha256.clone()))
+        && plan
+            .archive
+            .as_ref()
+            .is_none_or(|(_, directory)| directory.is_dir())
+        && plan.packages.is_dir()
+}
+
 /// A runtime's entry in `runtime.list` (design §5).
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct RuntimeEntry {
@@ -374,6 +386,10 @@ pub struct RuntimeEntry {
     /// checked interpreter, absent until it is checked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The interpreter the daemon resolved, present while the record marks
+    /// this runtime installed under the plan in effect (§2.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// `off`, `acquiring`, `failed`, or, once its launch command is
     /// provided, its connection's status: `starting`, `ready`, `down`.
     pub status: &'static str,
@@ -425,14 +441,16 @@ impl RuntimeService {
     }
     /// Every runtime's status.
     pub fn list(&self) -> Vec<RuntimeEntry> {
+        let records = read_records(&self.runtimes.lock().unwrap().record_file());
         let plans = self.plans.lock().unwrap().clone();
         let states = self.states.lock().unwrap();
         let versions = self.versions.lock().unwrap();
         Kind::ALL
             .into_iter()
             .map(|kind| {
-                let plan = &plans[Self::index(kind)];
-                let (status, reason) = match &states[Self::index(kind)] {
+                let index = Self::index(kind);
+                let plan = &plans[index];
+                let (status, mut reason) = match &states[index] {
                     State::Off => ("off", None),
                     State::Acquiring => ("acquiring", None),
                     State::Failed(reason) => ("failed", Some(reason.clone())),
@@ -442,14 +460,32 @@ impl RuntimeService {
                         RuntimeState::Down(reason) => ("down", Some(reason)),
                     },
                 };
+                let version = match plan.source {
+                    Source::Download => Some(plan.version.clone()),
+                    Source::System => versions[index].clone(),
+                };
+                let mut path = None;
+                if version
+                    .as_deref()
+                    .is_some_and(|version| is_installed(plan, version, records.get(kind.name())))
+                {
+                    match plan.interpreter.to_str() {
+                        Some(interpreter) => path = Some(interpreter.to_owned()),
+                        None => {
+                            let unrepresentable = "the interpreter path is not valid UTF-8";
+                            reason = Some(match reason.take() {
+                                Some(reason) => format!("{reason}; {unrepresentable}"),
+                                None => unrepresentable.to_owned(),
+                            });
+                        }
+                    }
+                }
                 RuntimeEntry {
                     name: kind.name(),
                     source: plan.source,
                     auto: plan.auto,
-                    version: match plan.source {
-                        Source::Download => Some(plan.version.clone()),
-                        Source::System => versions[Self::index(kind)].clone(),
-                    },
+                    version,
+                    path,
                     status,
                     reason,
                 }
@@ -639,14 +675,11 @@ impl RuntimeService {
             Source::Download => plan.version.clone(),
             Source::System => check_system(kind, &plan.interpreter).await?,
         };
-        let installed = read_records(&runtimes.record_file())
-            .get(kind.name())
-            .is_some_and(|record| *record == Record::of(&plan, &version, record.sha256.clone()))
-            && plan
-                .archive
-                .as_ref()
-                .is_none_or(|(_, directory)| directory.is_dir())
-            && plan.packages.is_dir();
+        let installed = is_installed(
+            &plan,
+            &version,
+            read_records(&runtimes.record_file()).get(kind.name()),
+        );
         if installed {
             return Ok(version);
         }
