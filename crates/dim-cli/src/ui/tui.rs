@@ -4717,6 +4717,16 @@ impl App {
             if let Some(retry) = retry {
                 let seconds = crate::projection::retry_seconds(retry.retry_at_ms);
                 let reason = crate::projection::failure_phrase(retry.kind, retry.reason.as_deref());
+                if seconds == 0 {
+                    return format!(
+                        "{} {}",
+                        FRAMES[beat % FRAMES.len()],
+                        tf(
+                            "Waiting for the provider · {reason} · Esc stops",
+                            &[("reason", &reason)]
+                        )
+                    );
+                }
                 return format!(
                     "{} {}",
                     FRAMES[beat % FRAMES.len()],
@@ -11710,7 +11720,12 @@ mod tests {
         })));
         drawn.draw();
         let shown = drawn_text(&mut drawn);
-        assert!(shown.contains("Retrying 2/8 in 0 s"), "{shown}");
+        assert!(
+            shown.contains(
+                "Waiting for the provider · Could not reach the provider, or the connection dropped · Esc stops"
+            ),
+            "{shown}"
+        );
 
         // Clearing the retry brings the working line back.
         drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {

@@ -64,13 +64,13 @@ ModelFailure {
 
 终端事实的 `error` 是一条完整的兜底行，因此所有已经打印 `error` 的渲染器无需自身改动就能显示更好的行。
 
-失败的请求只显示一行：`<meaning>: <reason>. <action>`，事实没有原因时省略 `: <reason>`。措辞来自 kind，该行不带 `model failed:` 前缀。请求已经显示过文本、思考或工具行时，该行以“以上响应不完整。”开头；各客户端从自己持有的行推导，不另外存储。事实出现之前写下的事件仍显示 `error` 行及其前缀。
+失败的请求只显示一行：`<meaning>: <reason>. <action>`，事实没有原因时省略 `: <reason>`。事实记录的尝试多于一次时，行尾加上 `Tried N times over M s.`，总等待时间取整到秒；只有一次尝试则不加。细节仍保留自己的 `tried N times over M s`。措辞来自 kind，该行不带 `model failed:` 前缀。请求已经显示过文本、思考或工具行时，该行以“以上响应不完整。”开头；各客户端从自己持有的行推导，不另外存储。事实出现之前写下的事件仍显示 `error` 行及其前缀。
 
 回合自身的 `failed` 结果不会重复模型失败：错误与同一回合已显示的模型失败相同时不再打印。不是模型失败的回合失败仍会打印。
 
 CLI 的 line 模式与 `exec` 只打印这一行。TUI 与 Web 把细节放在一步之外：kind、HTTP 状态、提供方 code、请求 id、尝试多于一次时的 `已尝试 N 次，历时 M 秒`、提供方要求的等待，以及原因链，每帧一行。TUI 的细节加入 `/tools` 循环与错误行的点击展开；Web 从错误行下方的“详情”展开项打开。两者默认收起。
 
-请求等待重试时，TUI 的工作行与 Web 的工作指示显示 `4 秒后第 3/8 次重试 · <meaning>: <reason> · <stop>`，按客户端时钟从 `ModelProgress.retry.retryAtMs` 倒数，且不低于 0。CLI line 模式每次尝试在它写其他状态行的地方写一行；`exec` 不写重试行。重试不产生 transcript 行，之后成功也不产生；失败行的 `已尝试 N 次` 才是持久记录。
+请求等待重试时，TUI 的工作行与 Web 的工作指示显示 `4 秒后第 3/8 次重试 · <meaning>: <reason> · <stop>`，按客户端时钟从 `ModelProgress.retry.retryAtMs` 倒数。该时刻已过而尚无新进度时，改为显示 `Waiting for the provider` 与 kind 的含义，而不是 `in 0 s`。可见的倒计时不是 live region：读屏在一次等待开始或 attempt 变化时听到 `Retrying, attempt 3 of 8: <meaning>`，不会每秒重读。CLI line 模式每次尝试在它写其他状态行的地方写一行；`exec` 不写重试行。重试不产生 transcript 行，之后成功也不产生；失败行的 `已尝试 N 次` 才是持久记录。
 
 ## 4. 重试
 
