@@ -170,6 +170,97 @@ impl ProgressSink {
     }
 }
 
+/// One outbound realtime frame (A.2 `realtimeSend`): `text` is a text frame
+/// carrying a JSON value, `audio` a binary frame carrying base64-decoded
+/// bytes, and `control` a direct transport's signaling message.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RealtimeFrame {
+    pub kind: RealtimeFrameKind,
+    pub data: Value,
+}
+impl RealtimeFrame {
+    /// The bytes the frame puts on the wire: the JSON encoding of `data` for a
+    /// text or control frame, and the decoded bytes for an audio frame.
+    pub fn bytes(&self) -> Result<Vec<u8>, AdapterError> {
+        match self.kind {
+            RealtimeFrameKind::Text | RealtimeFrameKind::Control => serde_json::to_vec(&self.data)
+                .map_err(|error| {
+                    AdapterError::invalid_input(format!("The frame cannot be encoded: {error}"))
+                }),
+            RealtimeFrameKind::Audio => {
+                let encoded = self.data.as_str().ok_or_else(|| {
+                    AdapterError::invalid_input("An audio frame's data is a base64 string")
+                })?;
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| AdapterError::invalid_input("An audio frame's data is not base64"))
+            }
+        }
+    }
+}
+
+/// The kind of one outbound realtime frame (A.2 `realtimeSend`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RealtimeFrameKind {
+    Text,
+    Audio,
+    Control,
+}
+
+/// How the adapter serves a session (A.2 `realtimeOpen`): it holds the socket,
+/// or the caller talks to the provider's own transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RealtimeTransport {
+    Relay,
+    Direct,
+}
+
+/// The short-lived connection a `direct` session returns (A.2): provider
+/// material only, never the long-lived credential.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RealtimeConnection {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ice_servers: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// What a successful `realtimeOpen` returns: the channel later `send` and
+/// `close` name, the transport, and a direct session's connection.
+#[derive(Debug)]
+pub struct RealtimeOpened {
+    pub channel_id: String,
+    pub transport: RealtimeTransport,
+    pub connection: Option<RealtimeConnection>,
+}
+
+/// What an adapter reports on a session it opened.
+pub enum RealtimeEvent {
+    /// One provider event, forwarded to the opening connection verbatim.
+    Event(Value),
+    /// The provider ended the session on its own.
+    Ended(RealtimeEnd),
+}
+
+/// Why an adapter's session ended without the caller asking: the provider
+/// closed it, or the adapter/protocol failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RealtimeEnd {
+    Provider,
+    Error(String),
+}
+
 /// A process-scoped `modalityAdapter` (A.2, Appendix G). The first slice reads
 /// the single process service per call; until the per-task lookup (#861) lands
 /// the service is not keyed by adapter name.
@@ -204,4 +295,23 @@ pub trait ModalityAdapter: Send + Sync + 'static {
         handle: &str,
         connection: ModalityConnection,
     ) -> AdapterFuture<'_, RemoteCancel>;
+    /// Opens one realtime session (A.2 `realtimeOpen`). Events the provider
+    /// sends are reported on `events` until the session ends; `cancel` aborts
+    /// the open and later ends the session.
+    fn realtime_open(
+        &self,
+        connection: ModalityConnection,
+        params: Value,
+        events: tokio::sync::mpsc::Sender<RealtimeEvent>,
+        cancel: CancellationToken,
+    ) -> AdapterFuture<'_, RealtimeOpened>;
+    /// Sends one frame on the session `channel_id` names (A.2 `realtimeSend`).
+    fn realtime_send(
+        &self,
+        channel_id: &str,
+        frame: RealtimeFrame,
+        cancel: CancellationToken,
+    ) -> AdapterFuture<'_, ()>;
+    /// Closes the session `channel_id` names (A.2 `realtimeClose`).
+    fn realtime_close(&self, channel_id: &str) -> AdapterFuture<'_, ()>;
 }

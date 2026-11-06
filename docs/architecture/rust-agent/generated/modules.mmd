@@ -594,9 +594,10 @@ flowchart LR
   m590["dim_modality"]
   m591["dim_modality::adapter"]
   m592["dim_modality::engine"]
-  m593["dim_modality::task"]
-  m594["dim_modality::task::tests"]
-  m595["dim_session_title"]
+  m593["dim_modality::realtime"]
+  m594["dim_modality::task"]
+  m595["dim_modality::task::tests"]
+  m596["dim_session_title"]
   m0 --> m1
   m0 -.-> m2
   m0 -.-> m3
@@ -4007,6 +4008,7 @@ flowchart LR
   m590 --> m591
   m590 --> m592
   m590 --> m593
+  m590 --> m594
   m591 --> m58
   m591 --> m169
   m592 --> m48
@@ -4017,24 +4019,30 @@ flowchart LR
   m592 --> m259
   m592 --> m590
   m592 --> m591
-  m592 --> m593
+  m592 --> m594
+  m593 --> m58
+  m593 --> m68
   m593 --> m169
-  m593 --> m233
+  m593 --> m590
   m593 --> m591
-  m593 -.-> m594
-  m594 --> m593
-  m595 --> m58
-  m595 --> m68
-  m595 --> m85
-  m595 --> m87
-  m595 --> m124
-  m595 --> m126
-  m595 --> m136
-  m595 --> m138
-  m595 --> m158
-  m595 --> m160
-  m595 --> m169
-  m595 --> m259
-  m595 --> m260
-  m595 --> m273
-  m595 --> m276
+  m593 --> m592
+  m594 --> m169
+  m594 --> m233
+  m594 --> m591
+  m594 -.-> m595
+  m595 --> m594
+  m596 --> m58
+  m596 --> m68
+  m596 --> m85
+  m596 --> m87
+  m596 --> m124
+  m596 --> m126
+  m596 --> m136
+  m596 --> m138
+  m596 --> m158
+  m596 --> m160
+  m596 --> m169
+  m596 --> m259
+  m596 --> m260
+  m596 --> m273
+  m596 --> m276

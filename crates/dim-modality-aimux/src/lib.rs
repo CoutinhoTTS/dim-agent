@@ -25,7 +25,8 @@ use dim_agent_runtime::AgentBuilder;
 use dim_agent_types::ModelId;
 use dim_modality::{
     AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Job, JobFile,
-    ModalityAdapter, ModalityAdapterService, ProgressSink, RemoteCancel, Submitted,
+    ModalityAdapter, ModalityAdapterService, ProgressSink, RealtimeEvent, RealtimeFrame,
+    RealtimeOpened, RemoteCancel, Submitted,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, DynPlugin, Effect};
@@ -300,6 +301,39 @@ impl ModalityAdapter for MediaAdapter {
         // aimux exposes no cancel for a video job: the provider finishes and
         // bills it whatever this build does (A.2 `unsupported`).
         Box::pin(async { Ok(RemoteCancel::Unsupported) })
+    }
+
+    fn realtime_open(
+        &self,
+        _connection: ModalityConnection,
+        _params: Value,
+        _events: tokio::sync::mpsc::Sender<RealtimeEvent>,
+        _cancel: CancellationToken,
+    ) -> AdapterFuture<'_, RealtimeOpened> {
+        // The media statements carry no realtime operation, so Modality never
+        // calls this for a model this adapter serves.
+        Box::pin(async {
+            Err(AdapterError::unavailable(
+                "No realtime operation is served by this adapter",
+            ))
+        })
+    }
+
+    fn realtime_send(
+        &self,
+        _channel_id: &str,
+        _frame: RealtimeFrame,
+        _cancel: CancellationToken,
+    ) -> AdapterFuture<'_, ()> {
+        Box::pin(async {
+            Err(AdapterError::unavailable(
+                "No realtime session is served by this adapter",
+            ))
+        })
+    }
+
+    fn realtime_close(&self, _channel_id: &str) -> AdapterFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
     }
 }
 
