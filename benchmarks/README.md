@@ -112,8 +112,10 @@ review 的改动，不是 cron 的副产品；跑完后先分析失败、再提 
 但没通过的 trial 交给模型（默认与 L1 judge 相同的 DeepSeek）：题目、判分输出末尾、dimcode
 Timeline 的末段，以及窗口内影响模型的 PR 改了什么。模型给出失败类型（agent / environment /
 timeout / model_api / harness / unknown）、原因、证据和可疑 PR（只能从窗口内的 PR 里选，带
-置信度），并判断原因是否与上次记录的相同。没打出分的 trial 不算失败，它属于下面的
-「打不出分」。
+置信度），并判断原因是否与上次记录的相同。当类型是 agent 或 timeout、且 Timeline 片段里
+看得到 agent 的行为时，再给出 agent 自身的问题（`agent_gap`）和一条具体、可验证的改进
+（`improvement`）；environment / model_api / harness / unknown 失败不要求这两项，模型返回
+空字符串。没打出分的 trial 不算失败，它属于下面的「打不出分」。
 
 每个语料一个跟踪 issue，生命周期是「一个问题窗口」。被跟踪的失败是：
 
@@ -124,7 +126,8 @@ timeout / model_api / harness / unknown）、原因、证据和可疑 PR（只�
 [report/issues.py](report/issues.py) 据此：
 
 ```
-有被跟踪的失败、当前没有打开的跟踪 issue   ─► 开 issue（正文：每题的原因、证据与可疑 PR）
+有被跟踪的失败、当前没有打开的跟踪 issue   ─► 开 issue（正文：每题的原因、证据、可疑 PR，
+                                              以及 agent/timeout 失败的 agent gap 与改进）
 又出现了新的被跟踪失败（或原因变了）       ─► 评论一条，只列新增的
 被跟踪的失败没有新增                       ─► 静默（只更新正文）
 一次测出了结果的运行里没有被跟踪的失败     ─► 关 issue；之后再出现就开新的
@@ -174,6 +177,21 @@ python3 benchmarks/daily_run.py --run-type baseline --head <commit> --tasks-dir 
   的来源是 `reported_by_dimcode`，即被测对象自报，不能当门禁输入。
 
 任务定义 checksum 与基线不符时**拒绝比较**，而不是给出一个看起来能比的数字。
+
+### 缓存解剖（离线）
+
+`runner/cache_anatomy.py` 读一份 `dimcode export` 的 JSONL（一个 Session 的完整
+Timeline），按 `model/call` 的请求体和 `model/usage` 的 cache token 做归因，不跑模型：
+
+```bash
+python3 benchmarks/runner/cache_anatomy.py /path/to/export.jsonl --profile deepseek --json out.json
+```
+
+输出每个分支的首请求继承占比、前缀树的共享深度/分叉点、白写与冷重付 token，以及按
+价格表折算的有效成本。加 `--simulate` 会再用同一份 trace 重算写缓存/保活策略的
+成本；`actual` 行必须复现实测成本，其余行是估计，不是实测。内置价格表是各 provider
+的**计价形状示例**，不是账单；做美元结论前用 `--prices` 指向当前 list price。输入的
+导出含 prompt、代码和工具输出，按敏感数据保管。
 
 ### 产物
 

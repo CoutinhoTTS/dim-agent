@@ -354,9 +354,14 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
 
     def test_environment_failures_are_tracked_whatever_the_baseline(self) -> None:
         reply = {"category": "environment", "cause": "uv download failed.",
-                 "evidence": "curl: (28)", "same_as_known": False, "suspects": []}
+                 "evidence": "curl: (28)",
+                 "agent_gap": "should be ignored",
+                 "improvement": "should be ignored",
+                 "same_as_known": False, "suspects": []}
         *_, done = self.night({"hard": 0.0}, {"hard": reply}, {}, {"hard": 0})
         self.assertEqual(done, ["opened #1 (frontier/tracking)"])
+        self.assertNotIn("**Agent gap:**", self.github.issues[1]["body"])
+        self.assertNotIn("**Improvement:**", self.github.issues[1]["body"])
 
     def test_an_unscoreable_night_does_not_close_the_issue(self) -> None:
         """Exit 6: nothing was scored, so nothing failed, and nothing was measured."""
