@@ -17137,6 +17137,7 @@
         "path SettingsError",
         "path SettingsError::Conflict",
         "path SettingsError::Document",
+        "path SettingsError::DocumentShape",
         "path SettingsError::Invalid",
         "path SettingsService",
         "path dim_app_server::settings::SettingsSnapshot",
@@ -22274,8 +22275,8 @@
         "path BusinessDocument",
         "path Result",
         "path SettingsError",
-        "path SettingsError::Document",
         "path SettingsError::Invalid",
+        "path SettingsError::shape",
         "path SettingsService",
         "path crate::settings::ProjectAuthorized",
         "path crate::settings::project_authorizations",
@@ -22521,6 +22522,7 @@
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Document",
+        "path SettingsError::DocumentShape",
         "path SettingsError::Invalid",
         "path SettingsError::Worker",
         "path SettingsService",
@@ -23755,7 +23757,9 @@
       "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::mcp",
       "references": [
+        "path McpError::Settings",
         "path McpService",
+        "use crate::mcp::McpError",
         "use crate::mcp::McpService"
       ]
     },
@@ -23843,7 +23847,9 @@
       "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::settings",
       "references": [
+        "path SettingsError",
         "path SettingsService",
+        "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
       ]
     },
@@ -24000,6 +24006,13 @@
         "path PluginError",
         "use super::Manager",
         "use super::PluginError"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::tools",
+      "to": "dim_app_server::plugin_manager::management",
+      "references": [
+        "path super::management::without_reasons"
       ]
     },
     {
@@ -25872,6 +25885,7 @@
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Document",
+        "path SettingsError::DocumentShape",
         "path SettingsError::Invalid",
         "path SettingsError::InvalidScope",
         "path SettingsError::Persistence",
@@ -26003,6 +26017,7 @@
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Document",
+        "path SettingsError::DocumentShape",
         "path SettingsError::InvalidScope",
         "path SettingsError::Storage",
         "path SettingsError::UnknownSource",
@@ -30748,7 +30763,8 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::sanitize::safe"
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {

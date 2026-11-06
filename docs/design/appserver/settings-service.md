@@ -365,10 +365,20 @@ impl SettingsService {
   Permission presets and tool lists do not write this source.
 - The file and native paths are shared with `BusinessDocument`, keyed by source name instead of
   `D::NAMESPACE`. CAS, the gate, leases, the unsynced case and `publish` stay as they are.
-- `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope` and
-  `Document(message)`. A written document that breaks the schema or is not an object is `Document` with the validator's message (the instance path, never the value); the
-  client path maps it to invalid params. A persisted document that breaks the schema stays
-  `Invalid` (`invalid_document` / `settings_failed`).
+- `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope`,
+  `Document(message)` and `DocumentShape { reason, position }`. A written document that
+  breaks the schema or is not an object is `Document` with the validator's message (the
+  instance path, never the value). `DocumentShape` is how `McpSettings` refuses an MCP
+  document as a whole — not an object, no `mcpServers` object, `mcpServers` not an object,
+  an empty server entry id, a file that is not JSON: the owner's static `reason`, which a
+  client may see, and `position` when the document was read from bytes. Its `Display` is
+  byte for byte what `Document` printed for the same text. No other owner has adopted it:
+  HooksSettings refuses a hook document as `Invalid("invalid hook document")`, and a
+  persisted file that the default `BusinessDocument` decode or a declared source cannot
+  parse is `Invalid("invalid settings document")`. `reason()` reports the static message of `Invalid` and of `DocumentShape`, and
+  `None` for every other variant, `Document` included, whose text is arbitrary. The
+  client path maps `Document` and `DocumentShape` to invalid params. A persisted document
+  that breaks the schema stays `Invalid` (`invalid_document` / `settings_failed`).
 - The `settings` service is a `HostDispatch` under `host_key("settings")`, and assembly registers
   `settings` in the `ServiceCatalog`, as `pluginFiles` is done today. Replies use
   the envelope of `sessions`: `{ok: true, value}` or `{ok: false, error: {code, message}}`.
@@ -581,8 +591,11 @@ Corrections made against the code (reflected in §4.3 and §4.5):
   (methods contract §3.2; ADR 004 D4 boundary). This is the only new plugin row; the §2 diagram's
   `managementMethods settings` sits in that part, and §9's ADR 002 D2 answer holds for it as for
   PermissionRules: it is the client path of the Settings data, not a wiring module.
-- `SettingsError` has `InvalidScope` and `Document(message)` besides the two named variants, so
-  the client path can tell invalid params from a persisted failure.
+- `SettingsError` has `InvalidScope`, `Document(message)` and
+  `DocumentShape { reason, position }` besides the two named variants, so the client path
+  can tell invalid params from a persisted failure; `reason()` reports the static message
+  behind `Invalid` and `DocumentShape`, and `DocumentShape`'s `Display` stays byte for
+  byte what `Document` printed.
 - The service reply envelope is the one of `sessions`.
 
 Acceptance (§11) covered by Rust flow tests, with the owner calling the `settings` service through

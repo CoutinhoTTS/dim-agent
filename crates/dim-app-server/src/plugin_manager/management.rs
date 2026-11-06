@@ -60,9 +60,17 @@ fn outcome(fields: &mut Map<String, Value>) {
     }
     if let Some(Value::Array(refused)) = fields.get_mut("refused") {
         for refusal in refused {
-            if let Some(error) = refusal.get_mut("error") {
-                *error = Value::String("Plugin content was refused".into());
-            }
+            let Some(entry) = refusal.as_object_mut() else {
+                continue;
+            };
+            // A refusal's owner-writable text is the static reason it
+            // carries (A.2); every other cause, and the position a
+            // document-shape refusal may hold, stays inside.
+            let reason = entry.remove("reason");
+            entry.insert(
+                "error".into(),
+                reason.unwrap_or_else(|| Value::String("Plugin content was refused".into())),
+            );
         }
     }
 }
@@ -70,5 +78,24 @@ fn outcome(fields: &mut Map<String, Value>) {
 fn git_source(source: &mut Map<String, Value>) {
     if let Some(Value::String(git)) = source.get_mut("git") {
         *git = super::acquire::git_url_safe(git);
+    }
+}
+
+/// Drops the internal `reason` member of every refusal (A.2): the `plugin`
+/// tool shows a refusal's raw error text, the same member a client never
+/// sees.
+pub(super) fn without_reasons(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(without_reasons),
+        Value::Object(fields) => {
+            if let Some(Value::Array(refused)) = fields.get_mut("refused") {
+                for refusal in refused {
+                    if let Some(entry) = refusal.as_object_mut() {
+                        entry.remove("reason");
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }

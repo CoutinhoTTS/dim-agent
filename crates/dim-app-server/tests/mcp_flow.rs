@@ -720,7 +720,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     fs::write(fixture.home.join("project/.mcp.json"), b"{").unwrap();
     assert!(matches!(
         mcp.catalog(Some(1), &cancel).await,
-        Err(McpError::Settings(SettingsError::Document(_)))
+        Err(McpError::Settings(SettingsError::DocumentShape { .. }))
     ));
     assert!(mcp.catalog(None, &cancel).await.is_ok());
     fixture.close().await;

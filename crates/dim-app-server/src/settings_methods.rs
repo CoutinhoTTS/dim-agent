@@ -97,7 +97,9 @@ impl From<SourceDeclaration> for SourceListing {
 /// The client path's wire errors (§4.3).
 fn wire(error: SettingsError) -> RpcError {
     let kind = match &error {
-        SettingsError::InvalidScope(_) | SettingsError::Document(_) => {
+        SettingsError::InvalidScope(_)
+        | SettingsError::Document(_)
+        | SettingsError::DocumentShape { .. } => {
             return RpcError::invalid(error.to_string());
         }
         SettingsError::Closed => return RpcError::reloading(),
