@@ -105,19 +105,74 @@ kind table. It is an override, not the always-present form.
 The terminal fact's `error` is a complete fallback line, so every renderer that
 already prints `error` shows the better line without a change of its own.
 
+A failed request shows one line: `<meaning>: <reason>. <action>`, with
+`: <reason>` left out when the fact carries none. When the fact records more
+than one attempt, the line ends with `Tried N times over M s.`, the total wait
+rounded to whole seconds; a single attempt adds nothing. The details keep their
+own `tried N times over M s`. The words come from the kind, and the line takes
+no `model failed:` prefix. A request that already showed text, thinking or a
+tool row starts the line with "The response above is incomplete.", which each
+client derives from the rows it holds rather than storing. An event written
+before the fact existed keeps the `error` line and its prefix.
+
+The turn's own `failed` outcome does not repeat the model failure: an error equal
+to the one the turn's model failure already showed prints nothing. The
+suppression is per turn: every turn end forgets what a previous turn showed,
+whether that turn completed, failed or was cancelled, so a later turn's failure
+with the same text still prints. A turn failure that is not a model failure
+still prints.
+
+The CLI line mode and `exec` print that one line. The TUI and the Web keep its
+details one step away: the kind, the HTTP status, the provider code, the request
+id, `tried N times over M s` when there was more than one attempt, the wait the
+provider asked for, and the cause chain, one frame per line. The TUI details join
+the `/tools` cycle and the click-to-expand of an error row; the Web opens them
+from a "Details" disclosure under the row. Both are collapsed by default.
+
+While a request waits to retry, the TUI's working line and the Web's working
+indicator read `Retrying 3/8 in 4 s · <meaning>: <reason> · <stop>`, counting
+down from `ModelProgress.retry.retryAtMs` on the client clock. Once that time
+passes before new progress arrives, they say `Waiting for the provider` with
+the kind's meaning instead of `in 0 s`. The visible countdown is not a live
+region: a screen reader hears `Retrying, attempt 3 of 8: <meaning>` when a wait
+starts or the attempt changes, never on each tick. The CLI line mode writes one
+line per attempt where it writes its other status lines; `exec` writes none. A
+retry adds no transcript row, and a later success adds none either; the failure
+line's `tried N times` is the persistent record.
+
 ## 4. Retry
 
-The ModelProvider retries:
-- at most 3 attempts;
-- with a backoff of 0.5 s × attempt × a jitter in [0.75, 1.0];
-- within a 60 s wait budget;
-- using `Retry-After` as the delay while it fits the budget left, and stopping
-  at once with `retryAfterMs` recorded when it does not;
-- only the `network`, `rate_limited` and `server_error` kinds, so 5xx statuses
-  other than 501 and 505 are now retried.
+`invoke` is shared by ModelProvider, the auxiliary model and the summary
+strategy, so all three retry the same way; there is one implementation and no
+per-caller setting.
 
-It does not retry after irreversible output. An interrupt cancels the sleep. A
-credential rejection keeps its one recovery, with no delay.
+| item | value |
+| --- | --- |
+| retried kinds | `network`, `rate_limited`, `server_error`, `malformed_response` |
+| attempts | at most 8 in total per request, the first included |
+| `malformed_response` | retried once per request: a second malformed response stops, whatever came before it |
+| backoff | the n-th retry sleeps 1 s × 2^(n−1), capped at 30 s, times a uniform jitter in [0.8, 1.0] |
+| `Retry-After` | used exactly as the delay, even above 30 s, while it fits in the budget left; if it does not fit, the request stops at once and records `retryAfterMs` |
+| wait budget | a request sleeps at most five minutes in all before it fails; a wait that does not fit in what is left stops the request at once |
+| unchanged | no retry after irreversible output; an interrupt cancels the sleep; one credential recovery with no delay, still within the 8 attempts; `ModelFailurePolicy::forbids_retry`; a terminal credential rejection is settled |
+
+The nominal backoff sleeps are 1, 2, 4, 8, 16, 30 and 30 s, about 91 s in all.
+The numbers follow the outage in #1197, which lasted tens of seconds: eight
+attempts ride out about 90 s, a 1 s base avoids sub-second attempts that hit
+the same outage, the 30 s cap keeps the last attempts from being minutes
+apart, and a server's own advice sets the timing without being able to extend
+the budget. A request can wait up to five minutes in all before it fails;
+recovery of a rejected credential never waits, whatever advice it carried.
+
+While it sleeps, the wait is published as `ModelProgress.retry`: `attempt` (the
+attempt about to run, at least 2), `maxAttempts`, `retryAtMs` (unix
+milliseconds at which it starts), `kind` and the failure's bounded `reason`.
+`retryAtMs` is wall-clock time for display and is advisory; the budget is
+measured on a monotonic clock, so a client must not treat it as a deadline.
+ModelProvider sets the field before the sleep and clears it when the attempt
+starts, the call ends, or the sleep is cancelled. It is not a Timeline fact: no
+later decision reads it, and the terminal fact keeps `attempts` and
+`waitedMs`.
 
 ## 5. Compatibility
 
