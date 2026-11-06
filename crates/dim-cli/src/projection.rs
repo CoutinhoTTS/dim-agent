@@ -4,15 +4,15 @@
 //! [`ViewSnapshot`]s built here. Only the rows the screen needs are kept; the
 //! durable history stays with the App Server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dim_agent_types::{
     BranchCreateAt, BranchCreateFailedData, BranchSource, CollaborationDelivery,
     CollaborationOutcome, CollaborationTarget, ContentBlock, ContextCompactionResult, ExecStatus,
     InputMode, InsufficientSpacePartName, JsonObject, Message, MessageContent, MessagePart,
-    ModelFailure, ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult, TurnOutcome,
-    UserInput,
+    ModelFailure, ModelFailureKind, ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult,
+    TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
@@ -75,6 +75,8 @@ pub struct Projection {
     background: HashMap<TaskTarget, String>,
     /// The newest turn end: its sequence and how the turn ended.
     ended: Option<(u64, TurnEnd)>,
+    /// Requests whose text, thinking or tool row already showed.
+    showed: HashSet<String>,
     /// The `error` of a model failure already shown this turn: the turn's
     /// repeat of it prints nothing.
     shown_failure: Option<String>,
@@ -496,6 +498,7 @@ impl Projection {
                     .insert(data.request_id.clone(), event.create_at);
             }
             EventContent::Thinking(data) => {
+                self.showed.insert(data.request_id.clone());
                 let index = self.open_thinking(&data.request_id);
                 let elapsed = self
                     .request_starts
@@ -512,6 +515,7 @@ impl Projection {
                 row.elapsed_ms = elapsed;
             }
             EventContent::Text(data) => {
+                self.showed.insert(data.request_id.clone());
                 self.close_thinking(&data.request_id);
                 let index = match self.assistant_rows.get(&data.request_id) {
                     Some(index) => *index,
@@ -529,6 +533,7 @@ impl Projection {
                 self.row(index).text.push_str(&data.delta);
             }
             EventContent::ToolUse(data) => {
+                self.showed.insert(data.request_id.clone());
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
@@ -581,7 +586,7 @@ impl Projection {
                 self.row(index).compaction = Some(compaction_view(&data.outcome));
             }
             EventContent::ModelEnd(data) => {
-                let incomplete = self.showed_output(&data.request_id);
+                let incomplete = self.showed.remove(&data.request_id);
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
@@ -1115,16 +1120,6 @@ impl Projection {
         row.failure = failure;
     }
 
-    /// Whether the request showed output already: a text, thinking or tool
-    /// row of the same request.
-    fn showed_output(&self, request_id: &str) -> bool {
-        self.assistant_rows.contains_key(request_id)
-            || self.thinking_rows.contains_key(request_id)
-            || self.rows.iter().any(|row| {
-                row.kind == RowKind::ToolCall && row.batch.as_deref() == Some(request_id)
-            })
-    }
-
     /// Shows a model request's reasoning that is not written yet. Progress
     /// that the written deltas overtook, or that runs ahead of them, waits
     /// for the next notice.
@@ -1139,6 +1134,9 @@ impl Projection {
         let Some(request_id) = &progress.request_id else {
             return;
         };
+        if !progress.thinking.is_empty() || !progress.text.is_empty() {
+            self.showed.insert(request_id.clone());
+        }
         if progress.thinking.is_empty() {
             return;
         }
@@ -1426,29 +1424,45 @@ fn presentation_line(presentation: &dim_agent_types::ProviderPresentation, error
     format!("model failed: {message}{action}")
 }
 
-/// The one line a model failure shows, worded from its kind through the
-/// interface language; `incomplete` prefixes it when the request had output.
-pub(crate) fn failure_line(failure: &ModelFailure, incomplete: bool) -> String {
-    let reason = failure
-        .reason
-        .as_deref()
+/// `<meaning>: <reason>`, worded from the kind through the interface
+/// language; the reason is trimmed and loses its trailing period. Just the
+/// meaning when the failure carries no reason.
+pub(crate) fn failure_phrase(kind: ModelFailureKind, reason: Option<&str>) -> String {
+    let reason = reason
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
         .map(|reason| reason.strip_suffix('.').unwrap_or(reason));
-    let mut line = String::new();
-    if incomplete {
-        line.push_str(crate::ui::i18n::t("The response above is incomplete."));
-        line.push(' ');
+    let meaning = crate::ui::i18n::t(kind.meaning());
+    match reason {
+        Some(reason) => format!("{meaning}: {reason}"),
+        None => meaning.to_owned(),
     }
-    line.push_str(crate::ui::i18n::t(failure.kind.meaning()));
-    if let Some(reason) = reason {
-        line.push_str(": ");
-        line.push_str(reason);
-        line.push('.');
-    }
-    line.push(' ');
-    line.push_str(crate::ui::i18n::t(failure.kind.action()));
-    line
+}
+
+/// The one line a model failure shows; `incomplete` prefixes it when the
+/// request had output.
+pub(crate) fn failure_line(failure: &ModelFailure, incomplete: bool) -> String {
+    let prefix = if incomplete {
+        format!(
+            "{} ",
+            crate::ui::i18n::t("The response above is incomplete.")
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{prefix}{}. {}",
+        failure_phrase(failure.kind, failure.reason.as_deref()),
+        crate::ui::i18n::t(failure.kind.action())
+    )
+}
+
+/// Whole seconds until a retry starts, never below zero.
+pub(crate) fn retry_seconds(retry_at_ms: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64);
+    retry_at_ms.saturating_sub(now).div_ceil(1000)
 }
 
 fn failure_detail(failure: &ModelFailure) -> FailureDetail {
@@ -2531,6 +2545,34 @@ mod tests {
         assert!(
             row.text
                 .starts_with("The response above is incomplete. The provider reported"),
+            "{}",
+            row.text
+        );
+    }
+
+    #[test]
+    fn a_tool_row_alone_starts_the_incomplete_sentence() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                serde_json::json!({
+                    "sequence": 1, "create_at": 1000, "type": "step", "name": "tool-use",
+                    "data": {
+                        "turn_id": "t1", "request_id": "r1",
+                        "call": {"id": "c1", "name": "read", "input": {}},
+                    },
+                }),
+                model_end(
+                    2,
+                    failure_data(serde_json::json!({"failure": failure_fact()})),
+                ),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert!(
+            row.text.starts_with("The response above is incomplete."),
             "{}",
             row.text
         );

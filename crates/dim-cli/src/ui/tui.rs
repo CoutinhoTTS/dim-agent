@@ -4715,20 +4715,8 @@ impl App {
                 .as_ref()
                 .and_then(|snapshot| snapshot.retry.as_ref());
             if let Some(retry) = retry {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |since| since.as_millis() as u64);
-                let seconds = retry.retry_at_ms.saturating_sub(now).div_ceil(1000);
-                let reason = match retry
-                    .reason
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|reason| !reason.is_empty())
-                    .map(|reason| reason.strip_suffix('.').unwrap_or(reason))
-                {
-                    Some(reason) => format!("{}: {reason}", t(retry.kind.meaning())),
-                    None => t(retry.kind.meaning()).to_owned(),
-                };
+                let seconds = crate::projection::retry_seconds(retry.retry_at_ms);
+                let reason = crate::projection::failure_phrase(retry.kind, retry.reason.as_deref());
                 return format!(
                     "{} {}",
                     FRAMES[beat % FRAMES.len()],

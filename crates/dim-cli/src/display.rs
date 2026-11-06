@@ -114,8 +114,17 @@ impl Display {
                         &[
                             ("attempt", &retry.attempt.to_string()),
                             ("max", &retry.max_attempts.to_string()),
-                            ("seconds", &retry_seconds(retry.retry_at_ms)),
-                            ("reason", &retry_reason(retry.kind, retry.reason.as_deref())),
+                            (
+                                "seconds",
+                                &crate::projection::retry_seconds(retry.retry_at_ms).to_string(),
+                            ),
+                            (
+                                "reason",
+                                &crate::projection::failure_phrase(
+                                    retry.kind,
+                                    retry.reason.as_deref(),
+                                ),
+                            ),
                         ],
                     );
                     self.record(&line)?;
@@ -270,26 +279,5 @@ impl Display {
                 "done"
             }
         ))
-    }
-}
-
-/// The seconds a retry waits from now, never below zero.
-fn retry_seconds(retry_at_ms: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as u64);
-    retry_at_ms.saturating_sub(now).div_ceil(1000).to_string()
-}
-
-/// `<meaning>: <reason>` worded from the kind, or the meaning alone.
-fn retry_reason(kind: ModelFailureKind, reason: Option<&str>) -> String {
-    let meaning = crate::ui::i18n::t(kind.meaning());
-    match reason
-        .map(str::trim)
-        .filter(|reason| !reason.is_empty())
-        .map(|reason| reason.strip_suffix('.').unwrap_or(reason))
-    {
-        Some(reason) => format!("{meaning}: {reason}"),
-        None => meaning.to_owned(),
     }
 }
