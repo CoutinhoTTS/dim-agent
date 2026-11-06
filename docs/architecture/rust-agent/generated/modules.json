@@ -11041,6 +11041,8 @@
         "mod recovery",
         "path recovery::invoke",
         "use recovery::Consume",
+        "use recovery::RetryObserver",
+        "use recovery::RetryWaiting",
         "use recovery::invoke"
       ]
     },
@@ -11236,6 +11238,8 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ModelFailureKind",
+        "path ModelFailureKind::MalformedResponse",
+        "path ModelFailureKind::Unknown",
         "use dim_agent_types::ModelFailureKind"
       ]
     },
@@ -11246,6 +11250,13 @@
         "path ModelRequest",
         "path model",
         "use dim_agent_types::ModelRequest"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::recovery",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path kind"
       ]
     },
     {
@@ -11279,6 +11290,14 @@
     },
     {
       "from": "dim_agent_capabilities::output",
+      "to": "dim_agent_capabilities::model_provider::recovery",
+      "references": [
+        "path crate::model_provider::RetryObserver",
+        "path crate::model_provider::RetryWaiting"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::output",
       "to": "dim_agent_capabilities::steer",
       "references": [
         "path REPLACED_BY_STEER",
@@ -11291,8 +11310,10 @@
       "references": [
         "path ModelProgress",
         "path ModelProgress::default",
+        "path RetryProgress",
         "path ToolProgress",
         "use dim_agent_runtime::ModelProgress",
+        "use dim_agent_runtime::RetryProgress",
         "use dim_agent_runtime::ToolProgress"
       ]
     },
@@ -13452,6 +13473,7 @@
       "from": "dim_agent_capabilities::summary_strategy",
       "to": "dim_agent_capabilities::model_provider::recovery",
       "references": [
+        "path crate::model_provider::RetryObserver",
         "path invoke_with_recovery",
         "use crate::model_provider::invoke_with_recovery"
       ]
@@ -16100,7 +16122,9 @@
       "from": "dim_agent_runtime::contracts",
       "to": "dim_agent_types::events",
       "references": [
-        "path dim_agent_types::BranchSource"
+        "path ModelFailureKind",
+        "path dim_agent_types::BranchSource",
+        "use dim_agent_types::ModelFailureKind"
       ]
     },
     {
@@ -27486,12 +27510,14 @@
         "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
+        "path ModelFailureKind",
         "path dim_agent_types::BranchSource",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::ApprovalDecision",
         "use dim_agent_types::BranchSource",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ModelFailureKind"
       ]
     },
     {
@@ -40393,6 +40419,7 @@
         "path InputDeletedData",
         "path InputMessageData",
         "path InputWithdrawData",
+        "path ModelFailureKind",
         "path ModelOutputEndData",
         "path ModelStartData",
         "path ModelUsageData",

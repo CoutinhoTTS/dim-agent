@@ -2749,7 +2749,7 @@
       },
       {
         "service": "dim_agent_capabilities::host::ModalityConnectionHost",
-        "provider": 14,
+        "provider": 15,
         "generation": 1,
         "removing": false
       },

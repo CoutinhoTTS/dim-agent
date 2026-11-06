@@ -448,6 +448,10 @@ impl SummaryStrategy {
     }
 }
 
+/// The summarizer runs without a display, so a retry it waits through
+/// reports nowhere.
+impl crate::model_provider::RetryObserver for Stats {}
+
 /// One compaction's counters and the summarizer settings it ran with; they
 /// become its diagnostics object.
 #[derive(Default)]
