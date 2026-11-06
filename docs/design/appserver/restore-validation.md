@@ -65,6 +65,8 @@ store.branches(id)  — one connection hold: the directory
 then, per branch, pages of 64 physical rows:
   decode every event without its request bodies, and check that every content reference
   a record names resolves to a content row (hashes only, no body loaded or hashed)
+  check that every node row's parent resolves to a content row (hashes and the parent field
+  only, no body loaded or hashed)
   check the row kind, the event-id index, the before trace's event id and kinds
   check sequence continuity, atomic-batch boundaries, and that the head is the final batch end
   collect every event id in one set (duplicates fail), and every completed compaction
@@ -75,6 +77,15 @@ then:
   directory checks: main is the root; every child has parent, anchor and cut; anchors do not
   exceed the parent head; parent chains exist and have no cycle
 ```
+
+The reference check runs per batch; the parent check is one statement over the Session's `node`
+rows, reading only each body's `parent` field. Together they prove every message list complete by
+induction without loading a body: the referenced node exists, each parent exists by the statement,
+and the walk ends at a node whose parent is null. Appends write a node and its parent in one
+transaction, fork copies the referenced parent closure, and the only delete removes a whole Session,
+so no path removes a single content row and the statement can cover the whole Session in constant
+memory. Export is the exception to the cheap pass: its preflight rebuilds and hash-checks every
+body before the first line is written, so a damaged body cannot leave a partial export.
 
 The cost is the pass. The issue measured it with `restore_cost product` in a release build:
 about 14 µs per event, 30 ms of a 69 ms restore at 5,008 events. Validation is one of the three

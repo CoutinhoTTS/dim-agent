@@ -3500,6 +3500,156 @@ async fn restore_validation_checks_references_across_batches() {
     db.close().await.unwrap();
 }
 
+/// [#713] Restore refuses a missing node anywhere in a message list: a v17
+/// record names only the last node, so the pass also checks that every node's
+/// parent resolves, not only the direct references.
+#[tokio::test]
+async fn restore_validation_refuses_a_missing_middle_node() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let request = || {
+        let mut request = ModelRequest::new(
+            "mock",
+            "test",
+            (0..3)
+                .map(|index| Message::text(Role::User, format!("middle message {index}")))
+                .collect(),
+        );
+        request.system = Some(Arc::new(SystemPrompt::Text("middle system".into())));
+        Arc::new(request)
+    };
+    store
+        .create_session("middle", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("middle", "main"),
+        vec![
+            record(
+                1,
+                EventKind::ContextPrepare(ContextPrepareData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    through: 0,
+                    request: request(),
+                    configuration: None,
+                    prompt: None,
+                    recovery: None,
+                }),
+            ),
+            record(
+                2,
+                EventKind::ModelCall(ModelCallData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    request: request(),
+                    configuration: None,
+                    prompt: None,
+                }),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let middle: String = connection
+        .query_row(
+            "SELECT hash FROM timeline_content WHERE session_id = 'middle' \
+             AND kind = 'node' AND body LIKE '%middle message 1%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM timeline_content WHERE session_id = 'middle' AND hash = ?1",
+                [&middle],
+            )
+            .unwrap(),
+        1
+    );
+    // The last node, the tools and the system rows stay: the record's direct
+    // reference resolves, and only the parent check can refuse the restore.
+    let result = store.branches("middle").await;
+    assert!(
+        matches!(&result, Err(AgentError::Storage(message))
+            if message == &format!("missing request content {middle}")),
+        "restore accepted the missing middle node: {result:?}"
+    );
+    drop(connection);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// [#713] The parent check reads every node row of the Session, not one batch:
+/// a chain deeper than a batch of 64 rows fails when a node near its start is
+/// missing while the last node the record references stays.
+#[tokio::test]
+async fn restore_validation_refuses_a_missing_parent_across_batches() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let request = Arc::new(ModelRequest::new(
+        "mock",
+        "test",
+        (0..70)
+            .map(|index| Message::text(Role::User, format!("chain message {index:02}")))
+            .collect(),
+    ));
+    store
+        .create_session("chain", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("chain", "main"),
+        vec![record(
+            1,
+            EventKind::ContextPrepare(ContextPrepareData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                through: 0,
+                request: request.clone(),
+                configuration: None,
+                prompt: None,
+                recovery: None,
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let second: String = connection
+        .query_row(
+            "SELECT hash FROM timeline_content WHERE session_id = 'chain' \
+             AND kind = 'node' AND body LIKE '%chain message 01%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM timeline_content WHERE session_id = 'chain' AND hash = ?1",
+                [&second],
+            )
+            .unwrap(),
+        1
+    );
+    let result = store.branches("chain").await;
+    assert!(
+        matches!(&result, Err(AgentError::Storage(message))
+            if message == &format!("missing request content {second}")),
+        "restore accepted the missing parent across batches: {result:?}"
+    );
+    drop(connection);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// [#601] A restore reuses a validation pass while the stored branch directory
 /// is unchanged, and validates again once a branch head changes.
 #[tokio::test]

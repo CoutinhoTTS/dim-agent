@@ -110,7 +110,7 @@ Each row names a convention, where it is written, and the mechanism by which v17
 | The Timeline (sequence, atomic batches, commit and publish, before), the Dispatcher (hot window only), the `TimelineStore` trait and its read semantics, and capabilities rebuilding from `local(..=S)` | [timeline-storage §1, §3, §4](../../architecture/rust-agent/timeline-storage.md), [time bus](../../architecture/rust-agent/time-bus.md), [single tree](../../architecture/rust-agent/single-tree.md) | No code outside the store changes. Every read returns the same events, in the same order and batches, with the same errors for intact data; only storage errors for damaged request content have new messages (§8) |
 | A checkpoint read "does not scan request bodies before the snapshot recovery position" ("不扫描快照恢复位置之前的请求正文") | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描), bounded reads table | A request row is rebuilt from its own references and the content rows they reach, never from another event row, so the read's event rows start at `resume` as today. The content it loads is the messages of the requests it returns, which v16 loads through the same rows' references (§10, acceptance 3a) |
 | Reads go in segments and release the read connection after each; no hold decodes unbounded history ("每段结束释放读连接 … 不在锁内解码无限历史") | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) | Event rows are read in today's segments (256 sequences, 64 rows in validation). A list walk releases the read connection after at most 256 node loads and continues from the next address; the read call keeps the partial walk between holds, as #213 keeps its cache (§7.2, acceptance 3a) |
-| Restore validates each page with its references and releases the lock per page; its caches are bounded ("恢复" row) | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) | `validate_session` decodes each page in the same holds without its request bodies and checks that every reference resolves (§8); it loads no body, so the pass uses no content cache |
+| Restore validates each page with its references and releases the lock per page; its caches are bounded ("恢复" row) | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) | `validate_session` decodes each page in the same holds without its request bodies and checks that every reference resolves and every node's parent resolves (§8); it loads no body, so the pass uses no content cache |
 | Serialization, reference resolution, hash checks and type conversion stay at the storage boundary | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) | Every node is hash-checked when it is loaded, as content rows are today (§8) |
 | External protocols expand to the original events ("外部协议仍展开为原事件") | [timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描) | Untouched |
 | An incompatible change needs a new version and a read path; an upgrade only adds structures and reads or rewrites no business row; one-way | [Storage format, 格式版本](native-storage-format.md#格式版本) and the S5a/S5b decisions | v17 by a marker bump (§11) |
@@ -543,9 +543,11 @@ An in-order walk that stops at the kept request checks only the nodes it loads; 
 kept request was rebuilt. A missing or damaged node fails the read explicitly ("missing request content", "request
 content hash mismatch", "request list length mismatch"); the request is never restored empty or partial. The bad row
 keeps its bytes: reads never write. `validate_session` decodes every event without its request bodies and checks that
-every reference a record names has a content row in the Session, so a Session with a missing content row is refused at
-restore and preserved, as today. A body that is present but damaged passes that check: it fails the read that loads it,
-which is where the hash and kind checks live. A damaged node reaches every request
+every reference a record names has a content row in the Session and that every node's parent has one too, so a Session
+with a missing content row — including a node in the middle of a message list — is refused at restore and preserved, as
+today. A body that is present but damaged passes that check: it fails the read that loads it, which is where the hash
+and kind checks live. Export is the one caller that keeps the full preflight: it rebuilds and hash-checks every body
+before its first line is written, so a damaged body leaves no partial export. A damaged node reaches every request
 whose list passes through it, which in normal operation is every request from the one that added it to the next
 compaction: the requests that reference the same message in v16.
 

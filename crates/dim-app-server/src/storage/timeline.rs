@@ -3188,6 +3188,33 @@ fn check_references(
     Ok(())
 }
 
+/// Fails unless every node row in `session` names an existing parent row: one
+/// statement over the Session's node rows, reading only each body's `parent`
+/// field, so no body is loaded or hashed. With `check_references` it proves
+/// every chain reachable from a reference complete by induction: the
+/// referenced node exists, every parent exists by this check, and the walk
+/// ends at a node whose `parent` is null. Memory does not grow with the
+/// Session.
+fn check_parents(connection: &Connection, session: &str) -> Result<()> {
+    let missing: Option<String> = connection
+        .query_row(
+            "SELECT json_extract(n.body, '$.parent') FROM timeline_content n \
+             WHERE n.session_id = ?1 AND n.kind = 'node' \
+               AND json_valid(n.body) AND json_type(n.body, '$.parent') = 'text' \
+               AND NOT EXISTS (SELECT 1 FROM timeline_content p \
+                 WHERE p.session_id = ?1 AND p.hash = json_extract(n.body, '$.parent')) \
+             LIMIT 1",
+            [session],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(missing) = missing {
+        return Err(error(format!("missing request content {missing}")));
+    }
+    Ok(())
+}
+
 /// Validates `session`'s stored rows and returns its branch directory.
 /// `reader` decides what the pass does with request bodies: restore passes a
 /// reader without bodies, so the pass checks that every content reference a
@@ -3215,7 +3242,7 @@ pub(super) async fn validate_session(
         if orphan {
             return Err(error("Timeline event references a missing branch"));
         }
-        Ok(())
+        check_parents(connection, &id)
     })
     .await?;
     let branches = directory.branches()?;

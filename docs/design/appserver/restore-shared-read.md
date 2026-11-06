@@ -398,7 +398,8 @@ and `main`'s prefix 5 times; with the prototype, twice each (own: scan and fill;
 one-event tail.
 
 **Validation hand-over (read A) is out of scope.** Storage validates every branch before the runtime builds anything,
-page by page, without loading request bodies, in bounded connection holds
+page by page, without loading request bodies — it checks that every reference and every node's parent resolves — in
+bounded connection holds
 ([timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描), "恢复" row). Handing its
 decoded events to the runtime would hold every branch's history from validation until the last branch opens, change
 what the `TimelineStore` port returns or keep state between its calls, and contradict the bounded-read convention.
