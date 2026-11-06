@@ -3017,6 +3017,7 @@
       "unexpandedMacros": [
         "format",
         "tracing::warn",
+        "unreachable",
         "vec"
       ]
     },
@@ -3039,6 +3040,7 @@
         "matches",
         "tokio::select",
         "tracing::warn",
+        "unreachable",
         "vec"
       ]
     },
@@ -27407,9 +27409,11 @@
         "path Reads",
         "path Reads::new",
         "path ResourceError",
+        "path ResourceError::invalid",
         "path UiResourcesPlugin::new",
         "path file_error",
         "path gone",
+        "path read_page",
         "use resources::PublishFile",
         "use resources::Read",
         "use resources::Reads",
@@ -27418,7 +27422,8 @@
         "use resources::UiResources",
         "use resources::UiResourcesPlugin",
         "use resources::file_error",
-        "use resources::gone"
+        "use resources::gone",
+        "use resources::read_page"
       ]
     },
     {
@@ -27434,8 +27439,29 @@
       "references": [
         "path FileReader",
         "path FileStorage",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Closed",
         "use dim_agent_capabilities::file_storage::FileReader",
-        "use dim_agent_capabilities::file_storage::FileStorage"
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_extensions::resources",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::service",
+        "path SessionMethods",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
       ]
     },
     {

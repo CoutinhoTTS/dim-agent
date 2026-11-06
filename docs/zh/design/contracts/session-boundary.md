@@ -6,7 +6,7 @@
 
 | 服务 | 作用域 | 注册什么 | 注册方 | 读取方 |
 | --- | --- | --- | --- | --- |
-| `sessionMethods` | Session | 方法命名空间 | Session 部件（Questions、Goal、SessionTitle、Attachments、ShellInput、InputQueue 的 `session.input` 等） | Rpc，经 Session，按调用 |
+| `sessionMethods` | Session | 方法命名空间 | Session 部件（Questions、Goal、SessionTitle、Attachments、ShellInput、SessionGrants、UiResources 的 `session.ui.resources`、InputQueue 的 `session.input` 等） | Rpc，经 Session，按调用 |
 | `managementMethods` | 进程 | 方法命名空间 | 只有进程部件（Mcp、Provider、SkillsCatalog、Settings 等） | Rpc，按调用 |
 | `toolRegistry` | Session | 工具 | Session 部件（Questions、Goal、Web、Scheduler、Workflow），各自注册自己的工具 | ToolRegistry，`toolRegistry` 的所有者（补充：工具注册） |
 
