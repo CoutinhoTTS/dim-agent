@@ -1340,10 +1340,10 @@ pub struct ProgressNotice {
     pub data: Value,
 }
 /// One built-in notification: its variant, payload and wire name in one
-/// entry. The [`Notification`] enum, its [`wire_name`](Notification::wire_name)
-/// match and [`BUILTIN_NOTIFICATIONS`] are all derived from this table, so a
-/// variant cannot be added without naming its wire name, and the name a
-/// provider may not take is the name it serializes under.
+/// entry. The [`Notification`] enum and [`BUILTIN_NOTIFICATIONS`] are both
+/// derived from this table, so a variant cannot be added without naming its
+/// wire name, and the name a provider may not take is the name it serializes
+/// under.
 macro_rules! notifications {
     ($(
         $(#[$doc:meta])*
@@ -1361,14 +1361,6 @@ macro_rules! notifications {
         /// The wire name of every [`Notification`] variant, in the same order:
         /// a contributed notification name may not collide with one.
         pub(crate) const BUILTIN_NOTIFICATIONS: &[&str] = &[$($wire),+];
-        impl Notification {
-            /// This notification's wire name.
-            pub fn wire_name(&self) -> &'static str {
-                match self {
-                    $( Self::$variant { .. } => $wire, )+
-                }
-            }
-        }
     };
 }
 notifications! {
