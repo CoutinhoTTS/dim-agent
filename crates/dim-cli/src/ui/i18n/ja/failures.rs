@@ -64,6 +64,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "プロバイダーは {seconds} 秒待つよう要求しました"
         }
         "cause:" => "原因：",
+        "Tried {count} times over {seconds} s." => "{count} 回試行、{seconds} 秒経過。",
+        "Waiting for the provider · {reason} · Esc stops" => {
+            "プロバイダーを待機中 · {reason} · Esc 停止"
+        }
         _ => return None,
     })
 }

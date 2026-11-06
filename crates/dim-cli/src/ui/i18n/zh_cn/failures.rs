@@ -40,6 +40,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "tried {count} times over {seconds} s" => "已尝试 {count} 次，历时 {seconds} 秒",
         "the provider asked to wait {seconds} s" => "提供方要求等待 {seconds} 秒",
         "cause:" => "原因：",
+        "Tried {count} times over {seconds} s." => "已尝试 {count} 次，历时 {seconds} 秒。",
+        "Waiting for the provider · {reason} · Esc stops" => {
+            "正在等待提供方 · {reason} · Esc 停止"
+        }
         _ => return None,
     })
 }

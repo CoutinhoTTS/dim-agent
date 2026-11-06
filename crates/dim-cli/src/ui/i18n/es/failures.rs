@@ -58,6 +58,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "tried {count} times over {seconds} s" => "{count} intentos en {seconds} s",
         "the provider asked to wait {seconds} s" => "el proveedor pidió esperar {seconds} s",
         "cause:" => "causa:",
+        "Tried {count} times over {seconds} s." => "{count} intentos en {seconds} s.",
+        "Waiting for the provider · {reason} · Esc stops" => {
+            "Esperando al proveedor · {reason} · Esc detiene"
+        }
         _ => return None,
     })
 }

@@ -1266,7 +1266,7 @@ fn exec_prints_the_model_failure_line_not_the_daemon_sentence() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("[failed] The provider reported a server error: The server is overloaded. Try again later or choose another model."),
+        stderr.contains("[failed] The provider reported a server error: The server is overloaded. Try again later or choose another model. Tried 3 times over 4 s."),
         "{stderr}"
     );
     assert!(

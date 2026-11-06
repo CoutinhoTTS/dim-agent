@@ -54,6 +54,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "tried {count} times over {seconds} s" => "{count} percobaan dalam {seconds} s",
         "the provider asked to wait {seconds} s" => "provider meminta menunggu {seconds} s",
         "cause:" => "penyebab:",
+        "Tried {count} times over {seconds} s." => "{count} percobaan dalam {seconds} s.",
+        "Waiting for the provider · {reason} · Esc stops" => {
+            "Menunggu provider · {reason} · Esc berhenti"
+        }
         _ => return None,
     })
 }

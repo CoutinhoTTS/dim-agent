@@ -56,6 +56,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "tried {count} times over {seconds} s" => "{count}회 시도, {seconds}초 경과",
         "the provider asked to wait {seconds} s" => "공급자가 {seconds}초 대기를 요청했습니다",
         "cause:" => "원인:",
+        "Tried {count} times over {seconds} s." => "{count}회 시도, {seconds}초 경과.",
+        "Waiting for the provider · {reason} · Esc stops" => {
+            "공급자를 기다리는 중 · {reason} · Esc 중지"
+        }
         _ => return None,
     })
 }

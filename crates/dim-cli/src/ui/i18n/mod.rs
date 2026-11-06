@@ -231,13 +231,15 @@ mod tests {
                 "provider code: {code}",
                 "request id: {id}",
                 "tried {count} times over {seconds} s",
+                "Tried {count} times over {seconds} s.",
                 "the provider asked to wait {seconds} s",
+                "Waiting for the provider · {reason} · Esc stops",
                 "cause:",
             ] {
                 assert!(table(locale, key).is_some(), "{code} lacks {key:?}");
             }
             set(locale);
-            let placeholders: [(&str, &[(&str, &str)]); 8] = [
+            let placeholders: [(&str, &[(&str, &str)]); 10] = [
                 ("kind: {kind}", &[("kind", "fixture-kind")]),
                 ("status: {status}", &[("status", "503")]),
                 ("provider code: {code}", &[("code", "fixture-code")]),
@@ -267,6 +269,14 @@ mod tests {
                         ("seconds", "4"),
                         ("reason", "fixture-reason"),
                     ],
+                ),
+                (
+                    "Tried {count} times over {seconds} s.",
+                    &[("count", "3"), ("seconds", "4")],
+                ),
+                (
+                    "Waiting for the provider · {reason} · Esc stops",
+                    &[("reason", "fixture-reason")],
                 ),
             ];
             for (key, args) in placeholders {

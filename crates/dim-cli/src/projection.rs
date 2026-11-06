@@ -1450,8 +1450,23 @@ pub(crate) fn failure_line(failure: &ModelFailure, incomplete: bool) -> String {
     } else {
         String::new()
     };
+    let attempts = if failure.attempts > 1 {
+        let seconds = failure.waited_ms.saturating_add(500) / 1000;
+        format!(
+            " {}",
+            crate::ui::i18n::tf(
+                "Tried {count} times over {seconds} s.",
+                &[
+                    ("count", &failure.attempts.to_string()),
+                    ("seconds", &seconds.to_string()),
+                ]
+            )
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{prefix}{}. {}",
+        "{prefix}{}. {}{attempts}",
         failure_phrase(failure.kind, failure.reason.as_deref()),
         crate::ui::i18n::t(failure.kind.action())
     )
@@ -2480,7 +2495,7 @@ mod tests {
             .expect("a failure row");
         assert_eq!(
             row.text,
-            "The provider reported a server error: The server is overloaded. Try again later or choose another model."
+            "The provider reported a server error: The server is overloaded. Try again later or choose another model. Tried 3 times over 4 s."
         );
         let details = row.failure.as_ref().expect("details");
         assert_eq!(details.kind, ModelFailureKind::ServerError);
@@ -2547,6 +2562,29 @@ mod tests {
                 .starts_with("The response above is incomplete. The provider reported"),
             "{}",
             row.text
+        );
+    }
+
+    #[test]
+    fn a_single_attempt_has_no_tried_suffix() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[model_end(
+                1,
+                failure_data(serde_json::json!({"failure": {
+                    "kind": "server_error",
+                    "reason": "The server is overloaded",
+                    "attempts": 1,
+                    "waitedMs": 0,
+                }})),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert_eq!(
+            row.text,
+            "The provider reported a server error: The server is overloaded. Try again later or choose another model."
         );
     }
 
