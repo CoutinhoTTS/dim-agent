@@ -806,6 +806,12 @@ impl Projection {
         self.goal.goal()
     }
 
+    /// Whether the newest goal record folded on this branch answers the change
+    /// at `sequence` (Goal D6), which is what `/goal` waits for after a write.
+    pub fn goal_answered(&self, sequence: u64) -> bool {
+        self.goal.answered(sequence)
+    }
+
     pub fn tasks(&self) -> &[TaskView] {
         &self.tasks
     }

@@ -2119,7 +2119,12 @@ impl Worker {
         }
         let branch = pending.branch.clone();
         if let Some((call, sequence)) = pending.written {
-            if self.cursors.get(&branch).copied().unwrap_or(0) >= sequence {
+            // The method writes a change input; Goal's branch part states the
+            // state in a record that names the change, and the report shows the
+            // state after it (Goal D3, D6).
+            if self.cursors.get(&branch).copied().unwrap_or(0) >= sequence
+                && self.projection_on(&branch).goal_answered(sequence)
+            {
                 self.finish_goal(&branch, Some(call));
             }
             return;
