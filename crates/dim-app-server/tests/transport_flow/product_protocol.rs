@@ -2862,6 +2862,9 @@ async fn mcp_save_refuses_a_leftover_overlay_and_remove_cleans_it() {
         removed["error"]["data"]["appError"], "mcp_unknown_server",
         "removing an entry that is already absent deletes the leftover record"
     );
+    // The remove deleted the record, which the project revision covers.
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
     assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"command":"newcmd","args":["new-arg"],"enabled":false}})).await);
     let saved = client
         .rpc(
@@ -2895,6 +2898,8 @@ async fn mcp_save_refuses_a_leftover_overlay_and_remove_cleans_it() {
     );
     let removed = client.rpc("mcp.remove", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"]})).await;
     assert_eq!(removed["error"]["data"]["appError"], "mcp_unknown_server");
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
     assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"type":"http","url":"https://example.test/mcp","enabled":false}})).await);
     let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
     assert_ok(&catalog);

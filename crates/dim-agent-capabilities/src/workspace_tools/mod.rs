@@ -15,7 +15,7 @@ pub mod mentions;
 use crate::{
     host::{HostError, HostFuture, SessionFilesHost, ToolDriver, ToolExecutionContext, ToolHost},
     host_platform::HostPlatform,
-    methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
+    methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
 };
 use background::BackgroundExecPlugin;
@@ -314,7 +314,8 @@ impl DynPlugin for WorkspaceToolsPlugin {
                 ctx,
                 FILES_NAMESPACE,
                 vec![MethodDecl::new(SEARCH_METHOD, false, Interruption::Report)],
-                Arc::new(move |_, value, _, _| {
+                Arc::new(move |call, _, _| {
+                    let MethodCall { params: value, .. } = call;
                     let (mentions, root) = (mentions.clone(), search_root.clone());
                     Box::pin(async move {
                         #[derive(serde::Deserialize)]
@@ -358,7 +359,8 @@ impl DynPlugin for WorkspaceToolsPlugin {
                     MethodDecl::new(OUTPUT_METHOD, false, Interruption::Report),
                     MethodDecl::new(PAGE_OUTPUT_METHOD, false, Interruption::Report),
                 ],
-                Arc::new(move |method, value, _, _| {
+                Arc::new(move |call, _, _| {
+                    let MethodCall { method, params: value, .. } = call;
                     let tree = tree.clone();
                     Box::pin(async move {
                         if method == PAGE_OUTPUT_METHOD {

@@ -1,5 +1,5 @@
 use super::*;
-use dim_agent_capabilities::methods::{Interruption, MethodDecl, SessionMethods};
+use dim_agent_capabilities::methods::{Interruption, MethodCall, MethodDecl, SessionMethods};
 use rutis::host::CtxHost;
 
 /// Registers one Session namespace with the Session's method table and
@@ -49,7 +49,7 @@ impl rutis::host::DynPlugin for Claim {
                         false,
                         Interruption::Drain,
                     )],
-                    Arc::new(move |_, _, _, _| {
+                    Arc::new(move |_, _, _| {
                         called.store(true, std::sync::atomic::Ordering::SeqCst);
                         Box::pin(async { Ok(json!({})) })
                     }),
@@ -325,7 +325,8 @@ impl Plugin for NotesProvider {
                     ..MethodDecl::new("notes.flood", false, Interruption::Drain)
                 },
             ],
-            Arc::new(move |method, params, cancel, progress| {
+            Arc::new(move |call, cancel, progress| {
+                let MethodCall { method, params, .. } = call;
                 let state = state.clone();
                 Box::pin(async move {
                     match method.as_str() {
