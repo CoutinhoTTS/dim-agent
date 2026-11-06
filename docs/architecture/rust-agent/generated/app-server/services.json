@@ -2748,6 +2748,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::host::ModalityConnectionHost",
+        "provider": 14,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::host::ModelHost",
         "provider": 5,
         "generation": 1,
