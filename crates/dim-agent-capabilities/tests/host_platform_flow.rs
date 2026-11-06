@@ -371,6 +371,16 @@ fn bash() -> Option<PathBuf> {
     })
 }
 
+/// A perl for the `setpgrp` probe, from the captured `PATH`. A host without
+/// one skips that probe.
+fn perl() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|entries| {
+        std::env::split_paths(&entries)
+            .map(|directory| directory.join("perl"))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
 async fn confined(
     platform: &HostPlatform,
     script: &str,
@@ -837,6 +847,102 @@ async fn a_confined_helper_leaves_no_process_after_it_exits() {
         .parse()
         .unwrap();
     assert!(gone(pid).await, "a finished helper left {pid} running");
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// A descendant that keeps the write ends of both pipes must not keep a
+/// finished helper waiting until its timeout.
+#[tokio::test]
+async fn a_confined_helper_returns_when_its_root_exits_with_a_descendant_on_its_pipes() {
+    let base = std::env::temp_dir().join(unique("dim-confined-drain"));
+    let write = base.join("write");
+    std::fs::create_dir_all(&write).unwrap();
+    let pid_file = write.join("grandchild.pid");
+    let script = format!(
+        "sleep 100 &\necho $! > {}\necho done\nexit 0\n",
+        quote(&pid_file)
+    );
+    let platform = confined_platform(switch_off());
+    let started = std::time::Instant::now();
+    let output = confined(&platform, &script, &write, Duration::from_secs(30))
+        .await
+        .expect("the root exited at once");
+    let elapsed = started.elapsed();
+    assert!(
+        output.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("done"), "{stdout:?}");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the call took {elapsed:?} for a root that exited at once"
+    );
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the script records its grandchild")
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(gone(pid).await, "the finished helper left {pid} running");
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// A descendant that left the process group keeps the pipes open past the
+/// drain bound. The call still returns with the root's status and the bytes
+/// read so far, and the escaped process is the caller's to kill: that is the
+/// limit the confinement documents for macOS and unconfined Linux.
+#[tokio::test]
+async fn a_confined_helper_returns_when_an_escaped_descendant_holds_its_pipes() {
+    let Some(perl) = perl() else {
+        println!("skipping the escaped-descendant probe: perl is not on PATH");
+        return;
+    };
+    let base = std::env::temp_dir().join(unique("dim-confined-escape"));
+    let write = base.join("write");
+    std::fs::create_dir_all(&write).unwrap();
+    let pid_file = write.join("escapee.pid");
+    let escape = format!(
+        "setpgrp(0, 0); open my $f, q(>), q({}) or die; print $f $$; close $f; sleep 100;",
+        pid_file.display()
+    );
+    let script = format!(
+        "{} -e '{}' &\nwhile [ ! -s {} ]; do sleep 0.01; done\necho done\nexit 0\n",
+        quote(&perl),
+        escape,
+        quote(&pid_file)
+    );
+    let platform = confined_platform(switch_off());
+    let started = std::time::Instant::now();
+    let output = confined(&platform, &script, &write, Duration::from_secs(30))
+        .await
+        .expect("the root exited at once");
+    let elapsed = started.elapsed();
+    assert!(
+        output.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("done"), "{stdout:?}");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the call took {elapsed:?} with the drain bound at one second"
+    );
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the escapee records its pid")
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        alive(pid),
+        "the escapee {pid} ended with the group, so this probe no longer proves the limit"
+    );
+    // SAFETY: the probe records the pid of the process it started, and the
+    // kill ends that escaped process.
+    let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert_eq!(killed, 0, "the escaped process {pid} could not be killed");
+    assert!(gone(pid).await, "the escaped process {pid} survived a kill");
     std::fs::remove_dir_all(&base).unwrap();
 }
 

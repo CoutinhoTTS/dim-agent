@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::AsyncReadExt,
     process::{ChildStderr, ChildStdout},
 };
 use tokio_util::sync::CancellationToken;
@@ -130,8 +130,12 @@ impl HostPlatform {
     /// The timeout, either output limit and `cancel` kill the helper's process
     /// tree with the existing tree-kill and return the typed error. Both
     /// streams are read concurrently, so a full pipe never blocks the helper.
-    /// No partial output is returned with an error. When this call returns,
-    /// every process of the helper's tree has ended, on success too.
+    /// No partial output is returned with an error.
+    ///
+    /// When the root exits, the call ends its tree and then drains what the
+    /// pipes still hold until EOF or a fixed drain bound, whichever comes
+    /// first; bytes already read are returned with the root's status, so a
+    /// descendant holding a pipe cannot turn a completed helper into a timeout.
     pub async fn spawn_confined(
         &self,
         spec: ConfinedSpec,
@@ -160,15 +164,12 @@ impl HostPlatform {
                 status,
                 stdout,
                 stderr,
-            } => {
-                end(&mut tree).await;
-                Ok(ConfinedOutput {
-                    status,
-                    stdout,
-                    stderr,
-                    confined,
-                })
-            }
+            } => Ok(ConfinedOutput {
+                status,
+                stdout,
+                stderr,
+                confined,
+            }),
             Outcome::OutputLimit { stream } => {
                 Err(killed(&mut tree, ConfinedError::OutputLimit { stream }).await)
             }
@@ -331,87 +332,106 @@ enum Outcome {
     Cancelled,
 }
 
-/// Ends the helper's process tree. A reaped root releases its descendants, so
-/// even a helper that exited on its own has its tree closed here. The tree's
-/// drop still kills what a failed termination leaves behind.
-async fn end(tree: &mut ProcessTree) {
+/// Ends the tree after a limit or cancellation, then returns the error to
+/// report. The tree's drop still kills what a failed termination leaves
+/// behind, so this path only logs.
+async fn killed(tree: &mut ProcessTree, error: ConfinedError) -> ConfinedError {
     if let Err(failure) = tree.terminate().await {
         tracing::warn!(%failure, "confined helper termination failed");
     }
-}
-
-/// Ends the tree after a limit or cancellation, then returns the error to
-/// report. A finished helper stays finished.
-async fn killed(tree: &mut ProcessTree, error: ConfinedError) -> ConfinedError {
-    end(tree).await;
     error
 }
 
-/// Reads both streams while waiting for the root, and stops at the first
-/// limit. A stream that closed early does not end the call: the root may still
-/// be running.
+/// The bound on reading what the pipes still hold after the root exited and
+/// its tree ended. EOF normally arrives at once; only a writer outside the
+/// group can hold a pipe open longer.
+const DRAIN_GRACE: Duration = Duration::from_secs(1);
+
+/// Bytes read from one pipe per poll.
+const READ_CHUNK: usize = 16 * 1024;
+
+/// What a branch of [`collect`] reported.
+enum Event {
+    Exited(io::Result<ExitStatus>),
+    Stdout(io::Result<usize>),
+    Stderr(io::Result<usize>),
+    Drained,
+}
+
+/// Reads both streams while waiting for the root. The root's exit ends the
+/// tree at once and then bounds the rest of the read, so a descendant holding
+/// a pipe cannot keep a finished helper waiting. A stream that closed early
+/// does not end the call: the root may still be running.
 async fn collect(
     tree: &mut ProcessTree,
-    stdout: ChildStdout,
-    stderr: ChildStderr,
+    mut stdout_pipe: ChildStdout,
+    mut stderr_pipe: ChildStderr,
     confinement: &Confinement,
 ) -> Outcome {
-    let mut stdout_pipe = Box::pin(read_capped(stdout, confinement.stdout_limit));
-    let mut stderr_pipe = Box::pin(read_capped(stderr, confinement.stderr_limit));
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut stdout_chunk = [0u8; READ_CHUNK];
+    let mut stderr_chunk = [0u8; READ_CHUNK];
     let mut status = None;
-    let mut stdout_bytes = None;
-    let mut stderr_bytes = None;
+    let mut drain = None;
     loop {
-        tokio::select! {
-            exited = tree.wait(), if status.is_none() => match exited {
-                Ok(exited) => status = Some(exited),
-                Err(error) => return Outcome::Failed(error),
-            },
-            collected = &mut stdout_pipe, if stdout_bytes.is_none() => match collected {
-                Ok(Collected::Bytes(bytes)) => stdout_bytes = Some(bytes),
-                Ok(Collected::OverLimit) => {
-                    return Outcome::OutputLimit { stream: ConfinedStream::Stdout };
+        let event = tokio::select! {
+            exited = tree.wait(), if status.is_none() => Event::Exited(exited),
+            read = stdout_pipe.read(&mut stdout_chunk), if stdout_open => Event::Stdout(read),
+            read = stderr_pipe.read(&mut stderr_chunk), if stderr_open => Event::Stderr(read),
+            _ = tokio::time::sleep_until(
+                drain.unwrap_or_else(|| tokio::time::Instant::now() + DRAIN_GRACE),
+            ), if drain.is_some() => Event::Drained,
+        };
+        match event {
+            Event::Exited(Ok(exited)) => status = Some(exited),
+            Event::Exited(Err(error)) => return Outcome::Failed(error),
+            Event::Stdout(Ok(0)) => stdout_open = false,
+            Event::Stdout(Ok(count)) => {
+                stdout.extend_from_slice(&stdout_chunk[..count]);
+                if stdout.len() > confinement.stdout_limit {
+                    return Outcome::OutputLimit {
+                        stream: ConfinedStream::Stdout,
+                    };
                 }
-                Err(error) => return Outcome::Failed(error),
-            },
-            collected = &mut stderr_pipe, if stderr_bytes.is_none() => match collected {
-                Ok(Collected::Bytes(bytes)) => stderr_bytes = Some(bytes),
-                Ok(Collected::OverLimit) => {
-                    return Outcome::OutputLimit { stream: ConfinedStream::Stderr };
+            }
+            Event::Stderr(Ok(0)) => stderr_open = false,
+            Event::Stderr(Ok(count)) => {
+                stderr.extend_from_slice(&stderr_chunk[..count]);
+                if stderr.len() > confinement.stderr_limit {
+                    return Outcome::OutputLimit {
+                        stream: ConfinedStream::Stderr,
+                    };
                 }
-                Err(error) => return Outcome::Failed(error),
-            },
+            }
+            Event::Stdout(Err(error)) | Event::Stderr(Err(error)) => return Outcome::Failed(error),
+            Event::Drained => {
+                return Outcome::Exited {
+                    status: status.expect("the root exited before the drain bound"),
+                    stdout,
+                    stderr,
+                };
+            }
         }
-        if status.is_some()
-            && stdout_bytes.is_some()
-            && stderr_bytes.is_some()
-            && let (Some(status), Some(stdout), Some(stderr)) =
-                (status, stdout_bytes.take(), stderr_bytes.take())
+        if status.is_some() && drain.is_none() {
+            if let Err(failure) = tree.terminate().await {
+                tracing::warn!(%failure, "confined helper termination failed");
+            }
+            if stdout_open || stderr_open {
+                drain = Some(tokio::time::Instant::now() + DRAIN_GRACE);
+            }
+        }
+        if let Some(exited) = status
+            && !stdout_open
+            && !stderr_open
         {
             return Outcome::Exited {
-                status,
+                status: exited,
                 stdout,
                 stderr,
             };
         }
     }
-}
-
-enum Collected {
-    Bytes(Vec<u8>),
-    OverLimit,
-}
-
-/// Reads until EOF or one byte past `limit`, so a stream that reaches the
-/// limit is reported without buffering the rest.
-async fn read_capped(pipe: impl AsyncRead + Unpin, limit: usize) -> io::Result<Collected> {
-    let mut bytes = Vec::new();
-    pipe.take(limit.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)
-        .await?;
-    Ok(if bytes.len() > limit {
-        Collected::OverLimit
-    } else {
-        Collected::Bytes(bytes)
-    })
 }
