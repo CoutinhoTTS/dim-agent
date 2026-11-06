@@ -281,9 +281,14 @@ fn read_progress_note(path: &Path) -> Option<ProgressNote> {
 
 /// Extends a startup wait while its daemon reports real progress. A note for
 /// another pid is ignored when `pid` names the child being waited on; a lock
-/// waiter passes `None`, because it does not know the holder's child.
+/// waiter passes `None`, because it does not know the holder's child. A note
+/// from another pid than the series being counted starts a new series, whose
+/// first note counts even when its counter is lower: a new daemon begins at
+/// one, while a daemon killed mid-upgrade may have left a higher counter.
 #[derive(Default)]
 struct ProgressWatch {
+    /// The pid whose note series is being counted.
+    pid: Option<u32>,
     counter: u64,
     /// The upgrade line has been printed.
     reported: bool,
@@ -300,7 +305,14 @@ impl ProgressWatch {
         timeout: Duration,
     ) -> Option<StoreUpgrade> {
         let note = read_progress_note(path)?;
-        if pid.is_some_and(|pid| note.pid != pid) || note.counter <= self.counter {
+        if pid.is_some_and(|pid| note.pid != pid) {
+            return None;
+        }
+        if self.pid != Some(note.pid) {
+            self.pid = Some(note.pid);
+            self.counter = 0;
+        }
+        if note.counter <= self.counter {
             return None;
         }
         self.counter = note.counter;
@@ -312,6 +324,7 @@ impl ProgressWatch {
     }
     /// Starts counting again for a child whose notes begin at one.
     fn reset(&mut self) {
+        self.pid = None;
         self.counter = 0;
     }
     /// Prints the upgrade line once per watch, in `locale`.

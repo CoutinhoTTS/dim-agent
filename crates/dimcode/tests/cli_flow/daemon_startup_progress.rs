@@ -1,6 +1,10 @@
 //! Startup waits follow a daemon that reports real store-upgrade progress:
 //! the spawn wait, the start-lock waiter, the one line on stderr and JSON
 //! stdout staying clean (#1213).
+//!
+//! Every test here shortens a startup bound through `DIM_TEST_*`, which only a
+//! debug build reads, so the module is a debug-build check.
+#![cfg(debug_assertions)]
 use super::*;
 
 /// The store upgrade line the CLI prints once.
@@ -297,6 +301,93 @@ fn a_start_lock_waiter_follows_progress_past_its_bound() {
     assert!(
         released.duration_since(reported) >= bound,
         "the lock stayed held a whole bound after the waiter's report"
+    );
+    assert!(!note.exists(), "the started daemon removed the note");
+}
+
+/// A stale note from a daemon killed mid-upgrade does not hide the new
+/// daemon's counters: a note from another pid starts a new series.
+#[test]
+fn a_start_lock_waiter_counts_a_new_daemons_notes_past_a_stale_one() {
+    use std::io::BufRead;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let home = Home::new();
+    let note = note_path(&home);
+    let bound = Duration::from_millis(1500);
+    let margin = Duration::from_millis(500);
+    // A daemon killed mid-upgrade left its note at counter 50.
+    write_progress_note(&note, 999999, 50);
+    // The client's `open_start_lock` derives `<native home>/daemon.start.lock`
+    // (crates/dim-cli/src/client.rs:189) and takes it with `try_lock`
+    // (client.rs:334); the test holds the same advisory lock, so it waits.
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    options.mode(0o600);
+    let lock = options.open(home.0.join("rust/daemon.start.lock")).unwrap();
+    lock.lock().unwrap();
+    let mut client = home
+        .command()
+        .env("DIM_TEST_START_LOCK_TIMEOUT_MS", "1500")
+        .args(["models", "fixture"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr_text = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&stderr_text);
+    let pipe = std::io::BufReader::new(client.stderr.take().unwrap());
+    let reader = thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut line = String::new();
+        while pipe.read_line(&mut line).unwrap_or(0) > 0 {
+            sink.lock().unwrap().push_str(&line);
+            line.clear();
+        }
+    });
+    // The waiter reports the stale note when it reads it; only then do the
+    // successor's own notes begin at one.
+    let started = Instant::now();
+    while !stderr_text.lock().unwrap().contains(UPGRADING) {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the waiter did not report the stale note"
+        );
+        if let Some(status) = client.try_wait().unwrap() {
+            lock.unlock().unwrap();
+            let _ = wait(client);
+            reader.join().unwrap();
+            let stderr = stderr_text.lock().unwrap().clone();
+            panic!("the client stopped waiting ({status}) before the lock was released: {stderr}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    // Live notes for another pid start at one, below the stale counter.
+    let reported = Instant::now();
+    let mut counter = 0;
+    let mut stopped: Option<ExitStatus> = None;
+    while reported.elapsed() < bound + margin {
+        counter += 1;
+        write_progress_note(&note, 424242, counter);
+        if let Some(status) = client.try_wait().unwrap() {
+            stopped = Some(status);
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    lock.unlock().unwrap();
+    let output = wait(client);
+    reader.join().unwrap();
+    let stderr = stderr_text.lock().unwrap().clone();
+    assert!(
+        stopped.is_none(),
+        "the client stopped waiting before the lock was released ({stopped:?}): {stderr}"
+    );
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr.matches(UPGRADING).count(), 1, "{stderr}");
+    assert!(
+        counter > 1,
+        "the successor reported while the lock was held"
     );
     assert!(!note.exists(), "the started daemon removed the note");
 }
