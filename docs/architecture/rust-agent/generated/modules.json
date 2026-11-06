@@ -24672,6 +24672,7 @@
         "path ModelNetwork::default",
         "path ModelSelectionHost",
         "path ProviderConnectionResolver",
+        "path RealtimeDeclaration",
         "path RecoverModelConnection",
         "path RecoveredModelConnection",
         "path ResolveModalityConnection",

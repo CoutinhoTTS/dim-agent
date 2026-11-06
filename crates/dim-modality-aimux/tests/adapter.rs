@@ -135,6 +135,7 @@ fn connection(base_url: &str, model: &str) -> ModalityConnection {
         },
         protocol: ModelProtocol::OpenaiCompatible,
         model: model.to_owned(),
+        realtime: None,
     }
 }
 
