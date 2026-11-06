@@ -322,9 +322,6 @@ impl ModalityAdapter for FixtureAdapter {
     fn available(&self) -> bool {
         self.available.load(Ordering::SeqCst)
     }
-    fn connection_kinds(&self) -> Vec<String> {
-        Vec::new()
-    }
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation> {
         let served = self.served.lock().unwrap();
         let operations: BTreeSet<String> = match served.as_ref() {

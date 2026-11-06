@@ -333,7 +333,6 @@ Service `modalityAdapter`, scope process, key adapter name, declared in the adap
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
 | `available` | sync | `{}` | `{ available: bool, reason? }`; read at each use, no reload on change |
-| `connectionKinds` | sync | `{}` | `string[]` (Provider connection kinds served) |
 | `operations` | sync | `{ model: {providerId, modelId} }` | `[{ category, operation, params_schema }]` |
 | `submit` | async | `{ job: Job, connection: ResolvedConnection }` | `{ remote_handle? }` |
 | `wait` | async | `{ task_id, remote_handle?, connection }`; progress as `{ fraction?, message? }` notifications on the call | `{ files: [{ name, media_type, path }], data? }`; `path` inside the job's work directory |
@@ -565,7 +564,6 @@ pub struct ProgressSink(Arc<dyn Fn(AdapterProgress) + Send + Sync>);
 
 pub trait ModalityAdapter: Send + Sync + 'static {
     fn available(&self) -> bool;
-    fn connection_kinds(&self) -> Vec<String>;
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
     fn submit(&self, job: Job, connection: ModalityConnection, cancel: CancellationToken)
         -> AdapterFuture<'_, Submitted>;

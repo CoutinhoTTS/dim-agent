@@ -333,7 +333,6 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | 方法 | 类型 | 请求 | 回复 |
 | --- | --- | --- | --- |
 | `available` | 同步 | `{}` | `{ available: bool, reason? }`；每次使用时读取，变化时不重载 |
-| `connectionKinds` | 同步 | `{}` | `string[]`（所服务的 Provider 连接类型） |
 | `operations` | 同步 | `{ model: {providerId, modelId} }` | `[{ category, operation, params_schema }]` |
 | `submit` | 异步 | `{ job: Job, connection: ResolvedConnection }` | `{ remote_handle? }` |
 | `wait` | 异步 | `{ task_id, remote_handle?, connection }`；进度以该调用上的 `{ fraction?, message? }` 通知送达 | `{ files: [{ name, media_type, path }], data? }`；`path` 位于作业的工作目录内 |
@@ -565,7 +564,6 @@ pub struct ProgressSink(Arc<dyn Fn(AdapterProgress) + Send + Sync>);
 
 pub trait ModalityAdapter: Send + Sync + 'static {
     fn available(&self) -> bool;
-    fn connection_kinds(&self) -> Vec<String>;
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
     fn submit(&self, job: Job, connection: ModalityConnection, cancel: CancellationToken)
         -> AdapterFuture<'_, Submitted>;
