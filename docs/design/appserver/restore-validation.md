@@ -55,7 +55,7 @@ A restore starts at `Agent::restore_session`
 config, then `Agent::create` receives `SessionStart::Restore` and calls `store.branches(id)`
 ([agent.rs:174](../../../crates/dim-agent-runtime/src/agent.rs#L174)) before it builds anything. For
 the native store that is `validate_session`
-([timeline.rs:3329](../../../crates/dim-app-server/src/storage/timeline.rs#L3329)):
+([timeline.rs:3198](../../../crates/dim-app-server/src/storage/timeline.rs#L3198)):
 
 ```text
 store.branches(id)  — one connection hold: the directory
@@ -63,7 +63,8 @@ store.branches(id)  — one connection hold: the directory
   orphan scan                      every timeline_events row has a timeline_branches row
   timeline_branches                branch_id, info, sequence, ordered by branch_id
 then, per branch, pages of 64 physical rows:
-  decode every event and its request content (one bounded reader across the pass)
+  decode every event without its request bodies, and check that every content reference
+  a record names resolves to a content row (hashes only, no body loaded or hashed)
   check the row kind, the event-id index, the before trace's event id and kinds
   check sequence continuity, atomic-batch boundaries, and that the head is the final batch end
   collect every event id in one set (duplicates fail), and every completed compaction
