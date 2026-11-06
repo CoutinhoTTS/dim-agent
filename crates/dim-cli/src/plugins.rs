@@ -68,7 +68,9 @@ impl Plugin for DaemonLink {
     }
 
     async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
-        let linked = client::connect_inner(&self.options, self.start)
+        let mut report =
+            |upgrade: client::StoreUpgrade| eprintln!("{}", crate::store_upgrade_line(&upgrade));
+        let linked = client::connect_inner(&self.options, self.start, &mut report)
             .await
             .map_err(ErrorKind::PluginFailed)?;
         let (client, notice) = match linked {

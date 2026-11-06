@@ -140,16 +140,46 @@ pub const SERVER_NAME: &str = if cfg!(windows) {
     "dimcode-server"
 };
 
-/// How long a spawned daemon may take to answer `hello`.
+/// How long a spawned daemon may take to answer `hello` without reporting
+/// progress.
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a verified `daemon.shutdown` may take to settle.
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a client waits for another client's start decision. The holder
-/// may spend a verified shutdown and a startup before it releases the lock,
-/// plus a margin for the handshakes and the Session check between them; it is
-/// derived from the two budgets so the three cannot drift apart.
+/// How long a client waits on another client's start decision without a
+/// progress report. The holder may spend a verified shutdown and a startup
+/// before it releases the lock, plus a margin for the handshakes and the
+/// Session check between them; it is derived from the two budgets so the
+/// three cannot drift apart. Like the spawn wait, this is a bound on
+/// inactivity: a holder whose daemon reports startup progress moves it
+/// forward.
 const START_LOCK_TIMEOUT: Duration =
     Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT.as_secs() + DAEMON_START_TIMEOUT.as_secs() + 10);
+/// The bypass note a starting daemon writes beside its store.
+const STARTUP_NOTE: &str = "dimcode.sqlite.startup";
+
+/// The startup bound a spawned daemon is given.
+fn daemon_start_timeout() -> Duration {
+    test_timeout("DIM_TEST_DAEMON_START_TIMEOUT_MS").unwrap_or(DAEMON_START_TIMEOUT)
+}
+
+/// The bound a client waiting on the start lock is given.
+fn start_lock_timeout() -> Duration {
+    test_timeout("DIM_TEST_START_LOCK_TIMEOUT_MS").unwrap_or(START_LOCK_TIMEOUT)
+}
+
+/// A flow test's shortened bound; a release build ignores the variable.
+fn test_timeout(name: &str) -> Option<Duration> {
+    #[cfg(debug_assertions)]
+    if let Some(millis) = std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return Some(Duration::from_millis(millis));
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = name;
+    None
+}
 
 /// The file one client at a time holds to decide reuse, replacement or a
 /// start: `<native_home>/daemon.start.lock`, a private file owned by the
@@ -182,17 +212,135 @@ fn open_start_lock(native_home: &Path) -> io::Result<std::fs::File> {
     Ok(file)
 }
 
-/// Waits for the start lock, polling every 50 ms as the spawn wait does. A
-/// waiter that outlasts the holder's budget fails and names the daemon log;
-/// it never spawns without the lock.
-async fn start_lock(native_home: &Path) -> Result<std::fs::File> {
+/// A store upgrade a daemon reports while starting, as its precise kind
+/// calls it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreUpgrade {
+    pub from: u32,
+    pub to: u32,
+}
+
+/// What a startup progress note reports.
+struct ProgressNote {
+    /// The daemon that wrote it.
+    pid: u32,
+    from: u32,
+    to: u32,
+    /// Rises with each rewrite; a reader counts only increases.
+    counter: u64,
+}
+
+/// The note's text when it is a regular file of a bounded size, owned by the
+/// current user and private on Unix, as the daemon writes it.
+fn read_note(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
+            return None;
+        }
+    }
+    String::from_utf8(std::fs::read(path).ok()?).ok()
+}
+
+/// The store upgrade a daemon's progress note announces, when the note is one.
+fn read_progress_note(path: &Path) -> Option<ProgressNote> {
+    let text = read_note(path)?;
+    let (header, body) = text.split_once('\n')?;
+    let pid = header
+        .strip_prefix("dimcode-startup-progress v1 pid=")?
+        .parse()
+        .ok()?;
+    let mut fields = body.lines().next()?.split_whitespace();
+    if fields.next()? != "store-upgrade" {
+        return None;
+    }
+    let (mut from, mut to, mut counter) = (None, None, None);
+    for field in fields {
+        let (name, value) = field.split_once('=')?;
+        let value: u64 = value.parse().ok()?;
+        match name {
+            "from" => from = Some(u32::try_from(value).ok()?),
+            "to" => to = Some(u32::try_from(value).ok()?),
+            "progress" => counter = Some(value),
+            // A later kind may add fields; an older client ignores them.
+            _ => {}
+        }
+    }
+    Some(ProgressNote {
+        pid,
+        from: from?,
+        to: to?,
+        counter: counter?,
+    })
+}
+
+/// Extends a startup wait while its daemon reports real progress. A note for
+/// another pid is ignored when `pid` names the child being waited on; a lock
+/// waiter passes `None`, because it does not know the holder's child.
+#[derive(Default)]
+struct ProgressWatch {
+    counter: u64,
+}
+
+impl ProgressWatch {
+    /// `None` when the note is absent, for another pid, or not a new report;
+    /// otherwise the reported upgrade and a deadline one `timeout` away.
+    fn observe(
+        &mut self,
+        path: &Path,
+        pid: Option<u32>,
+        deadline: &mut tokio::time::Instant,
+        timeout: Duration,
+    ) -> Option<StoreUpgrade> {
+        let note = read_progress_note(path)?;
+        if pid.is_some_and(|pid| note.pid != pid) || note.counter <= self.counter {
+            return None;
+        }
+        self.counter = note.counter;
+        *deadline = tokio::time::Instant::now() + timeout;
+        Some(StoreUpgrade {
+            from: note.from,
+            to: note.to,
+        })
+    }
+    /// Starts counting again for a child whose notes begin at one.
+    fn reset(&mut self) {
+        self.counter = 0;
+    }
+}
+
+/// Waits for the start lock, polling every 50 ms as the spawn wait does. The
+/// bound is inactivity: the holder's fixed budget covers a verified shutdown,
+/// a startup and a margin, and a progress note in the home moves it forward,
+/// whatever pid it names, because the holder's child may be upgrading the
+/// store. A waiter that outlasts the bound fails and names the daemon log; it
+/// never spawns without the lock.
+async fn start_lock(
+    native_home: &Path,
+    watch: &mut ProgressWatch,
+    reported: &mut bool,
+    report: &mut (dyn FnMut(StoreUpgrade) + Send),
+) -> Result<std::fs::File> {
     let file = open_start_lock(native_home)?;
-    let deadline = tokio::time::Instant::now() + START_LOCK_TIMEOUT;
+    let note = native_home.join(STARTUP_NOTE);
+    let timeout = start_lock_timeout();
+    let mut deadline = tokio::time::Instant::now() + timeout;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(file),
             Err(std::fs::TryLockError::WouldBlock) => {}
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        if let Some(upgrade) = watch.observe(&note, None, &mut deadline, timeout)
+            && !*reported
+        {
+            *reported = true;
+            report(upgrade);
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
@@ -347,8 +495,14 @@ async fn daemon_in_use(client: &mut Client) -> bool {
 /// The connection to the daemon of `options.home` after `hello`. Without a
 /// daemon, starts one when `start` and waits for it; else `None`. With
 /// `start`, one client at a time decides under `<native_home>/daemon.start.lock`
-/// whether to reuse the daemon, replace it, or start one.
-pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Link>> {
+/// whether to reuse the daemon, replace it, or start one. A daemon that
+/// reports a store upgrade while it starts is waited for, and `report` says
+/// so once; both waits are bounded by inactivity, not by total time.
+pub async fn connect_inner(
+    options: &Options,
+    start: bool,
+    report: &mut (dyn FnMut(StoreUpgrade) + Send),
+) -> Result<Option<Link>> {
     let profile = if !start {
         None
     } else {
@@ -383,7 +537,7 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Link
             return Err("Rust home must be private (0700) and owned by the current user".into());
         }
     }
-    let startup_note = native_home.join("dimcode.sqlite.startup");
+    let startup_note = native_home.join(STARTUP_NOTE);
     #[cfg(unix)]
     let endpoint = native_home.join("daemon.sock");
     #[cfg(windows)]
@@ -415,8 +569,10 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Link
     // daemon; everyone else waits here and then runs the same decision, which
     // normally finds the successor at its own version. `--server` daemons are
     // never started or replaced, so they take no lock.
+    let mut watch = ProgressWatch::default();
+    let mut reported = false;
     let _start_lock = if start && server.embedded {
-        Some(start_lock(&native_home).await?)
+        Some(start_lock(&native_home, &mut watch, &mut reported, report).await?)
     } else {
         None
     };
@@ -563,8 +719,10 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Link
         command.creation_flags(0x08000000 | 0x00000200);
     }
     let _ = std::fs::remove_file(&startup_note);
+    watch.reset();
     let mut child = command.spawn()?;
-    let deadline = tokio::time::Instant::now() + DAEMON_START_TIMEOUT;
+    let timeout = daemon_start_timeout();
+    let mut deadline = tokio::time::Instant::now() + timeout;
     loop {
         match Client::open(&connection, true).await {
             Ok(mut client) => {
@@ -594,6 +752,13 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Link
                 .into(),
             });
         }
+        if let Some(progress) =
+            watch.observe(&startup_note, Some(child.id()), &mut deadline, timeout)
+            && !reported
+        {
+            reported = true;
+            report(progress);
+        }
         if tokio::time::Instant::now() >= deadline {
             return Err(if server.embedded {
                 format!("App Server startup timed out; see {}", log_path.display())
@@ -612,18 +777,7 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Link
 /// The storage startup note this child left, if it is a private file owned by
 /// the current user and the header names this child.
 fn startup_failure(path: &std::path::Path, pid: u32) -> Option<String> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > 16 * 1024 {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
-            return None;
-        }
-    }
-    let text = String::from_utf8(std::fs::read(path).ok()?).ok()?;
+    let text = read_note(path)?;
     let (header, body) = text.split_once('\n')?;
     if header != format!("dimcode-startup-failure v1 pid={pid}") {
         return None;

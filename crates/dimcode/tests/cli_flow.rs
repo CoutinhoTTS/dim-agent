@@ -15,6 +15,9 @@ mod context;
 #[path = "cli_flow/daemon_replace.rs"]
 mod daemon_replace;
 
+#[path = "cli_flow/daemon_startup_progress.rs"]
+mod daemon_startup_progress;
+
 #[path = "cli_flow/exit.rs"]
 mod exit;
 

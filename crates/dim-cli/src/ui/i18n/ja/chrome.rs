@@ -564,6 +564,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
             "App Server はまだ {server} です。他のクライアントが使用中です（接続: {connections}、アタッチ中のセッション: {attached}、実行中のターン: {running}）。この {client} クライアントもそれを使います。終わったら `dimcode daemon stop` を実行してください。次回の起動では {client} が動きます。"
         }
+        "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
+            "ローカルストアをフォーマット v{from} から v{to} にアップグレードしています。大きなストアでは時間がかかることがあります。"
+        }
         _ => return None,
     })
 }

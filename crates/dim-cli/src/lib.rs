@@ -274,6 +274,18 @@ pub(crate) const DAEMON_BUSY: &str = "The App Server is still {server} because o
 /// [`DAEMON_BUSY`] with the counts a `daemon_busy` refusal carried.
 pub(crate) const DAEMON_BUSY_COUNTS: &str = "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}.";
 
+/// The line a client prints once when a daemon reports a store upgrade while
+/// it starts; both waits then follow the daemon's progress instead of a fixed
+/// startup budget.
+pub(crate) const DAEMON_UPGRADING: &str = "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store.";
+
+/// [`DAEMON_UPGRADING`] with the formats the progress note named.
+pub(crate) fn store_upgrade_line(upgrade: &client::StoreUpgrade) -> String {
+    let from = upgrade.from.to_string();
+    let to = upgrade.to.to_string();
+    crate::ui::i18n::tf(DAEMON_UPGRADING, &[("from", &from), ("to", &to)])
+}
+
 /// The notice for a kept daemon of another build, with the refusal's counts
 /// when it sent them.
 pub(crate) fn daemon_notice(notice: &client::DaemonNotice) -> String {
@@ -458,7 +470,8 @@ fn prepare() -> Result<Option<Options>> {
 
 async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>) -> Result<i32> {
     let mut signals = plugins::Signals::listen()?;
-    let linked = client::connect_inner(options, true)
+    let mut report = |upgrade: client::StoreUpgrade| eprintln!("{}", store_upgrade_line(&upgrade));
+    let linked = client::connect_inner(options, true, &mut report)
         .await?
         .ok_or("App Server did not start")?;
     if let Some(notice) = &linked.notice {
@@ -531,7 +544,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         ..
     } = &options.action
     {
-        let linked = client::connect_inner(&options, true)
+        let mut report =
+            |upgrade: client::StoreUpgrade| eprintln!("{}", store_upgrade_line(&upgrade));
+        let linked = client::connect_inner(&options, true, &mut report)
             .await?
             .ok_or("App Server did not start")?;
         if let Some(notice) = &linked.notice {

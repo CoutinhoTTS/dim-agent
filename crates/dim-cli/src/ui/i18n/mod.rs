@@ -295,12 +295,13 @@ mod tests {
         // while every locale silently falls back to English.
         const PLAIN: &str = crate::DAEMON_BUSY;
         const COUNTS: &str = crate::DAEMON_BUSY_COUNTS;
+        const UPGRADING: &str = crate::DAEMON_UPGRADING;
         let previous = active();
         for (locale, code, _) in LOCALES {
             if locale == Locale::En {
                 continue;
             }
-            for key in [PLAIN, COUNTS] {
+            for key in [PLAIN, COUNTS, UPGRADING] {
                 let translated = table(locale, key);
                 assert!(translated.is_some(), "{code} lacks {key:?}");
                 assert_ne!(translated.unwrap(), key, "{code} copies {key:?}");
@@ -321,6 +322,7 @@ mod tests {
                         ("running", "1"),
                     ],
                 ),
+                (UPGRADING, vec![("from", "33"), ("to", "34")]),
             ] {
                 let text = tf(key, &args);
                 for (_, value) in args {
