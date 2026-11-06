@@ -669,6 +669,19 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::host_platform::confined",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::host_platform",
+      "file": "crates/dim-agent-capabilities/src/host_platform/confined.rs",
+      "unexpandedMacros": [
+        "cfg",
+        "tokio::pin",
+        "tokio::select",
+        "tracing::warn",
+        "write"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::host_platform::exec_shell_settings",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::host_platform",
@@ -10705,6 +10718,18 @@
     },
     {
       "from": "dim_agent_capabilities::host_platform",
+      "to": "dim_agent_capabilities::host_platform::confined",
+      "references": [
+        "mod confined",
+        "use confined::ConfinedError",
+        "use confined::ConfinedOutput",
+        "use confined::ConfinedSpec",
+        "use confined::ConfinedStream",
+        "use confined::Confinement"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform",
       "to": "dim_agent_capabilities::host_platform::exec_shell_settings",
       "references": [
         "mod exec_shell_settings",
@@ -10759,6 +10784,31 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::host_platform::confined",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path ProcessSpec",
+        "path ProcessTree",
+        "path env_var",
+        "path super::ENVIRONMENT",
+        "use super::HostPlatform",
+        "use super::ProcessSpec",
+        "use super::ProcessTree",
+        "use super::env_var"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform::confined",
+      "to": "dim_agent_capabilities::host_platform::isolation",
+      "references": [
+        "path super::isolation::baseline_read_paths",
+        "path super::isolation::bubblewrap",
+        "path super::isolation::prepare",
+        "path super::isolation::roots"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::host_platform::exec_shell_settings",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -10802,6 +10852,7 @@
       "from": "dim_agent_capabilities::host_platform::isolation",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
+        "path ENVIRONMENT",
         "path HostPlatform",
         "path HostPlatform::current",
         "path Isolation",
@@ -10810,6 +10861,7 @@
         "path TemporaryDirectory",
         "path super::ShellStatus::Unavailable",
         "path super::path_entries",
+        "use super::ENVIRONMENT",
         "use super::HostPlatform",
         "use super::Isolation",
         "use super::ProcessSpec",
