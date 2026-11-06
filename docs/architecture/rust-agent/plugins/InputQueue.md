@@ -93,8 +93,8 @@ it, or on arrival when its turn is not open. These are the only InputQueue
 rules for it; the Loop consumes it only in the batch that starts its handover's
 continuation.
 
-A handover input is never a state input, so an ordering rule for state inputs
-leaves it last.
+A handover input is never a [state input](../../../design/model-prompts.md#5-scopes),
+so an ordering rule for state inputs leaves it last.
 
 ### Tests
 
