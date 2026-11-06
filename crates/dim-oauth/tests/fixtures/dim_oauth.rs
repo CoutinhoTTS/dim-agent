@@ -104,6 +104,10 @@ pub fn default_models() -> Value {
             "contextWindow":32000,"maxOutputTokens":1000,
             "raw":{"modalities":{"input":["text"],"output":["image"]}},
             "modalityCapabilities":["image.generate"]}},
+        {"id":"fixture-image-off","dim":{"id":"fixture-image-off","endpoint_type":"openai",
+            "status":"unavailable","contextWindow":32000,"maxOutputTokens":1000,
+            "raw":{"modalities":{"input":["text"],"output":["image"]}},
+            "modalityCapabilities":["image.generate"]}},
         {"id":"fixture-gemini","dim":{"id":"fixture-gemini","endpoint_type":"gemini"}}
     ]})
 }

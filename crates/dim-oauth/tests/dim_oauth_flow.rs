@@ -430,6 +430,11 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
         model("fixture-gemini").unavailable_reason.as_deref(),
         Some("unsupported_endpoint")
     );
+    // An unavailable status names the entry before its kind does.
+    assert_eq!(
+        model("fixture-image-off").unavailable_reason.as_deref(),
+        Some("server_unavailable")
+    );
 
     // A non-chat model still leases: its stored reason excludes a
     // conversational use, not a non-conversational one.
@@ -438,12 +443,14 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
         .await
         .unwrap();
     assert_eq!(image.protocol, ModelProtocol::OpenaiCompatible);
-    let endpoint = providers
-        .credential(PROVIDER, "fixture-gemini", &cancel())
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(endpoint.code, "account_unavailable");
+    for excluded in ["fixture-gemini", "fixture-image-off"] {
+        let refused = providers
+            .credential(PROVIDER, excluded, &cancel())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.code, "account_unavailable", "{excluded}");
+    }
     let lease = providers
         .credential(PROVIDER, "fixture-model", &cancel())
         .await
@@ -1102,27 +1109,40 @@ impl DynPlugin for ModelHostFixture {
     }
 }
 
+/// The process with Provider mounted over the managed account's SQLite
+/// storage, as the App Server mounts it.
+async fn provider_process(home: &Path) -> Process {
+    let process = process(home).await;
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
+    let views = [
+        process
+            .root
+            .plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        process
+            .root
+            .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names, 0).unwrap()),
+        process
+            .root
+            .plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names, 0).unwrap()),
+        process.root.plugin(ModelHostFixture),
+        process.root.plugin(ProviderPlugin::new(&names).unwrap()),
+    ];
+    for view in &views {
+        active(view).await;
+    }
+    process
+}
+
 /// A managed bundle's media model leases for its non-conversational use, and
 /// a chat request for the same model is refused before the lease.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn managed_media_model_leases_for_modality_and_chat_refuses_it() {
     let fixture = oauth::start().await;
     let home = home();
-    let Process { root, providers } = process(&home).await;
+    let Process { root, providers } = provider_process(&home).await;
     login(&providers, &fixture.base).await;
-    let catalog = dim_app_server::catalog();
-    let build = rutis_loader::resolve::Build::default();
-    let names = Names::copy(&catalog, &build);
-    let views = [
-        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names, 0).unwrap()),
-        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names, 0).unwrap()),
-        root.plugin(ModelHostFixture),
-        root.plugin(ProviderPlugin::new(&names).unwrap()),
-    ];
-    for view in &views {
-        active(view).await;
-    }
     let provider = root.get::<ProviderService>().unwrap();
     provider
         .refresh_for(PROVIDER.into(), &cancel())
@@ -1181,6 +1201,83 @@ async fn managed_media_model_leases_for_modality_and_chat_refuses_it() {
         .unwrap()
         .0
         .resolve(request, cancel())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(refused.to_string(), "Model is unavailable");
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A record persisted before the projection fix stores a chat-kind reason for
+/// a model the relay marked unavailable; the status alone excludes it from
+/// every use, so neither read lists it and no credential is leased.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stored_unavailable_media_model_is_excluded_from_every_use() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = provider_process(&home).await;
+    login(&providers, &fixture.base).await;
+    let provider = root.get::<ProviderService>().unwrap();
+    provider
+        .refresh_for(PROVIDER.into(), &cancel())
+        .await
+        .unwrap();
+    let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let (version, body): (u32, String) = database
+        .query_row(
+            "SELECT version,record FROM providers WHERE provider_id=?1",
+            [PROVIDER],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let mut body: Value = serde_json::from_str(&body).unwrap();
+    let model = body["models"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|model| model["entry"]["modelId"] == "fixture-image")
+        .unwrap();
+    // The refresh wrote the kind reason; the status is the only unavailable
+    // fact, exactly as a record from before the projection fix could hold it.
+    assert_eq!(model["unavailableReason"], "unsupported_model_type");
+    model["entry"]["status"] = json!("unavailable");
+    database
+        .execute(
+            "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
+            rusqlite::params![PROVIDER, version, body.to_string()],
+        )
+        .unwrap();
+    drop(database);
+
+    let listed = root
+        .get::<SelectableModelsHost>()
+        .unwrap()
+        .0
+        .selectable_for_modality(cancel())
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .iter()
+            .all(|model| model.target.provider_id != PROVIDER
+                || model.target.model_id != "fixture-image"),
+        "the stored status excludes the model from the modality read"
+    );
+    let refused = root
+        .get::<ModalityConnectionHost>()
+        .unwrap()
+        .0
+        .resolve_for_modality(
+            ModalityTarget {
+                target: ModelId {
+                    provider_id: PROVIDER.into(),
+                    model_id: "fixture-image".into(),
+                },
+                operation: "image.generate".into(),
+            },
+            cancel(),
+        )
         .await
         .err()
         .unwrap();

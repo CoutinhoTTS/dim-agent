@@ -694,7 +694,10 @@ for that model, and an undeclared operation as an invalid request that names it.
 The read and the connection cannot disagree, because they share the catalog and
 its selection predicate. The managed account's credential lease reads the same
 rule: it refuses only a reason that excludes every use, so a media model the
-catalog marks as non-chat still leases for this call.
+catalog marks as non-chat still leases for this call. That boundary rule reads
+the stored reason together with the entry's status: an `unavailable` status
+excludes every use whatever reason was stored, so a record an older projection
+wrote for such a model is listed by neither read and leases nothing.
 
 **Credential rule and lifetime.** The connection lives for that one call. Provider
 never persists it, never returns it to a client and never writes it to a task

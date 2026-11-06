@@ -457,6 +457,11 @@ impl ProviderRecord {
     /// derived from the effective limits, so a supplied limit makes the
     /// model available again, while the stored value stays for the reset
     /// that puts the base entry back in force.
+    ///
+    /// The boundary rule classifies the entry, not only its reason: an
+    /// `unavailable` status excludes every use, so the catalog publishes the
+    /// stored reason (or the generic every-use one when the status alone is
+    /// the cause) for both uses and neither selection lists it.
     pub(crate) fn effective_models(&self, bundled: &BundledCatalog) -> Vec<EffectiveModel<'_>> {
         self.models
             .iter()
@@ -471,7 +476,19 @@ impl ProviderRecord {
                 };
                 fill_bundled_limits(bundled, &mut entry);
                 let missing_limits = entry.capabilities.missing_limits();
-                let unavailable = limits_reason(source.unavailable_reason.clone(), &missing_limits);
+                let unavailable = if source.excluded_from_every_use() {
+                    // A stored limits reason is the weaker derived fact and
+                    // does not name an entry the status excludes.
+                    Some(Unavailable::every_use(
+                        source
+                            .unavailable_reason
+                            .as_deref()
+                            .filter(|reason| *reason != "limits_undeclared")
+                            .unwrap_or("provider_unavailable"),
+                    ))
+                } else {
+                    limits_reason(source.unavailable_reason.clone(), &missing_limits)
+                };
                 EffectiveModel {
                     source,
                     entry,
