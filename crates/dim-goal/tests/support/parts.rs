@@ -31,7 +31,7 @@ use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ops::RangeInclusive,
     path::PathBuf,
     sync::{
@@ -412,7 +412,8 @@ impl TimelineStore for RefusingStore {
 /// A store that holds Goal's creation check — its one `branch/create` query —
 /// until the case lets it go, so a case can commit a change and have the fold
 /// consume it while that check waits; every other call delegates to a memory
-/// store.
+/// store. It also holds one publication or one read at a time, so a case can
+/// place a fact in a window a live system never shows it in.
 #[derive(Default)]
 pub struct GatedStore {
     memory: MemoryTimelineStore,
@@ -425,6 +426,52 @@ pub struct GatedStore {
             tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// A state record's publication and every publication after it, held until
+    /// the case releases them.
+    state: Arc<Mutex<Option<StateHold>>>,
+    /// A read whose one kind matches, held until the case releases it.
+    read: Mutex<Option<ReadHold>>,
+}
+
+/// One held read: its single kind and the case's ends of the gate.
+struct ReadHold {
+    kind: String,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// One held publication: the state record naming `after` and everything
+/// committed after it wait, in order, for the case's release (R2, R4).
+struct StateHold {
+    /// The state record's `after`, or `None` for the next state record.
+    after: Option<u64>,
+    entered: Option<tokio::sync::oneshot::Sender<()>>,
+    release: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Set when the record's publication arrived: later ones queue behind it.
+    triggered: bool,
+    /// Set when the case released the gate: the queue drains and later
+    /// publications run directly.
+    released: bool,
+    queue: VecDeque<Box<dyn FnOnce() + Send>>,
+}
+
+impl StateHold {
+    /// Whether one of `events` is a state record naming the held `after`.
+    fn matches(&self, events: &[StoredEvent]) -> bool {
+        events.iter().any(|stored| {
+            let EventKind::InputMessage(data) = &stored.event.kind else {
+                return false;
+            };
+            data.blocks.iter().any(|block| {
+                let InputBlock::Raw { text, .. } = block;
+                if !text.contains(r#"kind="state""#) {
+                    return false;
+                }
+                self.after
+                    .is_none_or(|after| text.contains(&format!(r#"after="{after}""#)))
+            })
+        })
+    }
 }
 
 impl GatedStore {
@@ -456,6 +503,49 @@ impl GatedStore {
         let (entered, written) = tokio::sync::oneshot::channel();
         let (release, held) = tokio::sync::oneshot::channel();
         *self.published.lock().unwrap() = Some((entered, held));
+        (written, release)
+    }
+
+    /// Holds the publication of the state record naming `after` (`None`: the
+    /// next state record) and of every fact committed after it: the first end
+    /// fires once the record's append is committed, and sending on the second
+    /// publishes it and then the facts behind it.
+    pub fn hold_state(
+        &self,
+        after: Option<u64>,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, written) = tokio::sync::oneshot::channel();
+        let (release, held) = tokio::sync::oneshot::channel();
+        *self.state.lock().unwrap() = Some(StateHold {
+            after,
+            entered: Some(entered),
+            release: Some(held),
+            triggered: false,
+            released: false,
+            queue: VecDeque::new(),
+        });
+        (written, release)
+    }
+
+    /// Holds the next read whose single kind is `kind`: the first end fires
+    /// once the read starts, and sending on the second lets it answer.
+    pub fn hold_query(
+        &self,
+        kind: &str,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, written) = tokio::sync::oneshot::channel();
+        let (release, held) = tokio::sync::oneshot::channel();
+        *self.read.lock().unwrap() = Some(ReadHold {
+            kind: kind.to_owned(),
+            entered,
+            release: held,
+        });
         (written, release)
     }
 }
@@ -510,23 +600,91 @@ impl TimelineStore for GatedStore {
                 text.contains(r#"kind="continuation""#)
             })
         });
-        let held = continuation
-            .then(|| self.published.lock().unwrap().take())
-            .flatten();
-        let Some((entered, held)) = held else {
-            return self.memory.append(key, events, publish);
+        if continuation && let Some((entered, held)) = self.published.lock().unwrap().take() {
+            return self.memory.append(
+                key,
+                events,
+                Box::new(move |result| {
+                    tokio::spawn(async move {
+                        let _ = entered.send(());
+                        let _ = held.await;
+                        publish(result);
+                    });
+                }),
+            );
+        }
+        enum Held {
+            /// This append is the held record: its publication waits for the
+            /// case, then drains the queue in commit order.
+            Trigger(
+                tokio::sync::oneshot::Sender<()>,
+                tokio::sync::oneshot::Receiver<()>,
+            ),
+            /// A fact committed after the held record: it publishes behind it.
+            Behind,
+        }
+        let held = {
+            let mut slot = self.state.lock().unwrap();
+            match slot.as_mut() {
+                Some(hold) if hold.released => None,
+                Some(hold) if hold.triggered => Some(Held::Behind),
+                Some(hold) if hold.matches(&events) => {
+                    hold.triggered = true;
+                    match (hold.entered.take(), hold.release.take()) {
+                        (Some(entered), Some(release)) => Some(Held::Trigger(entered, release)),
+                        _ => Some(Held::Behind),
+                    }
+                }
+                _ => None,
+            }
         };
-        self.memory.append(
-            key,
-            events,
-            Box::new(move |result| {
-                tokio::spawn(async move {
-                    let _ = entered.send(());
-                    let _ = held.await;
-                    publish(result);
-                });
-            }),
-        )
+        match held {
+            None => self.memory.append(key, events, publish),
+            Some(Held::Behind) => {
+                let state = self.state.clone();
+                self.memory.append(
+                    key,
+                    events,
+                    Box::new(move |result| {
+                        let mut slot = state.lock().unwrap();
+                        match slot.as_mut() {
+                            Some(hold) if !hold.released => {
+                                hold.queue.push_back(Box::new(move || publish(result)));
+                            }
+                            _ => {
+                                drop(slot);
+                                publish(result);
+                            }
+                        }
+                    }),
+                )
+            }
+            Some(Held::Trigger(entered, release)) => {
+                let state = self.state.clone();
+                self.memory.append(
+                    key,
+                    events,
+                    Box::new(move |result| {
+                        tokio::spawn(async move {
+                            let _ = entered.send(());
+                            let _ = release.await;
+                            let mut slot = state.lock().unwrap();
+                            if let Some(hold) = slot.as_mut() {
+                                hold.released = true;
+                            }
+                            publish(result);
+                            loop {
+                                let next = slot.as_mut().and_then(|hold| hold.queue.pop_front());
+                                match next {
+                                    Some(callback) => callback(),
+                                    None => break,
+                                }
+                            }
+                        });
+                    }),
+                )
+            }
+        }
     }
     fn batch_end<'a>(
         &'a self,
@@ -555,7 +713,24 @@ impl TimelineStore for GatedStore {
                 )
             })
             .and_then(|(entered, release)| entered.zip(release));
-        let Some((entered, release)) = armed else {
+        if let Some((entered, release)) = armed {
+            return Box::pin(async move {
+                let _ = entered.send(());
+                let _ = release.await;
+                self.memory.query(key, query, from, through).await
+            });
+        }
+        let held = {
+            let mut slot = self.read.lock().unwrap();
+            match slot.as_ref() {
+                Some(hold) if query.kinds.len() == 1 && query.kinds[0] == hold.kind => slot.take(),
+                _ => None,
+            }
+        };
+        let Some(ReadHold {
+            entered, release, ..
+        }) = held
+        else {
             return self.memory.query(key, query, from, through);
         };
         Box::pin(async move {

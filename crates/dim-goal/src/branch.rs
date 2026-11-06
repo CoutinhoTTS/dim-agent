@@ -242,6 +242,10 @@ struct State {
     /// The `after` values of the state records Goal has written: a second pass
     /// that runs before the fold consumes a write must not state it again.
     written: std::collections::BTreeSet<u64>,
+    /// The highest `after` a state record was composed with. Records are
+    /// ordered by `after`, not by their commit order (R4): a record naming an
+    /// older state is not composed once a newer one exists.
+    recorded: u64,
 }
 
 struct Owner {
@@ -556,17 +560,18 @@ impl Owner {
     /// rebuild's facts take decisions only through its closing steps.
     fn ingest(self: &Arc<Self>, event: &AgentEvent, live: bool) {
         let turn_start = self.state.lock().unwrap().fold.turn_start;
-        // A held change input Goal already answered leaves a record stating a
-        // state the branch no longer has when InputQueue deletes it; the
-        // deletion is stated again after the fold drops the input (D3).
-        let answered_change = match &event.kind {
+        // A deleted change trigger never took effect: the fold is recomputed
+        // without it and, when a record naming it or a later change was
+        // written, the recomputed state is stated again (R2). The sequence is
+        // read before the fold drops the trigger.
+        let withdrawn = match &event.kind {
             EventKind::InputDeleted(data) => self
                 .state
                 .lock()
                 .unwrap()
                 .fold
-                .answered_change(&data.input_id),
-            _ => false,
+                .change_trigger(&data.input_id),
+            _ => None,
         };
         self.state.lock().unwrap().fold.apply(event);
         let sequence = event.sequence;
@@ -619,8 +624,8 @@ impl Owner {
             }
             EventKind::InputDeleted(_) => {
                 self.decide_end();
-                if answered_change {
-                    self.answer_deletion(sequence);
+                if let Some(withdrawn) = withdrawn {
+                    self.answer_deletion(sequence, withdrawn);
                 }
             }
             // A cancelled background end does not wake (BackgroundExec's
@@ -697,10 +702,14 @@ impl Owner {
             Box::pin(async move {
                 let _write = owner.write.lock().await;
                 let write = {
-                    let state = owner.state.lock().unwrap();
-                    !state.fold.is_decided(at)
+                    let mut state = owner.state.lock().unwrap();
+                    let write = !state.fold.is_decided(at)
                         && state.fold.local_blocks == 0
-                        && state.fold.last_change == 0
+                        && state.fold.last_change == 0;
+                    if write {
+                        state.recorded = state.recorded.max(at);
+                    }
+                    write
                 };
                 if !write {
                     return Ok(());
@@ -728,25 +737,35 @@ impl Owner {
                     }
                 };
                 owner
-                    .record(at, Some(text::State::Paused(reason.to_owned())), false)
+                    .record(
+                        at,
+                        Some(text::State::Paused(reason.to_owned())),
+                        false,
+                        None,
+                    )
                     .await
             })
         });
     }
 
-    /// Writes one state record for `after` (D2, D3): the state the fold states
-    /// now, or `state` when the write decides a new status (a pause, a
-    /// completion, a failure). Serialized with every other record, and skipped
-    /// when a newer change trigger asked for another state, so the newest
-    /// record always states the newest state. The old keys the fold still
-    /// holds live are retired in the same input (R1). `answer` marks the write
-    /// as the answer to the newest pending change: it is skipped when another
-    /// record already answered that change, as a deletion does.
+    /// Writes one state record for `after` (D2, D3, R2, R4): the state the
+    /// fold states now, or `state` when the write decides a new status (a
+    /// pause, a completion, a failure). Serialized with every other record,
+    /// skipped when a newer change trigger asked for another state and when a
+    /// record with a higher `after` was already composed, so the newest record
+    /// always states the newest state. The old keys the fold still holds live
+    /// are retired in the same input (R1). `answer` marks the write as the
+    /// answer to the newest pending change: it is skipped when another record
+    /// already answered that change, as a deletion does. `withdrawn` marks the
+    /// write as the compensation for a deleted change trigger: it is written
+    /// only when a record naming that trigger, or a later record, was already
+    /// written or is being written, decided here under the write lock.
     async fn record(
         self: &Arc<Self>,
         after: u64,
         state: Option<text::State>,
         answer: bool,
+        withdrawn: Option<u64>,
     ) -> Result<(), AgentError> {
         let _write = self.write.lock().await;
         let (objective, state, judge, live) = {
@@ -754,9 +773,20 @@ impl Owner {
             if answer && lock.fold.pending_change() != Some(after) {
                 return Ok(());
             }
-            if lock.fold.last_change > after || !lock.written.insert(after) {
+            if let Some(withdrawn) = withdrawn {
+                let named = lock.fold.recorded_at_or_after(withdrawn)
+                    || lock.written.range(withdrawn..).next().is_some();
+                if !named {
+                    return Ok(());
+                }
+            }
+            if lock.fold.last_change > after || after < lock.recorded {
                 return Ok(());
             }
+            if !lock.written.insert(after) {
+                return Ok(());
+            }
+            lock.recorded = after;
             let fold = &lock.fold;
             (
                 fold.objective.clone(),
@@ -788,17 +818,18 @@ impl Owner {
             return;
         };
         self.task(format!("state:{last}"), None, move |owner| {
-            Box::pin(async move { owner.record(last, None, true).await })
+            Box::pin(async move { owner.record(last, None, true, None).await })
         });
     }
 
-    /// States the branch again after the deletion of a change input Goal had
-    /// answered (D3): the deleted input is gone from the fold and the record
-    /// that named it states a state the branch no longer has, so the state as
-    /// it stands is stated with the deletion's sequence.
-    fn answer_deletion(self: &Arc<Self>, at: u64) {
+    /// States the branch again after the deletion of the change trigger
+    /// `withdrawn` (R2): the trigger is gone from the fold and a record that
+    /// named it states a state the branch no longer has, so the recomputed
+    /// state is stated with the deletion's sequence. Whether such a record
+    /// exists is decided under the write lock.
+    fn answer_deletion(self: &Arc<Self>, at: u64, withdrawn: u64) {
         self.task(format!("delete:{at}"), None, move |owner| {
-            Box::pin(async move { owner.record(at, None, false).await })
+            Box::pin(async move { owner.record(at, None, false, Some(withdrawn)).await })
         });
     }
 
@@ -892,6 +923,7 @@ impl Owner {
                     after,
                     Some(text::State::Paused("evaluation_failed".to_owned())),
                     false,
+                    None,
                 )
                 .await?;
             }
@@ -950,8 +982,13 @@ impl Owner {
                 self.tree.input(self.branch_id.clone(), input).await?;
             }
             Decision::Pause { reason } => {
-                self.record(after, Some(text::State::Paused(reason.to_owned())), false)
-                    .await?;
+                self.record(
+                    after,
+                    Some(text::State::Paused(reason.to_owned())),
+                    false,
+                    None,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -1158,6 +1195,7 @@ impl Owner {
                         at,
                         Some(text::State::Paused("evaluation_failed".to_owned())),
                         false,
+                        None,
                     )
                     .await
             })
@@ -1195,15 +1233,16 @@ impl Owner {
                     sequence,
                     Some(text::State::Paused("evaluation_failed".to_owned())),
                     false,
+                    None,
                 )
                 .await?;
             }
             ConclusionAction::Completed(text) => {
-                self.record(sequence, Some(text::State::Completed(text)), false)
+                self.record(sequence, Some(text::State::Completed(text)), false, None)
                     .await?;
             }
             ConclusionAction::Blocked(text) => {
-                self.record(sequence, Some(text::State::Blocked(text)), false)
+                self.record(sequence, Some(text::State::Blocked(text)), false, None)
                     .await?;
             }
             ConclusionAction::Continue => {
@@ -1267,6 +1306,7 @@ impl Owner {
                             sequence,
                             Some(text::State::Paused(reason.to_owned())),
                             false,
+                            None,
                         )
                         .await?;
                     }

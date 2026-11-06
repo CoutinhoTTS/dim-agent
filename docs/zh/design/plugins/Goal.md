@@ -70,9 +70,9 @@ flowchart TB
 
 Goal 不拥有自己类型的持久状态。分支 `B` 的目标是 `B` 本地事件中最新的存活 `goal:state` 块所陈述的状态；在记录出现之前写成的历史上，则是按下面规则折叠的两个旧 key。只有 Goal 的分支部分写这条记录。它是一条普通的 `input/message`，带一个 key 为 `goal:state` 的 raw 块，模式 Append，因此模型、客户端与 Goal 的折叠读到同一个事实：模型经 `render_input`，客户端经分支历史或通用带 key 投影，折叠经其 Dispatcher 订阅。没有为它特判任何规则或 ADR：这个块像其他被采用的输入一样进入模型上下文，压缩也像其他 key 一样经带 key 的基线重放它。
 
-**变更**是触发器，不是状态陈述。`session.goal.set/edit/pause/resume/clear` 与 `goal_update` 各写一条 `input/message`，其唯一的 raw 块 `kind="goal"`，说明被要求了什么（A.5）；它没有自己的 key，也没有状态句子。分支部分用恰好一条状态记录回答每个变更触发器，作为任务复核之后的自有工作，与写续跑相同：记录在 `after` 中写名该触发器。给定 `after` 的快照只写一次。重启在加载时把未回答的触发器回答一次（§4.2）。被 InputQueue 在 Goal 已回答之后删除的、被持有的 Queue 变更，会得到一条补偿记录，其 `after` 是 `input/deleted` 的序号，因为被删除的输入从未生效，而写名它的记录陈述了分支已不再具有的状态。
+**变更**是触发器，不是状态陈述。`session.goal.set/edit/pause/resume/clear` 与 `goal_update` 各写一条 `input/message`，其唯一的 raw 块 `kind="goal"`，说明被要求了什么（A.5）；它没有自己的 key，也没有状态句子。分支部分用恰好一条状态记录回答每个变更触发器，作为任务复核之后的自有工作，与写续跑相同：记录在 `after` 中写名该触发器。给定 `after` 的快照只写一次。重启在加载时把未回答的触发器回答一次（§4.2）。被 InputQueue 删除的变更触发器从未生效：折叠去掉它重新计算；只要已有写名该触发器的记录或任何更晚的记录曾被写入或正在被写入，Goal 就写一条补偿记录，其 `after` 是 `input/deleted` 的序号，陈述分支去掉该触发器后的状态。是否存在这样的记录在写锁下决定，因此在删除被折叠期间提交的记录会被补偿记录取代，绝不会成为最新的存活记录。
 
-折叠在变更 `input/message` 的序号处应用它（A14），因此在触发器与其记录之间做出的决策已经看到新状态；它忽略 `after` 写名的触发器比已折叠的最新变更更旧的记录。**模型**在下一个请求处得知变更，而不是在 Queue 输入驱动的那一轮：Append 记录立即释放，而 Queue 命令仍驱动它的轮次（A14）。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠去掉它重新计算（[session access](../contracts/session-access.md)）。
+折叠在变更 `input/message` 的序号处应用它（A14），因此在触发器与其记录之间做出的决策已经看到新状态。它忽略三类记录：`after` 写名已被删除的变更的、比已折叠的最新变更更旧的、以及比已应用的最新记录更旧的；Goal 也从不撰写 `after` 低于自己已写记录的记录，因此无论写入任务的提交顺序如何，最新的存活记录总是陈述最新的状态。**模型**在下一个请求处得知变更，而不是在 Queue 输入驱动的那一轮：Append 记录立即释放，而 Queue 命令仍驱动它的轮次（A14）。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠去掉它重新计算（[session access](../contracts/session-access.md)）。
 
 **旧历史。** 最新 Goal 块是旧 `goal:objective` 或 `goal:status` 块的分支，按下面记录出现之前的规则折叠，保持不变，加载时不回填记录。该分支上第一个被回答的变更触发器写入一条 `goal:state` 记录，此后记录就是生效状态；同一条输入退役分支上仍然存活的旧 key，此后分支只保留 `goal:state`——在其之后复制的压缩基线不会带任何过期的旧块，`session.keys` 也只剩一个 key。客户端以同样方式回退（§6）。该回退为记录之前写成的历史保留；当再没有这样的历史可读时移除。
 
@@ -228,7 +228,7 @@ sequenceDiagram
 | 驱动输入在 N 之后被删除（例如在被应用前经 `session.input.withdraw` 撤回） | 输入 < N < `input/deleted` | N 的决策在 C5 停止；消费 `input/deleted` 时重新做 N 的决策；C1–C6 成立则续跑 | InputQueue；Goal |
 | 一个批次中两个 `goal_update` 调用 | 两个块都在 `step/tool-result` 之前 | 都写入，两个结果都确认写入；折叠按顺序应用两者，第二个是当前状态 | Goal |
 | `completed` 或 `blocked` 之后 `resume` | 终态块 < resume | 目标重新打开：`active`，计数重新开始，这条 Queue 输入驱动一轮 | Goal |
-| 变更在被持有时被撤回 | 变更 < `input/deleted` | 从折叠中移除；最新未决策或已停止的决策重新进行；若 Goal 已回答它，这条删除由一条补偿记录回答，`after` 写名该删除 | InputQueue；Goal |
+| 变更在被持有时被撤回 | 变更 < `input/deleted` | 从折叠中移除；最新未决策或已停止的决策重新进行；当已有写名该变更的记录或任何更晚的记录时，补偿记录陈述重新计算后的分支状态 | InputQueue；Goal |
 | 子分支在目标块之后切出 | 已消费 < 切点 < `branch/start` | 子分支的折叠结果没有目标；Goal 写入起始 `clear`（§3.4）；不续跑；在那里的 `goal_update` 或任何变更只影响子分支 | Goal |
 | 目标轮次内的压缩（自动或手动） | `turn/start` < 压缩事实 < `turn/end` N | 该轮的一个步骤，没有 `turn/end`：不决策；轮次在压缩后的上下文上继续，由 N 照常决策 | Loop；Goal |
 | 没有轮次时的手动压缩 | `context/compact` < `context/compaction-start` < `context/compaction`，没有 `turn/*` | 不决策，不续跑；最新的 `turn/end` 与 `turn_open` 不变 | Loop；Goal |
@@ -375,7 +375,7 @@ C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两�
 
 投递 `M` 处的 `stop/interrupt`（`scope: turn`）时：若 C1 成立且 `A < M`，写暂停（`interrupted`）。
 
-投递 `input/deleted` 时：去掉被删除的输入重新折叠；若最新的 `turn/end` 不是 `decided`，重新做它的决策（C4 与 C5 去重）。若被删除的输入是 Goal 已回答的变更触发器，则写一条补偿记录，`after` 为这次删除的序号（§2）。
+投递 `input/deleted` 时：去掉被删除的输入重新折叠，丢弃每条写名它的记录；当写名被删除变更的记录或更晚的记录曾被写入或正在被写入时，写入陈述重新计算状态的补偿记录；若最新的 `turn/end` 不是 `decided`，重新做它的决策（C4 与 C5 去重）。
 
 每次写入都是自有工作：处理器登记一个以做出决定的序号为键的任务，然后返回；若某个 turn-end 请求到达时，该 turn end 的任务已在途，则在任务结束时再回答一次。写入前，任务基于此刻已消费的折叠结果复核同样的条件（[time-bus](../../../architecture/rust-agent/time-bus.md) §4），条件不再成立就不写；已提交但尚未消费的事实不读，由其消费方按序号处理（§4.1）。没有变化时，C4 与 `decided` 标记会让这次重复决策成为空操作，因此通常不写任何内容。cancelled 的 `exec/ended` 需要它：它可能在 turn-end 工作已经读过折叠、带着推迟的决策返回之后才关闭最后一个开放任务，而此后没有 wake 再请求一次决策（见上文的 background precondition）。Goal 的写入带 `after="N"`（或 `after="M"`），因此折叠结果记录了该决定，重载不会重复它。
 
@@ -482,7 +482,7 @@ Goal 消费 `branch/start`、`session/forked`、`branch/create`、`branch/create
 | 驱动输入在 N 之后被删除 | N < `input/deleted` | N 的决策在 C5 停止；消费 `input/deleted` 时重新做 N 的决策：C1–C6 成立则续跑 | Goal |
 | 在被应用前撤回的提示，`input/deleted` 在 N 之后 | 输入 < `input/withdraw` < N < `input/deleted` | 同上：Goal 不理会指令，依据 InputQueue 的 `input/deleted` 重新决策 | InputQueue；Goal |
 | Goal 自己的续跑在被持有时被用户撤回 | 续跑 < `input/deleted` | 从未被应用或消费，不算待处理，从折叠中移除（N 不再是 `decided`）；下一次决策可以再次续跑 | Goal |
-| 变更在被持有时被用户撤回（如 `pause`） | 变更 < `input/deleted` | 去掉它重新折叠；最新的 `turn/end` 若不是 `decided` 则重新决策 | InputQueue；Goal |
+| 变更在被持有时被用户撤回（如 `pause`） | 变更 < `input/deleted` | 去掉它重新折叠；写名它的记录被丢弃；当该记录或更晚的记录存在时，补偿记录作为最新存活记录陈述重新计算的状态；最新的 `turn/end` 若不是 `decided` 则重新决策 | InputQueue；Goal |
 | 同一 `turn/end` 之后另一来源的 Queue 后续输入（如 Hooks） | 都在 N 之后 | 按顺序两轮；每个 `turn/end` 最多一次续跑；该输入除非是操作者输入，否则不重置计数 | InputQueue；Goal |
 | 一条线的开启输入（TimelineTree 写入，第一个块是 `branch:line`；[Timeline 分支 §7.4](../timeline-branches.md#74-goal-与-pursuit)） | 在任何本地目标之前 | 不是操作者输入（A5）；它早于 `set`，所以从不影响计数 | TimelineTree；Goal |
 | N 之前中断 | 中断 < N | C2：暂停（`interrupted`），不续跑 | Goal |
@@ -591,7 +591,7 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 | A11 | 分叉 Session 的 `main` 从没有目标开始。分叉在其事务中、复制来的事实之后写 `session/forked`（[fork §6.5](../appserver/session-deletion-and-fork.md#65-打开分叉)）；Goal 从它之后折叠，并据此做起始 `clear` 决策 | 用户决定（2026-10-19）：分叉本身就是 Goal 消费的事实。不在此处写 `branch/start`，因为 Prompt 把根分支的 start 当作新 Session | — |
 | A12 | `resume` 总是驱动一轮（重新打开 completed 或 blocked 的目标，或使 active 的空闲目标重新开始工作）；重复的 `set` 和 `resume` 不去重 | 判断；方法看不到 `turn_open` 或待处理输入 | 重新开始的目标需要再次 `set`，或重复 resume 需要读取状态 |
 | A13 | `branchId` 默认为 `main`；任何分支都可以持有自己的目标 | 判断 | Goal 限于 `main` |
-| A14 | 变更在其触发器 `input/message` 的序号处生效；Goal 用一条 `goal:state` 记录陈述它，记录在 `after` 中写名该触发器，Append，因此模型在下一个请求处得知它；变更被 InputQueue 删除时从折叠中移除，Goal 已回答过的被删除变更由一条补偿记录再次陈述 | 判断：轮次中写入的暂停必须在该轮的 Append 被应用之前阻止续跑，而且模型不能只在 Queue 变更驱动的那一轮才得知它 | 变更改为在 `input/applied` 处生效；模型会继续读到已不成立的状态，或排队的变更要过几轮才到达它 |
+| A14 | 变更在其触发器 `input/message` 的序号处生效；Goal 用一条 `goal:state` 记录陈述它，记录在 `after` 中写名该触发器，Append，因此模型在下一个请求处得知它；变更被 InputQueue 删除时从折叠中移除，而写名它的记录或更晚的记录已写入时，由一条补偿记录再次陈述 | 判断：轮次中写入的暂停必须在该轮的 Append 被应用之前阻止续跑，而且模型不能只在 Queue 变更驱动的那一轮才得知它 | 变更改为在 `input/applied` 处生效；模型会继续读到已不成立的状态，或排队的变更要过几轮才到达它 |
 | A15 | 第二次 `goal_update`，或没有 active 目标时的 `goal_update`，返回写入确认而不是错误，其块成为当前状态（A16；在 [Pursuit](Pursuit.md) 的评审裁判下，干活模型的 `completed` 是请求） | 决定 G1（行为变化；去掉调用方的判断，以此回应 PR 评审"Goal 调用要看到之前已提交的写入"） | 工具需要读取并等待折叠结果，重新引入调用方判断 |
 | A16 | 状态规则：最新的存活本地 `goal:state` 记录就是当前目标文本与状态，只有它陈述目标文本时目标才存在；在旧历史上，仍是每个 key 最新的存活本地块。在 [Pursuit](Pursuit.md)（已实现）的评审裁判下，干活模型的 `completed` 是请求，不是状态变更：Goal 在它之后写的记录仍陈述 `active`，因此模型、折叠与客户端读到同一个状态，各自都不需要例外；旧 key 回退为带它的历史保留旧例外 | 用户决定（回应 PR 评审"Keep replayed Goal status consistent with the fold"）；记录让重放出的最新块本身就是状态 | 压缩后重放的状态可能与折叠结果不一致 |
 | A17 | 后台任务的启动是其回合中的一个 `step/tool-call`；有任务开放时目标会等待：该 turn/end 不决策，直到非 cancelled 结束的唤醒驱动下一轮，或 cancelled 结束关闭最后一个开放任务 | 判断：运行中的后台进程是持续的工作，不是已完成的回合 | 目标可能在它启动的任务仍在运行时暂停或续跑 |

@@ -319,6 +319,14 @@ pub struct Fold {
     driving: HashMap<String, u64>,
     events: Vec<AgentEvent>,
     deleted: HashSet<String>,
+    /// The sequences of the inputs `input/deleted` removed. A record whose
+    /// `after` names one of them states a change that never took effect and is
+    /// stepped as no statement at all (R2).
+    deleted_sequences: HashSet<u64>,
+    /// The `after` values of the state records this fold has stepped, deleted
+    /// changes included. A deletion asks whether a record naming the withdrawn
+    /// change, or a later record, exists (R2).
+    record_afters: BTreeSet<u64>,
 }
 
 impl Fold {
@@ -444,6 +452,9 @@ impl Fold {
 
     fn step_input(&mut self, event: &AgentEvent, data: &InputMessageData, sequence: u64) {
         if self.deleted.contains(&event.id) {
+            // The input is gone; a record naming it states a change that never
+            // took effect (R2).
+            self.deleted_sequences.insert(sequence);
             return;
         }
         if data.effective_mode() != InputMode::Append {
@@ -546,12 +557,18 @@ impl Fold {
     /// Applies the state one `goal:state` record states (D2). A record whose
     /// `after` is older than the newest change trigger is stale: a later
     /// trigger already asked for another state, and its own record follows.
+    /// A record naming a withdrawn change (R2), or one older than the newest
+    /// record this fold already stepped (R4), states nothing.
     fn step_state(&mut self, attrs: &Marker, raw: &str, retire: bool) {
         self.live.state = !retire;
         let Some(after) = attrs.get("after").and_then(|after| sequence_of(after)) else {
             return;
         };
-        if after < self.last_change {
+        self.record_afters.insert(after);
+        if self.deleted_sequences.contains(&after) {
+            return;
+        }
+        if after < self.last_change || after < self.state_after {
             return;
         }
         self.state_after = after;
@@ -759,11 +776,15 @@ impl Fold {
     pub fn pending_change(&self) -> Option<u64> {
         (self.last_change > self.state_after).then_some(self.last_change)
     }
-    /// Whether the change input `id` was answered by a state record (D3).
-    pub fn answered_change(&self, id: &str) -> bool {
-        self.change_triggers
-            .get(id)
-            .is_some_and(|sequence| *sequence <= self.state_after)
+    /// The sequence of the change trigger input `id`, when this fold holds it.
+    pub fn change_trigger(&self, id: &str) -> Option<u64> {
+        self.change_triggers.get(id).copied()
+    }
+    /// Whether a state record naming `after` or a later change has been
+    /// stepped: the newest live record states that state, not the withdrawn
+    /// change's (R2).
+    pub fn recorded_at_or_after(&self, after: u64) -> bool {
+        self.record_afters.range(after..).next().is_some()
     }
 }
 
@@ -914,7 +935,7 @@ pub fn decide_evaluated_continuation(fold: &Fold, limit: Option<u64>) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{Conclusion, conclusion_of};
+    use super::{Conclusion, Fold, conclusion_of};
     use crate::text;
     use dim_agent_types::InputBlock;
 

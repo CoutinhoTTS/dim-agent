@@ -323,15 +323,15 @@ async fn d4_a_withdrawn_pause_restates_the_state_its_record_keeps() {
     let set = env.set("ship it").await;
     env.goal("pause", json!({})).await.expect("pause writes");
     let pause = env.wait_for("main", r#"op="pause""#).await;
-    env.turn("main", &[&set, &pause]);
+    let end = env.turn("main", &[&set, &pause]);
     assert_eq!(
         env.settled("main").await.len(),
         4,
         "a paused goal writes no continuation at its turn end"
     );
 
-    // The pause record is the state: withdrawing the command does not unstate
-    // it, and the state is stated again at the deletion.
+    // The pause never took effect: the fold is recomputed without it, and the
+    // state the branch has again is stated at the deletion (R2).
     let deleted = env.emit(
         "main",
         EventKind::InputDeleted(InputDeletedData {
@@ -342,32 +342,32 @@ async fn d4_a_withdrawn_pause_restates_the_state_its_record_keeps() {
         .wait_for(
             "main",
             &format!(
-                r#"kind="state" status="paused" reason="user" after="{}""#,
+                r#"kind="state" status="active" after="{}""#,
                 deleted.sequence
             ),
         )
         .await;
     assert_eq!(
         again.text,
-        texts::paused("main", "ship it", "user", "", deleted.sequence, false)
+        texts::set_state("main", "ship it", deleted.sequence, false)
+    );
+    // The deletion takes the undecided turn end again: the goal is active, so
+    // it continues.
+    let continuation = env
+        .wait_for(
+            "main",
+            &format!(r#"kind="continuation" count="1" after="{}""#, end.sequence),
+        )
+        .await;
+    assert_eq!(
+        continuation.text,
+        texts::continuation("main", 1, None, 0, end.sequence)
     );
     let writes = env.settled("main").await;
     assert_eq!(
         writes.len(),
-        5,
-        "the trigger, both records, the pause's and the deletion's: {writes:#?}"
-    );
-    // The goal is still paused, so the next turn end continues nothing.
-    let end = env.turn_ids("main", &[]);
-    assert!(end.sequence > deleted.sequence);
-    let writes = env.settled("main").await;
-    assert_eq!(
-        writes
-            .iter()
-            .filter(|block| block.marker.contains(r#"kind="continuation""#))
-            .count(),
-        0,
-        "a paused goal continues nothing: {writes:#?}"
+        6,
+        "the two triggers, their records, the deletion's and the continuation: {writes:#?}"
     );
     env.close().await;
 }
@@ -437,9 +437,9 @@ async fn d5_a_restored_line_repeats_no_decision() {
     env.close().await;
 }
 
-/// D3: a held command Goal already answered is withdrawn before any turn
-/// consumed it; the record that answered it states a state the branch no
-/// longer has, so Goal states the state again, naming the deletion.
+/// D3, R2: a held command Goal already answered is withdrawn before any turn
+/// consumed it. The command never took effect: the branch is recomputed without
+/// it, so its goal is gone and the state is stated again, naming the deletion.
 #[tokio::test]
 async fn d3_a_deleted_answered_command_writes_the_state_again() {
     let env = Env::start().await;
@@ -458,9 +458,150 @@ async fn d3_a_deleted_answered_command_writes_the_state_again() {
             input_id: set.id.clone(),
         }),
     );
-    // The record Goal wrote is the state: the withdrawn command is gone from
-    // the fold and the record keeps the goal active, so the state is stated
-    // again at the deletion.
+    // The command is gone from the fold, so no goal survives it; the record
+    // that stated it is superseded by the record stating that (R2).
+    let again = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="state" status="cleared" after="{}""#,
+                deleted.sequence
+            ),
+        )
+        .await;
+    assert_eq!(again.text, texts::cleared("main", deleted.sequence));
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes.len(),
+        3,
+        "the set trigger, its record and the deletion's: {writes:#?}"
+    );
+    // The branch has no goal, so the next turn end continues nothing.
+    let end = env.turn_ids("main", &[]);
+    assert!(end.sequence > deleted.sequence);
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="continuation""#))
+            .count(),
+        0,
+        "a branch without a goal continues nothing: {writes:#?}"
+    );
+    assert!(
+        writes
+            .iter()
+            .rfind(|block| block.marker.contains(r#"kind="state""#))
+            .is_some_and(|record| record.text == again.text),
+        "the newest live record is the deletion's: {writes:#?}"
+    );
+    env.close().await;
+}
+
+/// R2: the record answering a change can be committed while the change is
+/// withdrawn, so the fold sees it only after the deletion. It is superseded by
+/// the compensation, which is the newest live record and states the state the
+/// branch has without the change.
+#[tokio::test]
+async fn r2_a_record_written_while_its_change_is_withdrawn_is_superseded() {
+    let env = Env::start_gated().await;
+    // Hold the first state record's publication: its commit completes, the
+    // fold does not see it.
+    let (committed, release) = env.gated().hold_state(None);
+    let set = env.set("ship it").await;
+    tokio::time::timeout(std::time::Duration::from_secs(15), committed)
+        .await
+        .expect("the record is written")
+        .expect("the gate signals");
+    // Withdraw the change while its record is unseen. The deletion publishes
+    // behind the record; both reach the fold on the release.
+    let deleted = env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    release.send(()).unwrap();
+    let again = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="state" status="cleared" after="{}""#,
+                deleted.sequence
+            ),
+        )
+        .await;
+    assert_eq!(again.text, texts::cleared("main", deleted.sequence));
+    let writes = env.settled("main").await;
+    let records: Vec<&Block> = writes
+        .iter()
+        .filter(|block| block.marker.contains(r#"kind="state""#))
+        .collect();
+    assert_eq!(
+        records.len(),
+        2,
+        "the answer and the compensation: {writes:#?}"
+    );
+    assert_eq!(
+        records[0].text,
+        texts::set_state("main", "ship it", set.sequence, false)
+    );
+    assert_eq!(
+        records.last().map(|record| record.text.clone()),
+        Some(again.text.clone()),
+        "the compensation is the newest live record: {writes:#?}"
+    );
+    env.close().await;
+}
+
+/// R4: a record naming an older state is not composed once a newer one exists.
+/// The failed turn end's pause waits at its progress read; an edit is written,
+/// answered and withdrawn while it waits, so its record and the compensation
+/// name states after the turn end. The fold, the newest live record and the
+/// keyed state then all state the same newer state.
+#[tokio::test]
+async fn r4_a_record_with_an_older_after_is_not_written() {
+    let env = Env::start_gated().await;
+    let set = env.set("ship it").await;
+    let first = env.turn("main", &[&set]);
+    let continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    assert_eq!(
+        continuation.text,
+        texts::continuation("main", 1, None, 0, first.sequence)
+    );
+    // The failed continuation-driven turn end decides through the tool-call
+    // read; hold it, so the decision waits before its pause record.
+    let (reached, release) = env.gated().hold_query("step/tool-call");
+    env.turn_start("main", "t2");
+    env.consume("main", &continuation.id);
+    let end = env.end_turn("main", "t2", "failed");
+    tokio::time::timeout(std::time::Duration::from_secs(15), reached)
+        .await
+        .expect("the turn-end decision reads the turn")
+        .expect("the gate signals");
+
+    // A newer change while it waits: the edit's record, then its compensation
+    // when the edit is withdrawn.
+    env.goal("edit", json!({"objective": "ship it twice"}))
+        .await
+        .expect("edit writes");
+    let edit = env.wait_for("main", r#"op="edit""#).await;
+    let edited = env
+        .wait_for(
+            "main",
+            &format!(r#"status="active" after="{}""#, edit.sequence),
+        )
+        .await;
+    assert_eq!(
+        edited.text,
+        texts::set_state("main", "ship it twice", edit.sequence, false)
+    );
+    let deleted = env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData {
+            input_id: edit.id.clone(),
+        }),
+    );
     let again = env
         .wait_for(
             "main",
@@ -474,24 +615,36 @@ async fn d3_a_deleted_answered_command_writes_the_state_again() {
         again.text,
         texts::set_state("main", "ship it", deleted.sequence, false)
     );
+    release.send(()).unwrap();
+
     let writes = env.settled("main").await;
-    assert_eq!(
-        writes.len(),
-        3,
-        "the set trigger, its record and the deletion's: {writes:#?}"
+    assert!(
+        writes
+            .iter()
+            .all(|block| !block.text.contains(&format!(r#"after="{}""#, end.sequence))),
+        "the record naming the older turn end is not written: {writes:#?}"
     );
-    // The goal is still active, so the next turn end continues it.
-    let end = env.turn_ids("main", &[]);
-    assert!(end.sequence > deleted.sequence);
+    let records: Vec<&Block> = writes
+        .iter()
+        .filter(|block| block.marker.contains(r#"kind="state""#))
+        .collect();
+    assert_eq!(
+        records.last().map(|record| record.text.clone()),
+        Some(again.text.clone()),
+        "the newest live record is the compensation: {writes:#?}"
+    );
+    // The fold states the same: the goal is active, so the next turn end
+    // continues it.
+    let next = env.turn_ids("main", &[]);
     let continuation = env
         .wait_for(
             "main",
-            &format!(r#"kind="continuation" count="1" after="{}""#, end.sequence),
+            &format!(r#"kind="continuation" count="2" after="{}""#, next.sequence),
         )
         .await;
     assert_eq!(
         continuation.text,
-        texts::continuation("main", 1, None, 0, end.sequence)
+        texts::continuation("main", 2, None, 0, next.sequence)
     );
     env.close().await;
 }
