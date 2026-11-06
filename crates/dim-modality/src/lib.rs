@@ -967,10 +967,11 @@ impl DynPlugin for ModalityPlugin {
 }
 
 /// Installs Modality as an optional process plugin: the `modality` Settings
-/// source and the `modality.*` management namespace. A host without the
-/// services it reads (settings, managementMethods and Provider's selection
-/// and selectable-model reads) still starts and opens Sessions; only
-/// `modality.*` is unavailable.
+/// source and the `modality.*` management namespace. The host must register
+/// the names of the services it reads (settings, managementMethods and
+/// Provider's selection and selectable-model reads), as the App Server's
+/// assembly does; when one of them has no provider, the host still starts
+/// and opens Sessions, and only `modality.*` is unavailable.
 pub fn install(builder: &mut AgentBuilder) {
     dim_agent_runtime::names::register::<ModalityAdapterService>(builder.catalog_mut(), None);
     builder

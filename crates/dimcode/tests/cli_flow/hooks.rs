@@ -57,6 +57,118 @@ fn hooks_list_prints_the_catalog_and_its_source_states() {
     );
 }
 
+/// After a successful install, `plugin install` reads `hooks.catalog` and
+/// prints the installed plugin's handlers whose state is not `ok` — the
+/// events and handler kinds Dim does not run — with one line pointing to
+/// `Hooks.md` Appendix G; handlers that run are not listed.
+#[test]
+fn plugin_install_reports_hook_handlers_that_will_not_run() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["plugin.install", "hooks.catalog"]);
+        let request = wire.read("plugin.install");
+        assert!(request["params"]["source"]["path"].is_string());
+        wire.reply(&request, json!({"id":"mem","name":"mem","enabled":true}));
+        let request = wire.read("hooks.catalog");
+        assert_eq!(request["params"], json!({}));
+        let mut listed = catalog();
+        listed["sources"].as_array_mut().unwrap().push(json!({
+            "source": "plugin:mem", "path": "/work/plugins/mem", "enabled": true, "state": "ok",
+        }));
+        listed["hooks"].as_array_mut().unwrap().extend([
+            json!({"source": "plugin:mem", "event": "PreCompact", "matcher": null,
+                   "command": "gc", "timeout": 600, "onFailure": "continue",
+                   "async": false, "state": "unsupported"}),
+            json!({"source": "plugin:mem", "event": "Stop", "matcher": null,
+                   "command": "bye", "timeout": 600, "onFailure": "continue",
+                   "async": false, "state": "ok"}),
+        ]);
+        wire.reply(&request, listed);
+    });
+    let output = home
+        .command()
+        .args(["plugin", "install", "/work/plugins/mem"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("PreCompact unsupported"), "{stdout}");
+    assert!(stdout.contains("See Hooks.md Appendix G"), "{stdout}");
+    assert!(!stdout.contains("Stop unsupported"), "{stdout}");
+}
+
+/// A daemon that does not advertise `hooks.catalog` is never asked for the
+/// catalog: the install still succeeds and reports no handler state.
+#[test]
+fn plugin_install_reports_no_handlers_without_a_catalog() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["plugin.install"]);
+        let request = wire.read("plugin.install");
+        wire.reply(&request, json!({"id":"mem","name":"mem","enabled":true}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("hooks.catalog"), "unexpected call: {line}");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["plugin", "install", "/work/plugins/mem"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("Hook handlers"), "{stdout}");
+}
+
+/// A `hooks.catalog` read that fails after a successful install leaves the
+/// install alone: no handler report, one stderr line, exit 0.
+#[test]
+fn plugin_install_survives_a_failed_catalog_read() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["plugin.install", "hooks.catalog"]);
+        let request = wire.read("plugin.install");
+        wire.reply(&request, json!({"id":"mem","name":"mem","enabled":true}));
+        let request = wire.read("hooks.catalog");
+        assert_eq!(request["params"], json!({}));
+        // The connection closes here without a reply.
+    });
+    let output = home
+        .command()
+        .args(["plugin", "install", "/work/plugins/mem"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("install id=mem"), "{stdout}");
+    assert!(!stdout.contains("Hook handlers"), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line
+                .starts_with("The installed plugin's hook handlers could not be checked:")),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn hooks_enable_and_disable_send_the_workspace_and_the_revision() {
     let home = Home::new();

@@ -274,7 +274,9 @@ fn code(error: &SettingsError) -> &'static str {
     match error {
         SettingsError::UnknownSource => "unknown_source",
         SettingsError::InvalidScope(_) => "invalid_scope",
-        SettingsError::Document(_) | SettingsError::Invalid(_) => "invalid_document",
+        SettingsError::Document(_)
+        | SettingsError::DocumentShape { .. }
+        | SettingsError::Invalid(_) => "invalid_document",
         SettingsError::UserOnlyField(_) => "user_only_field",
         SettingsError::Conflict => "conflict",
         SettingsError::Storage(FileStorageError::Unsynced(_)) => "unsynced",

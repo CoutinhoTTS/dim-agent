@@ -1660,6 +1660,9 @@ impl CollaborationSession {
                 trace_id: None,
                 turn_id: None,
                 startup: metadata.startup,
+                // The member adopts the model, not the profile the source
+                // Session adopted it from.
+                agent_id: None,
                 extensions: metadata.extensions,
             }),
         })

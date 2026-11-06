@@ -387,13 +387,8 @@ None to rutis: every loader operation used exists in rutis-loader 0.19.3.
 
 `status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor`, the services of `Loader::waits`; a row waiting for its runtime names the runtime's connection row, `session-node` or `py`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
 
-The client RPC boundary omits Git source userinfo, query and fragment, preserving
-the repository path, ref and commit. The persisted source is unchanged and remains
-available to update. Only catalog candidate sources, top-level status errors and
-direct content-refusal errors are projected; plugin-owned settings are not traversed.
-Status and content-refusal errors carry a generic message at this boundary, including
-in mutation replies: arbitrary Git, loader, manifest and content-error text can contain
-credentials.
+The client RPC boundary's projection of sources, status errors and content
+refusals, and every reason a refusal can carry, is in A.2.
 
 ### A.2 Errors
 
@@ -403,6 +398,42 @@ The codes are stable across clients. Client RPC errors identify their code with 
 stable, actionable description without including the owner's raw diagnostic message
 or echoing request fields; the descriptions above identify the owner's error, not a
 permission to publish secrets.
+
+The client RPC boundary omits Git source userinfo, query and fragment, preserving
+the repository path, ref and commit. The persisted source is unchanged and remains
+available to update. Only catalog candidate sources, top-level status errors and
+direct content-refusal errors are projected; plugin-owned settings are not traversed.
+Status errors carry a generic message at this boundary, including in mutation replies:
+arbitrary Git, loader and manifest text can contain credentials.
+
+A content refusal reaches the client with the static reason its cause carries —
+its owner's, or PluginManager's own for a content file it reads itself — and as
+the generic "Plugin content was refused" otherwise. A reason never carries a
+source position or the raw text, and the raw text, with the paths and URLs in it,
+stays in the server's logs and in the model-facing `plugin` tool.
+
+| Owner | Kind | Cause | Reason |
+| --- | --- | --- | --- |
+| PluginManager | `mcp` | The content file is not valid JSON | the file is not valid JSON |
+| PluginManager | `mcp` | The content file could not be read | the file could not be read |
+| PluginManager | `hooks` | The content file is not valid JSON | the file is not valid JSON |
+| PluginManager | `hooks` | The content file could not be read | the file could not be read |
+| McpSettings | `mcp` | The document is not a JSON object | MCP document must be a JSON object |
+| McpSettings | `mcp` | The document has no `mcpServers` object | MCP document must contain an mcpServers object |
+| McpSettings | `mcp` | `mcpServers` is not a JSON object | mcpServers must be a JSON object |
+| McpSettings | `mcp` | A server entry id is empty | MCP server entry id is empty |
+| McpSettings | `mcp` | A stdio entry `cwd` is not a directory inside the plugin | MCP plugin cwd must be a directory inside the plugin |
+| HooksSettings | `hooks` | The document is not a valid hooks document | invalid hook document |
+
+The table is the contract: a client matches a refusal by its exact message. The
+skills and UI kinds have no reasons, because their refusals name files and paths.
+A missing content file is not in the table: `Manifest::read` resolves every
+content path and refuses a missing one as `invalid_manifest` before PluginManager
+reads it. The table lists every reason a plugin's own content can produce; the
+wire can also carry a static message from Dim's own registration state — such as
+`invalid hook plugin registration` for a damaged `hooks-plugins.json` — which is
+outside this table, and a client must show any message it does not know as it
+shows the generic one.
 
 ## Appendix B. Conflict table
 

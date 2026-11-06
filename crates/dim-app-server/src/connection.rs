@@ -451,6 +451,7 @@ impl Connection {
                 call,
                 Call::InputLookup(_)
                     | Call::History(_)
+                    | Call::Branches(_)
                     | Call::Keys(_)
                     | Call::Summaries(_)
                     | Call::Catalog(_)
@@ -522,6 +523,7 @@ impl Connection {
                 }
                 (Some(&p.session_id), None)
             }
+            Call::Branches(p) => (Some(&p.session_id), None),
             Call::BranchCreate(p) => {
                 if self.protocol_version() < 2 {
                     return Err(RpcError::app(
@@ -665,6 +667,7 @@ impl Connection {
             Call::Submit(p) => Some(&p.session_id),
             Call::InputLookup(p) => Some(&p.session_id),
             Call::History(p) => Some(&p.session_id),
+            Call::Branches(p) => Some(&p.session_id),
             Call::Keys(p) => Some(&p.session_id),
             Call::Stop(p) => Some(&p.session_id),
             Call::Idle(p) => Some(&p.session_id),
@@ -712,7 +715,6 @@ impl Connection {
                 .get(id)
                 .map(|a| a.delivery.clone())
         });
-        let include_closed = matches!(&call, Call::Summaries(params) if params.include_closed);
         Some(match call {
             Call::Hello(_) => Err(RpcError::invalid("hello has already completed")),
             Call::Ping => Ok(Reply::Ping(PingResult {
@@ -766,7 +768,7 @@ impl Connection {
                     .expect("catalog reads have cancellation");
                 match rpc
                     .index
-                    .session_catalog(params, None, self.protocol_version(), false, cancel)
+                    .session_catalog(params, None, self.protocol_version(), cancel)
                     .await
                 {
                     Ok(mut page) => {
@@ -785,7 +787,10 @@ impl Connection {
                     Err(error) => Err(RpcError::from(error)),
                 }
             }
-            Call::Summaries(Summaries { agent_id, .. }) => {
+            Call::Summaries(Summaries {
+                agent_id,
+                include_closed,
+            }) => {
                 if let Some(agent_id) = agent_id.as_deref()
                     && let Some(reason) = rpc.index.unavailable_agent(agent_id)
                 {
@@ -802,11 +807,11 @@ impl Connection {
                                 Catalog {
                                     with_internal: true,
                                     with_acp_sessions: true,
+                                    include_closed,
                                     ..Catalog::default()
                                 },
                                 agent_id,
                                 self.protocol_version(),
-                                include_closed,
                                 cancel,
                             )
                             .await
@@ -922,6 +927,7 @@ impl Connection {
             Call::Submit(params) => self.submit(rpc, params).await,
             Call::InputLookup(params) => self.input_lookup(rpc, params).await,
             Call::History(params) => self.history(rpc, params).await,
+            Call::Branches(params) => self.branches(rpc, params).await,
             Call::Keys(params) => self.keys(rpc, params).await,
             Call::Stop(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
@@ -1209,7 +1215,7 @@ impl Connection {
                     return Err(RpcError::invalid("Model updates only support main"));
                 }
                 let mut startup_admission = None;
-                let model = if let Some(startup) = p.startup {
+                let mut model = if let Some(startup) = p.startup {
                     if self.entry != Entry::Local || rpc.config.product_home.is_none() {
                         return Err(RpcError::invalid(
                             "Model startup requires the protected-local product entry",
@@ -1304,6 +1310,19 @@ impl Connection {
                         }
                     }
                 };
+                // A model selection replaces the model, not the profile the
+                // branch adopted: the record names the profile whose prompt
+                // the branch runs, so it carries over until another adoption.
+                if let Some(agent_id) = session
+                    .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&p.branch_id)?
+                    .and_then(|state| state.configuration)
+                    .and_then(|configuration| configuration.metadata)
+                    .and_then(|metadata| metadata.agent_id)
+                {
+                    let mut metadata = model.metadata.take().unwrap_or_default();
+                    metadata.agent_id = Some(agent_id);
+                    model.metadata = Some(metadata);
+                }
                 let id = dim_agent_types::ModelId {
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),
