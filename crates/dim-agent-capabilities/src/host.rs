@@ -953,19 +953,3 @@ impl PrepareContext for IdentityContext {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_unknown_failure_bounds_its_reason_to_one_line() {
-        let message = format!("first line\n{}\nlast line", "x".repeat(1_000));
-        let facts = ModelFailureFacts::unknown(Some(message));
-        let reason = facts.reason.expect("a reason");
-        assert!(!reason.contains('\n'), "{reason}");
-        assert!(reason.chars().count() <= dim_agent_types::FAILURE_REASON_CHARS);
-        assert!(reason.starts_with("first line "), "{reason}");
-        assert_eq!(facts.kind, dim_agent_types::ModelFailureKind::Unknown);
-    }
-}

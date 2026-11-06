@@ -213,6 +213,7 @@ async fn a_failure_without_facts_keeps_its_message_and_bounds_the_reason() {
     let reason = failure.reason.as_deref().expect("a reason");
     assert!(!reason.contains('\n'), "{reason}");
     assert!(reason.chars().count() <= 300, "{reason}");
+    assert!(reason.starts_with("first line "), "{reason}");
     agent.close().await.unwrap();
 }
 

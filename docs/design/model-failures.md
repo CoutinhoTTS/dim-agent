@@ -12,35 +12,33 @@ normalized codes and the `AiMuxError` variant. It never matches message text.
 | kind | decided from | retried | meaning | action |
 | --- | --- | --- | --- | --- |
 | `network` | `ApiCall`, origin Transport, no HTTP status | yes | could not reach the provider, or the connection dropped | check the network or proxy |
-| `timeout` | `AiMuxError::Timeout`, aimux's own deadline | yes | the provider did not respond in time | check the network or proxy; try again later |
 | `rate_limited` | 429, rate-limit codes | yes; `Retry-After` is used while it fits the wait budget | the provider is rate limiting requests | wait and try again |
 | `server_error` | 408, 5xx except 501 and 505, server and overload codes, transient stream-event codes | yes | the provider reported a server error | try again later or choose another model |
-| `malformed_response` | `InvalidResponseData`, `JsonParse`, an undecodable stream | no | the provider sent a response Dim could not read | if it repeats, check the proxy or gateway |
+| `malformed_response` | `InvalidResponseData`, `JsonParse`, `InvalidToolInput`, `NoSuchTool`, `TypeValidation`, an undecodable stream | no | the provider sent a response Dim could not use | try again; if it repeats, choose another model or check the proxy or gateway |
 | `auth_rejected` | 401, 403, invalid-key/auth codes | no (the existing one credential recovery stays) | the provider rejected the credentials | sign in again or check the API key |
 | `quota_exhausted` | 402, quota/billing codes | no | the account has no quota left | check the plan or billing |
 | `not_found` | 404 | no | the provider did not find the model or endpoint | check the model and the provider's base URL |
 | `context_too_long` | 413, context-length codes | no | the conversation is longer than the model accepts | compact the conversation or start a new session |
 | `content_filtered` | content-policy codes | no | the provider's content filter blocked the response | rephrase the request |
-| `invalid_request` | 400, 409, 422, 501, 505, other 4xx, invalid-request codes, `InvalidArgument`, `InvalidPrompt`, `UnsupportedFunctionality` | no | the provider rejected the request | see the details |
+| `invalid_request` | 400, 409, 422, 501, 505, other 4xx, invalid-request codes including `max_tokens_exceeded`, `InvalidArgument`, `InvalidPrompt`, `UnsupportedFunctionality` | no | the provider rejected the request | see the details |
 | `output_limit` | the `max_tokens` stop | no | the model stopped at its output limit | increase the output token limit and retry |
 | `unknown` | anything else | no | the model request failed | see the details |
 
-Only `AiMuxError::Timeout` is `timeout`. A timeout of the HTTP connection or of
-the stream reaches the bridge as a transport `ApiCall` and is `network`.
+A timeout of the HTTP connection or of the stream reaches the bridge as a
+transport `ApiCall` and is `network`. `AiMuxError::Timeout` has no producer in a
+chat call; if it ever reaches the bridge it is `unknown` and is not retried.
 
 Codes are compared trimmed and ASCII-lowercased.
 
-- A permanent code wins over a status.
-- 409, 501 and 505 stay `invalid_request` whatever code came with them, as they
-  are never retried.
+- 409, 501 and 505 are `invalid_request` whatever transient code came with
+  them; a permanent code still decides its own kind.
 - A stream-event failure carries the response's status, not the event's, so only
   its code may decide: a transient code maps to `rate_limited` or
   `server_error`, a permanent code to its kind, anything else to `unknown`.
 
 Every `HostError::Failed` the bridge produces carries facts, including
 `AiMuxError::Timeout`, `InvalidResponseData`/`JsonParse`, `InvalidArgument`/
-`InvalidPrompt` and `UnsupportedFunctionality`. Where there is no
-`ApiCallError`, the facts carry no origin.
+`InvalidPrompt` and `UnsupportedFunctionality`.
 
 The kind is only as good as the provider's structured fields. A provider that
 reports, say, quota as a bare 429 with only a message becomes `rate_limited` and
@@ -75,9 +73,14 @@ ModelFailure {
   failure, and the innermost frame of the cause chain for a transport failure.
   A JSON parse message embeds the body text it could not read, so its `reason`
   is the parse diagnosis from the error's structure, and is absent when the
-  error carries no cause.
+  error carries no cause. A tool failure is named from its `tool_name` field:
+  `invalid arguments for tool '<tool_name>'` or `the model called an unknown
+  tool '<tool_name>'`. `TypeValidation` carries no reason, because its message
+  embeds the validated value. The tool input, the available-tool list and the
+  validated value are never stored.
 - `cause` is the chain from `ApiCallError.message` and `ErrorCause`, outermost
-  first, one line per frame.
+  first, one line per frame. `providerCode` and `requestId` are one bounded
+  line, at most 200 chars; an empty one is absent.
 - Never stored: the request URL, headers, request values, the response body or
   any credential. aimux already drops the URL; the bridge must not copy `url`,
   `request_body_values` or `response_body`, and `reason` and the cause frames
@@ -110,7 +113,8 @@ The ModelProvider retries:
 - within a 60 s wait budget;
 - using `Retry-After` as the delay while it fits the budget left, and stopping
   at once with `retryAfterMs` recorded when it does not;
-- only the `network`, `timeout`, `rate_limited` and `server_error` kinds.
+- only the `network`, `rate_limited` and `server_error` kinds, so 5xx statuses
+  other than 501 and 505 are now retried.
 
 It does not retry after irreversible output. An interrupt cancels the sleep. A
 credential rejection keeps its one recovery, with no delay.

@@ -299,6 +299,7 @@
       "file": "crates/dim-agent-aimux/src/stream.rs",
       "unexpandedMacros": [
         "async_stream::stream",
+        "format",
         "matches",
         "tracing::debug"
       ]
@@ -652,17 +653,6 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/host.rs",
       "unexpandedMacros": [
-        "format"
-      ]
-    },
-    {
-      "id": "dim_agent_capabilities::host::tests",
-      "crate": "dim_agent_capabilities",
-      "parent": "dim_agent_capabilities::host",
-      "file": "crates/dim-agent-capabilities/src/host.rs",
-      "unexpandedMacros": [
-        "assert",
-        "assert_eq",
         "format"
       ]
     },
@@ -7244,16 +7234,11 @@
         "path HostErrorKind::Transport",
         "path HostErrorKind::Unsupported",
         "path ModelFailureFacts",
-        "path ModelFailureOrigin",
-        "path ModelFailureOrigin::HttpResponse",
-        "path ModelFailureOrigin::StreamEvent",
-        "path ModelFailureOrigin::Transport",
         "path ModelStream",
         "use dim_agent_capabilities::host::HostError",
         "use dim_agent_capabilities::host::HostErrorKind",
         "use dim_agent_capabilities::host::ModelChunk",
         "use dim_agent_capabilities::host::ModelFailureFacts",
-        "use dim_agent_capabilities::host::ModelFailureOrigin",
         "use dim_agent_capabilities::host::ModelStopReason",
         "use dim_agent_capabilities::host::ModelStream"
       ]
@@ -7285,7 +7270,6 @@
         "path ModelFailureKind::QuotaExhausted",
         "path ModelFailureKind::RateLimited",
         "path ModelFailureKind::ServerError",
-        "path ModelFailureKind::Timeout",
         "path ModelFailureKind::Unknown",
         "path one_line",
         "use dim_agent_types::FAILURE_CAUSE_CHARS",
@@ -10485,13 +10469,6 @@
     },
     {
       "from": "dim_agent_capabilities::host",
-      "to": "dim_agent_capabilities::host::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host",
       "to": "dim_agent_runtime::contracts",
       "references": [
         "path PromptSourceTarget",
@@ -10586,13 +10563,6 @@
         "path ToolDefinition",
         "path ToolResult",
         "path kind"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host::tests",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path ModelFailureFacts::unknown"
       ]
     },
     {

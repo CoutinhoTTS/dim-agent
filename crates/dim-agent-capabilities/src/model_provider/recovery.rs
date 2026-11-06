@@ -186,8 +186,9 @@ impl RecoveryState {
     }
 }
 
-/// The kinds retried before the policy redesign: exactly the kinds that were
-/// transient before, so the retry numbers do not change yet.
+/// The retried kinds. The attempt count, the backoff and the wait budget are
+/// unchanged; `server_error` covers HTTP 5xx other than 501 and 505, which
+/// were not all retried before.
 fn retryable(kind: ModelFailureKind) -> bool {
     matches!(
         kind,
