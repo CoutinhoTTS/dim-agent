@@ -1,6 +1,6 @@
 mod images;
 mod recovery;
-pub use recovery::{Consume, invoke as invoke_with_recovery};
+pub use recovery::{Consume, RetryObserver, RetryWaiting, invoke as invoke_with_recovery};
 
 use crate::{
     context_preparation::ContextPreparation,

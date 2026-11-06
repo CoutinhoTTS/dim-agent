@@ -735,3 +735,5 @@ async fn parse_output(
         "Provider stream ended without message_stop",
     ))
 }
+
+impl crate::model_provider::RetryObserver for Output {}
