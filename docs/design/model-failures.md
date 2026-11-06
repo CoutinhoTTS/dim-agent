@@ -127,7 +127,8 @@ from a "Details" disclosure under the row. Both are collapsed by default.
 While a request waits to retry, the TUI's working line and the Web's working
 indicator read `Retrying 3/8 in 4 s · <meaning>: <reason> · <stop>`, counting
 down from `ModelProgress.retry.retryAtMs` on the client clock and never below
-zero. The CLI line mode writes one stderr line per attempt. A retry adds no
+zero. The CLI line mode writes one line per attempt where it writes its other
+status lines; `exec` writes none. A retry adds no
 transcript row, and a later success adds none either; the failure line's
 `tried N times` is the persistent record.
 

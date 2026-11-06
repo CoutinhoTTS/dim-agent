@@ -70,7 +70,7 @@ ModelFailure {
 
 CLI 的 line 模式与 `exec` 只打印这一行。TUI 与 Web 把细节放在一步之外：kind、HTTP 状态、提供方 code、请求 id、尝试多于一次时的 `已尝试 N 次，历时 M 秒`、提供方要求的等待，以及原因链，每帧一行。TUI 的细节加入 `/tools` 循环与错误行的点击展开；Web 从错误行下方的“详情”展开项打开。两者默认收起。
 
-请求等待重试时，TUI 的工作行与 Web 的工作指示显示 `正在重试 3/8，4 秒后 · <meaning>: <reason> · <stop>`，按客户端时钟从 `ModelProgress.retry.retryAtMs` 倒数，且不低于 0。CLI line 模式每次尝试写一行 stderr。重试不产生 transcript 行，之后成功也不产生；失败行的 `已尝试 N 次` 才是持久记录。
+请求等待重试时，TUI 的工作行与 Web 的工作指示显示 `4 秒后第 3/8 次重试 · <meaning>: <reason> · <stop>`，按客户端时钟从 `ModelProgress.retry.retryAtMs` 倒数，且不低于 0。CLI line 模式每次尝试在它写其他状态行的地方写一行；`exec` 不写重试行。重试不产生 transcript 行，之后成功也不产生；失败行的 `已尝试 N 次` 才是持久记录。
 
 ## 4. 重试
 
