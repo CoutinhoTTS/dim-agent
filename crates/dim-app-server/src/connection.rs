@@ -2,7 +2,7 @@ use crate::{
     ServerConfig,
     agents::{AgentIndex, DeleteOutcome, SessionUse},
     control::ServerControl,
-    outbound::{Frame, MAX_FRAME_BYTES, Sender},
+    outbound::{Admission, Frame, Sender},
     protocol::*,
     skills_management::skills_error,
 };
@@ -112,35 +112,37 @@ impl DirectConnection {
             unloading: unloading.clone(),
         })
     }
-    /// The encoded frame, after the connection and frame checks, without
-    /// writing it: a call's sink holds it until its reply.
+    /// The encoded frame, after the connection check and encoded once through
+    /// the sender's admission, without queueing it: a call's sink holds it
+    /// until its reply.
     fn frame(
         &self,
         method: &str,
         params: serde_json::Map<String, Value>,
-    ) -> Result<Outbound, NotifyError> {
-        if self.connection.upgrade().is_none()
-            || self.closed.is_cancelled()
-            || self.unloading.is_cancelled()
-        {
-            return Err(NotifyError::Gone);
-        }
-        let frame = Outbound::message(method.to_owned(), params);
-        let encoded = serde_json::to_vec(&frame).map_err(|_| NotifyError::TooLarge)?;
-        if encoded.len() > MAX_FRAME_BYTES {
-            return Err(NotifyError::TooLarge);
-        }
-        Ok(frame)
-    }
-    fn write(&self, frame: Outbound) -> Result<(), NotifyError> {
+    ) -> Result<Frame, NotifyError> {
         let Some(connection) = self.connection.upgrade() else {
             return Err(NotifyError::Gone);
         };
+        if self.closed.is_cancelled() || self.unloading.is_cancelled() {
+            return Err(NotifyError::Gone);
+        }
         connection
             .sender
-            .send(frame, false)
-            .map_err(|()| NotifyError::Gone)?;
-        Ok(())
+            .hold(Outbound::message(method.to_owned(), params))
+            .map_err(|admission| match admission {
+                Admission::TooLarge => NotifyError::TooLarge,
+                Admission::Full => NotifyError::Gone,
+            })
+    }
+    fn write(&self, frame: Frame) -> Result<(), NotifyError> {
+        let Some(connection) = self.connection.upgrade() else {
+            return Err(NotifyError::Gone);
+        };
+        if connection.sender.push(frame) {
+            Ok(())
+        } else {
+            Err(NotifyError::Gone)
+        }
     }
 }
 impl CallerConnection for DirectConnection {
@@ -169,17 +171,20 @@ impl CallerConnection for DirectConnection {
 /// `callChannel.notify` and `closed` for the provider that serves it.
 ///
 /// Every notification is written after the reply of the call that produced
-/// its `Caller`: one sent while the call runs waits here and goes out right
-/// after the reply, in order. It is a reliable frame, so a caller too slow to
-/// take it is disconnected like on any other reply, and a notification over
-/// the frame limit is refused before it reaches the sender.
+/// its `Caller`: one sent while the call runs is encoded once and admitted by
+/// the connection's sender here, then goes out right after the reply, in
+/// order. It is a reliable frame: a call holding more than the connection's
+/// reliable allowance is a slow consumer and the connection closes, while a
+/// notification over the frame limit is `TooLarge` and the connection stays
+/// open.
 pub(crate) struct CallSink {
     direct: Arc<DirectConnection>,
     state: Mutex<CallState>,
 }
 enum CallState {
-    /// Frames sent before the reply was written, in order.
-    Held(Vec<Outbound>),
+    /// Frames sent before the reply was written, in order: encoded and
+    /// holding their room already.
+    Held(Vec<Frame>),
     /// The reply is written; later frames go straight to the connection.
     Released,
 }

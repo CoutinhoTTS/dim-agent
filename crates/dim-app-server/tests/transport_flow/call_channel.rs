@@ -19,6 +19,9 @@ struct ChannelState {
     closed: Arc<tokio::sync::Notify>,
     /// Releases `channel.stream`'s task, which notifies after the reply.
     release: Arc<tokio::sync::Notify>,
+    /// `channel.fill` finished: the first code the full allowance returned
+    /// and the code of one more notification after it.
+    filled: std::sync::Mutex<Option<(&'static str, &'static str)>>,
 }
 impl ChannelState {
     fn caller(&self) -> Caller {
@@ -84,6 +87,22 @@ fn serve(call: MethodCall, state: Arc<ChannelState>) -> Result<Value, RpcError> 
             }
             Ok(json!({}))
         }
+        "channel.fill" => {
+            let count = call.params["count"].as_u64().unwrap_or(0) as usize;
+            let mut first = "ok";
+            for step in 0..count {
+                if let Err(error) = caller.notify(names.0, map(json!({"step": step}))) {
+                    first = error.code();
+                    break;
+                }
+            }
+            let later = match caller.notify(names.0, map(json!({"late": true}))) {
+                Ok(()) => "ok",
+                Err(error) => error.code(),
+            };
+            *state.filled.lock().unwrap() = Some((first, later));
+            Ok(json!({}))
+        }
         "channel.attempt" => {
             let name = call.params["method"]
                 .as_str()
@@ -132,6 +151,7 @@ impl DynPlugin for ChannelMethods {
                     ),
                     notification("channel.start", &[]),
                     notification("channel.attempt", &[]),
+                    notification("channel.fill", &[]),
                 ],
                 Arc::new(move |call, _, _| {
                     let state = state.clone();
@@ -340,6 +360,47 @@ async fn a_session_namespace_method_delivers_connection_bound_notifications() {
     state.release.notify_one();
     let second = client.read("the later Session notification").await;
     assert_eq!(second["method"], "session.channel.second");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: the notifications one call holds are bounded by the connection's
+/// reliable allowance. A call that holds past it is a slow consumer: the
+/// connection closes, the reply is not written, and later notifications on
+/// the same caller answer `gone`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_holding_past_the_allowance_closes_the_connection_as_a_slow_consumer() {
+    let (server, mut client, state) = launch_channel().await;
+    assert_ok(&client.rpc("channel.start", json!({})).await);
+    client.send("channel.fill", json!({"count": 1100})).await;
+    let Transport::Unix(stream) = &mut client.transport else {
+        panic!("the channel fixture is served on the local entry");
+    };
+    let mut line = String::new();
+    let read = tokio::time::timeout(Duration::from_secs(10), stream.read_line(&mut line))
+        .await
+        .expect("the slow consumer's connection closes");
+    assert_eq!(
+        read.unwrap(),
+        0,
+        "the connection stayed open and wrote: {line}"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some((first, later)) = *state.filled.lock().unwrap() {
+            assert_eq!(
+                (first, later),
+                ("gone", "gone"),
+                "the first refusal and every later notification answer gone"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the call never reached the allowance's limit"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     server.shutdown();
     server.join().await.unwrap();
 }

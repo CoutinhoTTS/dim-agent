@@ -2497,7 +2497,9 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/outbound.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_app_server::permission_rules",
@@ -20732,12 +20734,13 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::outbound",
       "references": [
+        "path Admission::Full",
+        "path Admission::TooLarge",
         "path Frame",
-        "path MAX_FRAME_BYTES",
         "path Sender",
         "path Sender::new",
+        "use crate::outbound::Admission",
         "use crate::outbound::Frame",
-        "use crate::outbound::MAX_FRAME_BYTES",
         "use crate::outbound::Sender"
       ]
     },
@@ -20803,7 +20806,6 @@
         "path ForkResult",
         "path ModelUpdateResult",
         "path Notification::Progress",
-        "path Outbound",
         "path Outbound::message",
         "path Outbound::notice",
         "path Outbound::result",
