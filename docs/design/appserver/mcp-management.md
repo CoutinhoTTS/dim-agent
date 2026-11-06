@@ -112,6 +112,11 @@ project files cannot set it (ADR 003 D3). It is written only by `mcp.set_enabled
 and credentials therefore change without a configuration write (`mcp.set_enabled`, `mcp.auth.*`);
 a client never rewrites an entry to change either.
 
+The publication follows the same rule: a project entry's generation is retired as soon as the
+user's record stops naming its `(workspace, id)`, whatever the project file or the withheld
+records read as. A disable is readable whenever it lands, so it never depends on a source it
+cannot read; the source's own error is reported unchanged.
+
 ### D3. Redaction covers every value a client does not need
 
 The projection returns the executable, the endpoint's origin, names, counts and presence flags.

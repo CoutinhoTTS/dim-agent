@@ -2808,3 +2808,60 @@ async fn unread_entry_members_are_kept_and_a_reserved_generation_is_broken() {
     fixture.close().await;
 }
 
+/// A project server the user disables stops even while the withheld records
+/// cannot be read: the user's decision does not depend on them (D24).
+#[tokio::test]
+async fn a_disabled_project_server_stops_when_the_records_cannot_be_read() {
+    let fixture = Fixture::new().await;
+    let cancel = CancellationToken::new();
+    let project_file = fixture.home.join("project/.mcp.json");
+    fs::write(
+        &project_file,
+        json!({"mcpServers":{"shared":{"command":"project-server"}}}).to_string(),
+    )
+    .unwrap();
+    let workspace = fixture.home.join("project");
+    let secrets_path = fixture.home.join("mcp-secrets.json");
+    fs::write(
+        &secrets_path,
+        json!({"entries":{(workspace.to_str().unwrap()):{"shared":{"$generation":"one","args":["--first"]}}}})
+            .to_string(),
+    )
+    .unwrap();
+    set_project(&fixture.mcp, 1, true, &cancel).await.unwrap();
+    let server = fixture
+        .mcp
+        .server(Some(1), "shared".into(), &cancel)
+        .await
+        .unwrap();
+    let token = fixture
+        .mcp
+        .catalog(Some(1), &cancel)
+        .await
+        .unwrap()
+        .project_revision
+        .unwrap();
+
+    // The records stop being readable.
+    fs::remove_file(&secrets_path).unwrap();
+    fs::create_dir(&secrets_path).unwrap();
+
+    let disabled = fixture
+        .mcp
+        .update(
+            SettingsScope::Project(1),
+            token,
+            "shared".into(),
+            McpChange::SetEnabled(false),
+            &cancel,
+        )
+        .await;
+    assert!(disabled.is_ok(), "{disabled:?}");
+    assert!(
+        server.withdrawn(),
+        "the generation is withdrawn though its records could not be read"
+    );
+
+    fs::remove_dir(&secrets_path).unwrap();
+    fixture.close().await;
+}

@@ -412,9 +412,27 @@ struct Projection {
 impl Projection {
     /// The entry no longer exists enabled. A known entry that is disabled is
     /// withdrawn even while its source is unreadable: the user's decision does
-    /// not depend on the project file. A missing entry is withdrawn only when
-    /// its source was read.
-    fn withdrawn(&self, generation: &Generation) -> bool {
+    /// not depend on the project file or on the withheld records. A missing
+    /// entry is withdrawn only when its source was read.
+    fn withdrawn(
+        &self,
+        generation: &Generation,
+        projects: &[(usize, std::path::PathBuf)],
+        enablement: &McpProjectEnablement,
+    ) -> bool {
+        // A project entry runs only while the user's record names it, and that
+        // record is readable whenever the disable is: the source may be
+        // unreadable, so its last `current` state is not consulted here.
+        if let McpSource::Project(root) = generation.source
+            && !projects.iter().any(|(project, workspace)| {
+                *project == root
+                    && workspace
+                        .to_str()
+                        .is_some_and(|workspace| enablement.contains(workspace, &generation.id))
+            })
+        {
+            return true;
+        }
         self.sources.get(&generation.source).is_some_and(|source| {
             match source.current.get(&generation.id) {
                 Some(config) => !enabled(config),
@@ -444,11 +462,10 @@ impl Projection {
         };
         let secrets_unreadable = secrets.is_err();
         let secrets = secrets.unwrap_or_default();
-        for source in [McpSource::User, McpSource::Plugins].into_iter().chain(
-            projects
-                .into_iter()
-                .map(|(root, _)| McpSource::Project(root)),
-        ) {
+        for source in [McpSource::User, McpSource::Plugins]
+            .into_iter()
+            .chain(projects.iter().map(|(root, _)| McpSource::Project(*root)))
+        {
             if secrets_unreadable && matches!(source, McpSource::Project(_)) {
                 let intent = self.sources.entry(source).or_insert_with(|| Source {
                     revision: String::new(),
@@ -566,7 +583,7 @@ impl Projection {
             .generations
             .iter()
             .filter(|(_, g)| {
-                let withdrawn = self.withdrawn(g);
+                let withdrawn = self.withdrawn(g, &projects, &enablement);
                 if withdrawn {
                     g.withdrawn.store(true, Ordering::SeqCst);
                 }
