@@ -622,7 +622,8 @@ plugin server, never scans a directory and never watches a file. It never caches
 executes anything in a store, never expands a `${NAME}` it contains, and never runs a
 `headersHelper` or any command. The converted text is used in place of `document` and never
 appears in a reply: `mcp.import.sources` reports only each store's identity, display path, state
-and entry count, and the preview and apply take the store id in place of the text. The preview
+and entry count, the preview repeats that row in `source`, and the preview and apply take the
+store id in place of the text. The preview
 answers `sourceRevision`, a digest of the converted document, and the apply requires it as
 `expectedSourceRevision`, so what the apply writes is the text the preview read; a store that
 changed in between answers `mcp_settings_conflict` before any write. That keeps preview and apply
@@ -1054,6 +1055,7 @@ It replies:
 | --- | --- | --- |
 | `revision` | string | The target source's revision, the token `mcp.import.apply` takes as `expectedVersion` (D5); `missing` when a user source has no document, while a project source's token is a digest and never that sentinel |
 | `sourceRevision` | string, present with `from` | The digest of the converted store document, the token the apply takes as `expectedSourceRevision` (D26); absent with `document`, which the apply carries itself |
+| `source` | `{id, client, scope, path}`, present with `from` | The store the preview read, with the display values `mcp.import.sources` reports for it; absent with `document`. It names the store, never one of its entries or values (D26) |
 | `entries` | `ImportEntry[]` | One row per entry in the document's order |
 | `unknownTopLevel` | string[] | Top-level members other than `mcpServers`, ascending; an import does not carry them |
 
@@ -1135,7 +1137,10 @@ both stores.
 `mcp.import.sources` reports the known stores, read-only, only when a request asks. It takes an
 optional `cwd`; without one it reports the three user stores, and with an authorized `cwd` it also
 reports `claude-code:local` and the two project stores, using the same authorization as every
-other `mcp.*` method. It reads each distinct file once and writes nothing.
+other `mcp.*` method. It reads each distinct file once and writes nothing. A preview that reads a
+store through `from` names the same row it read in its `source` field, so a client that previews
+without listing the stores first still knows which file the entries came from; the row carries
+identity, display path and scope, never an entry or a value.
 
 | Field | Type | Meaning |
 | --- | --- | --- |

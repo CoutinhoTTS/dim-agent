@@ -649,6 +649,20 @@ pub struct ImportPreview {
     /// for a client-supplied `document`, which the apply carries itself.
     #[serde(default)]
     pub source_revision: Option<String>,
+    /// With `from`: the known store the preview read, named as
+    /// `mcp.import.sources` names it; absent for a client-supplied document.
+    #[serde(default)]
+    pub source: Option<ImportSourceRef>,
+}
+
+/// One known store's identity and display path, without its entries or state.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSourceRef {
+    pub id: String,
+    pub client: String,
+    pub scope: String,
+    pub path: String,
 }
 
 /// One entry's place in the preview.

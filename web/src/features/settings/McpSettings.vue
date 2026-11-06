@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useSettingsText } from "../../i18n/settings-general"
-import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpImportApplied, readMcpImportPreview, readMcpImportSources, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpImportEntry, type McpImportResolution, type McpImportSource, type McpInspection, type McpInvalidEntry, type McpProbe, type McpServerInput, type McpView } from "../../rpc/general-settings"
+import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpImportApplied, readMcpImportPreview, readMcpImportSources, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpImportEntry, type McpImportPreviewSource, type McpImportResolution, type McpImportSource, type McpInspection, type McpInvalidEntry, type McpProbe, type McpServerInput, type McpView } from "../../rpc/general-settings"
 import { RpcError } from "../../rpc/client"
 import { configuration, patch, type Draft } from "./mcp-form"
 import { readAck } from "../../rpc/read"
@@ -30,7 +30,7 @@ const testResult = ref<{ id: string; probe: McpProbe }>()
 type ImportEntryState = McpImportEntry & { action: "import" | "skip" | "replace" | "rename"; newId: string }
 /// A preview names its input: the file's text the page read, or a known
 /// store id the daemon reads. A discovered store's text is never here.
-type ImportState = { source: "user" | "project"; document: string | undefined; from: string | undefined; sourceRevision: string | undefined; revision: string; entries: ImportEntryState[]; unknownTopLevel: string[] }
+type ImportState = { source: "user" | "project"; document: string | undefined; from: string | undefined; store: McpImportPreviewSource | undefined; sourceRevision: string | undefined; revision: string; entries: ImportEntryState[]; unknownTopLevel: string[] }
 const importPreview = ref<ImportState>()
 const importFile = ref<HTMLInputElement>()
 const importStale = ref(false)
@@ -171,6 +171,7 @@ async function readImportPreview(input: { document?: string; from?: string }): P
     source,
     document: input.document,
     from: input.from,
+    store: preview.source,
     sourceRevision: preview.sourceRevision,
     revision: preview.revision,
     unknownTopLevel: preview.unknownTopLevel,
@@ -468,7 +469,6 @@ onBeforeUnmount(() => {
     <section v-if="discovery" class="settings-card" aria-live="polite">
       <h3>{{ s('MCP stores of other local clients', '其他本地客户端的 MCP 存储') }}</h3>
       <p>{{ s('These files belong to other clients. Dim reads them only when you open Discover or preview one, inside the daemon, and never shows or returns a value from them.', '这些文件属于其他客户端。只有您打开“发现”或预览其中一项时，Dim 才会在守护进程内读取这些文件，且绝不显示或返回其中的任何值。') }}</p>
-      <p v-if="!discovery.length" role="status">{{ s('No known store was found.', '未找到已知存储。') }}</p>
       <div v-for="row in discovery" :key="row.id" class="runtime-detail">
         <p><strong>{{ row.id }}</strong> · {{ row.client }} · {{ row.scope }} · {{ row.state }}</p>
         <p>{{ row.path }}</p>
@@ -480,7 +480,7 @@ onBeforeUnmount(() => {
     </section>
     <section v-if="importPreview" class="settings-card" aria-live="polite">
       <h3>{{ s('Import preview', '导入预览') }} · {{ importPreview.source }} · {{ importPreview.revision }}</h3>
-      <p v-if="importPreview.from">{{ s('From store', '来自存储') }} {{ importPreview.from }} · {{ s('its text stays in the daemon.', '其内容留在守护进程中。') }}</p>
+      <p v-if="importPreview.store">{{ s('From store', '来自存储') }} {{ importPreview.store.id }} · {{ importPreview.store.client }} · {{ importPreview.store.scope }} · {{ importPreview.store.path }} · {{ s('its text stays in the daemon.', '其内容留在守护进程中。') }}</p>
       <p>{{ s('Each entry is matched against the selected source. No value is shown: changed fields are named only. Imported and replaced entries start disabled.', '每个条目会与所选来源比对。此处不显示任何值，只列出变更字段名。导入和替换的条目默认禁用。') }}</p>
       <p v-if="importPreview.source === 'project'">{{ s('The workspace file receives each entry\'s public skeleton: the command, declared working directory, URL origin and public OAuth fields. Arguments, environment and header values, the bearer token, a URL with userinfo, path, query or fragment, hidden OAuth fields and unknown members go to your user-scope mcp-secrets record, never to the workspace file.', '工作区文件只写入每个条目的公开骨架：命令、声明的运行目录、URL 来源和公开 OAuth 字段。参数、环境变量与请求头的值、Bearer 令牌、带用户信息、路径、查询或片段的 URL、隐藏的 OAuth 字段及未知成员会写入您的用户范围 mcp-secrets 记录，绝不会写入工作区文件。') }}</p>
       <p>{{ importUnknown() }}</p>

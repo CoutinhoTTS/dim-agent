@@ -420,6 +420,15 @@ fn print_import_preview(preview: &mcp::ImportPreview, source: &str, apply: bool)
         })
         .collect::<Vec<_>>();
     let mut notes = Vec::new();
+    if let Some(store) = &preview.source {
+        notes.push(format!(
+            "{} · {} · {} · {}",
+            store.id,
+            store.client,
+            store.scope,
+            safe_line(&store.path),
+        ));
+    }
     if preview.entries.is_empty() {
         notes.push(t("The document holds no mcpServers entries.").to_owned());
     } else {

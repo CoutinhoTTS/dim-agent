@@ -136,6 +136,20 @@ pub(crate) struct ImportPreview {
     /// client-supplied `document`, which the apply carries itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    /// The known store a `from` preview read, named as `mcp.import.sources`
+    /// names it; absent for a client-supplied `document`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<ImportSourceRef>,
+}
+
+/// One known store's identity and display path, without its entries or state.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImportSourceRef {
+    pub id: String,
+    pub client: String,
+    pub scope: String,
+    pub path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,6 +225,7 @@ pub(crate) fn preview(
             .collect(),
         unknown_top_level: document.extra.keys().cloned().collect(),
         source_revision: None,
+        source: None,
     }
 }
 

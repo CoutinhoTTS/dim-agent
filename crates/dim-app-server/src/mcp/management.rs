@@ -588,9 +588,9 @@ async fn import_document(
     from: Option<String>,
     workspace: Option<&(usize, discovery::Workspace)>,
     stopping: &CancellationToken,
-) -> Result<(String, Option<String>), RpcError> {
+) -> Result<(String, Option<String>, Option<import::ImportSourceRef>), RpcError> {
     match (document, from) {
-        (Some(document), None) => Ok((document, None)),
+        (Some(document), None) => Ok((document, None, None)),
         (None, Some(id)) => {
             let store = StoreId::parse(&id)
                 .ok_or_else(|| RpcError::invalid(format!("unknown MCP source {id}")))?;
@@ -600,18 +600,32 @@ async fn import_document(
             let workspace = workspace.map(|(_, workspace)| workspace.clone());
             let read = tokio::task::spawn_blocking(move || {
                 let environment = discovery::Environment::from_process();
-                discovery::document(store, &environment, workspace.as_ref())
+                // The identity row comes from the one read of the store the
+                // preview converts, so naming it reads nothing else.
+                discovery::document(store, &environment, workspace.as_ref()).map(
+                    |(document, identity)| {
+                        (
+                            document,
+                            import::ImportSourceRef {
+                                id: identity.id.to_owned(),
+                                client: identity.client.to_owned(),
+                                scope: identity.scope.to_owned(),
+                                path: identity.path,
+                            },
+                        )
+                    },
+                )
             })
             .await
             .map_err(|_| RpcError::app(-32000, "mcp_unavailable", "MCP worker failed"))?;
-            let document = read.map_err(|error| {
+            let (document, source) = read.map_err(|error| {
                 let code = error.code();
                 RpcError::app(-32000, code, error.message)
             })?;
             if stopping.is_cancelled() {
                 return Err(RpcError::interrupted());
             }
-            Ok((document.text, Some(document.revision)))
+            Ok((document.text, Some(document.revision), Some(source)))
         }
         _ => Err(RpcError::invalid(
             "mcp.import takes exactly one of document and from",
@@ -1072,7 +1086,7 @@ pub(super) fn provide(
                             p.source,
                             workspace.as_ref().map(|(root, _)| *root),
                         )?;
-                        let (document, source_revision) =
+                        let (document, source_revision, store) =
                             import_document(p.document, p.from, workspace.as_ref(), &stopping)
                                 .await?;
                         let document = import::parse_document(&document).map_err(error)?;
@@ -1081,6 +1095,7 @@ pub(super) fn provide(
                             .await
                             .map_err(error)?;
                         preview.source_revision = source_revision;
+                        preview.source = store;
                         return reply(preview);
                     }
                     "mcp.import.apply" => {
@@ -1104,7 +1119,7 @@ pub(super) fn provide(
                             p.source,
                             workspace.as_ref().map(|(root, _)| *root),
                         )?;
-                        let (document, source_revision) =
+                        let (document, source_revision, _) =
                             import_document(p.document, p.from, workspace.as_ref(), &stopping)
                                 .await?;
                         if let (Some(expected), Some(actual)) =

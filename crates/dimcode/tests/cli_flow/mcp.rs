@@ -3260,3 +3260,47 @@ fn mcp_configuration_keeps_a_reference() {
     );
     assert!(stdout.contains("Unset variables: MCP_TOKEN"), "{stdout}");
 }
+
+/// `--from` prints the store the preview read, in the same words
+/// `mcp.import.sources` reports it.
+#[test]
+fn mcp_import_names_the_store_it_read() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.import.preview");
+        assert_eq!(request["params"]["from"], "claude-code:user");
+        assert!(request["params"].get("document").is_none());
+        wire.reply(
+            &request,
+            json!({
+                "revision": "user:1",
+                "sourceRevision": "digest:1",
+                "source": {
+                    "id": "claude-code:user",
+                    "client": "claude-code",
+                    "scope": "user",
+                    "path": "~/.claude.json",
+                },
+                "entries": [],
+                "unknownTopLevel": [],
+            }),
+        );
+    });
+    let output = home
+        .command()
+        .args(["mcp", "import", "--from", "claude-code:user"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("claude-code:user · claude-code · user · ~/.claude.json"),
+        "{stderr}"
+    );
+}

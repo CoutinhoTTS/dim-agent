@@ -22590,6 +22590,7 @@
       "to": "dim_app_server::mcp::import",
       "references": [
         "path ImportResolution",
+        "path import::ImportSourceRef",
         "path import::check_resolutions",
         "path import::parse_document",
         "use super::import",
