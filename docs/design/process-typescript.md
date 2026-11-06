@@ -443,8 +443,13 @@ a file beneath it. Text and binary are separate operations on the same names:
 `read` and `replace` use the v1 text envelope, `readBytes` and `replaceBytes`
 carry raw bytes. A text read of a raw file fails `invalid_data` and leaves it
 untouched, and a binary read of a text file returns its envelope bytes. The byte
-operations are whole-buffer and capped at 8 MiB, the largest buffer that fits
-the runtime frame once base64-encoded; there is no streaming in JavaScript.
+operations are whole-buffer and capped at 8 MiB, below the 12 MiB raw ceiling
+the base64-encoded runtime frame implies; there is no streaming in JavaScript.
+A buffer large enough that its call message would exceed the runtime's 16 MiB
+frame is refused by the plugin's own runtime before it is sent, failing only
+that call with a `RangeError` coded `bad-value` while the row and the file
+store stay up, and the same holds for any call argument, a large text
+`replace` included.
 Streaming and work directories belong to the typed Rust API and have no
 JavaScript binding: `directory` creates missing parents for a helper process,
 while `withLock` still does not, so provisioning stays with installation.
