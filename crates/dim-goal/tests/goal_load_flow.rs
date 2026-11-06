@@ -653,7 +653,12 @@ async fn e2_a_load_answers_an_unanswered_change_once() {
         "main",
         message(
             vec![raw(
-                &texts::set_state("main", "ship it", set.sequence, false),
+                &texts::set_state(
+                    "main",
+                    "ship it",
+                    &texts::Answer::After(set.sequence),
+                    false,
+                ),
                 Some("goal:state"),
                 false,
             )],
@@ -681,7 +686,14 @@ async fn e2_a_load_answers_an_unanswered_change_once() {
         .await;
     assert_eq!(
         record.text,
-        texts::paused("main", "ship it", "user", "", pause.sequence, false)
+        texts::paused(
+            "main",
+            "ship it",
+            "user",
+            "",
+            &texts::Answer::After(pause.sequence),
+            false
+        )
     );
     let writes = env.settled("main").await;
     assert_eq!(
@@ -717,7 +729,12 @@ async fn e2_a_load_answers_an_unanswered_change_once() {
         "main",
         message(
             vec![raw(
-                &texts::set_state("main", "ship it", set.sequence, false),
+                &texts::set_state(
+                    "main",
+                    "ship it",
+                    &texts::Answer::After(set.sequence),
+                    false,
+                ),
                 Some("goal:state"),
                 false,
             )],
@@ -735,7 +752,14 @@ async fn e2_a_load_answers_an_unanswered_change_once() {
         "main",
         message(
             vec![raw(
-                &texts::paused("main", "ship it", "user", "", pause.sequence, false),
+                &texts::paused(
+                    "main",
+                    "ship it",
+                    "user",
+                    "",
+                    &texts::Answer::After(pause.sequence),
+                    false,
+                ),
                 Some("goal:state"),
                 false,
             )],
@@ -793,22 +817,29 @@ async fn e2_an_old_history_answers_its_first_change_with_a_state_record() {
     );
 
     // The first change answered after the upgrade writes the record.
-    let pause = env
-        .goal("pause", serde_json::json!({}))
+    env.goal("pause", serde_json::json!({}))
         .await
-        .expect("pause writes")["sequence"]
-        .as_u64()
-        .expect("a sequence");
-    env.wait_for("main", r#"op="pause" reason="user""#).await;
+        .expect("pause writes");
+    let pause = env.wait_for("main", r#"op="pause" reason="user""#).await;
     let record = env
         .wait_for(
             "main",
-            &format!(r#"kind="state" status="paused" reason="user" after="{pause}""#),
+            &format!(
+                r#"kind="state" status="paused" reason="user" trigger="{}""#,
+                pause.submission_id.as_deref().unwrap()
+            ),
         )
         .await;
     assert_eq!(
         record.text,
-        texts::paused("main", "ship it", "user", "", pause, false)
+        texts::paused(
+            "main",
+            "ship it",
+            "user",
+            "",
+            &texts::trigger(&pause),
+            false
+        )
     );
     let input = env
         .written_input("main", r#"kind="state" status="paused""#)
@@ -848,17 +879,17 @@ async fn e2_the_first_state_record_retires_the_old_keys() {
 
     // The user pauses; the record that answers states the branch, and the old
     // keys still live ride in the same input as retires.
-    let pause = env
-        .goal("pause", serde_json::json!({}))
+    env.goal("pause", serde_json::json!({}))
         .await
-        .expect("pause writes")["sequence"]
-        .as_u64()
-        .expect("a sequence");
+        .expect("pause writes");
     let trigger = env.wait_for("main", r#"op="pause""#).await;
     let record = env
         .wait_for(
             "main",
-            &format!(r#"kind="state" status="paused" reason="user" after="{pause}""#),
+            &format!(
+                r#"kind="state" status="paused" reason="user" trigger="{}""#,
+                trigger.submission_id.as_deref().unwrap()
+            ),
         )
         .await;
     let input = env
@@ -1116,6 +1147,95 @@ async fn e2_a_start_clear_with_old_key_retires_skips_the_full_fold() {
         .collect();
     assert!(
         !probes.is_empty(),
+        "the rebuild probes the newest Goal block: {reads:?}"
+    );
+    env.close().await;
+}
+
+/// R5, R3: the newest Goal block is a `clear` trigger whose record sits
+/// immediately before it in the same atomic batch. The scan classifies the
+/// pair by the record, so the branch's own history still reads as no goal and
+/// the rebuild keeps the cheap path.
+#[tokio::test]
+async fn e2_a_clear_batch_takes_the_cheap_rebuild() {
+    let env = Env::start_refusing().await;
+    let mut seed = env.seed_new("load-clear-batch").await;
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: None,
+            create_event: None,
+        }),
+    );
+    let set = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::set("main", "ship it"), None, false)],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::set_state(
+                    "main",
+                    "ship it",
+                    &texts::Answer::After(set.sequence),
+                    false,
+                ),
+                Some("goal:state"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    let record = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
+        submission_id: Some("test:clear-record".into()),
+        user: None,
+        blocks: vec![raw(
+            &texts::cleared("main", &texts::Answer::Trigger("test:clear".into())),
+            Some("goal:state"),
+            true,
+        )],
+        mode: Some(InputMode::Append),
+    });
+    let trigger = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
+        submission_id: Some("test:clear".into()),
+        user: None,
+        blocks: vec![raw(&texts::clear("main"), None, false)],
+        mode: Some(InputMode::Append),
+    });
+    seed.append_batch("main", vec![record, trigger]);
+    seed.finish().await;
+
+    let before = env.reads().len();
+    let env = env.restore_seeded("load-clear-batch").await;
+    assert_eq!(
+        env.writes("main").await.len(),
+        4,
+        "the set and its record, the clear's record and its trigger; the rebuild writes nothing"
+    );
+    let reads = env.reads();
+    let reads = &reads[before..];
+    let full: Vec<&Read> = reads
+        .iter()
+        .filter(|read| read.kinds.len() == 13 && read.include_publishing)
+        .collect();
+    assert!(full.is_empty(), "the full fold never runs: {full:?}");
+    let scan = [
+        "input/message",
+        "input/deleted",
+        "branch/start",
+        "session/forked",
+    ]
+    .iter()
+    .map(|kind| (*kind).to_owned())
+    .collect::<Vec<_>>();
+    assert!(
+        reads
+            .iter()
+            .any(|read| read.include_publishing && read.kinds == scan),
         "the rebuild probes the newest Goal block: {reads:?}"
     );
     env.close().await;

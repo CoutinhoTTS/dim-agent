@@ -253,6 +253,25 @@ impl Seed {
             .unwrap_or_else(|error| panic!("seeding {branch}: {error}"))
     }
 
+    /// Commits `kinds` as one atomic batch and returns the facts, so a case
+    /// can seed a batch Goal writes together (R5).
+    pub fn append_batch(&mut self, branch: &str, kinds: Vec<EventKind>) -> Vec<Arc<AgentEvent>> {
+        let timeline = self.timelines.entry(branch.to_owned()).or_insert_with(|| {
+            Arc::new(Timeline::new(
+                self.root.clone(),
+                TimelineKey {
+                    session_id: self.session.clone(),
+                    branch_id: branch.to_owned(),
+                },
+                vec![],
+                self.store.clone(),
+            ))
+        });
+        timeline
+            .append_batch_registered(kinds.into_iter().map(EventKind::into).collect(), |_| Ok(()))
+            .unwrap_or_else(|error| panic!("seeding a batch on {branch}: {error}"))
+    }
+
     /// Closes the seeding root; the facts stay in the store.
     pub async fn finish(self) {
         let _ = self.root.shutdown().await;
@@ -1193,6 +1212,7 @@ impl Env {
                     text.starts_with("<dim-goal ").then(|| Block {
                         id: event.id.clone(),
                         sequence: event.sequence,
+                        submission_id: data.submission_id.clone(),
                         marker: text.lines().next().unwrap().to_owned(),
                         text: text.clone(),
                         blocks: data.blocks.iter().map(raw_text).collect(),
@@ -1573,6 +1593,8 @@ pub fn user_with_blocks(text: &str, mode: InputMode, blocks: Vec<InputBlock>) ->
 pub struct Block {
     pub id: String,
     pub sequence: u64,
+    /// The input's submission id (`goal:<uuid>` for every Goal write).
+    pub submission_id: Option<String>,
     /// The `<dim-goal ...>` marker line.
     pub marker: String,
     pub text: String,

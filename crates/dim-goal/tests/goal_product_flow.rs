@@ -268,17 +268,25 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
     fixture.idle_on(&id, "main").await;
     let writes = goal_writes(&session, "main").await;
     assert_eq!(writes.len(), 5, "{writes:#?}");
-    assert_eq!(writes[0].sequence, sequence, "the set trigger");
-    assert_eq!(writes[0].text, texts::set("main", "ship <it>"));
+    assert_eq!(writes[1].sequence, sequence, "the set trigger");
+    assert_eq!(writes[1].text, texts::set("main", "ship <it>"));
+    assert_eq!(
+        writes[0].mode,
+        dim_agent_types::InputMode::Append,
+        "the record commits first"
+    );
     wait_goal(
         &session,
         "main",
-        &format!(r#"kind="state" status="active" after="{sequence}""#),
+        &format!(
+            r#"kind="state" status="active" trigger="{}""#,
+            writes[1].submission_id.as_deref().unwrap()
+        ),
     )
     .await;
     assert_eq!(
         goal_block(&session, "main", r#"kind="state" status="active""#).await,
-        texts::set_state("main", "ship <it>", sequence, false),
+        texts::set_state("main", "ship <it>", &texts::trigger(&writes[1]), false),
         "the record that answers the set"
     );
     assert!(
@@ -371,7 +379,7 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
     fixture.set_limit(5).await;
     let id = fixture.new_session(&["goal_update", "wait"]).await;
     let session = fixture.agent.get_session(&id).unwrap();
-    let finish = fixture
+    fixture
         .goal_on(&id, "set", json!({"objective": "finish"}))
         .await
         .unwrap();
@@ -392,15 +400,19 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
         vec![texts::set("main", "finish")],
         "the second session's set"
     );
+    let finish_trigger = wait_goal(&session, "main", r#"op="set""#).await;
     wait_goal(
         &session,
         "main",
-        &format!(r#"kind="state" status="active" after="{finish}""#),
+        &format!(
+            r#"kind="state" status="active" trigger="{}""#,
+            finish_trigger.submission_id.as_deref().unwrap()
+        ),
     )
     .await;
     assert_eq!(
         goal_block(&session, "main", r#"kind="state" status="active""#).await,
-        texts::set_state("main", "finish", finish, false),
+        texts::set_state("main", "finish", &texts::trigger(&finish_trigger), false),
         "the second session's record"
     );
     assert_eq!(
@@ -416,13 +428,19 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
     let completed = writes
         .iter()
         .find(|block| block.marker.contains(r#"op="completed""#))
-        .expect("the completed report")
-        .sequence;
+        .expect("the completed report");
     assert_eq!(
         goal_block(&session, "main", r#"status="completed""#).await,
-        texts::reported("main", "finish", "completed", SPECIAL, completed),
+        texts::reported(
+            "main",
+            "finish",
+            "completed",
+            SPECIAL,
+            &texts::trigger(completed)
+        ),
         "the record that answers the report"
     );
+    let completed = completed.sequence;
     assert!(
         writes
             .iter()
@@ -458,7 +476,7 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
     fixture.goal_on(&id, "pause", json!({})).await.unwrap();
     fixture.goal_on(&id, "resume", json!({})).await.unwrap();
     let clear = fixture.goal_on(&id, "clear", json!({})).await.unwrap();
-    wait_goal(&session, "main", r#"op="clear""#).await;
+    let clear_trigger = wait_goal(&session, "main", r#"op="clear""#).await;
     fixture.idle_on(&id, "main").await;
     assert_eq!(
         goal_block(&session, "main", r#"op="pause" reason="user""#).await,
@@ -468,10 +486,14 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
         goal_block(&session, "main", r#"op="resume""#).await,
         texts::resume("main")
     );
+    let _ = clear;
     wait_goal(
         &session,
         "main",
-        &format!(r#"status="cleared" after="{clear}""#),
+        &format!(
+            r#"status="cleared" trigger="{}""#,
+            clear_trigger.submission_id.as_deref().unwrap()
+        ),
     )
     .await;
     assert_eq!(
@@ -481,7 +503,7 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
     );
     assert_eq!(
         goal_block(&session, "main", r#"status="cleared""#).await,
-        texts::cleared("main", clear),
+        texts::cleared("main", &texts::trigger(&clear_trigger)),
         "the record that answers it"
     );
 
@@ -546,7 +568,7 @@ async fn goal_restore_refolds_without_repeating_decisions() {
         .goal_on(&id, "edit", json!({"objective": edited}))
         .await
         .unwrap();
-    wait_goal(&session, "main", r#"op="edit""#).await;
+    let edit_trigger = wait_goal(&session, "main", r#"op="edit""#).await;
     fixture.idle_on(&id, "main").await;
     assert_eq!(
         goal_block(&session, "main", r#"op="edit""#).await,
@@ -554,17 +576,24 @@ async fn goal_restore_refolds_without_repeating_decisions() {
     );
     // The edit is a trigger: its record states the new objective and the
     // status the goal actually has, still the limit pause.
+    let _ = edit;
     wait_goal(
         &session,
         "main",
-        &format!(r#"kind="state" status="paused" reason="limit" after="{edit}""#),
+        &format!(
+            r#"kind="state" status="paused" reason="limit" trigger="{}""#,
+            edit_trigger.submission_id.as_deref().unwrap()
+        ),
     )
     .await;
     assert_eq!(
         goal_block(
             &session,
             "main",
-            &format!(r#"kind="state" status="paused" reason="limit" after="{edit}""#)
+            &format!(
+                r#"kind="state" status="paused" reason="limit" trigger="{}""#,
+                edit_trigger.submission_id.as_deref().unwrap()
+            )
         )
         .await,
         texts::paused(
@@ -572,7 +601,7 @@ async fn goal_restore_refolds_without_repeating_decisions() {
             &edited,
             "limit",
             "the automatic continuation limit was reached",
-            edit,
+            &texts::trigger(&edit_trigger),
             false
         ),
         "the edit's record"
@@ -857,16 +886,20 @@ async fn goal_on_a_line_behaves_as_on_main() {
         )
         .await
         .unwrap();
-    wait_goal(&session, &child, r#"op="set""#).await;
+    let line_trigger = wait_goal(&session, &child, r#"op="set""#).await;
     assert_eq!(
         goal_blocks(&session, &child, r#"op="set""#).await,
         vec![texts::set(&child, "line objective")],
         "the line's set"
     );
+    let _ = line_set;
     wait_goal(
         &session,
         &child,
-        &format!(r#"kind="state" status="active" after="{line_set}""#),
+        &format!(
+            r#"kind="state" status="active" trigger="{}""#,
+            line_trigger.submission_id.as_deref().unwrap()
+        ),
     )
     .await;
     wait_goal(&session, &child, r#"count="1""#).await;
@@ -944,16 +977,20 @@ async fn goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() {
         )
         .await
         .unwrap();
-    wait_goal(&session, "main", r#"op="set""#).await;
+    let judged_trigger = wait_goal(&session, "main", r#"op="set""#).await;
     assert_eq!(
         goal_blocks(&session, "main", r#"op="set""#).await,
         vec![texts::evaluator_set("main", "make the tests pass")],
         "the judged set"
     );
+    let _ = judged;
     wait_goal(
         &session,
         "main",
-        &format!(r#"kind="state" status="active" judge="evaluator" after="{judged}""#),
+        &format!(
+            r#"kind="state" status="active" judge="evaluator" trigger="{}""#,
+            judged_trigger.submission_id.as_deref().unwrap()
+        ),
     )
     .await;
     fixture
@@ -1394,6 +1431,120 @@ async fn goal_registers_the_entry_for_the_marker_it_writes() {
     fixture.close().await;
 }
 
+/// Records every request and echoes, so a change's first request can be read
+/// once the branch settles.
+struct RecordingModel {
+    requests: Mutex<Vec<Arc<ModelRequest>>>,
+}
+
+impl Default for RecordingModel {
+    fn default() -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl ModelDriver for RecordingModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        self.requests.lock().unwrap().push(request.clone());
+        EchoModel.invoke(request, connection, cancel)
+    }
+}
+
+/// R5: a change and the record that answers it commit as one atomic batch,
+/// the record first, so the change's first turn starts with the record
+/// already ahead of its trigger. `set` on a goal-free branch and `resume`
+/// from paused; twenty runs each, because the guarantee is the order of the
+/// batch's two inputs, not one timing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn goal_a_changes_first_request_holds_its_record_before_the_trigger() {
+    let mut runs = 0;
+    for case in ["set", "resume"] {
+        for run in 0..20 {
+            let model = Arc::new(RecordingModel::default());
+            let mut fixture = Fixture::start_with(model.clone()).await;
+            fixture.set_limit(1).await;
+            let id = fixture.id.clone();
+            if case == "resume" {
+                fixture
+                    .goal("set", json!({"objective": "ship it"}))
+                    .await
+                    .unwrap();
+                fixture.idle_on(&id, "main").await;
+                fixture.goal("pause", json!({})).await.unwrap();
+                fixture.idle_on(&id, "main").await;
+            }
+            let before = model.requests.lock().unwrap().len();
+            let params = if case == "set" {
+                json!({"objective": "ship it"})
+            } else {
+                json!({})
+            };
+            let sequence = fixture
+                .goal(case, params)
+                .await
+                .unwrap_or_else(|error| panic!("{case} run {run}: {error}"));
+            fixture.idle_on(&id, "main").await;
+
+            // The trigger event names itself by submission id; the record the
+            // change wrote names that id in its `trigger` attribute.
+            let events = fixture.events("main", sequence - 1).await;
+            let trigger = events
+                .iter()
+                .find(|event| event.sequence == sequence)
+                .unwrap_or_else(|| panic!("{case} run {run}: the trigger event"));
+            let EventKind::InputMessage(data) = &trigger.kind else {
+                panic!("{case} run {run}: the trigger is not an input");
+            };
+            let submission = data
+                .submission_id
+                .clone()
+                .unwrap_or_else(|| panic!("{case} run {run}: the trigger's submission id"));
+            let record = texts::set_state(
+                "main",
+                "ship it",
+                &texts::Answer::Trigger(submission.clone()),
+                false,
+            );
+            let trigger_text = if case == "set" {
+                texts::set("main", "ship it")
+            } else {
+                texts::resume("main")
+            };
+
+            let text = {
+                let requests = model.requests.lock().unwrap();
+                let first = requests.get(before).unwrap_or_else(|| {
+                    panic!(
+                        "{case} run {run}: the change drove no request ({} recorded)",
+                        requests.len()
+                    )
+                });
+                request_text(first)
+            };
+            let record_at = text.find(&record).unwrap_or_else(|| {
+                panic!("{case} run {run}: the first request holds no record: {text}")
+            });
+            let trigger_at = text.find(&trigger_text).unwrap_or_else(|| {
+                panic!("{case} run {run}: the first request holds no trigger: {text}")
+            });
+            assert!(
+                record_at < trigger_at,
+                "{case} run {run}: the record follows its trigger: {text}"
+            );
+            runs += 1;
+            fixture.close().await;
+        }
+    }
+    assert_eq!(runs, 40, "every case ran twenty times");
+}
+
 /// The text of a request's messages, as one string: the inputs the model read.
 fn request_text(request: &ModelRequest) -> String {
     request
@@ -1574,15 +1725,26 @@ async fn goal_a_queued_set_overtaken_by_a_pause_reads_as_paused_everywhere() {
         .unwrap();
     let pause = fixture.goal_on(&id, "pause", json!({})).await.unwrap();
     assert!(set < pause);
+    let pause_trigger = wait_goal(&session, "main", r#"op="pause" reason="user""#).await;
     let record = wait_goal(
         &session,
         "main",
-        &format!(r#"kind="state" status="paused" reason="user" after="{pause}""#),
+        &format!(
+            r#"kind="state" status="paused" reason="user" trigger="{}""#,
+            pause_trigger.submission_id.as_deref().unwrap()
+        ),
     )
     .await;
     assert_eq!(
         record.text,
-        texts::paused("main", "ship it", "user", "", pause, false)
+        texts::paused(
+            "main",
+            "ship it",
+            "user",
+            "",
+            &texts::trigger(&pause_trigger),
+            false
+        )
     );
 
     // The request the running turn builds next reads the paused record last,
@@ -1663,10 +1825,15 @@ async fn goal_a_compaction_inside_a_turn_carries_the_record_from_the_baseline() 
     tokio::time::timeout(Duration::from_secs(15), model.entered.notified())
         .await
         .expect("the request the set drove");
+    let set_trigger = wait_goal(&session, "main", r#"op="set""#).await;
+    let _ = set;
     let record = wait_goal(
         &session,
         "main",
-        &format!(r#"kind="state" status="active" after="{set}""#),
+        &format!(
+            r#"kind="state" status="active" trigger="{}""#,
+            set_trigger.submission_id.as_deref().unwrap()
+        ),
     )
     .await;
     model.release.notify_one();
@@ -1782,14 +1949,15 @@ async fn goal_each_change_answers_with_one_newest_state_record() {
     ];
     for (method, params) in steps {
         let sequence = fixture.goal_on(&id, method, params).await.unwrap();
-        let needle = format!(r#"after="{sequence}""#);
+        let trigger = wait_goal(&session, "main", &format!(r#"op="{method}""#)).await;
+        assert_eq!(trigger.sequence, sequence, "{method}: the trigger");
+        let needle = format!(r#"trigger="{}""#, trigger.submission_id.as_deref().unwrap());
         let record = wait_goal(&session, "main", &needle).await;
         let answers: Vec<Block> = goal_writes(&session, "main")
             .await
             .into_iter()
             .filter(|block| {
-                block.marker.contains(r#"kind="state""#)
-                    && block.marker.contains(&format!(r#"after="{sequence}""#))
+                block.marker.contains(r#"kind="state""#) && block.marker.contains(&needle)
             })
             .collect();
         assert_eq!(answers.len(), 1, "{method}: {answers:#?}");
@@ -1814,8 +1982,8 @@ async fn goal_each_change_answers_with_one_newest_state_record() {
         &session,
         "main",
         &format!(
-            r#"kind="state" status="completed" after="{}""#,
-            report.sequence
+            r#"kind="state" status="completed" trigger="{}""#,
+            report.submission_id.as_deref().unwrap()
         ),
     )
     .await;
@@ -1826,19 +1994,27 @@ async fn goal_each_change_answers_with_one_newest_state_record() {
             "ship it twice",
             "completed",
             "done",
-            report.sequence
+            &texts::trigger(&report)
         )
     );
 
     // The user's clear retires the record; the key holds no live entry after.
     let clear = fixture.goal_on(&id, "clear", json!({})).await.unwrap();
+    let clear_trigger = wait_goal(&session, "main", r#"op="clear""#).await;
     let record = wait_goal(
         &session,
         "main",
-        &format!(r#"status="cleared" after="{clear}""#),
+        &format!(
+            r#"status="cleared" trigger="{}""#,
+            clear_trigger.submission_id.as_deref().unwrap()
+        ),
     )
     .await;
-    assert_eq!(record.text, texts::cleared("main", clear));
+    let _ = clear;
+    assert_eq!(
+        record.text,
+        texts::cleared("main", &texts::trigger(&clear_trigger))
+    );
     let reply = fixture
         .client
         .rpc("session.keys", json!({"sessionId":id,"branchId":"main"}))

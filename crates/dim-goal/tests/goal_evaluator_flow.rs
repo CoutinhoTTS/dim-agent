@@ -474,10 +474,8 @@ async fn pursuit_1_a_completion_request_creates_one_evaluator_and_continues_noth
     assert_eq!(env.creates("main").await.len(), 1);
     assert_eq!(
         create.at,
-        BranchCreateAt::Sequence {
-            sequence: evaluation
-        },
-        "the evaluator opens at the turn end it evaluates"
+        BranchCreateAt::Create {},
+        "the evaluator opens at the branch head, the turn end it evaluates: {evaluation}"
     );
     assert_eq!(
         create.prompt,

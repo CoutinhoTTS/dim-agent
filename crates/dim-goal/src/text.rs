@@ -212,6 +212,25 @@ fn result_sentence(branch: &str, state: &State, judge: Judge) -> String {
     }
 }
 
+/// The fact a state record answers (D3, R5): the change trigger it states,
+/// named by submission id when the record commits in the trigger's atomic
+/// batch, or the sequence of the fact it answers.
+#[derive(Clone, Copy)]
+pub enum Answered<'a> {
+    Sequence(u64),
+    Trigger(&'a str),
+}
+
+impl Answered<'_> {
+    /// The record's attribute naming the answered fact.
+    fn attribute(&self) -> (&'static str, String) {
+        match self {
+            Self::Sequence(after) => ("after", after.to_string()),
+            Self::Trigger(trigger) => ("trigger", (*trigger).to_owned()),
+        }
+    }
+}
+
 /// The state record Goal writes (A.5): one `goal:state` block, Append, keyed so
 /// compaction replays it and `session.keys` shows it (§2, D1).
 ///
@@ -227,12 +246,12 @@ pub fn state(
     objective: Option<&str>,
     state: State,
     judge: Judge,
-    after: u64,
+    answered: Answered,
     live: Live,
     texts: &GoalTexts,
 ) -> InputMessageData {
     let Some(objective) = objective.filter(|objective| !objective.is_empty()) else {
-        return cleared(branch, after, live);
+        return cleared(branch, answered, live);
     };
     let mut attrs = vec![
         ("kind", "state".to_owned()),
@@ -244,7 +263,8 @@ pub fn state(
     if judge == Judge::Evaluator {
         attrs.push(("judge", "evaluator".to_owned()));
     }
-    attrs.push(("after", after.to_string()));
+    let (name, value) = answered.attribute();
+    attrs.push((name, value));
     attrs.push(("branch", branch.to_owned()));
     let mut body = vec![
         "<objective>".to_owned(),
@@ -276,10 +296,10 @@ pub fn state(
 
 /// A state record that says the branch has no goal: one retired `goal:state`
 /// block (§2, A.5), and the old keys too when the fold still holds them live.
-fn cleared(branch: &str, after: u64, live: Live) -> InputMessageData {
+fn cleared(branch: &str, answered: Answered, live: Live) -> InputMessageData {
     retire_blocks(
         branch,
-        after,
+        answered,
         None,
         format!("The goal for branch {branch} is not in effect."),
         live,
@@ -291,7 +311,7 @@ fn cleared(branch: &str, after: u64, live: Live) -> InputMessageData {
 pub fn start_clear(branch: &str, after: u64, live: Live) -> InputMessageData {
     retire_blocks(
         branch,
-        after,
+        Answered::Sequence(after),
         Some("new_branch"),
         format!(
             "Any goal above belongs to another branch, not to branch {branch}. Disregard it; branch {branch} has no goal."
@@ -302,7 +322,7 @@ pub fn start_clear(branch: &str, after: u64, live: Live) -> InputMessageData {
 
 fn retire_blocks(
     branch: &str,
-    after: u64,
+    answered: Answered,
     reason: Option<&str>,
     body: String,
     live: Live,
@@ -314,7 +334,8 @@ fn retire_blocks(
     if let Some(reason) = reason {
         attrs.push(("reason", reason.to_owned()));
     }
-    attrs.push(("after", after.to_string()));
+    let (name, value) = answered.attribute();
+    attrs.push((name, value));
     attrs.push(("branch", branch.to_owned()));
     let mut blocks = vec![
         Block::new(attrs, vec![body.clone()])

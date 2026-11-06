@@ -19,26 +19,32 @@ async fn a_set_asks_for_the_objective_and_goal_states_it_in_a_record() {
         .unwrap();
     let writes = fixture.settled_writes("main").await;
     assert_eq!(writes.len(), 2, "{writes:#?}");
-    assert_eq!(writes[0].sequence, sequence);
-    assert_eq!(writes[0].mode, InputMode::Queue);
-    assert_eq!(writes[0].blocks, 1, "{}", writes[0].text);
-    assert_eq!(writes[0].text, texts::set("main", OBJECTIVE));
-    assert_eq!(writes[1].mode, InputMode::Append);
-    assert_eq!(writes[1].blocks, 1, "{}", writes[1].text);
     assert_eq!(
-        writes[1].text,
-        texts::set_state("main", OBJECTIVE, sequence, false)
+        writes[1].sequence, sequence,
+        "the method replies with the trigger's sequence"
     );
+    assert_eq!(writes[0].mode, InputMode::Append);
+    assert_eq!(writes[0].blocks, 1, "{}", writes[0].text);
+    assert_eq!(
+        writes[0].text,
+        texts::set_state("main", OBJECTIVE, &texts::trigger(&writes[1]), false)
+    );
+    assert_eq!(writes[1].mode, InputMode::Queue);
+    assert_eq!(writes[1].blocks, 1, "{}", writes[1].text);
+    assert_eq!(writes[1].text, texts::set("main", OBJECTIVE));
     let all = fixture.events("main", 0).await;
     let state = all
         .iter()
-        .find(|event| event.sequence == writes[1].sequence)
+        .find(|event| event.sequence == writes[0].sequence)
         .expect("the state record");
     let EventKind::InputMessage(data) = &state.kind else {
         panic!("the state record is an input message")
     };
     let dim_agent_types::InputBlock::Raw { text, key, retire } = &data.blocks[0];
-    assert_eq!(text, &texts::set_state("main", OBJECTIVE, sequence, false));
+    assert_eq!(
+        text,
+        &texts::set_state("main", OBJECTIVE, &texts::trigger(&writes[1]), false)
+    );
     assert_eq!(key.as_deref(), Some("goal:state"));
     assert!(!retire);
     fixture.close().await;

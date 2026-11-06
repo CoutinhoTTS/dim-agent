@@ -349,7 +349,12 @@ async fn d4_a_withdrawn_pause_restates_the_state_its_record_keeps() {
         .await;
     assert_eq!(
         again.text,
-        texts::set_state("main", "ship it", deleted.sequence, false)
+        texts::set_state(
+            "main",
+            "ship it",
+            &texts::Answer::After(deleted.sequence),
+            false
+        )
     );
     // The deletion takes the undecided turn end again: the goal is active, so
     // it continues.
@@ -445,11 +450,17 @@ async fn d3_a_deleted_answered_command_writes_the_state_again() {
     let env = Env::start().await;
     let set = env.set("ship it").await;
     let active = env
-        .wait_for("main", r#"kind="state" status="active""#)
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="state" status="active" trigger="{}""#,
+                set.submission_id.as_deref().unwrap()
+            ),
+        )
         .await;
     assert_eq!(
         active.text,
-        texts::set_state("main", "ship it", set.sequence, false)
+        texts::set_state("main", "ship it", &texts::trigger(&set), false)
     );
     assert_eq!(active.mode, InputMode::Append);
     let deleted = env.emit(
@@ -469,7 +480,10 @@ async fn d3_a_deleted_answered_command_writes_the_state_again() {
             ),
         )
         .await;
-    assert_eq!(again.text, texts::cleared("main", deleted.sequence));
+    assert_eq!(
+        again.text,
+        texts::cleared("main", &texts::Answer::After(deleted.sequence))
+    );
     let writes = env.settled("main").await;
     assert_eq!(
         writes.len(),
@@ -531,7 +545,10 @@ async fn r2_a_record_written_while_its_change_is_withdrawn_is_superseded() {
             ),
         )
         .await;
-    assert_eq!(again.text, texts::cleared("main", deleted.sequence));
+    assert_eq!(
+        again.text,
+        texts::cleared("main", &texts::Answer::After(deleted.sequence))
+    );
     let writes = env.settled("main").await;
     let records: Vec<&Block> = writes
         .iter()
@@ -544,7 +561,7 @@ async fn r2_a_record_written_while_its_change_is_withdrawn_is_superseded() {
     );
     assert_eq!(
         records[0].text,
-        texts::set_state("main", "ship it", set.sequence, false)
+        texts::set_state("main", "ship it", &texts::trigger(&set), false)
     );
     assert_eq!(
         records.last().map(|record| record.text.clone()),
@@ -589,12 +606,15 @@ async fn r4_a_record_with_an_older_after_is_not_written() {
     let edited = env
         .wait_for(
             "main",
-            &format!(r#"status="active" after="{}""#, edit.sequence),
+            &format!(
+                r#"status="active" trigger="{}""#,
+                edit.submission_id.as_deref().unwrap()
+            ),
         )
         .await;
     assert_eq!(
         edited.text,
-        texts::set_state("main", "ship it twice", edit.sequence, false)
+        texts::set_state("main", "ship it twice", &texts::trigger(&edit), false)
     );
     let deleted = env.emit(
         "main",
@@ -613,7 +633,12 @@ async fn r4_a_record_with_an_older_after_is_not_written() {
         .await;
     assert_eq!(
         again.text,
-        texts::set_state("main", "ship it", deleted.sequence, false)
+        texts::set_state(
+            "main",
+            "ship it",
+            &texts::Answer::After(deleted.sequence),
+            false
+        )
     );
     release.send(()).unwrap();
 
@@ -663,19 +688,27 @@ async fn d3_a_report_racing_a_pause_leaves_the_newest_change_readable() {
         .tool("main", json!({"status": "completed", "summary": "done"}))
         .await;
     assert_eq!(report.is_error, None);
-    let pause = env.goal("pause", json!({})).await.expect("pause writes")["sequence"]
-        .as_u64()
-        .expect("a sequence");
-    env.wait_for("main", r#"op="pause" reason="user""#).await;
+    env.goal("pause", json!({})).await.expect("pause writes");
+    let pause = env.wait_for("main", r#"op="pause" reason="user""#).await;
     let record = env
         .wait_for(
             "main",
-            &format!(r#"kind="state" status="paused" reason="user" after="{pause}""#),
+            &format!(
+                r#"kind="state" status="paused" reason="user" trigger="{}""#,
+                pause.submission_id.as_deref().unwrap()
+            ),
         )
         .await;
     assert_eq!(
         record.text,
-        texts::paused("main", "ship it", "user", "", pause, false)
+        texts::paused(
+            "main",
+            "ship it",
+            "user",
+            "",
+            &texts::trigger(&pause),
+            false
+        )
     );
     let writes = env.settled("main").await;
     let records: Vec<&Block> = writes
@@ -812,7 +845,7 @@ async fn d9_two_reports_in_one_batch_leave_the_second_status() {
             "ship it",
             "blocked",
             "second",
-            second_trigger.sequence
+            &texts::trigger(&second_trigger)
         )
     );
     env.close().await;
@@ -957,7 +990,7 @@ async fn d11_a_set_completed_blocked_leaves_the_second_summary() {
             "ship it",
             "blocked",
             "needs credentials",
-            second_trigger.sequence
+            &texts::trigger(&second_trigger)
         )
     );
     env.close().await;
@@ -1082,7 +1115,7 @@ async fn pursuit_9_the_model_judge_completes_without_an_evaluator() {
         5,
         "the set trigger, its record, one continuation, the report and its record"
     );
-    assert_eq!(writes[3].text, texts::report("main", "completed", "done"));
+    assert_eq!(writes[4].text, texts::report("main", "completed", "done"));
     env.close().await;
 }
 
@@ -1591,7 +1624,12 @@ async fn pursuit_5_a_change_consumed_while_the_creation_check_runs_writes_no_pau
         .await;
     assert_eq!(
         record.text,
-        texts::set_state("main", "ship it", resume.sequence, true)
+        texts::set_state(
+            "main",
+            "ship it",
+            &texts::Answer::After(resume.sequence),
+            true
+        )
     );
     let writes = env.settled("main").await;
     let markers: Vec<&str> = writes.iter().map(|write| write.marker.as_str()).collect();

@@ -185,7 +185,7 @@ pub fn is_opening(kind: &EventKind) -> bool {
 /// with no `after` (one Goal wrote while deciding), no `result` (a conclusion)
 /// and no old key (a change written before the state record existed). The
 /// objective or summary the change asks for is decoded from its body.
-fn change_of(data: &InputMessageData) -> Option<(Marker, &'static str)> {
+pub(crate) fn change_of(data: &InputMessageData) -> Option<(Marker, &'static str)> {
     for block in &data.blocks {
         let InputBlock::Raw {
             text: raw,
@@ -229,6 +229,67 @@ fn change_of(data: &InputMessageData) -> Option<(Marker, &'static str)> {
         return Some((attrs, op));
     }
     None
+}
+
+/// Applies the change `op` with `attrs` to the goal state; one implementation
+/// serves the fold's stepping and the record composed with a change before it
+/// is folded (R5). Returns whether the change is a request instead of a state
+/// change: a `completed` under the evaluator judge leaves the state as it is
+/// (A16).
+fn apply_change(
+    op: &str,
+    attrs: &Marker,
+    objective: &mut Option<String>,
+    state: &mut text::State,
+    judge: &mut Judge,
+) -> bool {
+    match op {
+        "set" => {
+            *objective = attrs
+                .get("objective")
+                .filter(|objective| !objective.is_empty())
+                .cloned();
+            *judge = Judge::of(attrs);
+            *state = text::State::Active;
+        }
+        "edit" => {
+            if let Some(changed) = attrs
+                .get("objective")
+                .filter(|objective| !objective.is_empty())
+                .cloned()
+            {
+                *objective = Some(changed);
+            }
+        }
+        "pause" => {
+            *state = text::State::Paused(
+                attrs
+                    .get("reason")
+                    .filter(|reason| !reason.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| "user".to_owned()),
+            );
+        }
+        "resume" => {
+            *state = text::State::Active;
+        }
+        "clear" => {
+            *objective = None;
+            *state = text::State::None;
+            *judge = Judge::Model;
+        }
+        "completed" if *judge == Judge::Evaluator => return true,
+        "completed" | "blocked" => {
+            let summary = attrs.get("summary").cloned().unwrap_or_default();
+            *state = if op == "completed" {
+                text::State::Completed(summary)
+            } else {
+                text::State::Blocked(summary)
+            };
+        }
+        _ => {}
+    }
+    false
 }
 
 /// The state a live old `goal:status` block sets. An operation no status
@@ -327,6 +388,19 @@ pub struct Fold {
     /// changes included. A deletion asks whether a record naming the withdrawn
     /// change, or a later record, exists (R2).
     record_afters: BTreeSet<u64>,
+    /// A state record that names its trigger by submission id (R5): it states
+    /// its change when the very next event is that trigger, and states
+    /// nothing when any other event comes first.
+    held_record: Option<HeldRecord>,
+}
+
+/// A `goal:state` record with `trigger="<submission id>"`: the statement it
+/// carries waits for the trigger input it names, the next event (R5).
+struct HeldRecord {
+    trigger: String,
+    attrs: Marker,
+    raw: String,
+    retire: bool,
 }
 
 impl Fold {
@@ -387,12 +461,31 @@ impl Fold {
 
     fn step(&mut self, event: &AgentEvent) {
         let sequence = event.sequence;
+        // A held record names its trigger, the next event (R5): only that
+        // input pairs with it; any other event lets it state nothing.
+        let held = match &event.kind {
+            EventKind::InputMessage(_) => self.held_record.take(),
+            _ => {
+                self.held_record = None;
+                None
+            }
+        };
         if is_opening(&event.kind) {
             self.open(event);
             return;
         }
         match &event.kind {
-            EventKind::InputMessage(data) => self.step_input(event, data, sequence),
+            EventKind::InputMessage(data) => {
+                self.step_input(event, data, sequence);
+                if let Some(held) = held
+                    && !self.deleted.contains(&event.id)
+                    && data.submission_id.as_deref() == Some(held.trigger.as_str())
+                {
+                    // The trigger's change is applied above; the record states
+                    // it at the trigger's sequence (A14).
+                    self.step_state(&held.attrs, &held.raw, held.retire, Some(sequence));
+                }
+            }
             EventKind::BranchCreate(data) => {
                 let BranchSource::Host { operation_id } = &data.source else {
                     return;
@@ -540,7 +633,7 @@ impl Fold {
                 self.last_block = sequence;
             }
             if key == Some(STATE_KEY) {
-                self.step_state(&attrs, raw_text, *retire);
+                self.step_state(&attrs, raw_text, *retire, None);
             } else {
                 self.step_legacy(key.unwrap_or_default(), &attrs, raw_text, *retire, sequence);
             }
@@ -558,12 +651,28 @@ impl Fold {
     /// `after` is older than the newest change trigger is stale: a later
     /// trigger already asked for another state, and its own record follows.
     /// A record naming a withdrawn change (R2), or one older than the newest
-    /// record this fold already stepped (R4), states nothing.
-    fn step_state(&mut self, attrs: &Marker, raw: &str, retire: bool) {
-        self.live.state = !retire;
-        let Some(after) = attrs.get("after").and_then(|after| sequence_of(after)) else {
+    /// record this fold already stepped (R4), states nothing. A record with
+    /// `trigger="<submission id>"` names its change instead of an `after` and
+    /// is held until the next event, that trigger, arrives: `paired` carries
+    /// the trigger's sequence when it does (R5).
+    fn step_state(&mut self, attrs: &Marker, raw: &str, retire: bool, paired: Option<u64>) {
+        let Some(after) =
+            paired.or_else(|| attrs.get("after").and_then(|after| sequence_of(after)))
+        else {
+            match attrs.get("trigger") {
+                Some(trigger) => {
+                    self.held_record = Some(HeldRecord {
+                        trigger: trigger.clone(),
+                        attrs: attrs.clone(),
+                        raw: raw.to_owned(),
+                        retire,
+                    });
+                }
+                None => self.live.state = !retire,
+            }
             return;
         };
+        self.live.state = !retire;
         self.record_afters.insert(after);
         if self.deleted_sequences.contains(&after) {
             return;
@@ -646,62 +755,36 @@ impl Fold {
     /// answers it states the same state; the fold already knows it so a
     /// decision taken between the two reads the change at its sequence (A14).
     fn step_change(&mut self, op: &str, attrs: &Marker, sequence: u64) {
-        match op {
-            "set" => {
-                self.objective = attrs
-                    .get("objective")
-                    .filter(|objective| !objective.is_empty())
-                    .cloned();
-                self.judge = Judge::of(attrs);
-                self.state = text::State::Active;
-                self.active = sequence;
-            }
-            "edit" => {
-                if let Some(objective) = attrs
-                    .get("objective")
-                    .filter(|objective| !objective.is_empty())
-                    .cloned()
-                {
-                    self.objective = Some(objective);
-                }
-            }
-            "pause" => {
-                self.state = text::State::Paused(
-                    attrs
-                        .get("reason")
-                        .filter(|reason| !reason.is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| "user".to_owned()),
-                );
-            }
-            "resume" => {
-                self.state = text::State::Active;
-                self.active = sequence;
-            }
-            "clear" => {
-                self.objective = None;
-                self.state = text::State::None;
-                self.judge = Judge::Model;
-            }
-            "completed" | "blocked" => {
-                if op == "completed" && self.judge == Judge::Evaluator {
-                    // A16: under the evaluator judge the worker's `completed`
-                    // is a request; only the evaluator completes the goal.
-                    self.requests.push(Request {
-                        sequence,
-                        summary: attrs.get("summary").cloned().unwrap_or_default(),
-                    });
-                    return;
-                }
-                let summary = attrs.get("summary").cloned().unwrap_or_default();
-                self.state = if op == "completed" {
-                    text::State::Completed(summary)
-                } else {
-                    text::State::Blocked(summary)
-                };
-            }
-            _ => {}
+        let request = apply_change(
+            op,
+            attrs,
+            &mut self.objective,
+            &mut self.state,
+            &mut self.judge,
+        );
+        if request {
+            // A16: under the evaluator judge the worker's `completed` is a
+            // request; only the evaluator completes the goal (§4.1).
+            self.requests.push(Request {
+                sequence,
+                summary: attrs.get("summary").cloned().unwrap_or_default(),
+            });
+            return;
         }
+        if matches!(op, "set" | "resume") {
+            self.active = sequence;
+        }
+    }
+
+    /// The goal state this fold states after `op` with `attrs`, as the change
+    /// trigger would leave it: the record that commits with the trigger states
+    /// it before the trigger is folded (R5).
+    pub fn after_change(&self, op: &str, attrs: &Marker) -> (Option<String>, text::State, Judge) {
+        let mut objective = self.objective.clone();
+        let mut state = self.state.clone();
+        let mut judge = self.judge;
+        apply_change(op, attrs, &mut objective, &mut state, &mut judge);
+        (objective, state, judge)
     }
 
     /// A goal exists and is active (C1).
@@ -994,7 +1077,7 @@ mod tests {
             Some(objective),
             text::State::Completed(summary.to_owned()),
             text::Judge::Model,
-            41,
+            text::Answered::Sequence(41),
             live,
             &text::GoalTexts::default(),
         );

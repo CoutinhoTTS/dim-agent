@@ -40472,6 +40472,7 @@
       "references": [
         "mod branch",
         "path branch",
+        "path branch::Changes::default",
         "path branch::GoalBranch::new"
       ]
     },
@@ -40558,6 +40559,7 @@
       "references": [
         "path AgentError",
         "path AgentError::BranchEnded",
+        "path AgentError::Reloading",
         "use dim_agent_runtime::AgentError"
       ]
     },
@@ -40609,6 +40611,7 @@
         "path EventKind::TurnEnd",
         "path ExecStatus::Cancelled",
         "path InputBlock::Raw",
+        "path InputMessageData",
         "path InterruptScope::Turn",
         "path TurnEndData",
         "path dim_agent_types::BranchCreateFailedData::Cancelled",
@@ -40619,6 +40622,7 @@
         "use dim_agent_types::EventKind",
         "use dim_agent_types::ExecStatus",
         "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InterruptScope",
         "use dim_agent_types::TurnEndData",
         "use dim_agent_types::TurnOutcome"
@@ -40653,6 +40657,7 @@
         "path fold::ConclusionKind::Failed",
         "path fold::Progress::NoToolCall",
         "path fold::Progress::ToolCall",
+        "path fold::change_of",
         "path fold::conclusion_of",
         "path fold::decide_conclusion",
         "path fold::decide_evaluated_continuation",
@@ -40680,6 +40685,9 @@
         "path Live",
         "path Live::default",
         "path text",
+        "path text::Answered::Sequence",
+        "path text::Answered::Trigger",
+        "path text::Judge",
         "path text::OBJECTIVE_KEY",
         "path text::STATE_KEY",
         "path text::STATUS_KEY",
@@ -40687,12 +40695,18 @@
         "path text::State::Blocked",
         "path text::State::Completed",
         "path text::State::Paused",
+        "path text::clear",
         "path text::conclusion",
         "path text::continuation",
+        "path text::edit",
         "path text::evaluate_again",
         "path text::evaluated_continuation",
         "path text::evaluator_prompt",
         "path text::marker",
+        "path text::pause",
+        "path text::report",
+        "path text::resume",
+        "path text::set",
         "path text::start_clear",
         "path text::state",
         "use crate::text",
@@ -40804,6 +40818,7 @@
       "to": "dim_goal::text",
       "references": [
         "path text",
+        "path text::Answered::Sequence",
         "path text::GoalTexts::default",
         "path text::Judge::Model",
         "path text::Live::default",
@@ -40902,6 +40917,21 @@
     },
     {
       "from": "dim_goal::session",
+      "to": "dim_goal::branch",
+      "references": [
+        "path Change::Clear",
+        "path Change::Edit",
+        "path Change::Pause",
+        "path Change::Report",
+        "path Change::Resume",
+        "path Change::Set",
+        "path Changes",
+        "use crate::branch::Change",
+        "use crate::branch::Changes"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
       "to": "dim_goal::session::tests",
       "references": [
         "mod tests"
@@ -40918,12 +40948,6 @@
         "path text::Judge::Model",
         "path text::TOOL_DESCRIPTION",
         "path text::TOOL_INVALID",
-        "path text::clear",
-        "path text::edit",
-        "path text::pause",
-        "path text::report",
-        "path text::resume",
-        "path text::set",
         "path text::tool_schema",
         "use crate::text",
         "use crate::text::OBJECTIVE_LIMIT",

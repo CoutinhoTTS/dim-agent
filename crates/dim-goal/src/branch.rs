@@ -12,8 +12,8 @@ use dim_agent_runtime::{
     TimelineQueryPredicate, TimelineQueryScope, rebuild_facts,
 };
 use dim_agent_types::{
-    AgentEvent, BranchSource, EventKind, ExecStatus, InputBlock, InterruptScope, TurnEndData,
-    TurnOutcome,
+    AgentEvent, BranchSource, EventKind, ExecStatus, InputBlock, InputMessageData, InterruptScope,
+    TurnEndData, TurnOutcome,
 };
 use dim_app_server::settings::{SettingsScope, SettingsService};
 use rutis::Ctx;
@@ -22,12 +22,94 @@ use serde::{Deserialize, Deserializer};
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU64,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const SOURCE: &str = "goal";
+
+/// One change Goal's callers ask for (D3). The branch part writes its trigger
+/// and the record that states it as one atomic batch, so the first model
+/// request a change drives already carries its record (R5).
+#[derive(Clone)]
+pub(crate) enum Change {
+    Set {
+        objective: String,
+        judge: text::Judge,
+    },
+    Edit {
+        objective: String,
+    },
+    Pause,
+    Resume,
+    Clear,
+    Report {
+        completed: bool,
+        summary: String,
+    },
+}
+
+impl Change {
+    /// The trigger input for `branch`; each keeps the mode it had when the
+    /// Session part wrote it alone (A.5).
+    fn trigger(&self, branch: &str) -> InputMessageData {
+        match self {
+            Self::Set { objective, judge } => text::set(branch, objective, *judge),
+            Self::Edit { objective } => text::edit(branch, objective),
+            Self::Pause => text::pause(branch),
+            Self::Resume => text::resume(branch),
+            Self::Clear => text::clear(branch),
+            Self::Report { completed, summary } => text::report(
+                branch,
+                if *completed { "completed" } else { "blocked" },
+                summary,
+            ),
+        }
+    }
+}
+
+/// The loaded branch Owners, by branch id. The process plugin hands the same
+/// table to its Session part and its branch parts, so a `session.goal.*` call
+/// or the `goal_update` tool reaches the branch's Owner, which composes the
+/// record, without a service (ADR 002 D3).
+#[derive(Clone, Default)]
+pub(crate) struct Changes {
+    owners: Arc<Mutex<HashMap<String, Weak<Owner>>>>,
+}
+
+impl Changes {
+    /// Writes `change` on `branch` through its Owner and returns the
+    /// trigger's sequence.
+    pub(crate) async fn change(&self, branch: &str, change: Change) -> Result<u64, AgentError> {
+        let owner = self
+            .owners
+            .lock()
+            .unwrap()
+            .get(branch)
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| AgentError::Reloading("Goal".into()))?;
+        owner.change(change).await
+    }
+    /// Registers `owner` for its branch; the returned handle withdraws it.
+    fn register(&self, owner: &Arc<Owner>) -> Weak<Owner> {
+        let weak = Arc::downgrade(owner);
+        self.owners
+            .lock()
+            .unwrap()
+            .insert(owner.branch_id.clone(), weak.clone());
+        weak
+    }
+    fn withdraw(&self, branch: &str, owner: &Weak<Owner>) {
+        let mut owners = self.owners.lock().unwrap();
+        if owners
+            .get(branch)
+            .is_some_and(|entry| Weak::ptr_eq(entry, owner))
+        {
+            owners.remove(branch);
+        }
+    }
+}
 
 /// The facts the fold consumes (A.6).
 const KEYS: &[&str] = &[
@@ -91,10 +173,11 @@ pub struct GoalBranch {
     phase: Key<BranchLifecycle>,
     session: Key<SessionLifecycle>,
     texts: Arc<GoalTexts>,
+    changes: Changes,
 }
 
 impl GoalBranch {
-    pub fn new(names: &Names<'_>, texts: Arc<GoalTexts>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>, texts: Arc<GoalTexts>, changes: Changes) -> rutis::Result<Self> {
         Ok(Self {
             dispatcher: names.key()?,
             timeline: names.key()?,
@@ -104,6 +187,7 @@ impl GoalBranch {
             phase: names.key()?,
             session: names.key()?,
             texts,
+            changes,
         })
     }
 }
@@ -134,6 +218,7 @@ impl DynPlugin for GoalBranch {
             let session = ctx.require_at(&self.session)?;
             let stop = CancellationToken::new();
             let (resolved, _) = watch::channel(false);
+            let (stepped, _) = watch::channel(0);
             let owner = Arc::new(Owner {
                 branch_id: identity.branch_id.clone(),
                 timeline,
@@ -145,14 +230,18 @@ impl DynPlugin for GoalBranch {
                 stop: stop.clone(),
                 tasks: TaskTracker::new(),
                 resolved,
+                stepped,
                 state: Mutex::new(State::default()),
                 write: tokio::sync::Mutex::new(()),
             });
+            let registered = self.changes.register(&owner);
             let cleanup = owner.clone();
+            let changes = self.changes.clone();
             ctx.effect(move || async move {
                 cleanup.stop.cancel();
                 cleanup.tasks.close();
                 cleanup.tasks.wait().await;
+                changes.withdraw(&cleanup.branch_id, &registered);
                 Ok(())
             })?;
             let closing = owner.clone();
@@ -246,6 +335,10 @@ struct State {
     /// ordered by `after`, not by their commit order (R4): a record naming an
     /// older state is not composed once a newer one exists.
     recorded: u64,
+    /// The sequence of the newest Goal input this generation committed on the
+    /// branch. A change composes its record only once the fold has stepped it
+    /// (R5).
+    last_write: u64,
 }
 
 struct Owner {
@@ -260,6 +353,9 @@ struct Owner {
     tasks: TaskTracker,
     /// Set once the branch's identity is read; every decision waits for it.
     resolved: watch::Sender<bool>,
+    /// The sequence of the newest event the fold has stepped, so a change can
+    /// wait for the fold's position before composing its record (R5).
+    stepped: watch::Sender<u64>,
     state: Mutex<State>,
     /// Serializes state records: each is composed from the fold as it stands
     /// when the lock is taken and commits before the next one is composed, so
@@ -279,6 +375,85 @@ impl Owner {
                 return;
             }
         }
+    }
+
+    /// Commits one Goal input on this branch and remembers it as the branch's
+    /// newest Goal write (R5).
+    async fn write(&self, input: InputMessageData) -> Result<Arc<AgentEvent>, AgentError> {
+        let event = self.tree.input(self.branch_id.clone(), input).await?;
+        let mut state = self.state.lock().unwrap();
+        state.last_write = state.last_write.max(event.sequence);
+        drop(state);
+        Ok(event)
+    }
+
+    /// Waits until the fold has stepped this generation's newest Goal write,
+    /// so the record composed next is composed from a fold that holds it (R5).
+    /// The fold is stepped by live delivery, never by this wait.
+    async fn await_fold(&self) -> Result<(), AgentError> {
+        let target = self.state.lock().unwrap().last_write;
+        if target == 0 {
+            return Ok(());
+        }
+        let mut stepped = self.stepped.subscribe();
+        loop {
+            if *stepped.borrow_and_update() >= target {
+                return Ok(());
+            }
+            tokio::select! {
+                result = stepped.changed() => {
+                    if result.is_err() {
+                        return Err(AgentError::Reloading("Goal".into()));
+                    }
+                }
+                _ = self.stop.cancelled() => {
+                    return Err(AgentError::Closed(self.branch_id.clone()));
+                }
+            }
+        }
+    }
+
+    /// Writes `change` for the Session part and the `goal_update` tool: the
+    /// state record and the trigger as one atomic batch, the record first, so
+    /// the trigger's turn starts with the record already ahead of it (R5).
+    async fn change(self: &Arc<Self>, change: Change) -> Result<u64, AgentError> {
+        let _write = self.write.lock().await;
+        self.await_fold().await?;
+        let trigger = change.trigger(&self.branch_id);
+        let (objective, state, judge, live) = {
+            let lock = self.state.lock().unwrap();
+            let (attrs, op) =
+                fold::change_of(&trigger).expect("a change carries its own trigger marker");
+            let (objective, state, judge) = lock.fold.after_change(op, &attrs);
+            (objective, state, judge, lock.fold.live)
+        };
+        let trigger_id = trigger
+            .submission_id
+            .clone()
+            .expect("Goal inputs carry a submission id");
+        let record = text::state(
+            &self.branch_id,
+            objective.as_deref(),
+            state,
+            judge,
+            text::Answered::Trigger(&trigger_id),
+            live,
+            &self.texts,
+        );
+        let events = self
+            .tree
+            .inputs(self.branch_id.clone(), vec![record, trigger])
+            .await?;
+        let sequence = events
+            .last()
+            .expect("a change batch holds its trigger")
+            .sequence;
+        let mut lock = self.state.lock().unwrap();
+        lock.recorded = lock.recorded.max(sequence);
+        lock.written.insert(sequence);
+        lock.last_write = lock.last_write.max(sequence);
+        drop(lock);
+        Ok(sequence)
     }
 
     /// Runs `work` once under `key` while the branch is active, and records a
@@ -461,13 +636,21 @@ impl Owner {
             query.direction = TimelineQueryDirection::Descending;
             let reply = self.timeline.query(query).await?;
             through = reply.through;
-            for event in &reply.events {
+            for (index, event) in reply.events.iter().enumerate() {
                 match &event.kind {
                     EventKind::InputDeleted(data) => {
                         deleted.insert(data.input_id.clone());
                     }
                     EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
-                        if let Some(retired) = goal_record(data) {
+                        // R5: a change trigger states what the record
+                        // immediately before it in the same batch states, so
+                        // a `clear` batch takes the cheap path too. A pair the
+                        // page boundary hides reads as the trigger alone: the
+                        // full fold, the safe side.
+                        let paired = fold::change_of(data)
+                            .and_then(|_| reply.events.get(index + 1))
+                            .and_then(|record| paired_record(record, data));
+                        if let Some(retired) = paired.or_else(|| goal_record(data)) {
                             return Ok(Some(SegmentScan {
                                 newest: Some((event.sequence, retired)),
                                 opening: None,
@@ -575,6 +758,7 @@ impl Owner {
         };
         self.state.lock().unwrap().fold.apply(event);
         let sequence = event.sequence;
+        self.stepped.send_replace(sequence);
         if fold::is_opening(&event.kind) {
             self.state.lock().unwrap().start = Some(sequence);
             if live {
@@ -715,11 +899,7 @@ impl Owner {
                     return Ok(());
                 }
                 owner
-                    .tree
-                    .input(
-                        owner.branch_id.clone(),
-                        text::start_clear(&owner.branch_id, at, live),
-                    )
+                    .write(text::start_clear(&owner.branch_id, at, live))
                     .await?;
                 Ok(())
             })
@@ -800,11 +980,11 @@ impl Owner {
             objective.as_deref(),
             state,
             judge,
-            after,
+            text::Answered::Sequence(after),
             live,
             &self.texts,
         );
-        if let Err(error) = self.tree.input(self.branch_id.clone(), input).await {
+        if let Err(error) = self.write(input).await {
             self.state.lock().unwrap().written.remove(&after);
             return Err(error);
         }
@@ -979,7 +1159,7 @@ impl Owner {
             Decision::Continuation { count, idle } => {
                 let input =
                     text::continuation(&self.branch_id, count, limit, idle, after, &self.texts);
-                self.tree.input(self.branch_id.clone(), input).await?;
+                self.write(input).await?;
             }
             Decision::Pause { reason } => {
                 self.record(
@@ -1095,11 +1275,7 @@ impl Owner {
             return self.report(&role, result_name(result), &body).await;
         }
         if self.state.lock().unwrap().fold.turn_ends == 1 {
-            self.tree
-                .input(
-                    self.branch_id.clone(),
-                    text::evaluate_again(&self.branch_id, sequence),
-                )
+            self.write(text::evaluate_again(&self.branch_id, sequence))
                 .await?;
             return Ok(());
         }
@@ -1296,7 +1472,7 @@ impl Owner {
                         if !self.state.lock().unwrap().written.insert(sequence) {
                             return Ok(());
                         }
-                        if let Err(error) = self.tree.input(self.branch_id.clone(), input).await {
+                        if let Err(error) = self.write(input).await {
                             self.state.lock().unwrap().written.remove(&sequence);
                             return Err(error);
                         }
@@ -1440,6 +1616,29 @@ impl Owner {
         }
         Ok(live)
     }
+}
+
+/// Whether `record`, the event immediately before the change trigger `data`,
+/// is the state record that names `data` by submission id; `Some(retired)`
+/// then carries the record's classification (R5).
+fn paired_record(record: &AgentEvent, data: &InputMessageData) -> Option<bool> {
+    let EventKind::InputMessage(record) = &record.kind else {
+        return None;
+    };
+    let trigger = data.submission_id.as_deref()?;
+    for block in &record.blocks {
+        let InputBlock::Raw {
+            text: raw,
+            key,
+            retire,
+        } = block;
+        if key.as_deref() != Some(text::STATE_KEY) {
+            continue;
+        }
+        let attrs = text::marker(raw)?;
+        return (attrs.get("trigger").map(String::as_str) == Some(trigger)).then_some(*retire);
+    }
+    None
 }
 
 /// Whether `data` carries a Goal block, and whether it states a retired state

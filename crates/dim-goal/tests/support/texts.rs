@@ -4,6 +4,50 @@
 //! answers them with.
 #![allow(dead_code)]
 
+/// The fact a state record answers: the change trigger it commits with (R5),
+/// named by its submission id, or the sequence of the fact it answers.
+#[derive(Clone, Debug)]
+pub enum Answer {
+    Trigger(String),
+    After(u64),
+}
+
+impl Answer {
+    fn attribute(&self) -> String {
+        match self {
+            Self::Trigger(trigger) => format!("trigger=\"{trigger}\""),
+            Self::After(sequence) => format!("after=\"{sequence}\""),
+        }
+    }
+}
+
+/// Anything that carries an input's submission id: both harnesses' blocks.
+pub trait Submitted {
+    fn submission_id(&self) -> Option<&str>;
+}
+
+impl Submitted for super::Block {
+    fn submission_id(&self) -> Option<&str> {
+        self.submission_id.as_deref()
+    }
+}
+
+impl Submitted for super::parts::Block {
+    fn submission_id(&self) -> Option<&str> {
+        self.submission_id.as_deref()
+    }
+}
+
+/// [`Answer`] naming the change trigger `block`.
+pub fn trigger(block: &impl Submitted) -> Answer {
+    Answer::Trigger(
+        block
+            .submission_id()
+            .expect("a change trigger carries a submission id")
+            .to_owned(),
+    )
+}
+
 /// The objective policy sentence the row's factory configuration carries.
 pub fn policy(branch: &str) -> String {
     format!(
@@ -60,10 +104,11 @@ pub fn set(branch: &str, objective: &str) -> String {
 }
 
 /// The state record that answers `set`: the goal active.
-pub fn set_state(branch: &str, objective: &str, after: u64, evaluator: bool) -> String {
+pub fn set_state(branch: &str, objective: &str, answer: &Answer, evaluator: bool) -> String {
     format!(
-        "<dim-goal kind=\"state\" status=\"active\"{} after=\"{after}\" branch=\"{branch}\">\n{}\n{}\n</dim-goal>",
+        "<dim-goal kind=\"state\" status=\"active\"{} {} branch=\"{branch}\">\n{}\n{}\n</dim-goal>",
         judge_attr(evaluator),
+        answer.attribute(),
         objective_body(branch, objective),
         active_sentence(branch)
     )
@@ -87,10 +132,11 @@ pub fn edit(branch: &str, objective: &str) -> String {
     )
 }
 
-pub fn edit_state(branch: &str, objective: &str, after: u64, evaluator: bool) -> String {
+pub fn edit_state(branch: &str, objective: &str, answer: &Answer, evaluator: bool) -> String {
     format!(
-        "<dim-goal kind=\"state\" status=\"active\"{} after=\"{after}\" branch=\"{branch}\">\n{}\n{}\n</dim-goal>",
+        "<dim-goal kind=\"state\" status=\"active\"{} {} branch=\"{branch}\">\n{}\n{}\n</dim-goal>",
         judge_attr(evaluator),
+        answer.attribute(),
         objective_body(branch, objective),
         active_sentence(branch)
     )
@@ -108,12 +154,13 @@ pub fn paused(
     objective: &str,
     reason: &str,
     phrase: &str,
-    after: u64,
+    answer: &Answer,
     evaluator: bool,
 ) -> String {
     format!(
-        "<dim-goal kind=\"state\" status=\"paused\" reason=\"{reason}\"{} after=\"{after}\" branch=\"{branch}\">\n{}\n{}\n</dim-goal>",
+        "<dim-goal kind=\"state\" status=\"paused\" reason=\"{reason}\"{} {} branch=\"{branch}\">\n{}\n{}\n</dim-goal>",
         judge_attr(evaluator),
+        answer.attribute(),
         objective_body(branch, objective),
         paused_sentence(branch, reason, phrase)
     )
@@ -125,8 +172,8 @@ pub fn resume(branch: &str) -> String {
     )
 }
 
-pub fn resumed(branch: &str, objective: &str, after: u64, evaluator: bool) -> String {
-    set_state(branch, objective, after, evaluator)
+pub fn resumed(branch: &str, objective: &str, answer: &Answer, evaluator: bool) -> String {
+    set_state(branch, objective, answer, evaluator)
 }
 
 pub fn clear(branch: &str) -> String {
@@ -136,9 +183,10 @@ pub fn clear(branch: &str) -> String {
 }
 
 /// The retired state record that answers a clear (and a branch with no goal).
-pub fn cleared(branch: &str, after: u64) -> String {
+pub fn cleared(branch: &str, answer: &Answer) -> String {
     format!(
-        "<dim-goal kind=\"state\" status=\"cleared\" after=\"{after}\" branch=\"{branch}\">\nThe goal for branch {branch} is not in effect.\n</dim-goal>"
+        "<dim-goal kind=\"state\" status=\"cleared\" {} branch=\"{branch}\">\nThe goal for branch {branch} is not in effect.\n</dim-goal>",
+        answer.attribute()
     )
 }
 
@@ -219,7 +267,13 @@ pub fn report(branch: &str, status: &str, summary: &str) -> String {
 }
 
 /// The state record that answers a report goal_update wrote.
-pub fn reported(branch: &str, objective: &str, status: &str, summary: &str, after: u64) -> String {
+pub fn reported(
+    branch: &str,
+    objective: &str,
+    status: &str,
+    summary: &str,
+    answer: &Answer,
+) -> String {
     let (tag, sentence) = if status == "completed" {
         (
             "result",
@@ -236,7 +290,8 @@ pub fn reported(branch: &str, objective: &str, status: &str, summary: &str, afte
         )
     };
     format!(
-        "<dim-goal kind=\"state\" status=\"{status}\" after=\"{after}\" branch=\"{branch}\">\n{}\n{sentence}\n{}\n</dim-goal>",
+        "<dim-goal kind=\"state\" status=\"{status}\" {} branch=\"{branch}\">\n{}\n{sentence}\n{}\n</dim-goal>",
+        answer.attribute(),
         objective_body(branch, objective),
         tagged(tag, summary)
     )
@@ -272,7 +327,14 @@ pub fn automatic_pause(
     phrase: &str,
     after: u64,
 ) -> String {
-    paused(branch, objective, reason, phrase, after, false)
+    paused(
+        branch,
+        objective,
+        reason,
+        phrase,
+        &Answer::After(after),
+        false,
+    )
 }
 
 /// The record an automatic pause writes under the evaluator judge: the judge
@@ -284,7 +346,14 @@ pub fn evaluated_pause(
     phrase: &str,
     after: u64,
 ) -> String {
-    paused(branch, objective, reason, phrase, after, true)
+    paused(
+        branch,
+        objective,
+        reason,
+        phrase,
+        &Answer::After(after),
+        true,
+    )
 }
 
 /// The state record a branch writes on its opening: one retired record, and
