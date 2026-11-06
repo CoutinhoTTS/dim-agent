@@ -656,6 +656,14 @@ impl ModalityTasks {
         if !params.params.is_object() {
             return Err(invalid_input("params must be an object"));
         }
+        // `params.files` is Modality's own channel in the record (A.4); a
+        // caller supplies files at the top level only. This runs before the
+        // adapter's schema, so the answer never depends on it.
+        if params.params.get("files").is_some() {
+            return Err(invalid_input(
+                "params.files is reserved; pass input files in files",
+            ));
+        }
         // Duplicate `client_task_id`: the lock serializes concurrent submits,
         // and the index answers with the task that already exists.
         let _client_guard = self.client_guard(params.client_task_id.as_deref()).await;
@@ -791,10 +799,10 @@ impl ModalityTasks {
                 node_path: input.node_path_path().map(|path| path.to_owned()),
             })
             .collect();
-        if !metadata.is_empty() {
-            record_params["files"] =
-                serde_json::to_value(&metadata).expect("input metadata is serializable");
-        }
+        // The record's `params.files` is always the validated metadata, an
+        // empty array when the submission has no files (A.4).
+        record_params["files"] =
+            serde_json::to_value(&metadata).expect("input metadata is serializable");
         let record = TaskRecord {
             version: task::FORMAT_VERSION,
             task_id: task_id.clone(),

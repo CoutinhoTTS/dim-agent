@@ -3113,3 +3113,80 @@ async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn params_files_is_reserved_for_the_validated_metadata() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-reserved").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let node_file = home.join("node.png");
+    std::fs::write(&node_file, b"node bytes").unwrap();
+    let link = home.join("link.png");
+    std::os::unix::fs::symlink(&node_file, &link).unwrap();
+    let tasks_dir = home.join("modality/tasks");
+    let count = || {
+        std::fs::read_dir(&tasks_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+
+    // A caller's `params.files` is refused before the adapter's schema and
+    // before anything is written or submitted.
+    let before = count();
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate",
+            "params": {"prompt": "p", "files": [
+                {"name": "../escape", "media_type": "image/png", "bytes": 1, "sha256": "00"},
+                {"name": "link.png", "media_type": "image/png", "bytes": 1, "sha256": "00",
+                    "node_path": link.to_str().unwrap()}
+            ]}}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&refused),
+        "invalid_input",
+        "params.files is reserved: {refused}"
+    );
+    assert_eq!(count(), before, "a reserved params.files writes nothing");
+    assert_eq!(fixture.submits(), 0, "the adapter is never called");
+
+    // A real submission records exactly the validated metadata.
+    let inline = b"reserved inline bytes".to_vec();
+    let canonical = std::fs::canonicalize(&node_file).unwrap();
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "m"},
+        "files": [
+            inline_file("in.png", "image/png", &inline),
+            {"name": "n.png", "media_type": "image/png", "node_path": node_file.to_str().unwrap()}
+        ]}),
+    )
+    .await;
+    let files = task["params"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "{task}");
+    assert_eq!(
+        files[0],
+        json!({"name": "in.png", "media_type": "image/png",
+            "bytes": inline.len(), "sha256": sha256(&inline)})
+    );
+    assert_eq!(files[1]["name"], "n.png");
+    assert_eq!(files[1]["bytes"], 10);
+    assert_eq!(files[1]["sha256"], sha256(b"node bytes"));
+    assert_eq!(files[1]["node_path"], canonical.to_str().unwrap());
+    wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
+
+    // No files: the record carries an empty array.
+    let empty = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "e"}}),
+    )
+    .await;
+    assert_eq!(empty["params"]["files"], json!([]));
+    wait_terminal(&mut client, empty["task_id"].as_str().unwrap()).await;
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
