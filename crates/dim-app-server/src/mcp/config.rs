@@ -847,6 +847,11 @@ pub struct McpSecrets {
     pub entries: BTreeMap<String, BTreeMap<String, McpSecretEntry>>,
 }
 impl McpSecrets {
+    /// The records one workspace withholds, by id: the overlay a project
+    /// source's entries and its revision token are computed with.
+    pub(crate) fn overlays(&self, workspace: &str) -> BTreeMap<String, McpSecretEntry> {
+        self.entries.get(workspace).cloned().unwrap_or_default()
+    }
     pub(crate) fn get(&self, workspace: &str, id: &str) -> Option<&McpSecretEntry> {
         self.entries
             .get(workspace)
