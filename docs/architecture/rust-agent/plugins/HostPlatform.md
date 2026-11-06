@@ -222,12 +222,16 @@ boundary.
 `a_confined_helper_reads_its_grants_and_writes_only_its_directory` runs the same
 probe unconfined and confined with the switch off, and covers the reads, the
 writes next to the read file and in the system temporary and home directories,
-and a refused loopback connection; `the_isolation_switch_does_not_change_a_confined_helper` keeps the helper's network
-denial with the switch on and Network allowed;
+and a refused loopback connection from the bash on the host (a host without bash
+prints that it skips that probe); `the_isolation_switch_does_not_change_a_confined_helper`
+keeps the helper's network denial with the switch on and Network allowed;
 `a_confined_helper_timeout_kills_its_grandchild`,
-`a_confined_helper_stdout_cap_kills_the_tree` and `a_confined_helper_cancel_kills_the_tree`
-check that each limit removes the helper's tree, `a_confined_helper_leaves_no_process_after_it_exits`
-that a helper which exits on its own leaves nothing either, and
+`a_confined_helper_stdout_cap_kills_the_tree`, `a_confined_helper_stderr_cap_kills_the_tree`
+and `a_confined_helper_cancel_kills_the_tree` check that each limit removes the
+helper's tree; `a_confined_helper_leaves_no_process_after_it_exits` that a
+helper which exits on its own leaves nothing either;
+`a_confined_helper_gets_the_allowlist_plus_its_own_environment` that only the
+allowlist and the helper's own entries reach it, with its `TMPDIR` honored; and
 `a_confined_helper_refuses_relative_and_missing_paths` the path refusals.
 `a_host_without_bubblewrap_runs_the_confined_helper_unconfined` covers the
 Linux fallback.

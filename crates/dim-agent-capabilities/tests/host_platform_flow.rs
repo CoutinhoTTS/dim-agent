@@ -356,6 +356,21 @@ fn unique(name: &str) -> String {
     format!("{name}-{}", uuid::Uuid::new_v4().simple())
 }
 
+/// A bash for the `/dev/tcp` loopback probe, which is not a POSIX feature:
+/// `/bin/bash`, or `bash` on the captured `PATH`. A host without one skips
+/// that probe.
+fn bash() -> Option<PathBuf> {
+    let bash = PathBuf::from("/bin/bash");
+    if bash.is_file() {
+        return Some(bash);
+    }
+    std::env::var_os("PATH").and_then(|entries| {
+        std::env::split_paths(&entries)
+            .map(|directory| directory.join("bash"))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
 async fn confined(
     platform: &HostPlatform,
     script: &str,
@@ -407,8 +422,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
          printf '%s' \"$(cat {input})\" > {write}/result.txt && echo write=yes || echo write=no\n\
          echo x > {read}/escape.txt 2>/dev/null && echo read-side=yes || echo read-side=no\n\
          echo x > {temp} 2>/dev/null && echo temp=yes || echo temp=no\n\
-         echo x > \"$HOME/{home_escape}\" 2>/dev/null && echo home=yes || echo home=no\n\
-         if exec 3<>/dev/tcp/127.0.0.1/{port} 2>/dev/null; then echo tcp=yes; else echo tcp=no; fi\n",
+         echo x > \"$HOME/{home_escape}\" 2>/dev/null && echo home=yes || echo home=no\n",
         input = quote(&input),
         write = quote(&write),
         read = quote(&read),
@@ -431,13 +445,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
         .await
         .unwrap();
     assert!(control.wait().await.unwrap().success());
-    for probe in [
-        "read=yes",
-        "write=yes",
-        "read-side=yes",
-        "temp=yes",
-        "tcp=yes",
-    ] {
+    for probe in ["read=yes", "write=yes", "read-side=yes", "temp=yes"] {
         assert!(
             control_output.contains(probe),
             "the unconfined control did not report {probe}: {control_output}"
@@ -471,7 +479,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
         String::from_utf8_lossy(&output.stderr)
     );
     let output = String::from_utf8(output.stdout).unwrap();
-    for probe in ["read=yes", "write=yes", "read-side=no", "temp=no", "tcp=no"] {
+    for probe in ["read=yes", "write=yes", "read-side=no", "temp=no"] {
         assert!(
             output.contains(probe),
             "the confined helper did not report {probe}: {output}"
@@ -487,6 +495,59 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
     );
     assert!(!read.join("escape.txt").exists());
     assert!(!temp_escape.exists());
+
+    let Some(bash) = bash() else {
+        eprintln!("bash is not installed; the loopback probe is skipped");
+        std::fs::remove_dir_all(&base).unwrap();
+        return;
+    };
+    let probe = format!(
+        "if exec 3<>/dev/tcp/127.0.0.1/{port} 2>/dev/null; then echo tcp=yes; else echo tcp=no; fi\n"
+    );
+    let mut control = platform
+        .spawn(ProcessSpec {
+            executable: bash.clone(),
+            args: vec!["-c".into(), probe.clone().into()],
+            cwd: write.clone(),
+            env: vec![],
+        })
+        .unwrap();
+    let mut control_output = String::new();
+    control
+        .stdout()
+        .read_to_string(&mut control_output)
+        .await
+        .unwrap();
+    assert!(control.wait().await.unwrap().success());
+    assert!(
+        control_output.contains("tcp=yes"),
+        "the unconfined control did not reach the listener: {control_output}"
+    );
+    let output = platform
+        .spawn_confined(
+            ConfinedSpec {
+                executable: bash,
+                args: vec!["-c".into(), probe.into()],
+                env: vec![],
+            },
+            Confinement {
+                read: vec![],
+                write: vec![write.clone()],
+                timeout: Duration::from_secs(30),
+                stdout_limit: 64 * 1024,
+                stderr_limit: 64 * 1024,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(output.confined, "the helper must report its confinement");
+    assert!(output.status.success());
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.contains("tcp=no"),
+        "a confined helper reached a loopback listener: {output}"
+    );
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -714,6 +775,11 @@ async fn the_isolation_switch_does_not_change_a_confined_helper() {
         std::fs::remove_dir_all(&base).unwrap();
         return;
     }
+    let Some(bash) = bash() else {
+        eprintln!("bash is not installed; the loopback probe is skipped");
+        std::fs::remove_dir_all(&base).unwrap();
+        return;
+    };
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let script = format!(
@@ -722,7 +788,7 @@ async fn the_isolation_switch_does_not_change_a_confined_helper() {
     let output = platform
         .spawn_confined(
             ConfinedSpec {
-                executable: "/bin/sh".into(),
+                executable: bash,
                 args: vec!["-c".into(), script.into()],
                 env: vec![],
             },
@@ -745,6 +811,7 @@ async fn the_isolation_switch_does_not_change_a_confined_helper() {
     );
     std::fs::remove_dir_all(&base).unwrap();
 }
+
 #[tokio::test]
 async fn a_confined_helper_leaves_no_process_after_it_exits() {
     let base = std::env::temp_dir().join(unique("dim-confined-exit"));
@@ -770,5 +837,135 @@ async fn a_confined_helper_leaves_no_process_after_it_exits() {
         .parse()
         .unwrap();
     assert!(gone(pid).await, "a finished helper left {pid} running");
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[tokio::test]
+async fn a_confined_helper_stderr_cap_kills_the_tree() {
+    let base = std::env::temp_dir().join(unique("dim-confined-stderr"));
+    let write = base.join("write");
+    std::fs::create_dir_all(&write).unwrap();
+    let pid_file = write.join("grandchild.pid");
+    let script = format!(
+        "sleep 100 &\necho $! > {}\nwhile :; do echo 0123456789abcdef >&2; done\n",
+        quote(&pid_file)
+    );
+    let platform = confined_platform(switch_off());
+    let result = platform
+        .spawn_confined(
+            ConfinedSpec {
+                executable: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+                env: vec![],
+            },
+            Confinement {
+                read: vec![],
+                write: vec![write.clone()],
+                timeout: Duration::from_secs(30),
+                stdout_limit: 64 * 1024,
+                stderr_limit: 1024,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(ConfinedError::OutputLimit {
+                stream: ConfinedStream::Stderr
+            })
+        ),
+        "{:?}",
+        result.err()
+    );
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the script records its grandchild")
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(gone(pid).await, "the stderr cap left the grandchild {pid}");
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[tokio::test]
+async fn a_confined_helper_gets_the_allowlist_plus_its_own_environment() {
+    let base = std::env::temp_dir().join(unique("dim-confined-env"));
+    let write = base.join("write");
+    let temporary = write.join("tmp");
+    std::fs::create_dir_all(&temporary).unwrap();
+    let mut platform = confined_platform(switch_off());
+    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+    platform.env = env(&[
+        ("PATH", &path),
+        ("HOME", "/service-home"),
+        ("LANG", "C"),
+        ("DIM_CONFINED_FIXTURE_SECRET", "service-only"),
+    ]);
+    let mktemp = write.join("mktemp.txt");
+    let script = format!(
+        "env\nmktemp \"$TMPDIR/dim-helper.XXXXXX\" > {}\n",
+        quote(&mktemp)
+    );
+    let output = platform
+        .spawn_confined(
+            ConfinedSpec {
+                executable: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+                env: env(&[
+                    ("HELPER_ONLY", "1"),
+                    ("HOME", write.to_str().unwrap()),
+                    ("TMPDIR", temporary.to_str().unwrap()),
+                ]),
+            },
+            Confinement {
+                read: vec![],
+                write: vec![write.clone()],
+                timeout: Duration::from_secs(30),
+                stdout_limit: 64 * 1024,
+                stderr_limit: 64 * 1024,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("DIM_CONFINED_FIXTURE_SECRET=")),
+        "the service environment reached the helper: {output}"
+    );
+    assert!(
+        lines.contains(&"HELPER_ONLY=1"),
+        "the helper's own entry is missing: {output}"
+    );
+    let homes: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| line.starts_with("HOME="))
+        .collect();
+    let expected = format!("HOME={}", write.display());
+    assert_eq!(homes, [expected.as_str()], "unexpected HOME: {output}");
+    assert!(
+        lines.contains(&format!("PATH={path}").as_str()),
+        "PATH is not the captured value: {output}"
+    );
+    assert!(
+        lines.contains(&"LANG=C"),
+        "LANG is not the captured value: {output}"
+    );
+    let created = std::fs::read_to_string(&mktemp).expect("mktemp records its file");
+    let created = PathBuf::from(created.trim());
+    assert!(
+        created.starts_with(&temporary),
+        "{created:?} is not inside the helper's TMPDIR {temporary:?}"
+    );
+    assert!(created.exists());
     std::fs::remove_dir_all(&base).unwrap();
 }
