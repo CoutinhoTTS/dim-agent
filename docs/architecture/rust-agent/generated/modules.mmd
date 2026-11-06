@@ -596,7 +596,14 @@ flowchart LR
   m592["dim_modality::engine"]
   m593["dim_modality::task"]
   m594["dim_modality::task::tests"]
-  m595["dim_session_title"]
+  m595["dim_ocr"]
+  m596["dim_ocr::args"]
+  m597["dim_ocr::contract"]
+  m598["dim_ocr::helper"]
+  m599["dim_ocr::pdf"]
+  m600["dim_ocr::platform"]
+  m601["dim_ocr::vision"]
+  m602["dim_session_title"]
   m0 --> m1
   m0 -.-> m2
   m0 -.-> m3
@@ -1039,6 +1046,7 @@ flowchart LR
   m61 --> m63
   m61 --> m64
   m62 --> m59
+  m62 --> m60
   m63 --> m59
   m64 --> m59
   m66 --> m58
@@ -4022,18 +4030,32 @@ flowchart LR
   m593 --> m591
   m593 -.-> m594
   m594 --> m593
-  m595 --> m58
-  m595 --> m68
-  m595 --> m85
-  m595 --> m87
-  m595 --> m124
-  m595 --> m126
-  m595 --> m136
-  m595 --> m138
-  m595 --> m158
-  m595 --> m160
-  m595 --> m169
-  m595 --> m259
-  m595 --> m260
-  m595 --> m273
-  m595 --> m276
+  m595 --> m596
+  m595 --> m597
+  m595 --> m598
+  m595 -.-> m599
+  m595 --> m600
+  m595 -.-> m601
+  m596 --> m597
+  m598 --> m596
+  m598 --> m597
+  m598 --> m599
+  m598 --> m601
+  m599 --> m597
+  m601 --> m597
+  m601 --> m600
+  m602 --> m58
+  m602 --> m68
+  m602 --> m85
+  m602 --> m87
+  m602 --> m124
+  m602 --> m126
+  m602 --> m136
+  m602 --> m138
+  m602 --> m158
+  m602 --> m160
+  m602 --> m169
+  m602 --> m259
+  m602 --> m260
+  m602 --> m273
+  m602 --> m276

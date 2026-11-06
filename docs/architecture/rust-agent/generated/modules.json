@@ -6143,6 +6143,72 @@
       ]
     },
     {
+      "id": "dim_ocr",
+      "crate": "dim_ocr",
+      "parent": null,
+      "file": "crates/dim-ocr/src/lib.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_ocr::args",
+      "crate": "dim_ocr",
+      "parent": "dim_ocr",
+      "file": "crates/dim-ocr/src/args.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_ocr::contract",
+      "crate": "dim_ocr",
+      "parent": "dim_ocr",
+      "file": "crates/dim-ocr/src/contract.rs",
+      "unexpandedMacros": [
+        "format",
+        "write"
+      ]
+    },
+    {
+      "id": "dim_ocr::helper",
+      "crate": "dim_ocr",
+      "parent": "dim_ocr",
+      "file": "crates/dim-ocr/src/helper.rs",
+      "unexpandedMacros": [
+        "format",
+        "writeln"
+      ]
+    },
+    {
+      "id": "dim_ocr::pdf",
+      "crate": "dim_ocr",
+      "parent": "dim_ocr",
+      "file": "crates/dim-ocr/src/pdf.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_ocr::platform",
+      "crate": "dim_ocr",
+      "parent": "dim_ocr",
+      "file": "crates/dim-ocr/src/platform.rs",
+      "unexpandedMacros": [
+        "cfg",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_ocr::vision",
+      "crate": "dim_ocr",
+      "parent": "dim_ocr",
+      "file": "crates/dim-ocr/src/vision.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "msg_send"
+      ]
+    },
+    {
       "id": "dim_session_title",
       "crate": "dim_session_title",
       "parent": null,
@@ -10765,7 +10831,8 @@
         "use confined::ConfinedOutput",
         "use confined::ConfinedSpec",
         "use confined::ConfinedStream",
-        "use confined::Confinement"
+        "use confined::Confinement",
+        "use confined::SystemServices"
       ]
     },
     {
@@ -10907,6 +10974,16 @@
         "use super::ProcessSpec",
         "use super::ProcessSpecError",
         "use super::TemporaryDirectory"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform::isolation",
+      "to": "dim_agent_capabilities::host_platform::confined",
+      "references": [
+        "path SystemServices",
+        "path SystemServices::None",
+        "path SystemServices::OnDeviceRecognition",
+        "use super::SystemServices"
       ]
     },
     {
@@ -42892,6 +42969,182 @@
       ]
     },
     {
+      "from": "dim_ocr",
+      "to": "dim_ocr::args",
+      "references": [
+        "mod args",
+        "use args::HelperArguments"
+      ]
+    },
+    {
+      "from": "dim_ocr",
+      "to": "dim_ocr::contract",
+      "references": [
+        "mod contract",
+        "use contract::Document",
+        "use contract::DocumentText",
+        "use contract::HelperError",
+        "use contract::HelperErrorCode",
+        "use contract::MAX_ARTIFACT_BYTES",
+        "use contract::MAX_INPUT_BYTES",
+        "use contract::MAX_PAGE_PIXELS",
+        "use contract::MAX_PDF_PAGES",
+        "use contract::OutputMode",
+        "use contract::PAGE_IMAGE_PREFIX",
+        "use contract::Page",
+        "use contract::PageText",
+        "use contract::RESULT_FILE",
+        "use contract::Region",
+        "use contract::TEXT_FILE",
+        "use contract::page_image_name",
+        "use contract::read_pages"
+      ]
+    },
+    {
+      "from": "dim_ocr",
+      "to": "dim_ocr::helper",
+      "references": [
+        "mod helper",
+        "use helper::helper_main",
+        "use helper::helper_main_with_budget"
+      ]
+    },
+    {
+      "from": "dim_ocr",
+      "to": "dim_ocr::pdf",
+      "references": [
+        "mod pdf"
+      ]
+    },
+    {
+      "from": "dim_ocr",
+      "to": "dim_ocr::platform",
+      "references": [
+        "mod platform",
+        "use platform::APPLE_VISION_MODEL",
+        "use platform::APPLE_VISION_PROVIDER",
+        "use platform::apple_vision_available",
+        "use platform::macos_version"
+      ]
+    },
+    {
+      "from": "dim_ocr",
+      "to": "dim_ocr::vision",
+      "references": [
+        "mod vision"
+      ]
+    },
+    {
+      "from": "dim_ocr::args",
+      "to": "dim_ocr::contract",
+      "references": [
+        "path HelperError",
+        "path HelperError::invalid_input",
+        "path OutputMode",
+        "path OutputMode::default",
+        "path OutputMode::parse",
+        "use crate::contract::HelperError",
+        "use crate::contract::OutputMode"
+      ]
+    },
+    {
+      "from": "dim_ocr::helper",
+      "to": "dim_ocr::args",
+      "references": [
+        "path HelperArguments",
+        "path HelperArguments::parse",
+        "use crate::args::HelperArguments"
+      ]
+    },
+    {
+      "from": "dim_ocr::helper",
+      "to": "dim_ocr::contract",
+      "references": [
+        "path Document",
+        "path HelperError",
+        "path HelperError::failed",
+        "path HelperError::invalid_input",
+        "path HelperError::limit",
+        "path HelperError::unavailable",
+        "path HelperErrorCode",
+        "path MAX_ARTIFACT_BYTES",
+        "path MAX_INPUT_BYTES",
+        "path OutputMode::Layout",
+        "path OutputMode::Text",
+        "path RESULT_FILE",
+        "path TEXT_FILE",
+        "path crate::contract::Page",
+        "path crate::contract::Region",
+        "path page_image_name",
+        "use crate::contract::Document",
+        "use crate::contract::HelperError",
+        "use crate::contract::HelperErrorCode",
+        "use crate::contract::MAX_ARTIFACT_BYTES",
+        "use crate::contract::MAX_INPUT_BYTES",
+        "use crate::contract::OutputMode",
+        "use crate::contract::RESULT_FILE",
+        "use crate::contract::TEXT_FILE",
+        "use crate::contract::page_image_name"
+      ]
+    },
+    {
+      "from": "dim_ocr::helper",
+      "to": "dim_ocr::pdf",
+      "references": [
+        "path crate::pdf::PdfDocument",
+        "path crate::pdf::PdfDocument::open"
+      ]
+    },
+    {
+      "from": "dim_ocr::helper",
+      "to": "dim_ocr::vision",
+      "references": [
+        "path crate::vision::image_source",
+        "path crate::vision::recognize_image",
+        "path crate::vision::recognize_url",
+        "path crate::vision::write_png"
+      ]
+    },
+    {
+      "from": "dim_ocr::pdf",
+      "to": "dim_ocr::contract",
+      "references": [
+        "path HelperError",
+        "path HelperError::encrypted_pdf",
+        "path HelperError::failed",
+        "path HelperError::invalid_input",
+        "path HelperError::limit",
+        "path MAX_PAGE_PIXELS",
+        "path MAX_PDF_PAGES",
+        "path RENDER_DPI",
+        "use crate::contract::HelperError",
+        "use crate::contract::MAX_PAGE_PIXELS",
+        "use crate::contract::MAX_PDF_PAGES",
+        "use crate::contract::RENDER_DPI"
+      ]
+    },
+    {
+      "from": "dim_ocr::vision",
+      "to": "dim_ocr::contract",
+      "references": [
+        "path HelperError",
+        "path HelperError::failed",
+        "path HelperError::invalid_input",
+        "path HelperError::limit",
+        "path Region",
+        "path crate::contract::MAX_PAGE_PIXELS",
+        "use crate::contract::HelperError",
+        "use crate::contract::Region"
+      ]
+    },
+    {
+      "from": "dim_ocr::vision",
+      "to": "dim_ocr::platform",
+      "references": [
+        "path crate::platform::macos_version"
+      ]
+    },
+    {
       "from": "dim_session_title",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -44448,6 +44701,18 @@
     {
       "module": "dim_modality",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_ocr::contract",
+      "path": "A::Error"
+    },
+    {
+      "module": "dim_ocr::contract",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_ocr::platform",
+      "path": "CStr::from_bytes_until_nul"
     }
   ]
 }
