@@ -141,7 +141,10 @@ file, never followed). FileStorage's lock, temporary and account-marker
 resources are omitted, including names the filesystem equates with them.
 
 `EntryKind` serializes as `file`, `directory` or `other` for generated exports.
-Native entry names remain `OsString`; the exporting boundary chooses its UTF-8 policy.
+Native entry names remain `OsString`; the exporting boundary chooses its UTF-8
+policy, and one that returns a path-shaped name joins the resolved components
+with `/`, so the name round-trips through its own path resolution: on Unix a
+backslash is part of a name, and on Windows it is a separator.
 
 `remove` makes an entry absent. Files, including those beneath a directory,
 are removed under the lock leases use, so removing a leased file, or a directory

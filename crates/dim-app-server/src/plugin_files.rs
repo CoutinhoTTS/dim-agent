@@ -12,7 +12,7 @@ use serde_json::json;
 use std::{
     fs::Permissions,
     io,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -135,7 +135,7 @@ impl Scope {
         self.operation(args, |files, prefix, path, cancel| {
             Box::pin(async move {
                 Ok(match files.storage.list(&path, &cancel).await {
-                    Ok(entries) => success(entries_value(&prefix, entries)),
+                    Ok(entries) => success(entries_value(Path::new(&prefix), entries)),
                     Err(error) => failure(error),
                 })
             })
@@ -279,7 +279,7 @@ impl Scope {
 /// One entry of the JSON `list` reply: its path relative to the authorized
 /// root and its kind. An entry name that is not UTF-8 is omitted, because
 /// these operations address names as strings.
-fn entries_value(prefix: &str, entries: Vec<DirectoryEntry>) -> Value {
+fn entries_value(prefix: &Path, entries: Vec<DirectoryEntry>) -> Value {
     Value::List(
         entries
             .into_iter()
@@ -456,12 +456,17 @@ fn file_error(error: FileStorageError) -> PluginFileError {
 }
 
 /// The name of `leaf` under `prefix`, as these operations spell relative
-/// names: the prefix's components joined by `/`, whatever separators or `.`
-/// components the caller wrote, and `leaf` appended.
-fn join_name(prefix: &str, leaf: &str) -> String {
+/// names: the components the storage resolved, joined by `/`, with `leaf`
+/// appended. The prefix is read exactly as [`FileStorage::path`] reads it, so
+/// on Unix a backslash stays part of a component and on Windows it separates;
+/// no component can contain `/`, so a returned name always round-trips.
+fn join_name(prefix: &Path, leaf: &str) -> String {
     let mut name = prefix
-        .split(['/', '\\'])
-        .filter(|part| !part.is_empty() && *part != ".")
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_str()?),
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("/");
     if !name.is_empty() {
@@ -572,7 +577,7 @@ impl PluginFileTransactions {
                     .into_iter()
                     .filter_map(|entry| {
                         Some(PluginFileEntry {
-                            name: join_name(&joined, entry.name.to_str()?),
+                            name: join_name(Path::new(&joined), entry.name.to_str()?),
                             kind: entry.kind,
                         })
                     })

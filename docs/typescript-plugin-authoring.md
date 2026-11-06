@@ -305,9 +305,11 @@ not encode an `AbortSignal` as this argument.
 bytes: no text envelope is involved, a text file's bytes are its stored
 envelope, and a file over 8 MiB fails `invalid_data` before it is read. The
 scope's `list(prefix)` returns one level of a directory, sorted, with each
-entry's name relative to the authorized root and its kind, ready to pass to
-another operation; `remove(name)` removes a file or a directory tree and
-returns `locked` while a lease holds it or a file beneath it. Plugins that must
+entry's name relative to the authorized root and its kind; a name is the stored
+components joined by `/`, ready to pass to another operation, and on Unix a
+backslash is part of a name while on Windows it is a separator. `remove(name)`
+removes a file or a directory tree and returns `locked` while a lease holds it
+or a file beneath it. Plugins that must
 handle larger files keep them out of JavaScript: there is no streaming on this
 side. A buffer large enough that its call message would exceed the runtime's
 16 MiB frame fails that call before it is sent, as a `RangeError` coded

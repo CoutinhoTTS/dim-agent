@@ -766,3 +766,43 @@ async fn list_remove_and_work_directories_follow_the_root_and_its_leases() {
     assert_eq!(files.list("").await, Err(PluginFileError::InvalidPath));
     root.shutdown().await.unwrap();
 }
+
+/// On Unix a backslash is an ordinary byte in a name, so `a\b` and `a/b` are
+/// different directories. A listed name is built from the components the
+/// storage resolved, so removing the returned name cannot reach the other file.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backslash_in_a_listed_name_stays_inside_its_component() {
+    let directory = Directory::new();
+    let (root, _, (files, _)) = mount(&directory.0).await;
+
+    std::fs::create_dir_all(directory.0.join("a\\b")).unwrap();
+    std::fs::create_dir_all(directory.0.join("a/b")).unwrap();
+    std::fs::write(directory.0.join("a\\b/item"), b"backslash").unwrap();
+    std::fs::write(directory.0.join("a/b/item"), b"slash").unwrap();
+
+    let backslash = files.list("a\\b").await.unwrap();
+    assert_eq!(
+        backslash,
+        [PluginFileEntry {
+            name: "a\\b/item".to_owned(),
+            kind: EntryKind::File,
+        }]
+    );
+    assert_eq!(
+        files.list("a/b").await.unwrap(),
+        [PluginFileEntry {
+            name: "a/b/item".to_owned(),
+            kind: EntryKind::File,
+        }]
+    );
+
+    files.remove(&backslash[0].name).await.unwrap();
+    assert!(!directory.0.join("a\\b/item").exists());
+    assert_eq!(
+        std::fs::read(directory.0.join("a/b/item")).unwrap(),
+        b"slash"
+    );
+
+    root.shutdown().await.unwrap();
+}
