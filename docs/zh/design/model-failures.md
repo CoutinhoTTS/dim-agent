@@ -92,7 +92,7 @@ CLI 的 line 模式与 `exec` 只打印这一行。TUI 与 Web 把细节放在�
 
 ### 失败链
 
-续接请求延续它之前失败的那个请求。它的 `context/prepare` 与 `model/call` 携带 `failure_chain {from_request_id, attempts, waited_ms}`：被续接的失败请求、该请求已用的尝试次数和已睡眠的退避时间。ModelProvider 用它们初始化续接请求的重试状态，因此它的第一次调用就是这条链的下一次尝试，整条链共用 8 次调用与 300 秒睡眠的预算。没有尝试或等待预算时，请求不发起调用而直接结算为失败。续接的终态 `failure` 报告链的总计，因此失败行的 `Tried N times over M s` 覆盖整条链。没有该字段的请求获得全新预算；工具步骤之后的普通请求不属于任何链。
+续接请求延续它之前失败的那个请求。它的 `context/prepare` 与 `model/call` 携带 `failure_chain {from_request_id, attempts, waited_ms}`：被续接的失败请求、该请求已用的尝试次数和已睡眠的退避时间。ModelProvider 用它们初始化续接请求的重试状态，因此它的第一次调用就是这条链的下一次尝试，整条链共用 8 次调用与 300 秒睡眠的预算。没有尝试或等待预算时，请求不发起调用而直接结算为失败。续接的终态 `failure` 报告链的总计，因此失败行的 `Tried N times over M s` 覆盖整条链。没有该字段的请求获得全新预算；工具步骤之后的普通请求不属于任何链。被重载结算的续接请求报告链上已提交的总计，因为重载之前做过的尝试不是事实。
 
 8 次与 300 秒是 ModelProvider 的公开上限：处置方读取它们，就能在不读 ModelProvider 状态的情况下拒绝已耗尽的链。生产环境的失败策略若要禁止重试，必须在与 `failure_chain` 相同的格式决定中为 `ModelFailure` 增加一个禁止位。
 

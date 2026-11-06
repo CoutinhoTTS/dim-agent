@@ -1096,7 +1096,11 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
                         request,
                         configuration: None,
                         prompt: None,
-                        failure_chain: None,
+                        failure_chain: (boundary == "model-call").then(|| FailureChain {
+                            from_request_id: "request-before".into(),
+                            attempts: 5,
+                            waited_ms: 70_000,
+                        }),
                     })
                     .into(),
                 )
@@ -1141,6 +1145,25 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
         );
         if boundary != "input-consumed" && boundary != "model-output-end" {
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. } if error == CAPABILITY_RELOADING))));
+        }
+        if boundary == "model-call" {
+            let failure = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    EventKind::ModelOutputEnd(ModelOutputEndData {
+                        outcome:
+                            ModelOutputOutcome::Failed {
+                                failure: Some(failure),
+                                ..
+                            },
+                        ..
+                    }) => Some(failure.as_ref()),
+                    _ => None,
+                })
+                .expect("the settled call reports facts");
+            assert_eq!(failure.kind, ModelFailureKind::Unknown);
+            assert_eq!(failure.attempts, 5);
+            assert_eq!(failure.waited_ms, 70_000);
         }
         assert_eq!(
             events

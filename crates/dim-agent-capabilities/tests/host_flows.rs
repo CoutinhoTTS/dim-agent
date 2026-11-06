@@ -1019,6 +1019,108 @@ async fn context_preparation_copies_a_failure_chain_into_the_call() {
     agent.close().await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_request_without_a_failure_chain_gets_a_fresh_retry_budget() {
+    let (agent, session, probe) = recovery_agent(25, None).await;
+    session
+        .submit("fresh budget".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 8);
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.kind, ModelFailureKind::ServerError);
+    assert_eq!(failure.attempts, 8);
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_continuation_continues_its_failure_chain_retry_budget() {
+    let chain = FailureChain {
+        from_request_id: "request-before".into(),
+        attempts: 5,
+        waited_ms: 0,
+    };
+    let (agent, session, probe) = recovery_agent_with(25, None, Some(("model/call", chain))).await;
+    session
+        .submit("continue".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.kind, ModelFailureKind::ServerError);
+    assert_eq!(failure.attempts, 8);
+    assert!((2_400..=3_000).contains(&failure.waited_ms), "{failure:?}");
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_spent_failure_chain_settles_without_a_call() {
+    let chain = FailureChain {
+        from_request_id: "request-before".into(),
+        attempts: 8,
+        waited_ms: 70_000,
+    };
+    let (agent, session, probe) = recovery_agent_with(25, None, Some(("model/call", chain))).await;
+    session
+        .submit("continue".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let (error, failure) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                outcome:
+                    ModelOutputOutcome::Failed {
+                        error,
+                        failure: Some(failure),
+                        ..
+                    },
+                ..
+            }) => Some((error, failure)),
+            _ => None,
+        })
+        .expect("a failed model output with facts");
+    assert_eq!(error, "the failure chain's retry budget is spent");
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    assert_eq!(failure.attempts, 8);
+    assert_eq!(failure.waited_ms, 70_000);
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_continuation_waits_no_longer_than_the_chain_budget_left() {
+    let chain = FailureChain {
+        from_request_id: "request-before".into(),
+        attempts: 5,
+        waited_ms: 299_000,
+    };
+    let (agent, session, probe) = recovery_agent_with(25, None, Some(("model/call", chain))).await;
+    let started = tokio::time::Instant::now();
+    session
+        .submit("continue".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    let slept = started.elapsed();
+    assert!(
+        slept >= Duration::from_millis(800) && slept <= Duration::from_secs(1),
+        "{slept:?}"
+    );
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.attempts, 7);
+    assert!(
+        (299_800..=300_000).contains(&failure.waited_ms),
+        "{failure:?}"
+    );
+    agent.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
     tokio::time::timeout(Duration::from_secs(15), async {

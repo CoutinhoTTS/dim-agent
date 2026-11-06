@@ -1,6 +1,8 @@
 mod images;
 mod recovery;
-pub use recovery::{Consume, RetryObserver, RetryWaiting, invoke as invoke_with_recovery};
+pub use recovery::{
+    Consume, MAX_ATTEMPTS, RetryObserver, RetryWaiting, WAIT_BUDGET, invoke as invoke_with_recovery,
+};
 
 use crate::{
     context_preparation::ContextPreparation,
@@ -177,7 +179,19 @@ impl ModelProvider {
             }
         }
         for (call, started) in open {
-            self.complete(call, Err(HostError::failed(CAPABILITY_RELOADING)), &started)?;
+            let mut facts = ModelFailureFacts::unknown(Some(CAPABILITY_RELOADING.into()));
+            if let Some(chain) = &call.failure_chain {
+                facts.attempts = chain.attempts;
+                facts.waited = std::time::Duration::from_millis(chain.waited_ms);
+            }
+            let error = HostError::Failed {
+                message: CAPABILITY_RELOADING.into(),
+                budget: None,
+                kind: HostErrorKind::Other,
+                model: Some(Box::new(facts)),
+                presentation: None,
+            };
+            self.complete(call, Err(error), &started)?;
         }
         Ok(())
     }
@@ -229,6 +243,7 @@ impl ModelProvider {
                 recovery::invoke(
                     &self.host,
                     &request,
+                    call.failure_chain.as_ref(),
                     resolved,
                     &cancel,
                     &mut output,
