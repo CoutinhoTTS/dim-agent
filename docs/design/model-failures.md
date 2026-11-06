@@ -105,6 +105,41 @@ kind table. It is an override, not the always-present form.
 The terminal fact's `error` is a complete fallback line, so every renderer that
 already prints `error` shows the better line without a change of its own.
 
+A failed request shows one line: `<meaning>: <reason>. <action>`, with
+`: <reason>` left out when the fact carries none. When the fact records more
+than one attempt, the line ends with `Tried N times over M s.`, the total wait
+rounded to whole seconds; a single attempt adds nothing. The details keep their
+own `tried N times over M s`. The words come from the kind, and the line takes
+no `model failed:` prefix. A request that already showed text, thinking or a
+tool row starts the line with "The response above is incomplete.", which each
+client derives from the rows it holds rather than storing. An event written
+before the fact existed keeps the `error` line and its prefix.
+
+The turn's own `failed` outcome does not repeat the model failure: an error equal
+to the one the turn's model failure already showed prints nothing. The
+suppression is per turn: every turn end forgets what a previous turn showed,
+whether that turn completed, failed or was cancelled, so a later turn's failure
+with the same text still prints. A turn failure that is not a model failure
+still prints.
+
+The CLI line mode and `exec` print that one line. The TUI and the Web keep its
+details one step away: the kind, the HTTP status, the provider code, the request
+id, `tried N times over M s` when there was more than one attempt, the wait the
+provider asked for, and the cause chain, one frame per line. The TUI details join
+the `/tools` cycle and the click-to-expand of an error row; the Web opens them
+from a "Details" disclosure under the row. Both are collapsed by default.
+
+While a request waits to retry, the TUI's working line and the Web's working
+indicator read `Retrying 3/8 in 4 s · <meaning>: <reason> · <stop>`, counting
+down from `ModelProgress.retry.retryAtMs` on the client clock. Once that time
+passes before new progress arrives, they say `Waiting for the provider` with
+the kind's meaning instead of `in 0 s`. The visible countdown is not a live
+region: a screen reader hears `Retrying, attempt 3 of 8: <meaning>` when a wait
+starts or the attempt changes, never on each tick. The CLI line mode writes one
+line per attempt where it writes its other status lines; `exec` writes none. A
+retry adds no transcript row, and a later success adds none either; the failure
+line's `tried N times` is the persistent record.
+
 ## 4. Retry
 
 `invoke` is shared by ModelProvider, the auxiliary model and the summary
