@@ -20,8 +20,8 @@ use crate::{
     tool_registry::ToolRegistry,
 };
 use dim_agent_runtime::{
-    BranchLifecycle, Dispatcher, Names, SessionConfig, SessionIdentity, Timeline, TimelineIdentity,
-    rebuild_facts,
+    BranchLifecycle, CollaborationRole, Dispatcher, Names, SessionConfig, SessionIdentity,
+    Timeline, TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData, ApprovalRespondData,
@@ -141,6 +141,10 @@ impl HooksRuntime {
             "cwd": self.config.cwd,
             "permission_mode": preset,
             "branch_id": branch,
+            "collaboration_role": match self.config.collaboration_role {
+                CollaborationRole::Leader => "leader",
+                CollaborationRole::Member => "member",
+            },
         })
         .as_object()
         .cloned()

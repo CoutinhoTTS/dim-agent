@@ -7,7 +7,7 @@ use rutis::Ctx;
 use rutis::host::{CtxHost, FiberView};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 use tokio::{
     sync::{Mutex as AsyncMutex, watch},
@@ -47,7 +47,8 @@ pub struct TimelineContext {
     failure: Mutex<Option<String>>,
     stop: CancellationToken,
     tasks: Mutex<Option<(JoinHandle<()>, JoinHandle<()>)>>,
-    ended: AtomicBool,
+    /// The sequence of the line's committed `branch/end`, 0 before it.
+    ended: AtomicU64,
     /// Serializes stop and close.
     control: AsyncMutex<()>,
     close: CloseOnce,
@@ -179,7 +180,7 @@ impl TimelineContext {
             opening,
             changed: watch::channel(()).0,
             failure: Mutex::new(None),
-            ended: AtomicBool::new(false),
+            ended: AtomicU64::new(0),
             stop: CancellationToken::new(),
             tasks: Mutex::new(None),
             control: AsyncMutex::new(()),
@@ -267,12 +268,21 @@ impl TimelineContext {
     pub fn is_closing(&self) -> bool {
         self.close.started()
     }
-    pub fn mark_ended(&self) {
-        self.ended.store(true, Ordering::Release);
+    /// Records the sequence of this line's committed `branch/end`: input is
+    /// refused from this call on.
+    pub fn mark_ended(&self, sequence: u64) {
+        self.ended.store(sequence, Ordering::Release);
     }
     /// Whether this line's `branch/end` has committed.
     pub fn ended(&self) -> bool {
-        self.ended.load(Ordering::Acquire)
+        self.end_event().is_some()
+    }
+    /// The sequence of this line's committed `branch/end`, `None` before it.
+    pub fn end_event(&self) -> Option<u64> {
+        match self.ended.load(Ordering::Acquire) {
+            0 => None,
+            sequence => Some(sequence),
+        }
     }
     /// True once the close has settled: its Timeline is closed, so nothing is
     /// committed to it any more, and its subtree is released.

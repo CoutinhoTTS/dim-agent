@@ -115,7 +115,7 @@ turn consumed.
 | D8 | `sessions.history` (the process service) does not gain the fields | Mirror the fields in both reads | It has no consumer that opens a thread; the fields are a client read. Adding them would advertise a contract nothing uses, and the service can adopt the read when a consumer needs it |
 | D9 | All new request and reply fields are optional; a request without them keeps today's meaning, limits and errors | A protocol version bump | The wire stays v3; replies only gain fields, and request decoding is strict only for fields the client sends. A client learns the feature from `hello.features` (`session.history.latestTurn`), so it never sends the fields to an older daemon that would reject them as unknown |
 | D10 | The first page of a window is the newest part, and the client backfills towards the turn start | The oldest part, so the client folds forward while live events arrive | A thread opens to show the newest content; the oldest part would show the turn's beginning and hide the running output. Live events after the pin arrive as `session.event` either way, and `session.model.progress` keys the open blocks |
-| D11 | The forward mode keeps today's contract, including its unlimited `limit`; only `latestTurn` adds a bound | Apply the 4,096-event and 4 MiB bound to every `after` read | Existing clients and the export page with their own limits; changing their accepted requests would break callers without reducing any measured cost |
+| D11 | The forward mode keeps today's contract, including its unlimited `limit`; a forward reply is bounded by the same encoded-byte budget as a window, and a short page is not the end — `done` is. A trimmed page keeps its oldest whole batches within 4 MiB and `nextAfter` is its last returned sequence, so every client continues as it does today | Apply the 4,096-event and 4 MiB bound to every `after` read, or bound only windows | Existing clients page with their own limits; changing their accepted requests would break callers. But events have no size bound, so an ordinary forward page of large tool results can exceed the 16 MiB frame and kill the connection: bounding the reply, not the request, closes that hole for every caller, and a trimmed page is what clients already handle — they continue on `nextAfter` and stop on `done` |
 | D12 | If the pin is the `turn/start` itself and the turn's first request is not committed at `through`, the window starts at the newest `input/message` at or below the turn start; a later read with a new pin can start earlier | Wait for the first request before replying; keep no prompt; treat it as an error | Waiting would make a pinned read depend on events above the pin. The fallback keeps the prompting input in the window. A new pin may legitimately produce an earlier window start, and the same pin keeps every candidate at or below it, so the reply is stable |
 
 ## 4. Contract
@@ -129,7 +129,7 @@ turn consumed.
 | `after?` | Unchanged forward cursor: exclusive, must end a batch. Absent in a window read (rejected there); default 0 otherwise |
 | `before?` | Backward cursor: exclusive upper bound. The page ends at the last batch end at or below `before - 1` and never above `through`. Must be at least 1 and at most `through`. Mutually exclusive with `after`; accepted with and without `latestTurn` (without it, the window is the whole branch). Absent on the first window page, where the top is `through` |
 | `latestTurn?` | `true` selects the turn window (§4.2). Mutually exclusive with `after`. `false` behaves as absent. It requires the native Session store, like `session.catalog` |
-| `limit?` | Raw events per page before the page runs to its batch boundary. Without `latestTurn`: positive, no upper bound (unchanged), default 256 when absent. With `latestTurn`: 1 to 4096, default 4096. The encoded-byte budget of §4.4 can make the page shorter in both window modes |
+| `limit?` | Raw events per page before the page runs to its batch boundary. Without `latestTurn`: positive, no upper bound (unchanged), default 256 when absent. With `latestTurn`: 1 to 4096, default 4096. The encoded-byte budget of §4.4 can make the page shorter in every mode, forward included; a short page is not the end |
 
 A `latestTurn` read is newest-first. A read with `before` and without `latestTurn`
 is newest-first over the branch. A read with neither is today's forward read.
@@ -197,8 +197,17 @@ the event and byte limits like any other window.
   raw rows and not the envelope. A batch is kept whole; the page never ends
   inside one, so a single batch above 4 MiB is returned whole and can make the
   reply larger than the target. Only a batch above the transport frame fails
-  `history_too_large` (§4.5); the client can still read that turn with forward
-  paging (§1.1).
+  `history_too_large` (§4.5), and it fails in both directions: no
+  `session.history` page can carry it, so a client reads the resource itself
+  (`session.exec.output.page` for terminal output) or the export. A client
+  walking forward cannot get past such a batch: every retry from the same
+  `after` answers `history_too_large` again. That is still better than an
+  over-frame reply, which closed the connection.
+- A forward page is bounded from the other end: it keeps its oldest whole
+  batches within the byte target and always at least the first, so `nextAfter`
+  always advances. A trimmed page is a short page with `done` false — a short
+  page is not the end; `done` is — and the client continues on `nextAfter`
+  exactly as it does today.
 - A page is batch-complete at both ends. Forward: it takes `limit` events and
   runs to the end of that batch. Backward: it takes up to `limit` events
   downward from the top and runs to the start of the batch that holds the oldest
@@ -240,7 +249,7 @@ the existing `-32602 invalid_params`.
 | 9 | `through` is inside a batch | storage error (unchanged) |
 | 10 | `after` is above `through`, or `after` is inside a batch | `invalid` (unchanged) |
 | 11 | `before` is above `through` | `invalid` |
-| 12 | the newest batch of a window page encodes to more than the transport frame minus 64 KiB | `-32000 history_too_large`: the reply cannot be framed |
+| 12 | the first batch of a history page — the newest of a window, the oldest of a forward read — encodes to more than the transport frame minus 64 KiB | `-32000 history_too_large`: the reply cannot be framed |
 
 Every other combination is accepted: `latestTurn` with or without `through`;
 `latestTurn` with or without `before`; `before` with or without `latestTurn`;
@@ -257,7 +266,7 @@ The method's error contract, including the new `history_too_large`:
 | `session_build_failed` | -32000 | acquiring the Session failed while restoring it | report it; a retry may succeed after the cause is fixed |
 | `service_reloading` | -32000 | the Agents index, or a capability the restore needs, is reloading | retry |
 | `session_invalid_input` | -32000 | the branch does not exist | correct the branch |
-| `history_too_large` | -32000 | the newest batch of a window page alone encodes to more than the transport frame minus 64 KiB, so the reply cannot be framed | read that turn with forward paging (§1.1); no retry of the same window helps |
+| `history_too_large` | -32000 | the first batch of a history page alone encodes to more than the transport frame minus 64 KiB, so the reply cannot be framed | read the batch's own resource (for terminal output, `session.exec.output.page`) or the export; a forward walk cannot get past the batch, and every retry from the same `after` answers `history_too_large` again — but the connection stays open, unlike an over-frame reply |
 | none | -32603 | a storage failure or a reply encoding failure; opaque, with a server message | retry, and report if it repeats |
 
 `session.history` returns no other `appError`. The existing `session.submit`
@@ -475,7 +484,10 @@ The implementation in this change carries these.
 9. **Byte bound.** A turn whose newest part encodes to more than 4 MiB is
    trimmed on batch boundaries, and its second page continues without a gap; a
    single batch above 4 MiB is returned whole, and only a batch above the
-   transport frame replies `history_too_large`.
+   transport frame replies `history_too_large`. A forward page of large facts
+   is bounded the same way from its own start: the reply stays under the
+   frame, `done` is false, and paging with `nextAfter` reaches the same events
+   in the same order.
 10. **Measurement.** A flow test builds turns of about 1,900, 3,100 and 6,900
     events and reports, for each, the number of `session.history` requests the
     client needs for the whole turn, the encoded reply bytes and the call

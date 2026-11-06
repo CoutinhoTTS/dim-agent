@@ -16,7 +16,7 @@ use crate::{
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     timeline_tree::TreeCommands,
     workspace_tools::exec::{
-        OutputSink, capture_preview, pump, sanitize, signal_name, tail_bytes, truncate_preview,
+        OutputSink, bounded_preview, capture_preview, pump, sanitize, signal_name, tail_bytes,
     },
 };
 use dim_agent_runtime::{
@@ -531,10 +531,7 @@ impl RunOutput {
     /// left anything out.
     fn bounded(&self) -> (String, bool) {
         let captured = self.0.lock().unwrap();
-        let text = truncate_preview(&captured.preview);
-        let truncated = captured.decoded > captured.preview.len()
-            || text.len() < sanitize(&captured.preview).len();
-        (text, truncated)
+        bounded_preview(&captured.preview, captured.decoded)
     }
 }
 

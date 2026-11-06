@@ -9,9 +9,9 @@ mod record;
 mod tools;
 
 use crate::hooks_settings::HooksService;
-use crate::mcp::McpService;
+use crate::mcp::{McpError, McpService};
 use crate::methods::ManagementMethods;
-use crate::settings::{SettingsService, SourceDeclaration};
+use crate::settings::{SettingsError, SettingsService, SourceDeclaration};
 use crate::ui_extensions::UiExtensions;
 use acquire::PluginsDir;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, Progress, RpcError};
@@ -136,7 +136,7 @@ pub(crate) struct State {
     record: Mutex<Record>,
     /// Content refusals PluginManager made itself, shared by the startup
     /// owners and every generation of its row (§3.7). In memory only.
-    pub(crate) refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
+    pub(crate) refusals: Arc<Mutex<BTreeMap<(String, Kind), OwnRefusal>>>,
     /// The built-in rows of the assembly.
     builtins: OnceLock<BTreeSet<String>>,
     /// The catalog the runtime started with (§4 `instanceNames`).
@@ -555,7 +555,7 @@ struct Change {
 /// Logs each content refusal of a reconcile at `warn` (§3.7), with the
 /// plugin id, the kind and the error.
 fn log_refused(plugin: &str, outcome: &Outcome) {
-    for (kind, error) in &outcome.refused {
+    for (kind, error, _) in &outcome.refused {
         // The kind's name as the replies show it: its `Serialize`, the one
         // place the names are written.
         let name = serde_json::to_value(kind).unwrap_or_default();
@@ -590,7 +590,7 @@ pub(crate) struct Owners {
     ui: Key<UiExtensions>,
     /// Content refusals PluginManager made itself, by plugin id and kind
     /// (§3.7). In memory only.
-    refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
+    refusals: Arc<Mutex<BTreeMap<(String, Kind), OwnRefusal>>>,
 }
 
 /// The row names of the content owners and the kind each takes.
@@ -601,28 +601,69 @@ const OWNERS: [(&str, Kind); 4] = [
     ("UiExtensions", Kind::Ui),
 ];
 
-/// A content refusal: the kind and the error it came with (§3.7).
-type Refusal = (Kind, String);
+/// A content refusal: the kind, the error text its owner reported (§3.7),
+/// and the owner's static reason when the cause has one (A.2). The client
+/// projection reports the reason, or the generic message; the raw text is
+/// kept for logs and the `plugin` tool.
+type Refusal = (Kind, String, Option<&'static str>);
 
-/// What a reply's or `plugin.list`'s `refused` holds (A.1): `{kind, error}`.
+/// PluginManager's own content refusal (§3.7): the raw detail, which names
+/// the path, kept for logs and the `plugin` tool, and the static reason a
+/// client may see (A.2).
+type OwnRefusal = (String, &'static str);
+
+/// Why PluginManager could not read a plugin's content file (§3.7): the
+/// raw detail for logs and the `plugin` tool, and the static reason a
+/// client may see (A.2).
+struct ContentError {
+    detail: String,
+    reason: &'static str,
+}
+
+/// What a reply's or `plugin.list`'s `refused` holds (A.1): `{kind, error}`,
+/// plus the owner's `reason` when the cause has one (A.2). The `reason`
+/// member is internal: the client projection turns it into the error, and
+/// the `plugin` tool drops it.
 fn refused_entries(refusals: &[Refusal]) -> Vec<Value> {
     refusals
         .iter()
-        .map(|(kind, error)| json!({"kind": kind, "error": error}))
+        .map(|(kind, error, reason)| match reason {
+            Some(reason) => json!({"kind": kind, "error": error, "reason": reason}),
+            None => json!({"kind": kind, "error": error}),
+        })
         .collect()
 }
 
 fn refused(kind: Kind, error: impl std::fmt::Display) -> Refusal {
-    (kind, error.to_string())
+    (kind, error.to_string(), None)
+}
+
+/// A refusal an owner reported as a `SettingsError`: it carries the static
+/// reason of its cause when that cause has one (A.2).
+fn refused_settings(kind: Kind, error: &SettingsError) -> Refusal {
+    (kind, error.to_string(), error.reason())
+}
+
+/// A content refusal PluginManager made itself: it carries the static reason
+/// its cause has (A.2).
+fn refused_content(kind: Kind, error: &ContentError) -> Refusal {
+    (kind, error.detail.clone(), Some(error.reason))
 }
 
 /// A plugin's JSON content document at `path` (§3.7): the one read and parse
-/// for every kind whose owner takes one. The error names the path.
-fn read_content(path: &Path) -> Result<Value, String> {
-    std::fs::read(path)
-        .map_err(|error| error.to_string())
-        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
-        .map_err(|error| format!("{}: {error}", path.display()))
+/// for every kind whose owner takes one. The detail names the path; the
+/// reason is PluginManager's own wording and reaches a client (A.2). A
+/// missing file never gets here: `Manifest::read` resolves every content
+/// path and refuses it as `invalid_manifest` first.
+fn read_content(path: &Path) -> Result<Value, ContentError> {
+    let bytes = std::fs::read(path).map_err(|error| ContentError {
+        detail: format!("{}: {error}", path.display()),
+        reason: "the file could not be read",
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| ContentError {
+        detail: format!("{}: {error}", path.display()),
+        reason: "the file is not valid JSON",
+    })
 }
 
 fn skill_issues(issues: Vec<SkillIssue>) -> Option<String> {
@@ -648,7 +689,7 @@ impl Owners {
     pub fn new(
         ctx: Ctx,
         names: &Names<'_>,
-        refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
+        refusals: Arc<Mutex<BTreeMap<(String, Kind), OwnRefusal>>>,
     ) -> rutis::Result<Self> {
         Ok(Self {
             ctx,
@@ -758,13 +799,16 @@ impl Owners {
                             .register_plugin(plugin.into(), dir.into(), document, &cancel)
                             .await
                         {
-                            outcome.refused.push(refused(Kind::Mcp, error.to_string()));
+                            outcome.refused.push(match &error {
+                                McpError::Settings(error) => refused_settings(Kind::Mcp, error),
+                                _ => refused(Kind::Mcp, &error),
+                            });
                         }
                     }
                     Err(error) => {
                         let _ = mcp.withdraw_plugin(plugin.into(), &cancel).await;
                         self.keep_refusal(plugin, Kind::Mcp, &error);
-                        outcome.refused.push(refused(Kind::Mcp, error));
+                        outcome.refused.push(refused_content(Kind::Mcp, &error));
                     }
                 },
                 (Some(mcp), None) => {
@@ -790,15 +834,13 @@ impl Owners {
                             .register_plugin(plugin.into(), dir.into(), document, &cancel)
                             .await
                         {
-                            outcome
-                                .refused
-                                .push(refused(Kind::Hooks, error.to_string()));
+                            outcome.refused.push(refused_settings(Kind::Hooks, &error));
                         }
                     }
                     Err(error) => {
                         let _ = hooks.withdraw_plugin(plugin.into(), &cancel).await;
                         self.keep_refusal(plugin, Kind::Hooks, &error);
-                        outcome.refused.push(refused(Kind::Hooks, error));
+                        outcome.refused.push(refused_content(Kind::Hooks, &error));
                     }
                 },
                 (Some(hooks), None) => {
@@ -842,12 +884,13 @@ impl Owners {
         }
     }
 
-    /// PluginManager's own refusal of `kind` for `plugin` (§3.7).
-    fn keep_refusal(&self, plugin: &str, kind: Kind, error: &str) {
-        self.refusals
-            .lock()
-            .unwrap()
-            .insert((plugin.to_owned(), kind), error.to_owned());
+    /// PluginManager's own refusal of `kind` for `plugin` (§3.7): the raw
+    /// detail and its static reason.
+    fn keep_refusal(&self, plugin: &str, kind: Kind, error: &ContentError) {
+        self.refusals.lock().unwrap().insert(
+            (plugin.to_owned(), kind),
+            (error.detail.clone(), error.reason),
+        );
     }
 
     /// Drops PluginManager's refusal of `kind` for `plugin`: its document
@@ -881,29 +924,37 @@ impl Owners {
         if manifest.mcp.is_some()
             && let Some(mcp) = self.ctx.get_at(&self.mcp)
         {
-            let error = self
+            let own = self
                 .refusals
                 .lock()
                 .unwrap()
                 .get(&(plugin.to_owned(), Kind::Mcp))
-                .cloned()
-                .or_else(|| mcp.plugin_refusal(plugin));
-            if let Some(error) = error {
-                found.push(refused(Kind::Mcp, error));
+                .cloned();
+            match own {
+                Some((detail, reason)) => found.push((Kind::Mcp, detail, Some(reason))),
+                None => {
+                    if let Some((error, reason)) = mcp.plugin_refusal(plugin) {
+                        found.push((Kind::Mcp, error, reason));
+                    }
+                }
             }
         }
         if manifest.hooks.is_some()
             && let Some(hooks) = self.ctx.get_at(&self.hooks)
         {
-            let error = self
+            let own = self
                 .refusals
                 .lock()
                 .unwrap()
                 .get(&(plugin.to_owned(), Kind::Hooks))
-                .cloned()
-                .or_else(|| hooks.plugin_refusal(plugin));
-            if let Some(error) = error {
-                found.push(refused(Kind::Hooks, error));
+                .cloned();
+            match own {
+                Some((detail, reason)) => found.push((Kind::Hooks, detail, Some(reason))),
+                None => {
+                    if let Some((error, reason)) = hooks.plugin_refusal(plugin) {
+                        found.push((Kind::Hooks, error, reason));
+                    }
+                }
             }
         }
         found

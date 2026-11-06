@@ -3,14 +3,14 @@ use super::*;
 /// What one model invocation streams: `chunks` thinking fragments, which are
 /// one durable event each, or one text fragment of `bytes`.
 #[derive(Clone, Copy)]
-enum Plan {
+pub(super) enum Plan {
     Chunks(usize),
     Huge(usize),
 }
 
 /// Streams the next queued plan; a turn without a plan streams one chunk.
 #[derive(Default)]
-struct StreamingModel(std::sync::Mutex<std::collections::VecDeque<Plan>>);
+pub(super) struct StreamingModel(std::sync::Mutex<std::collections::VecDeque<Plan>>);
 
 impl StreamingModel {
     fn push(&self, plan: Plan) {
@@ -61,7 +61,7 @@ impl dim_agent_capabilities::host::ModelDriver for StreamingModel {
 /// Captures the current branch's Timeline for atomic batches and can hold
 /// the next thinking fact before dispatch completes.
 #[derive(Default)]
-struct BatchProbe {
+pub(super) struct BatchProbe {
     timeline: std::sync::Mutex<Option<Arc<dim_agent_runtime::Timeline>>>,
     hold: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Notify,
@@ -114,7 +114,7 @@ impl rutis::host::DynPlugin for BatchProbePlugin {
     }
 }
 
-async fn serve_streaming(
+pub(super) async fn serve_streaming(
     directory: &std::path::Path,
     model: Arc<StreamingModel>,
 ) -> (RunningServer, Arc<BatchProbe>) {
@@ -169,7 +169,7 @@ async fn serve_streaming(
 
 /// A short path under `/tmp`: a socket path must stay below `SUN_LEN`, which a
 /// runner's `temp_dir` can exceed.
-fn new_directory(name: &str) -> std::path::PathBuf {
+pub(super) fn new_directory(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("/tmp").join(format!("dim-hw-{name}-{}", uuid::Uuid::new_v4()))
 }
 
@@ -196,7 +196,13 @@ fn sequences(page: &Value) -> Vec<u64> {
         .collect()
 }
 
-async fn turn(client: &mut Client, model: &StreamingModel, id: &str, text: &str, plan: Plan) {
+pub(super) async fn turn(
+    client: &mut Client,
+    model: &StreamingModel,
+    id: &str,
+    text: &str,
+    plan: Plan,
+) {
     model.push(plan);
     assert_ok(
         &client

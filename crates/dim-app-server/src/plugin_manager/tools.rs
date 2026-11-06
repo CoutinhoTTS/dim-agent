@@ -364,7 +364,10 @@ impl ToolHandler for Plugin {
                 }
             };
             Ok(match reply {
-                Ok(reply) => ToolResult::text(reply.to_string()),
+                Ok(mut reply) => {
+                    super::management::without_reasons(&mut reply);
+                    ToolResult::text(reply.to_string())
+                }
                 Err(error) => ToolResult::error(error),
             })
         })

@@ -3006,6 +3006,7 @@
       "unexpandedMacros": [
         "format",
         "tracing::warn",
+        "unreachable",
         "vec"
       ]
     },
@@ -3028,6 +3029,7 @@
         "matches",
         "tokio::select",
         "tracing::warn",
+        "unreachable",
         "vec"
       ]
     },
@@ -10094,6 +10096,7 @@
         "path SessionIdentity",
         "path TimelineIdentity",
         "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::CollaborationRole",
         "use dim_agent_runtime::SessionConfig",
         "use dim_agent_runtime::SessionIdentity",
         "use dim_agent_runtime::TimelineIdentity"
@@ -12480,19 +12483,19 @@
       "to": "dim_agent_capabilities::workspace_tools::exec",
       "references": [
         "path OutputSink",
+        "path bounded_preview",
         "path capture_preview",
         "path pump",
         "path sanitize",
         "path signal_name",
         "path tail_bytes",
-        "path truncate_preview",
         "use crate::workspace_tools::exec::OutputSink",
+        "use crate::workspace_tools::exec::bounded_preview",
         "use crate::workspace_tools::exec::capture_preview",
         "use crate::workspace_tools::exec::pump",
         "use crate::workspace_tools::exec::sanitize",
         "use crate::workspace_tools::exec::signal_name",
-        "use crate::workspace_tools::exec::tail_bytes",
-        "use crate::workspace_tools::exec::truncate_preview"
+        "use crate::workspace_tools::exec::tail_bytes"
       ]
     },
     {
@@ -13490,9 +13493,15 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::contracts",
       "references": [
+        "path BranchDirectoryEntry",
+        "path BranchDirectoryState::Ended",
+        "path BranchDirectoryState::Ending",
+        "path BranchDirectoryState::Open",
         "path BranchOptions",
         "path TimelineInfo",
         "path TimelineTreeControl",
+        "use dim_agent_runtime::BranchDirectoryEntry",
+        "use dim_agent_runtime::BranchDirectoryState",
         "use dim_agent_runtime::BranchOptions",
         "use dim_agent_runtime::TimelineInfo",
         "use dim_agent_runtime::TimelineTreeControl"
@@ -15566,6 +15575,7 @@
       "from": "dim_agent_runtime::agent",
       "to": "dim_agent_runtime::contracts",
       "references": [
+        "path BranchDirectoryEntry",
         "path BranchOptions",
         "path ConfigureOutcome",
         "path ConfigureUpdate",
@@ -17127,6 +17137,7 @@
         "path SettingsError",
         "path SettingsError::Conflict",
         "path SettingsError::Document",
+        "path SettingsError::DocumentShape",
         "path SettingsError::Invalid",
         "path SettingsService",
         "path dim_app_server::settings::SettingsSnapshot",
@@ -18718,10 +18729,12 @@
       "from": "dim_app_server::agents::configuration",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path RpcError",
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path SessionMethods",
         "path params",
+        "path reply",
         "use dim_agent_capabilities::methods::Interruption",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
@@ -18745,6 +18758,14 @@
         "path prompt_sources::SESSION",
         "path prompt_sources::session_entry",
         "use dim_agent_capabilities::prompt_sources"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::configuration",
+      "to": "dim_agent_capabilities::prompt_state",
+      "references": [
+        "path PromptSnapshot",
+        "use dim_agent_capabilities::prompt_state::PromptSnapshot"
       ]
     },
     {
@@ -20632,6 +20653,7 @@
         "path Call::Attach",
         "path Call::BranchCreate",
         "path Call::BranchEnd",
+        "path Call::Branches",
         "path Call::Catalog",
         "path Call::CatalogCancel",
         "path Call::Close",
@@ -21087,7 +21109,11 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::contracts",
       "references": [
+        "path BranchDirectoryState::Ended",
+        "path BranchDirectoryState::Ending",
+        "path BranchDirectoryState::Open",
         "path BranchOptions",
+        "use dim_agent_runtime::BranchDirectoryState",
         "use dim_agent_runtime::BranchOptions"
       ]
     },
@@ -21157,6 +21183,7 @@
       "references": [
         "path BranchCreate",
         "path BranchEnd",
+        "path Branches",
         "path History",
         "path InputLookup",
         "path InputLookupResult::Accepted",
@@ -21164,6 +21191,7 @@
         "path Keys",
         "path Reply",
         "path Reply::BranchCreate",
+        "path Reply::Branches",
         "path Reply::History",
         "path Reply::InputLookup",
         "path Reply::Keys",
@@ -21184,11 +21212,13 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_app_server::tree_protocol",
       "references": [
+        "path wire::BranchDirectoryView",
+        "path wire::BranchInfo::from",
+        "path wire::BranchesResult",
         "path wire::CreateResult",
         "path wire::HistoryResult",
         "path wire::KeyEntry",
         "path wire::KeysResult",
-        "path wire::ProductEvent",
         "path wire::ProductEvent::new",
         "use crate::tree_protocol"
       ]
@@ -22246,8 +22276,8 @@
         "path BusinessDocument",
         "path Result",
         "path SettingsError",
-        "path SettingsError::Document",
         "path SettingsError::Invalid",
+        "path SettingsError::shape",
         "path SettingsService",
         "path crate::settings::ProjectAuthorized",
         "path crate::settings::project_authorizations",
@@ -22493,6 +22523,7 @@
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Document",
+        "path SettingsError::DocumentShape",
         "path SettingsError::Invalid",
         "path SettingsError::Worker",
         "path SettingsService",
@@ -23628,7 +23659,9 @@
       "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::mcp",
       "references": [
+        "path McpError::Settings",
         "path McpService",
+        "use crate::mcp::McpError",
         "use crate::mcp::McpService"
       ]
     },
@@ -23716,7 +23749,9 @@
       "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::settings",
       "references": [
+        "path SettingsError",
         "path SettingsService",
+        "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
       ]
     },
@@ -23873,6 +23908,13 @@
         "path PluginError",
         "use super::Manager",
         "use super::PluginError"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::tools",
+      "to": "dim_app_server::plugin_manager::management",
+      "references": [
+        "path super::management::without_reasons"
       ]
     },
     {
@@ -24057,6 +24099,7 @@
         "path crate::tree_protocol::ApprovalRequest",
         "path crate::tree_protocol::ApprovalResolved",
         "path crate::tree_protocol::BarrierResult",
+        "path crate::tree_protocol::BranchesResult",
         "path crate::tree_protocol::CreateResult",
         "path crate::tree_protocol::EventNotice",
         "path crate::tree_protocol::ForwardedNotice",
@@ -25744,6 +25787,7 @@
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Document",
+        "path SettingsError::DocumentShape",
         "path SettingsError::Invalid",
         "path SettingsError::InvalidScope",
         "path SettingsError::Persistence",
@@ -25875,6 +25919,7 @@
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Document",
+        "path SettingsError::DocumentShape",
         "path SettingsError::InvalidScope",
         "path SettingsError::Storage",
         "path SettingsError::UnknownSource",
@@ -27157,6 +27202,7 @@
         "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
+        "path dim_agent_types::BranchSource",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::ApprovalDecision",
@@ -27300,9 +27346,11 @@
         "path Reads",
         "path Reads::new",
         "path ResourceError",
+        "path ResourceError::invalid",
         "path UiResourcesPlugin::new",
         "path file_error",
         "path gone",
+        "path read_page",
         "use resources::PublishFile",
         "use resources::Read",
         "use resources::Reads",
@@ -27311,7 +27359,8 @@
         "use resources::UiResources",
         "use resources::UiResourcesPlugin",
         "use resources::file_error",
-        "use resources::gone"
+        "use resources::gone",
+        "use resources::read_page"
       ]
     },
     {
@@ -27327,8 +27376,29 @@
       "references": [
         "path FileReader",
         "path FileStorage",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Closed",
         "use dim_agent_capabilities::file_storage::FileReader",
-        "use dim_agent_capabilities::file_storage::FileStorage"
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::ui_extensions::resources",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::service",
+        "path SessionMethods",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
       ]
     },
     {
@@ -30595,7 +30665,8 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::sanitize::safe"
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {

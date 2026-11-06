@@ -321,6 +321,12 @@ AcpGateway's own design reports a Hooks `input_blocked` rejection from `session.
 | — | `PreCompact`/`PostCompact`, `SessionEnd` and `SubagentStart`/`SubagentStop` stay unsupported, for the reasons in G.1 |
 | — | The native CLI gets `dimcode hooks list`, `dimcode hooks enable\|disable`, `dimcode hooks edit` and `dimcode hooks set PATH` ([CLI commands](../cli-commands.md#commands)) |
 
+#### 2026-11-06
+
+| # | Decision |
+| --- | --- |
+| — | The common payload carries `collaboration_role` (`leader` or `member`), taken from `SessionConfig.collaboration_role`. In Dim a subagent is a Collaboration member, so subagent identity goes into the member's own lifecycle — its `SessionStart` and `Stop` payloads — and not into new `SubagentStart`/`SubagentStop` events (G.1) |
+
 ### 10.2 Accepted owner changes
 
 | Item | Owner | Issue |
@@ -381,7 +387,7 @@ Plugin documents are kept in the Settings source `hooks-plugins`, one `{dir, hoo
 
 | Channel | Content |
 | --- | --- |
-| stdin | One UTF-8 JSON object, then EOF. Common: `hook_event_name`, `session_id`, `cwd`, `permission_mode` (Dim preset: `read-only`, `workspace-write`, `full-access`), `turn_id` when turn-scoped, plus Dim fields `branch_id`, `dim_source` (`user`, `project` or `plugin:<id>`). No `transcript_path` |
+| stdin | One UTF-8 JSON object, then EOF. Common: `hook_event_name`, `session_id`, `cwd`, `permission_mode` (Dim preset: `read-only`, `workspace-write`, `full-access`), `turn_id` when turn-scoped, plus Dim fields `branch_id`, `dim_source` (`user`, `project` or `plugin:<id>`) and `collaboration_role` (`leader` for every Session that is not a Collaboration member, `member` for a Collaboration member Session). No `transcript_path` |
 | Environment | HostPlatform's base environment plus `DIM_PROJECT_DIR`, `DIM_HOOK_EVENT`, `DIM_SESSION_ID` and `DIMCODE_HOME`; `DIM_PLUGIN_ROOT` for plugin sources only |
 | Exit 0 | stdout empty, one JSON object (A.4), or plain text — anything that is not one JSON object, other JSON values included — which is context for `SessionStart` and `UserPromptSubmit` and otherwise ignored |
 | Exit 2 | Blocking result for the event (A.4); stderr (first 2 KiB) is the reason |
@@ -585,7 +591,7 @@ Dim does not read Claude or Codex files and has no import command. To migrate, c
 | `Stop` | `Stop` | `Stop` → Queue follow-up | Bounded (A8) |
 | `SessionStart` | `SessionStart` | `SessionStart` → keyed Append | `startup` only |
 | `Notification` | — | `Notification` on `approval/request` | `permission_prompt` only |
-| `PreCompact`, `PostCompact`, `SessionEnd`, `Subagent*`, others | `PreCompact`, `PostCompact`, `SessionEnd`, `Interrupt`, `Subagent*` | Unsupported | Listed `unsupported` in the catalog. `PreCompact`/`PostCompact`: blocking would need a compaction-admission port in ContextCompaction; an observation-only form needs no owner change and can be added later. Compaction removes nothing from the Timeline, and `Stop` runs after every completed turn, so archiving loses nothing. `SessionEnd`: Session close is lifecycle, including idle unload, and work must settle before services are removed (AGENTS rule 8); a command at close would delay close. `SubagentStart`/`SubagentStop`: a Collaboration member is its own Session, which gets its own `SessionStart` and `Stop` |
+| `PreCompact`, `PostCompact`, `SessionEnd`, `Subagent*`, others | `PreCompact`, `PostCompact`, `SessionEnd`, `Interrupt`, `Subagent*` | Unsupported | Listed `unsupported` in the catalog. `PreCompact`/`PostCompact`: blocking would need a compaction-admission port in ContextCompaction; an observation-only form needs no owner change and can be added later. Compaction removes nothing from the Timeline, and `Stop` runs after every completed turn, so archiving loses nothing. `SessionEnd`: Session close is lifecycle, including idle unload, and work must settle before services are removed (AGENTS rule 8); a command at close would delay close. `SubagentStart`/`SubagentStop`: a Collaboration member is its own Session, which gets its own `SessionStart` and `Stop`, with `collaboration_role: "member"` on their stdin (A.3) |
 
 ### G.2 Tool names
 
@@ -611,6 +617,7 @@ Codex `apply_patch` has no alias: its input is a patch, while Dim's `write` and 
 | Project trust | Codex: hash-bound trust and `/hooks` review; Claude: an interactive session's workspace trust dialog lists the hooks a folder's settings would activate, and `claude -p` or SDK runs never show it | Disabled until the user enables the workspace; no hashes; later edits apply (ADR 003 D4) |
 | `disableAllHooks` | Claude: highest-precedence file wins; a project `false` overrides a user `true` | User document only |
 | Handler types and fields | `command`, `http`, `mcp_tool`, `prompt`, `agent`; `args`, `if` | `command` only; `args`/`if` handlers are not run |
+| Install reporting | Installing a plugin is silent about its handlers | `dimcode plugin install` prints the installed plugin's handlers whose state is not `ok` — events Dim does not run (G.1) and handler kinds it does not support — read from the existing `hooks.catalog`, with one line pointing to this appendix; a daemon that does not advertise `hooks.catalog` is not asked, and a read that fails is reported without failing the install |
 | Timeouts | Claude: 600 s (30 s for `UserPromptSubmit`); Codex: 600 s | Same as Claude |
 | stdin | `transcript_path`; `permission_mode` (`default`, `plan`, `acceptEdits`, `bypassPermissions`, …); `tool_name` with the product's names | `transcript_path` is replaced by `dimcode export` reading the Session (A.3); `permission_mode` is `read-only`, `workspace-write` or `full-access`; `tool_name` and `tool_input` are Dim's (G.2), so an MCP tool's `tool_name` is its Dim name, not `mcp__<server>__<tool>` |
 | Environment | `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT` | `DIM_PROJECT_DIR`, `DIMCODE_HOME`; replace `$CLAUDE_PROJECT_DIR` in pasted commands. `CLAUDE_PLUGIN_ROOT` and `GROK_PLUGIN_ROOT` are not set, so a pasted command that references them does not resolve; a plugin ships its Dim form with `$DIM_PLUGIN_ROOT` |
@@ -631,6 +638,6 @@ Codex `apply_patch` has no alias: its input is a patch, while Dim's `write` and 
 | `HookSources` | Session port `HookSourcesHost(Arc<dyn ReadHookSources>)`, bound by App Server as `CommandRulesHost` and `SkillSettingsHost` are |
 | `hooks`, `hooks-projects`, `hooks-plugins` | `BusinessDocument` types in App Server (`hooks`: `USER_FILE` `hooks.json`, no `PROJECT_FILE`; `hooks-projects`: `USER_FILE` `hooks-projects.json`; `hooks-plugins`: `USER_FILE` `hooks-plugins.json`, one `{dir, hooks}` entry per plugin id, as `McpPluginServers` in `mcp/config.rs`) |
 | `.dimcode/hooks.json` | Read by `HooksSettings` through `FileStorage::path(root, ".dimcode/hooks.json")` and `read_limited`, `root` from `SettingsService::project_root(cwd)`, parsed into the `hooks` document type |
-| `register`, `withdraw`, `plugins()` | `HooksService::register_plugin(plugin: String, dir: PathBuf, document: serde_json::Value, cancel: &CancellationToken) -> Result<()>`, `withdraw_plugin(plugin: String, cancel: &CancellationToken) -> Result<()>`, `plugins(cancel: &CancellationToken) -> Result<Vec<String>>` and `plugin_refusal(&self, plugin: &str) -> Option<String>`, as `McpService`'s (`crates/dim-app-server/src/mcp.rs`): a refused document leaves no entry and is remembered for `plugin_refusal`; PluginManager reads the service through `names.key()` in its `Owners`, its `Kind::Hooks` added to `OWNERS` and `CONTENT` ([PluginManager §3.7](PluginManager.md#37-content-registration)) |
+| `register`, `withdraw`, `plugins()` | `HooksService::register_plugin(plugin: String, dir: PathBuf, document: serde_json::Value, cancel: &CancellationToken) -> Result<()>`, `withdraw_plugin(plugin: String, cancel: &CancellationToken) -> Result<()>`, `plugins(cancel: &CancellationToken) -> Result<Vec<String>>` and `plugin_refusal(&self, plugin: &str) -> Option<(String, Option<&'static str>)>`, as `McpService`'s (`crates/dim-app-server/src/mcp.rs`): a refused document leaves no entry, and `plugin_refusal` reports its error text with the static reason its cause carries, both read under one lock; PluginManager reads the service through `names.key()` in its `Owners`, its `Kind::Hooks` added to `OWNERS` and `CONTENT` ([PluginManager §3.7](PluginManager.md#37-content-registration)) |
 | `hooks.*` | `Keyed<ManagementMethods>`; `methods.register(ctx, "hooks", …)` |
 | Runner | Session service `HooksRuntime`, private to Hooks; processes from `HostPlatform::build_process_spec` and `spawn`, with the event's stdin object (A.3) as the initial stdin (A.6.3), owned by `ctx.effect` |
