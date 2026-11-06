@@ -306,16 +306,10 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
     if matches!(failure, AiMuxError::Aborted(_)) && cancel.is_cancelled() {
         return HostError::Cancelled("Model request cancelled".into());
     }
-    // The strict stream reports its failures as `Other` caused by the
-    // `InvalidResponseData` it found; that has to classify as
-    // `InvalidResponseData` itself, not as a transport failure.
-    let failure = match failure {
-        AiMuxError::Other {
-            message: _,
-            cause: Some(ErrorCause::AiMux(inner)),
-        } if matches!(inner.as_ref(), AiMuxError::InvalidResponseData { .. }) => *inner,
-        failure => failure,
-    };
+    // Classify and describe the same inner failure: a repair callback's
+    // failure, a retry wrapper's last attempt and anything wrapped in `Other`
+    // caused by another aimux error are unwrapped first.
+    let failure = unwrap_failure(failure);
     let (classification, facts) = classify(&failure);
     tracing::debug!(
         failure_kind = ?facts.kind,
@@ -330,6 +324,21 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
         budget: None,
         model: Some(Box::new(facts)),
         presentation: None,
+    }
+}
+
+fn unwrap_failure(failure: AiMuxError) -> AiMuxError {
+    match failure {
+        AiMuxError::Other {
+            cause: Some(ErrorCause::AiMux(inner)),
+            ..
+        } => unwrap_failure(*inner),
+        AiMuxError::ToolCallRepair { cause, .. } => unwrap_failure(*cause),
+        AiMuxError::Retry(mut retry) => match retry.errors.pop() {
+            Some(error) => unwrap_failure(error),
+            None => AiMuxError::Retry(retry),
+        },
+        failure => failure,
     }
 }
 
@@ -416,7 +425,11 @@ fn classify(failure: &AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
                 AiMuxError::UnsupportedFunctionality(_) => {
                     (ModelFailureKind::InvalidRequest, HostErrorKind::Unsupported)
                 }
-                AiMuxError::InvalidResponseData { .. } | AiMuxError::JsonParse { .. } => {
+                AiMuxError::InvalidResponseData { .. }
+                | AiMuxError::JsonParse { .. }
+                | AiMuxError::InvalidToolInput { .. }
+                | AiMuxError::NoSuchTool { .. }
+                | AiMuxError::TypeValidation { .. } => {
                     (ModelFailureKind::MalformedResponse, HostErrorKind::Other)
                 }
                 AiMuxError::NoSuchModel { .. } | AiMuxError::NoSuchProvider { .. } => {
@@ -425,7 +438,7 @@ fn classify(failure: &AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
                 AiMuxError::TokenExpired(_) => {
                     (ModelFailureKind::AuthRejected, HostErrorKind::Other)
                 }
-                AiMuxError::Timeout(_) => (ModelFailureKind::Timeout, HostErrorKind::Transport),
+                AiMuxError::Timeout(_) => (ModelFailureKind::Unknown, HostErrorKind::Transport),
                 AiMuxError::Other { .. } => (ModelFailureKind::Unknown, HostErrorKind::Transport),
                 _ => (ModelFailureKind::Unknown, HostErrorKind::Other),
             };
@@ -454,8 +467,18 @@ fn classify(failure: &AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
 fn reason_of(failure: &AiMuxError) -> Option<String> {
     match failure {
         AiMuxError::JsonParse { cause, .. } => cause.as_ref().and_then(source_diagnosis),
-        // Their messages embed the tool input or the validated value.
-        AiMuxError::InvalidToolInput { .. } | AiMuxError::TypeValidation { .. } => None,
+        AiMuxError::InvalidToolInput { tool_name, .. } => one_line(
+            &format!("invalid arguments for tool '{tool_name}'"),
+            FAILURE_REASON_CHARS,
+        ),
+        AiMuxError::NoSuchTool { tool_name, .. } => one_line(
+            &format!("the model called an unknown tool '{tool_name}'"),
+            FAILURE_REASON_CHARS,
+        ),
+        // Its message embeds the validated value.
+        AiMuxError::TypeValidation { .. } => None,
+        // The inner text only; `Display` adds the variant prefix.
+        AiMuxError::Timeout(message) => one_line(message, FAILURE_REASON_CHARS),
         AiMuxError::Other {
             cause: Some(ErrorCause::AiMux(error)),
             ..
@@ -507,10 +530,8 @@ fn permanent_kind(code: &str) -> Option<ModelFailureKind> {
             ModelFailureKind::QuotaExhausted
         }
         "invalid_api_key" | "authentication_error" => ModelFailureKind::AuthRejected,
-        "invalid_request_error" => ModelFailureKind::InvalidRequest,
-        "context_length_exceeded" | "context_too_long" | "max_tokens_exceeded" => {
-            ModelFailureKind::ContextTooLong
-        }
+        "invalid_request_error" | "max_tokens_exceeded" => ModelFailureKind::InvalidRequest,
+        "context_length_exceeded" | "context_too_long" => ModelFailureKind::ContextTooLong,
         "content_policy_violation" | "safety_block" | "moderation_block" => {
             ModelFailureKind::ContentFiltered
         }

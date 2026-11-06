@@ -1884,6 +1884,22 @@ async fn native_http_statuses_and_codes_classify() {
         &host,
         ModelProtocol::OpenaiChat,
         chat.url.clone(),
+        "facts-max-tokens",
+    )
+    .await;
+    assert_model_failure(
+        &error,
+        (Some(429), Some("max_tokens_exceeded")),
+        Some(ModelFailureOrigin::HttpResponse),
+        ModelFailureKind::InvalidRequest,
+        Some("request rejected"),
+        Some("request-max-tokens"),
+    );
+
+    let error = invoke_failure(
+        &host,
+        ModelProtocol::OpenaiChat,
+        chat.url.clone(),
         "facts-status-429-wait",
     )
     .await;
@@ -1940,7 +1956,7 @@ async fn a_malformed_stream_body_is_a_malformed_response() {
     assert!(
         error
             .to_string()
-            .starts_with("The provider sent a response Dim could not read"),
+            .starts_with("The provider sent a response Dim could not use"),
         "{error}"
     );
 
@@ -2078,6 +2094,23 @@ async fn respond_native(
                     "error": {
                         "code": "content_policy_violation",
                         "message": "fixture 400",
+                        "fixture": "raw-body-must-not-cross"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+    }
+    if request_text.contains("facts-max-tokens") {
+        return Response::builder()
+            .status(429)
+            .header("content-type", "application/json")
+            .header("x-request-id", "request-max-tokens")
+            .body(Body::from(
+                json!({
+                    "error": {
+                        "code": "max_tokens_exceeded",
+                        "message": "request rejected",
                         "fixture": "raw-body-must-not-cross"
                     }
                 })

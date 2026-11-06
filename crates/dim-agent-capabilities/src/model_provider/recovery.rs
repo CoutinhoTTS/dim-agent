@@ -191,9 +191,6 @@ impl RecoveryState {
 fn retryable(kind: ModelFailureKind) -> bool {
     matches!(
         kind,
-        ModelFailureKind::Network
-            | ModelFailureKind::Timeout
-            | ModelFailureKind::RateLimited
-            | ModelFailureKind::ServerError
+        ModelFailureKind::Network | ModelFailureKind::RateLimited | ModelFailureKind::ServerError
     )
 }

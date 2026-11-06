@@ -541,7 +541,6 @@ pub struct ToolUseData {
 #[serde(rename_all = "snake_case")]
 pub enum ModelFailureKind {
     Network,
-    Timeout,
     RateLimited,
     ServerError,
     MalformedResponse,
@@ -561,10 +560,9 @@ impl ModelFailureKind {
     pub const fn meaning(self) -> &'static str {
         match self {
             Self::Network => "Could not reach the provider, or the connection dropped",
-            Self::Timeout => "The provider did not respond in time",
             Self::RateLimited => "The provider is rate limiting requests",
             Self::ServerError => "The provider reported a server error",
-            Self::MalformedResponse => "The provider sent a response Dim could not read",
+            Self::MalformedResponse => "The provider sent a response Dim could not use",
             Self::AuthRejected => "The provider rejected the credentials",
             Self::QuotaExhausted => "The account has no quota left",
             Self::NotFound => "The provider did not find the model or endpoint",
@@ -581,10 +579,11 @@ impl ModelFailureKind {
     pub const fn action(self) -> &'static str {
         match self {
             Self::Network => "Check the network or proxy.",
-            Self::Timeout => "Check the network or proxy; try again later.",
             Self::RateLimited => "Wait and try again.",
             Self::ServerError => "Try again later or choose another model.",
-            Self::MalformedResponse => "If it repeats, check the proxy or gateway.",
+            Self::MalformedResponse => {
+                "Try again; if it repeats, choose another model or check the proxy or gateway."
+            }
             Self::AuthRejected => "Sign in again or check the API key.",
             Self::QuotaExhausted => "Check the plan or billing.",
             Self::NotFound => "Check the model and the provider's base URL.",
