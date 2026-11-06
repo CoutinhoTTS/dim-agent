@@ -755,6 +755,9 @@ pub struct ModelFailure {
         deserialize_with = "crate::optional_non_null"
     )]
     pub retry_after_ms: Option<u64>,
+    /// The failure policy forbids retrying this failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_forbidden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

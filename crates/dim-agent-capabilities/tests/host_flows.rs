@@ -622,6 +622,7 @@ impl RecoveryProbe {
                 attempts: 1,
                 waited: Duration::ZERO,
                 retry_after_stop: None,
+                retry_forbidden: false,
             })),
             presentation: None,
         }
@@ -1300,6 +1301,11 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                     _ => ModelFailureKind::AuthRejected,
                 };
                 assert_eq!(failure.kind, expected_kind, "mode {mode}");
+                assert_eq!(
+                    failure.retry_forbidden,
+                    matches!(mode, 13 | 15),
+                    "mode {mode}"
+                );
                 assert_eq!(usize::from(failure.attempts), expected_calls, "mode {mode}");
                 if matches!(mode, 7 | 8 | 16 | 19) {
                     assert!(failure.waited_ms > 0, "mode {mode}");

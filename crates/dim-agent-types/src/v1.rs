@@ -754,6 +754,21 @@ impl Serialize for KindRef<'_> {
                 },
             }
             .serialize(serializer)
+        } else if let crate::EventKind::ModelOutputEnd(data) = self.0 {
+            let mut value = serde_json::to_value(data).map_err(serde::ser::Error::custom)?;
+            // The frozen view predates the retry-policy fact and stays without it.
+            if let Some(failure) = value
+                .get_mut("failure")
+                .and_then(|failure| failure.as_object_mut())
+            {
+                failure.remove("retryForbidden");
+            }
+            Tagged {
+                event_type: "step",
+                name: "model-output-end",
+                data: value,
+            }
+            .serialize(serializer)
         } else if let crate::EventKind::BranchCreate(data) = self.0 {
             let crate::BranchSource::Tool {
                 turn_id,

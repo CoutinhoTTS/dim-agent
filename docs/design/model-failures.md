@@ -186,8 +186,9 @@ attempt or wait budget left, the request settles failed without a call. The
 continuation's terminal `failure` reports the chain totals, so the failed
 line's `Tried N times over M s` covers the whole chain. A request without the
 field gets a fresh budget; a normal request after a tool step is never part of
-a chain. A continuation settled by a reload reports the chain's committed
-totals, because the attempts it made before the reload are not facts.
+a chain. A chain-carrying request reports the chain's committed totals whenever
+it settles failed without invocation facts, including a reload, because the
+attempts it made outside the invocation are not facts.
 
 The 8 attempts and the 300 s are ModelProvider's public limits: a disposer
 reads them and declines a spent chain without reading ModelProvider's state. A

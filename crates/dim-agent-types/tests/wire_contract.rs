@@ -279,6 +279,69 @@ fn failure_chain_roundtrips_and_rejects_invalid_contracts() {
 }
 
 #[test]
+fn retry_forbidden_roundtrips_and_rejects_invalid_contracts() {
+    use std::sync::Arc;
+    let old = fixture("step/model-output-end", Some("failed"));
+    // An event written before the retry-policy fact still decodes and
+    // re-encodes without it.
+    let old_event: AgentEvent = serde_json::from_value(old.clone()).unwrap();
+    equal_json(&serde_json::to_value(old_event).unwrap(), &old);
+
+    let mut event = old;
+    event["data"]["failure"] = json!({
+        "kind": "server_error",
+        "status": 503,
+        "cause": [],
+        "attempts": 1,
+        "waitedMs": 0,
+        "retryForbidden": true
+    });
+    let decoded: AgentEvent = serde_json::from_value(event.clone()).unwrap();
+    equal_json(&serde_json::to_value(&decoded).unwrap(), &event);
+    let mut view = event.clone();
+    view["data"]["failure"]
+        .as_object_mut()
+        .unwrap()
+        .remove("retryForbidden");
+    let outbound = serde_json::to_value(
+        v1::SharedEvent::new(Arc::new(
+            serde_json::from_value::<AgentEvent>(event.clone()).unwrap(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    equal_json(&outbound, &view);
+
+    let mut allowed = fixture("step/model-output-end", Some("failed"));
+    allowed["data"]["failure"] = json!({
+        "kind": "server_error",
+        "attempts": 1,
+        "waitedMs": 0,
+        "retryForbidden": false
+    });
+    let decoded: AgentEvent = serde_json::from_value(allowed).unwrap();
+    let encoded = serde_json::to_value(&decoded).unwrap();
+    assert!(
+        encoded["data"]["failure"].get("retryForbidden").is_none(),
+        "{encoded}"
+    );
+
+    for forbidden in [json!("yes"), json!(1), json!(null)] {
+        let mut invalid = fixture("step/model-output-end", Some("failed"));
+        invalid["data"]["failure"] = json!({
+            "kind": "server_error",
+            "attempts": 1,
+            "waitedMs": 0,
+            "retryForbidden": forbidden
+        });
+        assert!(
+            serde_json::from_value::<AgentEvent>(invalid.clone()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn omitted_modes_and_safe_integer_limits_keep_the_contract() {
     let mut value = fixture("input/message", None);
     value["sequence"] = json!(JS_MAX_SAFE_INTEGER);
