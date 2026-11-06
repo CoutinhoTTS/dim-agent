@@ -195,8 +195,10 @@ type Sink = Box<dyn Fn(Value) + Send + Sync>;
 
 /// Why a connection-bound notification was not written (methods contract
 /// A.2). `Undeclared` is a name the provider generation did not declare,
-/// `Gone` a connection that has closed or a load that has unloaded, and
-/// `TooLarge` an encoded notification over the frame limit.
+/// `Gone` a connection that has closed or a generation or load that has
+/// unloaded, and `TooLarge` an encoded notification over the frame limit.
+/// An unloaded generation answers `Gone` for every name; while it is loaded,
+/// `Undeclared` is decided before the connection's state, in both bindings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotifyError {
     Undeclared,
@@ -247,6 +249,10 @@ pub struct Caller(Arc<CallerInner>);
 struct CallerInner {
     connection: Arc<dyn CallerConnection>,
     notifications: Arc<HashSet<String>>,
+    /// The serving generation's stopping signal: after it fires, a
+    /// notification is `Gone`, as it is for the foreign binding, whose
+    /// entries the same unload removes (A.2).
+    stopping: CancellationToken,
     /// The foreign binding's `callId` of the call that produced this caller;
     /// `None` for a native provider, which never records into [`Callers`].
     call: Option<String>,
@@ -262,15 +268,20 @@ impl Caller {
     pub(crate) fn call_id(&self) -> Option<&str> {
         self.0.call.as_deref()
     }
-    /// Sends a connection-bound notification. A name the provider generation
-    /// did not declare is `Undeclared` and nothing is written; a closed
-    /// connection is `Gone`; an encoded notification over the frame limit is
-    /// `TooLarge` and the connection stays open.
+    /// Sends a connection-bound notification. A generation that has unloaded
+    /// is `Gone` for every name; while it is loaded, a name it did not
+    /// declare is `Undeclared` and nothing is written, whatever the
+    /// connection's state; a closed connection is `Gone`; an encoded
+    /// notification over the frame limit is `TooLarge` and the connection
+    /// stays open.
     pub fn notify(
         &self,
         method: &str,
         params: serde_json::Map<String, Value>,
     ) -> Result<(), NotifyError> {
+        if self.0.stopping.is_cancelled() {
+            return Err(NotifyError::Gone);
+        }
         if !self.0.notifications.contains(method) {
             return Err(NotifyError::Undeclared);
         }
@@ -297,23 +308,34 @@ pub struct CallSite {
 }
 
 /// One row instance's calls on one connection: the connection's direct
-/// writer, the notification names the generations that served it declared,
-/// and the calls whose replies are not written yet.
+/// writer and the calls whose replies are not written yet.
 struct ConnectionEntry {
     connection: Arc<dyn CallerConnection>,
-    notifications: HashSet<String>,
     calls: HashMap<String, Weak<dyn CallerConnection>>,
+}
+
+/// The caller index under [`Callers`]' one lock.
+#[derive(Default)]
+struct CallerIndex {
+    /// Per row instance, the notification names its generation declared.
+    /// They outlive the connections that called it, so a name the provider
+    /// did not declare answers `Undeclared` rather than `Gone`.
+    declared: HashMap<InstanceId, HashSet<String>>,
+    /// Per row instance and connection id, the connection's direct writer
+    /// and its unfinished calls.
+    entries: HashMap<(InstanceId, String), ConnectionEntry>,
 }
 
 /// The calls a row of another language has in flight, by row instance and
 /// connection id (methods contract A.2, foreign `notify`): the process's only
 /// caller index. A native provider keeps its own [`Caller`] and records
 /// nothing here. Entries are removed when the connection closes, when the
-/// admitting Rpc load unloads and when the row's generation unloads. No write
+/// admitting Rpc load unloads and when the row's generation unloads; the
+/// instance's declared names are removed with its generation. No write
 /// happens under this index's lock: `notify` looks up and clones the target
 /// connection and lets go of the lock before it encodes or sends anything.
 #[derive(Default)]
-pub struct Callers(Mutex<HashMap<(InstanceId, String), ConnectionEntry>>);
+pub struct Callers(Mutex<CallerIndex>);
 
 /// One foreign call's record in [`Callers`]: its entry exists exactly while
 /// its sink holds frames, and [`finish`](Self::finish) removes it after the
@@ -334,8 +356,8 @@ impl CallRegistration {
             connection,
             call,
         } = self;
-        let mut entries = callers.0.lock().expect("caller index");
-        if let Some(entry) = entries.get_mut(&(instance, connection)) {
+        let mut index = callers.0.lock().expect("caller index");
+        if let Some(entry) = index.entries.get_mut(&(instance, connection)) {
             entry.calls.remove(&call);
         }
     }
@@ -355,16 +377,20 @@ impl Callers {
         notifications: &HashSet<String>,
     ) -> CallRegistration {
         let connection_id = connection.id().to_owned();
-        let mut entries = self.0.lock().expect("caller index");
-        let entry = entries
+        let mut index = self.0.lock().expect("caller index");
+        index
+            .declared
+            .entry(instance)
+            .or_default()
+            .extend(notifications.iter().cloned());
+        let entry = index
+            .entries
             .entry((instance, connection_id.clone()))
             .or_insert_with(|| ConnectionEntry {
                 connection: direct.clone(),
-                notifications: HashSet::new(),
                 calls: HashMap::new(),
             });
         entry.connection = direct;
-        entry.notifications.extend(notifications.iter().cloned());
         entry
             .calls
             .insert(call.to_owned(), Arc::downgrade(connection));
@@ -377,8 +403,9 @@ impl Callers {
     }
     /// Writes `method` for the call `call`: through that call while its reply
     /// is not written, and directly once it is or when the id is not in
-    /// flight. The generation must have received a call from `connection`
-    /// (`Gone`), and a name it did not declare is `Undeclared`.
+    /// flight. A name the generation did not declare is `Undeclared` before
+    /// the connection is looked at; a connection the generation received no
+    /// call from, or one that closed, is `Gone`.
     pub fn notify(
         &self,
         instance: InstanceId,
@@ -390,13 +417,16 @@ impl Callers {
         // Only look up and clone under the lock: encoding a large frame and
         // taking the sink's lock must not hold the process's index.
         let target = {
-            let entries = self.0.lock().expect("caller index");
-            let Some(entry) = entries.get(&(instance, connection.to_owned())) else {
+            let index = self.0.lock().expect("caller index");
+            let Some(declared) = index.declared.get(&instance) else {
                 return Err(NotifyError::Gone);
             };
-            if !entry.notifications.contains(method) {
+            if !declared.contains(method) {
                 return Err(NotifyError::Undeclared);
             }
+            let Some(entry) = index.entries.get(&(instance, connection.to_owned())) else {
+                return Err(NotifyError::Gone);
+            };
             match entry.calls.get(call).and_then(Weak::upgrade) {
                 Some(sink) => sink,
                 None => entry.connection.clone(),
@@ -411,33 +441,36 @@ impl Callers {
         instance: InstanceId,
         connection: &str,
     ) -> Result<BoxFuture<'static, ()>, NotifyError> {
-        let entries = self.0.lock().expect("caller index");
-        let entry = entries
+        let index = self.0.lock().expect("caller index");
+        let entry = index
+            .entries
             .get(&(instance, connection.to_owned()))
             .ok_or(NotifyError::Gone)?;
         Ok(entry.connection.closed())
     }
     /// The admitting Rpc load unloaded: no call it admitted can be named.
     pub fn clear(&self) {
-        self.0.lock().expect("caller index").clear();
+        *self.0.lock().expect("caller index") = CallerIndex::default();
     }
-    /// `connection` closed: every row's entries for it are gone.
+    /// `connection` closed: every generation's entries for it are gone. The
+    /// declared names stay until their generation unloads.
     pub fn close_connection(&self, connection: &str) {
         self.0
             .lock()
             .expect("caller index")
+            .entries
             .retain(|(_, id), _| id != connection);
     }
-    /// The row generation `instance` unloaded: its entries are gone.
+    /// The row generation `instance` unloaded: its entries and declared names
+    /// are gone.
     pub fn forget_instance(&self, instance: InstanceId) {
-        self.0
-            .lock()
-            .expect("caller index")
-            .retain(|(owner, _), _| *owner != instance);
+        let mut index = self.0.lock().expect("caller index");
+        index.declared.remove(&instance);
+        index.entries.retain(|(owner, _), _| *owner != instance);
     }
     #[cfg(test)]
     fn count(&self) -> usize {
-        self.0.lock().expect("caller index").len()
+        self.0.lock().expect("caller index").entries.len()
     }
 }
 
@@ -609,7 +642,9 @@ impl MethodProvider {
     /// the method declares it; the channel closes before the reply is handed
     /// over. `site` is the client connection the call arrived on: the handler
     /// receives its [`Caller`] bound to this generation's declared
-    /// notifications. A provider of another language also records the call
+    /// notifications; once this generation unloads, the caller answers
+    /// `Gone`, like the foreign binding's index entry. A provider of another
+    /// language also records the call
     /// under its `callId`, so a notification follows this call's reply until
     /// [`Accepted::registration`] ends it.
     pub fn accept(
@@ -639,6 +674,7 @@ impl MethodProvider {
             let caller = Caller(Arc::new(CallerInner {
                 connection: site.connection.clone(),
                 notifications: self.notifications.clone(),
+                stopping: self.stopping.clone(),
                 call: call.clone(),
             }));
             if let Some(call) = call {
@@ -1231,8 +1267,43 @@ mod tests {
         assert_eq!(callers.count(), 2);
         callers.close_connection("first");
         assert_eq!(callers.count(), 1);
+        // A closed connection answers a name the generation declared `Gone`,
+        // and an undeclared name `Undeclared`: the provider's error comes
+        // first in both bindings (A.2).
+        assert_eq!(
+            callers.notify(
+                first.instance(),
+                "first",
+                "call-1",
+                "notes.changed",
+                Default::default()
+            ),
+            Err(NotifyError::Gone)
+        );
+        assert_eq!(
+            callers.notify(
+                first.instance(),
+                "first",
+                "call-1",
+                "notes.other",
+                Default::default()
+            ),
+            Err(NotifyError::Undeclared)
+        );
         callers.forget_instance(second.instance());
         assert_eq!(callers.count(), 0);
+        // The generation that unloaded declared nothing any more: its names
+        // are `Gone`, as they are for a native caller after the same unload.
+        assert_eq!(
+            callers.notify(
+                second.instance(),
+                "second",
+                "call-2",
+                "notes.other",
+                Default::default()
+            ),
+            Err(NotifyError::Gone)
+        );
         first.shutdown().await.unwrap();
         second.shutdown().await.unwrap();
     }

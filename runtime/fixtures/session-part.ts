@@ -10,6 +10,15 @@ type Call = {
 type MethodCall = { callId: string; method: string; params: { sessionId: string }; origin?: { connectionId: string } }
 
 const channelClosed: string[] = []
+let lastChannelCall: { connectionId: string; callId: string } | undefined
+async function codeOf(request: () => Promise<unknown>): Promise<string | null> {
+  try {
+    await request()
+    return null
+  } catch (error) {
+    return (error as { code?: string }).code ?? null
+  }
+}
 
 export const part = definePlugin({
   name: 'SessionTypeScriptFixture',
@@ -88,7 +97,7 @@ export const part = definePlugin({
       ? [{ name: 'session.typescript.bad', mutating: false, interruption: 'report', progress: false, reply: 'direct' }]
       : config.badMethods
         ? [{ name: 'session.typescript.bad', mutating: false }]
-        : ['status', 'wait_fast', 'wait_tool', 'error', 'malformed', 'undefined', 'extra_value', 'extra_error', 'handed_off', 'report', 'drain', 'channel', 'channel_state', 'channel_after_b', 'channel_hold_after_b', 'channel_block', 'channel_release', 'channel_bad_request', 'channel_unknown'].map(name => ({
+        : ['status', 'wait_fast', 'wait_tool', 'error', 'malformed', 'undefined', 'extra_value', 'extra_error', 'handed_off', 'report', 'drain', 'channel', 'channel_state', 'channel_after_b', 'channel_hold_after_b', 'channel_block', 'channel_release', 'channel_bad_request', 'channel_unknown', 'channel_too_large', 'channel_after_reply', 'channel_notify_after_reply', 'channel_remember', 'channel_after_close_codes'].map(name => ({
           name: `${namespace}.${name}`, mutating: false,
           interruption: name === 'drain' ? 'drain' : 'report', progress: true,
           notifications: name === 'channel' ? [`${namespace}.changed`] : [],
@@ -159,6 +168,42 @@ export const part = definePlugin({
             } catch (error) {
               return { kind: 'value', value: { code: (error as { code?: string }).code ?? null } }
             }
+          }
+          if (call.method.endsWith('.channel_too_large')) {
+            const connectionId = call.origin?.connectionId
+            if (!connectionId) return { kind: 'value', value: { error: 'no origin' } }
+            try {
+              await callChannel.notify({ connectionId, callId: call.callId, method: `${namespace}.changed`, params: { text: 'x'.repeat(16 * 1024 * 1024) } })
+              return { kind: 'value', value: { code: null } }
+            } catch (error) {
+              const failure = error as { code?: string; message?: string }
+              return { kind: 'value', value: { code: failure.code ?? null, message: String(failure.message ?? error) } }
+            }
+          }
+          if (call.method.endsWith('.channel_after_reply')) {
+            const connectionId = call.origin?.connectionId
+            if (!connectionId) return { kind: 'value', value: { error: 'no origin' } }
+            lastChannelCall = { connectionId, callId: call.callId }
+            return { kind: 'value', value: { connectionId } }
+          }
+          if (call.method.endsWith('.channel_notify_after_reply')) {
+            if (!lastChannelCall) return { kind: 'value', value: { error: 'no replied call' } }
+            await callChannel.notify({ ...lastChannelCall, method: `${namespace}.changed`, params: { after: 'reply' } })
+            return { kind: 'value', value: {} }
+          }
+          if (call.method.endsWith('.channel_remember')) {
+            const connectionId = call.origin?.connectionId
+            if (!connectionId) return { kind: 'value', value: { error: 'no origin' } }
+            lastChannelCall = { connectionId, callId: call.callId }
+            void callChannel.closed({ connectionId }).then(() => { channelClosed.push(connectionId) })
+            return { kind: 'value', value: { connectionId } }
+          }
+          if (call.method.endsWith('.channel_after_close_codes')) {
+            if (!lastChannelCall) return { kind: 'value', value: { error: 'no remembered call' } }
+            return { kind: 'value', value: {
+              undeclared: await codeOf(() => callChannel.notify({ ...lastChannelCall!, method: `${namespace}.notdeclared`, params: {} })),
+              declared: await codeOf(() => callChannel.notify({ ...lastChannelCall!, method: `${namespace}.changed`, params: {} })),
+            } }
           }
           if (call.method.endsWith('.channel_state')) {
             return { kind: 'value', value: { closed: channelClosed.length } }

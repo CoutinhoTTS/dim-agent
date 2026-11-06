@@ -22,6 +22,8 @@ struct ChannelState {
     /// `channel.fill` finished: the first code the full allowance returned
     /// and the code of one more notification after it.
     filled: std::sync::Mutex<Option<(&'static str, &'static str)>>,
+    /// The Session provider generations mounted so far, the newest last.
+    views: std::sync::Mutex<Vec<rutis::host::FiberView>>,
 }
 impl ChannelState {
     fn caller(&self) -> Caller {
@@ -37,6 +39,17 @@ impl ChannelState {
             Err(error) => json!({"code": error.code()}),
         }
     }
+    /// Restarts the Session provider's generation of the newest Session.
+    async fn restart(&self) {
+        let view = self
+            .views
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a Session provider generation");
+        view.restart().await.unwrap();
+    }
 }
 
 /// A declaration with the notifications it declares; a notification belongs
@@ -50,7 +63,8 @@ fn notification(name: &str, notifications: &[&str]) -> MethodDecl {
 
 /// The handler both test providers serve: `stream` sends one notification
 /// inside the call and one from a task after it, `start` keeps the caller,
-/// and `attempt` sends through the kept one.
+/// `fill` holds more notifications than the connection's allowance, and
+/// `attempt` sends through the kept one.
 fn serve(call: MethodCall, state: Arc<ChannelState>) -> Result<Value, RpcError> {
     let caller = call
         .origin
@@ -75,7 +89,7 @@ fn serve(call: MethodCall, state: Arc<ChannelState>) -> Result<Value, RpcError> 
                 Err(error) => json!({"code": error.code()}),
             })
         }
-        "channel.start" => {
+        "channel.start" | "session.channel.start" => {
             *state.caller.lock().unwrap() = Some(caller.clone());
             if call.params["hold"] == true {
                 let closed = caller.closed();
@@ -87,7 +101,7 @@ fn serve(call: MethodCall, state: Arc<ChannelState>) -> Result<Value, RpcError> 
             }
             Ok(json!({}))
         }
-        "channel.fill" => {
+        "channel.fill" | "session.channel.fill" => {
             let count = call.params["count"].as_u64().unwrap_or(0) as usize;
             let mut first = "ok";
             for step in 0..count {
@@ -103,7 +117,7 @@ fn serve(call: MethodCall, state: Arc<ChannelState>) -> Result<Value, RpcError> 
             *state.filled.lock().unwrap() = Some((first, later));
             Ok(json!({}))
         }
-        "channel.attempt" => {
+        "channel.attempt" | "session.channel.attempt" => {
             let name = call.params["method"]
                 .as_str()
                 .unwrap_or_default()
@@ -163,9 +177,39 @@ impl DynPlugin for ChannelMethods {
     }
 }
 
+/// Mounts the Session namespace's provider as a child, so the test can
+/// reload its generation while the Session lives.
+struct ChannelSessionOwner {
+    methods: Key<SessionMethods>,
+    state: Arc<ChannelState>,
+}
+impl DynPlugin for ChannelSessionOwner {
+    fn name(&self) -> &str {
+        "channel-session-owner-fixture"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let methods = ctx.require_at(&self.methods)?;
+            let view = dim_agent_runtime::mount_active(
+                ctx,
+                ChannelSession {
+                    methods,
+                    state: self.state.clone(),
+                },
+            )
+            .await?;
+            self.state.views.lock().unwrap().push(view);
+            Ok(Effect::Done)
+        })
+    }
+}
+
 /// Serves the Session namespace `session.channel`.
 struct ChannelSession {
-    methods: Key<SessionMethods>,
+    methods: Arc<SessionMethods>,
     state: Arc<ChannelState>,
 }
 impl DynPlugin for ChannelSession {
@@ -173,18 +217,23 @@ impl DynPlugin for ChannelSession {
         "channel-session-fixture"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.methods.erase()]
+        Vec::new()
     }
     fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let state = self.state.clone();
-            ctx.require_at(&self.methods)?.register(
+            self.methods.register(
                 ctx,
                 "session.channel",
-                vec![notification(
-                    "session.channel.stream",
-                    &["session.channel.first", "session.channel.second"],
-                )],
+                vec![
+                    notification(
+                        "session.channel.stream",
+                        &["session.channel.first", "session.channel.second"],
+                    ),
+                    notification("session.channel.start", &[]),
+                    notification("session.channel.attempt", &[]),
+                    notification("session.channel.fill", &[]),
+                ],
                 Arc::new(move |call, _, _| {
                     let state = state.clone();
                     Box::pin(async move { serve(call, state) })
@@ -209,7 +258,7 @@ fn channel_plugin(
         builder.require_feature(Feature::new("ChannelSession").session(
             "ChannelSession",
             move |names| {
-                Ok(Box::new(ChannelSession {
+                Ok(Box::new(ChannelSessionOwner {
                     methods: names.key()?,
                     state: state.clone(),
                 }))
@@ -342,13 +391,21 @@ async fn an_oversized_notification_is_refused_and_the_connection_stays_open() {
 }
 
 /// A.2: a method a Session namespace serves gets the same caller and
-/// delivers the same way.
+/// delivers the same way, to the calling connection only: another client of
+/// the same Session receives nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_namespace_method_delivers_connection_bound_notifications() {
     let (server, mut client, state) = launch_channel().await;
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let session = created["result"]["sessionId"].as_str().unwrap();
+    let mut other = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &other
+            .rpc("session.attach", json!({"sessionId": session}))
+            .await,
+    );
+    other.notices.clear();
     let id = client
         .send("session.channel.stream", json!({"sessionId": session}))
         .await;
@@ -360,6 +417,19 @@ async fn a_session_namespace_method_delivers_connection_bound_notifications() {
     state.release.notify_one();
     let second = client.read("the later Session notification").await;
     assert_eq!(second["method"], "session.channel.second");
+    assert_ok(&other.rpc("daemon.ping", json!({})).await);
+    let leaked: Vec<_> = other
+        .notices
+        .iter()
+        .filter(|notice| {
+            notice["method"] == "session.channel.first"
+                || notice["method"] == "session.channel.second"
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "another client of the Session received the notifications: {leaked:?}"
+    );
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -401,6 +471,58 @@ async fn a_call_holding_past_the_allowance_closes_the_connection_as_a_slow_consu
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: a retained native caller answers `gone` once its provider generation
+/// unloads, as the foreign binding's index entry does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_caller_after_its_generation_unloads_answers_gone() {
+    let (server, mut client, state) = launch_channel().await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(
+        &client
+            .rpc("session.channel.start", json!({"sessionId": session}))
+            .await,
+    );
+    state.restart().await;
+    let reply = client
+        .rpc(
+            "session.channel.attempt",
+            json!({"sessionId": session, "method": "session.channel.first"}),
+        )
+        .await;
+    assert_eq!(reply["result"], json!({"code": "gone"}), "{reply}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: a closed connection does not hide a name the loaded generation did
+/// not declare: `undeclared` is decided before the connection's state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_connection_does_not_hide_an_undeclared_name() {
+    let (server, mut client, state) = launch_channel().await;
+    assert_ok(&client.rpc("channel.start", json!({"hold": true})).await);
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(10), state.closed.notified())
+        .await
+        .expect("the caller's closed did not resolve");
+    let mut other = Client::new_version(&server, false, 3).await;
+    let undeclared = other
+        .rpc("channel.attempt", json!({"method": "channel.undeclared"}))
+        .await;
+    assert_eq!(
+        undeclared["result"],
+        json!({"code": "undeclared"}),
+        "{undeclared}"
+    );
+    let declared = other
+        .rpc("channel.attempt", json!({"method": "channel.first"}))
+        .await;
+    assert_eq!(declared["result"], json!({"code": "gone"}), "{declared}");
     server.shutdown();
     server.join().await.unwrap();
 }
