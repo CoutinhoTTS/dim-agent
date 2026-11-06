@@ -170,7 +170,7 @@ enum Handles {
     /// A distinct handle per task, `handle-<task id>`.
     #[default]
     PerTask,
-    /// No handle: `wait` correlates by submission order.
+    /// No handle: the adapter keys its in-flight work by `task_id`.
     None,
 }
 
@@ -187,6 +187,10 @@ struct Behavior {
     progress: Vec<AdapterProgress>,
     /// When set, `wait` blocks until it fires.
     gate: Option<CancellationToken>,
+    /// The output file's bytes are the job's own task id.
+    named_output: bool,
+    /// Complete later submissions before earlier ones.
+    reverse_completion: bool,
     /// A path outside the work directory to return instead of writing.
     outside: Option<std::path::PathBuf>,
     remote_cancel: RemoteCancel,
@@ -205,6 +209,8 @@ impl Default for Behavior {
             data: None,
             progress: Vec::new(),
             gate: None,
+            named_output: false,
+            reverse_completion: false,
             outside: None,
             remote_cancel: RemoteCancel::Cancelled,
         }
@@ -222,8 +228,13 @@ struct FixtureAdapter {
     jobs: Mutex<HashMap<String, Job>>,
     /// Handle to task id.
     handles: Mutex<HashMap<String, String>>,
-    /// Task ids whose submission carried no handle, oldest first.
-    unhandled: Mutex<std::collections::VecDeque<String>>,
+    /// Task ids of no-handle submissions, in submission order.
+    order: Mutex<Vec<String>>,
+    /// Task ids whose `wait` finished, for `reverse_completion`.
+    finished: Mutex<std::collections::HashSet<String>>,
+    finished_notify: tokio::sync::Notify,
+    /// Every task id a `wait` was given.
+    wait_ids: Mutex<Vec<String>>,
     submits: AtomicUsize,
     waits: AtomicUsize,
     remote_cancels: AtomicUsize,
@@ -238,7 +249,10 @@ impl Default for FixtureAdapter {
             behavior: Mutex::new(Behavior::default()),
             jobs: Mutex::new(HashMap::new()),
             handles: Mutex::new(HashMap::new()),
-            unhandled: Mutex::new(std::collections::VecDeque::new()),
+            order: Mutex::new(Vec::new()),
+            finished: Mutex::new(std::collections::HashSet::new()),
+            finished_notify: tokio::sync::Notify::new(),
+            wait_ids: Mutex::new(Vec::new()),
             submits: AtomicUsize::new(0),
             waits: AtomicUsize::new(0),
             remote_cancels: AtomicUsize::new(0),
@@ -283,6 +297,9 @@ impl FixtureAdapter {
     }
     fn waits(&self) -> usize {
         self.waits.load(Ordering::SeqCst)
+    }
+    fn wait_ids(&self) -> Vec<String> {
+        self.wait_ids.lock().unwrap().clone()
     }
     fn remote_cancels(&self) -> usize {
         self.remote_cancels.load(Ordering::SeqCst)
@@ -350,7 +367,7 @@ impl ModalityAdapter for FixtureAdapter {
                     .unwrap()
                     .insert(handle.clone(), task_id.clone());
             }
-            None => self.unhandled.lock().unwrap().push_back(task_id.clone()),
+            None => self.order.lock().unwrap().push(task_id.clone()),
         }
         self.jobs.lock().unwrap().insert(task_id, job);
         Box::pin(async move {
@@ -361,24 +378,35 @@ impl ModalityAdapter for FixtureAdapter {
     }
     fn wait(
         &self,
+        task_id: &str,
         handle: Option<&str>,
         _connection: ModalityConnection,
         progress: ProgressSink,
         _cancel: CancellationToken,
     ) -> AdapterFuture<'_, AdapterOutput> {
         self.waits.fetch_add(1, Ordering::SeqCst);
+        self.wait_ids.lock().unwrap().push(task_id.to_owned());
         let behavior = self.behavior();
-        let task_id = match handle {
-            Some(handle) => self.handles.lock().unwrap().get(handle).cloned(),
-            None => self.unhandled.lock().unwrap().pop_front(),
-        };
-        let Some(job) = task_id.and_then(|task_id| self.job(&task_id)) else {
+        if let Some(handle) = handle {
+            let known = self.handles.lock().unwrap().get(handle).cloned();
+            if known.as_deref() != Some(task_id) {
+                return Box::pin(async {
+                    Err(AdapterError::provider_error(
+                        "the fixture was given a handle of another job",
+                    ))
+                });
+            }
+        }
+        let Some(job) = self.job(task_id) else {
             return Box::pin(async {
                 Err(AdapterError::provider_error(
                     "the fixture knows no such job",
                 ))
             });
         };
+        let task_id = task_id.to_owned();
+        let reverse = behavior.reverse_completion && handle.is_none();
+        let this = self;
         Box::pin(async move {
             for update in behavior.progress {
                 progress.send(update);
@@ -386,6 +414,28 @@ impl ModalityAdapter for FixtureAdapter {
             }
             if let Some(gate) = &behavior.gate {
                 gate.cancelled().await;
+            }
+            if reverse {
+                // Complete later submissions before earlier ones.
+                loop {
+                    let notified = this.finished_notify.notified();
+                    let blocked = {
+                        let order = this.order.lock().unwrap();
+                        let finished = this.finished.lock().unwrap();
+                        order
+                            .iter()
+                            .position(|id| id == &task_id)
+                            .is_some_and(|position| {
+                                order[position + 1..]
+                                    .iter()
+                                    .any(|id| !finished.contains(id))
+                            })
+                    };
+                    if !blocked {
+                        break;
+                    }
+                    notified.await;
+                }
             }
             if let Some(error) = behavior.wait_error {
                 return Err(error);
@@ -400,15 +450,31 @@ impl ModalityAdapter for FixtureAdapter {
                     data: None,
                 });
             }
-            let mut files = Vec::new();
-            for (name, media_type, bytes) in behavior.files {
-                let path = job.work_dir.join(&name);
-                std::fs::write(&path, &bytes).expect("fixture output");
-                files.push(JobFile {
+            let files = if behavior.named_output {
+                let name = "out.bin".to_owned();
+                let bytes = task_id.clone().into_bytes();
+                std::fs::write(job.work_dir.join(&name), &bytes).expect("fixture output");
+                vec![JobFile {
                     name,
-                    media_type,
-                    path,
-                });
+                    media_type: "image/png".into(),
+                    path: job.work_dir.join("out.bin"),
+                }]
+            } else {
+                let mut files = Vec::new();
+                for (name, media_type, bytes) in behavior.files {
+                    let path = job.work_dir.join(&name);
+                    std::fs::write(&path, &bytes).expect("fixture output");
+                    files.push(JobFile {
+                        name,
+                        media_type,
+                        path,
+                    });
+                }
+                files
+            };
+            if reverse {
+                this.finished.lock().unwrap().insert(task_id.clone());
+                this.finished_notify.notify_waiters();
             }
             Ok(AdapterOutput {
                 files,
@@ -2779,6 +2845,74 @@ async fn retention_keeps_the_newest_two_hundred_terminal_tasks() {
         state_of(&task_status(&mut client, &ids[0]).await),
         "succeeded"
     );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_unhandled_tasks_receive_their_own_results() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        handles: Handles::None,
+        gate: Some(gate.clone()),
+        named_output: true,
+        reverse_completion: true,
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-unhandled").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let first = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "first"}}),
+    )
+    .await;
+    let second = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "second"}}),
+    )
+    .await;
+    let first_id = first["task_id"].as_str().unwrap().to_owned();
+    let second_id = second["task_id"].as_str().unwrap().to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.submits() < 2 || fixture.waits() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both jobs must reach the adapter's wait"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The second job completes before the first, and each wait gets its own
+    // task id, so no submission-order pairing can produce the right results.
+    gate.cancel();
+    for task_id in [&first_id, &second_id] {
+        let record = wait_terminal(&mut client, task_id).await;
+        assert_eq!(state_of(&record), "succeeded", "{record}");
+        let file = record["result"]["files"][0].clone();
+        assert_eq!(file["bytes"], task_id.len());
+        assert_eq!(file["sha256"], sha256(task_id.as_bytes()));
+        let chunk = client
+            .rpc(
+                "modality.task.result",
+                json!({"task_id": task_id, "name": "out.bin", "offset": 0, "length": 100}),
+            )
+            .await;
+        assert_ok(&chunk);
+        assert_eq!(
+            STANDARD
+                .decode(chunk["result"]["data_base64"].as_str().unwrap())
+                .unwrap(),
+            task_id.as_bytes(),
+            "the result names the task that produced it"
+        );
+    }
+    let mut received = fixture.wait_ids();
+    received.sort();
+    let mut wanted = vec![first_id, second_id];
+    wanted.sort();
+    assert_eq!(received, wanted, "every wait received its own task id");
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

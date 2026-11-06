@@ -336,7 +336,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `connectionKinds` | 同步 | `{}` | `string[]`（所服务的 Provider 连接类型） |
 | `operations` | 同步 | `{ model: {providerId, modelId} }` | `[{ category, operation, params_schema }]` |
 | `submit` | 异步 | `{ job: Job, connection: ResolvedConnection }` | `{ remote_handle? }` |
-| `wait` | 异步 | `{ remote_handle?, connection }`；进度以该调用上的 `{ fraction?, message? }` 通知送达 | `{ files: [{ name, media_type, path }], data? }`；`path` 位于作业的工作目录内 |
+| `wait` | 异步 | `{ task_id, remote_handle?, connection }`；进度以该调用上的 `{ fraction?, message? }` 通知送达 | `{ files: [{ name, media_type, path }], data? }`；`path` 位于作业的工作目录内 |
 | `cancelRemote` | 异步 | `{ remote_handle, connection }` | `{ outcome: "cancelled" \| "unsupported" \| "already_finished" }` |
 | `realtimeOpen` | 异步 | `{ connection, params }`；提供方事件以该调用上的 `{ channel_id, event }` 通知送达，直到关闭 | `{ channel_id } \| null`（不支持） |
 | `realtimeSend` | 异步 | `{ channel_id, frame }` | `{}` |
@@ -344,7 +344,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 
 `Job` 为 `{ task_id, category, operation, model: {providerId, modelId}, params, files: [{ name, media_type, path }], work_dir }`。内联输入的 `path` 是 Modality 存放在 `modality/tasks/<task_id>/input/<name>` 的文件的绝对路径；通过 `node_path` 给出的输入保留调用方路径，Modality 只读取一次以取得 `bytes` 与 `sha256`，从不复制，执行方就地读取。`work_dir` 是任务的 `modality/tasks/<task_id>/work` 目录，调用前创建；每个结果文件解析为其中的普通文件。`ResolvedConnection` 是 Provider 非对话连接解析返回的数据形态（`kind`、`provider_id`、`model`、端点与凭据材料），每次调用传入，从不存储或记录日志。
 
-`available` 在不重载的情况下报告运行时可用性（例如提供方端点不可达）。若某个操作的可用适配器都不服务已配置或显式指定的模型，则报告为“no adapter for the configured model”，其提交以 `unavailable` 失败。`image.understand` 不是适配器操作：它由一个可选的视觉模型服务，且只做选择。OCR 不是适配器：对每个任务，Modality 使用目标节点的 HostPlatform（缺失或不可用：`node_unavailable`），探测 `modality` 设置文档为该节点给出的 OCR 组件路径，并在那里 spawn 它；离线的对端节点使调用以 `node_unavailable` 失败，且不发生任何重载（§3.2）。带已存储 `remote_handle` 的 `wait` 必须能在新一代中工作；不返回句柄的适配器无法恢复。
+`available` 在不重载的情况下报告运行时可用性（例如提供方端点不可达）。若某个操作的可用适配器都不服务已配置或显式指定的模型，则报告为“no adapter for the configured model”，其提交以 `unavailable` 失败。`image.understand` 不是适配器操作：它由一个可选的视觉模型服务，且只做选择。OCR 不是适配器：对每个任务，Modality 使用目标节点的 HostPlatform（缺失或不可用：`node_unavailable`），探测 `modality` 设置文档为该节点给出的 OCR 组件路径，并在那里 spawn 它；离线的对端节点使调用以 `node_unavailable` 失败，且不发生任何重载（§3.2）。`wait` 以 `task_id` 指名它等待的作业；当 `submit` 返回了 `remote_handle` 时，适配器可以改用它。带已存储 `remote_handle` 的 `wait` 必须能在新一代中工作；不返回句柄的适配器以 `task_id` 记录自己进行中的工作，且仅限同一代内，因此无法恢复。
 
 ### A.3 方法
 
@@ -569,8 +569,8 @@ pub trait ModalityAdapter: Send + Sync + 'static {
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
     fn submit(&self, job: Job, connection: ModalityConnection, cancel: CancellationToken)
         -> AdapterFuture<'_, Submitted>;
-    fn wait(&self, handle: Option<&str>, connection: ModalityConnection, progress: ProgressSink,
-        cancel: CancellationToken) -> AdapterFuture<'_, AdapterOutput>;
+    fn wait(&self, task_id: &str, handle: Option<&str>, connection: ModalityConnection,
+        progress: ProgressSink, cancel: CancellationToken) -> AdapterFuture<'_, AdapterOutput>;
     fn cancel_remote(&self, handle: &str, connection: ModalityConnection)
         -> AdapterFuture<'_, RemoteCancel>;
 }

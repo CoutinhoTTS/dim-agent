@@ -1604,7 +1604,7 @@ impl Shared {
             ProgressSink::new(move |progress| shared.report_progress(&slot, progress))
         };
         let output = tokio::select! {
-            output = adapter.0.wait(handle.as_deref(), connection, progress, slot.cancel.child_token()) => output,
+            output = adapter.0.wait(&record.task_id, handle.as_deref(), connection, progress, slot.cancel.child_token()) => output,
             _ = slot.cancel.cancelled() => return,
         };
         if slot.cancel_requested() {

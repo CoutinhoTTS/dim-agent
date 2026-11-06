@@ -195,6 +195,7 @@ pub trait ModalityAdapter: Send + Sync + 'static {
     /// generation.
     fn wait(
         &self,
+        task_id: &str,
         handle: Option<&str>,
         connection: ModalityConnection,
         progress: ProgressSink,

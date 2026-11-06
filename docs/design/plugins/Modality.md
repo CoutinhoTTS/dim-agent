@@ -336,7 +336,7 @@ Service `modalityAdapter`, scope process, key adapter name, declared in the adap
 | `connectionKinds` | sync | `{}` | `string[]` (Provider connection kinds served) |
 | `operations` | sync | `{ model: {providerId, modelId} }` | `[{ category, operation, params_schema }]` |
 | `submit` | async | `{ job: Job, connection: ResolvedConnection }` | `{ remote_handle? }` |
-| `wait` | async | `{ remote_handle?, connection }`; progress as `{ fraction?, message? }` notifications on the call | `{ files: [{ name, media_type, path }], data? }`; `path` inside the job's work directory |
+| `wait` | async | `{ task_id, remote_handle?, connection }`; progress as `{ fraction?, message? }` notifications on the call | `{ files: [{ name, media_type, path }], data? }`; `path` inside the job's work directory |
 | `cancelRemote` | async | `{ remote_handle, connection }` | `{ outcome: "cancelled" \| "unsupported" \| "already_finished" }` |
 | `realtimeOpen` | async | `{ connection, params }`; provider events as `{ channel_id, event }` notifications on the call until closed | `{ channel_id } \| null` (unsupported) |
 | `realtimeSend` | async | `{ channel_id, frame }` | `{}` |
@@ -344,7 +344,7 @@ Service `modalityAdapter`, scope process, key adapter name, declared in the adap
 
 `Job` is `{ task_id, category, operation, model: {providerId, modelId}, params, files: [{ name, media_type, path }], work_dir }`. An inline input's `path` is the absolute path of the file Modality stored at `modality/tasks/<task_id>/input/<name>`; an input supplied by `node_path` keeps that caller path, which Modality read once for `bytes` and `sha256` and never copies, and the executor reads it in place. `work_dir` is the task's `modality/tasks/<task_id>/work` directory, created before the call; every result file resolves to a regular file inside it. `ResolvedConnection` is the data shape Provider's non-conversational connection resolution returns (`kind`, `provider_id`, `model`, endpoint and credential material), passed per call and never stored or logged.
 
-`available` reports runtime availability without a reload (for example, a provider endpoint unreachable). An operation whose available adapters do not serve the configured or explicit model is reported as "no adapter for the configured model", and its submits fail `unavailable`. `image.understand` is not an adapter operation: it is served by a selectable vision model and is selection-only. OCR is not an adapter: per task, Modality uses the HostPlatform of the target node (absent or unavailable: `node_unavailable`), probes the OCR component path the `modality` settings document gives for that node, and spawns it there; an offline peer node fails the call with `node_unavailable` and nothing reloads (§3.2). `wait` with a stored `remote_handle` must work in a new generation; an adapter that returns no handle cannot be resumed.
+`available` reports runtime availability without a reload (for example, a provider endpoint unreachable). An operation whose available adapters do not serve the configured or explicit model is reported as "no adapter for the configured model", and its submits fail `unavailable`. `image.understand` is not an adapter operation: it is served by a selectable vision model and is selection-only. OCR is not an adapter: per task, Modality uses the HostPlatform of the target node (absent or unavailable: `node_unavailable`), probes the OCR component path the `modality` settings document gives for that node, and spawns it there; an offline peer node fails the call with `node_unavailable` and nothing reloads (§3.2). `wait` names its job by `task_id`; when `submit` returned a `remote_handle`, the adapter may use it instead. `wait` with a stored `remote_handle` must work in a new generation; an adapter that returns no handle keys its own in-flight work by `task_id`, and only within one generation, so it cannot be resumed.
 
 ### A.3 Methods
 
@@ -569,8 +569,8 @@ pub trait ModalityAdapter: Send + Sync + 'static {
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
     fn submit(&self, job: Job, connection: ModalityConnection, cancel: CancellationToken)
         -> AdapterFuture<'_, Submitted>;
-    fn wait(&self, handle: Option<&str>, connection: ModalityConnection, progress: ProgressSink,
-        cancel: CancellationToken) -> AdapterFuture<'_, AdapterOutput>;
+    fn wait(&self, task_id: &str, handle: Option<&str>, connection: ModalityConnection,
+        progress: ProgressSink, cancel: CancellationToken) -> AdapterFuture<'_, AdapterOutput>;
     fn cancel_remote(&self, handle: &str, connection: ModalityConnection)
         -> AdapterFuture<'_, RemoteCancel>;
 }
