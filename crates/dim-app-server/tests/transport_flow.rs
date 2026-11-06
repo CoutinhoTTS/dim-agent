@@ -30,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "transport_flow/approval.rs"]
 mod approval;
+#[path = "transport_flow/call_channel.rs"]
+mod call_channel;
 
 #[path = "transport_flow/tool_cleanup.rs"]
 mod tool_cleanup;

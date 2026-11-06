@@ -1410,6 +1410,14 @@ pub enum Outbound {
         #[serde(flatten)]
         notification: Notification,
     },
+    /// A notification a provider contributed through `callChannel.notify`
+    /// (methods contract A.2): its declared name, written to the calling
+    /// connection only.
+    Message {
+        jsonrpc: &'static str,
+        method: String,
+        params: serde_json::Map<String, Value>,
+    },
 }
 impl Outbound {
     pub fn result(id: RequestId, result: Result<Reply, RpcError>) -> Self {
@@ -1430,6 +1438,14 @@ impl Outbound {
         Self::Notice {
             jsonrpc: "2.0",
             notification,
+        }
+    }
+    /// A contributed notification, `{"jsonrpc":"2.0","method","params"}`.
+    pub fn message(method: String, params: serde_json::Map<String, Value>) -> Self {
+        Self::Message {
+            jsonrpc: "2.0",
+            method,
+            params,
         }
     }
 }

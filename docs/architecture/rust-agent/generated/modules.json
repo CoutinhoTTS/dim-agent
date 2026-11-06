@@ -2056,7 +2056,9 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/connection.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
+        "serde_json::json",
         "tokio::select",
         "tracing::error",
         "tracing::info",
@@ -18002,6 +18004,7 @@
       "from": "dim_app_server",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path dim_agent_capabilities::methods::Callers",
         "path dim_agent_capabilities::methods::ReservedMethods"
       ]
     },
@@ -18157,6 +18160,7 @@
         "path ConnectionHub",
         "path ConnectionPlugin::new",
         "path RpcPlugin::new",
+        "path connection::CallChannelPlugin::new",
         "use connection::ConnectionHub",
         "use connection::ConnectionPlugin",
         "use connection::RpcPlugin"
@@ -20456,6 +20460,14 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Accepted",
+        "path CallSite",
+        "path CallerConnection",
+        "path Callers",
+        "path Callers::default",
+        "path NotifyError",
+        "path NotifyError::Gone",
+        "path NotifyError::TooLarge",
+        "path NotifyError::Undeclared",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::closed",
@@ -20466,6 +20478,10 @@
         "path dim_agent_capabilities::methods::valid_name",
         "path params",
         "use dim_agent_capabilities::methods::Accepted",
+        "use dim_agent_capabilities::methods::CallSite",
+        "use dim_agent_capabilities::methods::CallerConnection",
+        "use dim_agent_capabilities::methods::Callers",
+        "use dim_agent_capabilities::methods::NotifyError",
         "use dim_agent_capabilities::methods::RpcError"
       ]
     },
@@ -20717,9 +20733,11 @@
       "to": "dim_app_server::outbound",
       "references": [
         "path Frame",
+        "path MAX_FRAME_BYTES",
         "path Sender",
         "path Sender::new",
         "use crate::outbound::Frame",
+        "use crate::outbound::MAX_FRAME_BYTES",
         "use crate::outbound::Sender"
       ]
     },
@@ -20785,6 +20803,8 @@
         "path ForkResult",
         "path ModelUpdateResult",
         "path Notification::Progress",
+        "path Outbound",
+        "path Outbound::message",
         "path Outbound::notice",
         "path Outbound::result",
         "path PermissionResult",
@@ -21068,7 +21088,8 @@
       "to": "dim_app_server::connection",
       "references": [
         "path Connection",
-        "path RpcService"
+        "path RpcService",
+        "path request"
       ]
     },
     {
@@ -21250,7 +21271,9 @@
       "to": "dim_app_server::connection",
       "references": [
         "path Connection",
-        "path RpcService"
+        "path RpcService",
+        "path failure",
+        "path request"
       ]
     },
     {

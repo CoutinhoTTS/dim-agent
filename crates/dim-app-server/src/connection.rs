@@ -2,12 +2,12 @@ use crate::{
     ServerConfig,
     agents::{AgentIndex, DeleteOutcome, SessionUse},
     control::ServerControl,
-    outbound::{Frame, Sender},
+    outbound::{Frame, MAX_FRAME_BYTES, Sender},
     protocol::*,
     skills_management::skills_error,
 };
 use dim_agent_capabilities::{
-    methods::{Accepted, RpcError},
+    methods::{Accepted, CallSite, CallerConnection, Callers, NotifyError, RpcError},
     permission::{Permission, PermissionState, PermissionUpdateError},
     skills::SkillsBranch,
     workspace_tools::background::{BackgroundExec, TaskError},
@@ -22,6 +22,11 @@ mod tree;
 mod ui_extensions;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
+use rutis_bridge::session::{
+    Error as BridgeError, HostDispatch, Reply as BridgeReply, Value as BridgeValue, caller_row,
+};
+use serde::de::DeserializeOwned;
+use serde_json::Map;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -88,6 +93,142 @@ impl Drop for Inflight {
             .remove(&self.id);
     }
 }
+
+/// The plain writer and close signal of one client connection (methods
+/// contract A.2): what a foreign notification whose call has finished uses.
+/// It holds the connection weakly, so a kept handle does not keep it alive.
+pub(crate) struct DirectConnection {
+    id: String,
+    connection: Weak<Connection>,
+    closed: CancellationToken,
+    unloading: CancellationToken,
+}
+impl DirectConnection {
+    fn new(connection: &Arc<Connection>, unloading: &CancellationToken) -> Arc<Self> {
+        Arc::new(Self {
+            id: connection.id.clone(),
+            connection: Arc::downgrade(connection),
+            closed: connection.closed.clone(),
+            unloading: unloading.clone(),
+        })
+    }
+    /// The encoded frame, after the connection and frame checks, without
+    /// writing it: a call's sink holds it until its reply.
+    fn frame(
+        &self,
+        method: &str,
+        params: serde_json::Map<String, Value>,
+    ) -> Result<Outbound, NotifyError> {
+        if self.connection.upgrade().is_none()
+            || self.closed.is_cancelled()
+            || self.unloading.is_cancelled()
+        {
+            return Err(NotifyError::Gone);
+        }
+        let frame = Outbound::message(method.to_owned(), params);
+        let encoded = serde_json::to_vec(&frame).map_err(|_| NotifyError::TooLarge)?;
+        if encoded.len() > MAX_FRAME_BYTES {
+            return Err(NotifyError::TooLarge);
+        }
+        Ok(frame)
+    }
+    fn write(&self, frame: Outbound) -> Result<(), NotifyError> {
+        let Some(connection) = self.connection.upgrade() else {
+            return Err(NotifyError::Gone);
+        };
+        connection
+            .sender
+            .send(frame, false)
+            .map_err(|()| NotifyError::Gone)?;
+        Ok(())
+    }
+}
+impl CallerConnection for DirectConnection {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Map<String, Value>,
+    ) -> Result<(), NotifyError> {
+        self.write(self.frame(method, params)?)
+    }
+    fn closed(&self) -> BoxFuture<'static, ()> {
+        let (closed, unloading) = (self.closed.clone(), self.unloading.clone());
+        Box::pin(async move {
+            tokio::select! {
+                _ = closed.cancelled() => {}
+                _ = unloading.cancelled() => {}
+            }
+        })
+    }
+}
+
+/// The calling connection of one admitted call (methods contract A.2):
+/// `callChannel.notify` and `closed` for the provider that serves it.
+///
+/// Every notification is written after the reply of the call that produced
+/// its `Caller`: one sent while the call runs waits here and goes out right
+/// after the reply, in order. It is a reliable frame, so a caller too slow to
+/// take it is disconnected like on any other reply, and a notification over
+/// the frame limit is refused before it reaches the sender.
+pub(crate) struct CallSink {
+    direct: Arc<DirectConnection>,
+    state: Mutex<CallState>,
+}
+enum CallState {
+    /// Frames sent before the reply was written, in order.
+    Held(Vec<Outbound>),
+    /// The reply is written; later frames go straight to the connection.
+    Released,
+}
+impl CallSink {
+    fn new(connection: &Arc<Connection>, unloading: &CancellationToken) -> Arc<Self> {
+        Arc::new(Self {
+            direct: DirectConnection::new(connection, unloading),
+            state: Mutex::new(CallState::Held(Vec::new())),
+        })
+    }
+    fn direct(&self) -> Arc<DirectConnection> {
+        self.direct.clone()
+    }
+    /// The reply is written: everything held follows it, in order. A
+    /// notification sent from here on is written directly.
+    fn release(&self) {
+        let mut state = self.state.lock().expect("held notifications");
+        if let CallState::Held(frames) = &mut *state {
+            for frame in frames.drain(..) {
+                let _ = self.direct.write(frame);
+            }
+        }
+        *state = CallState::Released;
+    }
+}
+impl CallerConnection for CallSink {
+    fn id(&self) -> &str {
+        self.direct.id()
+    }
+    fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Map<String, Value>,
+    ) -> Result<(), NotifyError> {
+        let frame = self.direct.frame(method, params)?;
+        let mut state = self.state.lock().expect("held notifications");
+        match &mut *state {
+            CallState::Held(frames) => frames.push(frame),
+            CallState::Released => {
+                drop(state);
+                self.direct.write(frame)?;
+            }
+        }
+        Ok(())
+    }
+    fn closed(&self) -> BoxFuture<'static, ()> {
+        self.direct.closed()
+    }
+}
 impl Connection {
     pub fn new(
         hub: Arc<ConnectionHub>,
@@ -139,6 +280,10 @@ impl Connection {
     }
     pub async fn finish(&self) {
         self.closed.cancel();
+        // The connection closed: no call of any row can name it again.
+        let _ = self
+            .hub
+            .with_rpc(|rpc| rpc.callers.close_connection(&self.id));
         if self.entry == Entry::Local {
             self.hub.web.release(&self.hub, &self.id).await;
         }
@@ -195,10 +340,19 @@ impl Connection {
                     }
                     let rpc = rpc.clone();
                     let progress = this.progress(&id, &method);
+                    let sink = CallSink::new(&this, &rpc.unloading);
+                    let site = CallSite {
+                        connection: sink.clone(),
+                        direct: sink.direct(),
+                        callers: rpc.callers.clone(),
+                    };
                     rpc.commands.clone().spawn(async move {
-                        match this.session_method(&rpc, method, params, progress).await {
+                        match this
+                            .session_method(&rpc, method, params, site, progress)
+                            .await
+                        {
                             Ok((accepted, usage)) => {
-                                this.answer(id, guard, accepted).await;
+                                this.answer(id, guard, accepted, sink).await;
                                 drop(usage);
                             }
                             Err(error) => {
@@ -219,16 +373,22 @@ impl Connection {
                     return Err(RpcError::reloading());
                 }
                 let progress = this.progress(&id, &method);
+                let sink = CallSink::new(&this, &rpc.unloading);
+                let site = CallSite {
+                    connection: sink.clone(),
+                    direct: sink.direct(),
+                    callers: rpc.callers.clone(),
+                };
                 let accepted = crate::methods::dispatch(
                     &rpc.management,
                     &rpc.loader,
                     method,
                     params,
-                    None,
+                    Some(site),
                     rpc.unloading.clone(),
                     progress,
                 )?;
-                rpc.commands.spawn(this.answer(id, guard, accepted));
+                rpc.commands.spawn(this.answer(id, guard, accepted, sink));
                 return Ok(());
             }
             let rpc = rpc.clone();
@@ -248,19 +408,36 @@ impl Connection {
             let _ = self.sender.send(Outbound::result(id, Err(error)), false);
         }
     }
-    /// Sends an admitted contributed call's reply on this connection. The id
-    /// is the client's again once answered. An interrupted operation may still
+    /// Sends an admitted contributed call's reply on this connection, then
+    /// releases the call's held notifications behind it. The id is the
+    /// client's again once answered. An interrupted operation may still
     /// commit: the calling load's unload waits for it, so the next load reads
     /// its outcome.
-    async fn answer(self: Arc<Self>, id: RequestId, guard: Inflight, accepted: Accepted) {
-        let result = accepted
-            .reply
+    async fn answer(
+        self: Arc<Self>,
+        id: RequestId,
+        guard: Inflight,
+        accepted: Accepted,
+        sink: Arc<CallSink>,
+    ) {
+        let Accepted {
+            reply,
+            settled,
+            registration,
+        } = accepted;
+        let result = reply
             .await
             .unwrap_or_else(|_| Err(RpcError::wire(-32603, "Method operation failed")))
             .map(Reply::Contributed);
         let _ = self.sender.send(Outbound::result(id, result), false);
+        sink.release();
+        // The reply is written: the foreign call no longer holds
+        // notifications, so its index entry ends here, not at handler return.
+        if let Some(registration) = registration {
+            registration.finish();
+        }
         drop(guard);
-        let _ = accepted.settled.await;
+        let _ = settled.await;
     }
     /// The progress sink of contributed call `id` (methods contract A.2):
     /// `management.progress {id, method, data}` on this connection only, best
@@ -292,6 +469,7 @@ impl Connection {
         rpc: &RpcService,
         method: String,
         params: Value,
+        site: CallSite,
         progress: impl Fn(Value) + Send + Sync + 'static,
     ) -> Result<(Accepted, SessionUse), RpcError> {
         let session_id = params
@@ -308,7 +486,8 @@ impl Connection {
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
         }
-        let accepted = provider.accept(method, params, None, rpc.unloading.clone(), progress)?;
+        let accepted =
+            provider.accept(method, params, Some(site), rpc.unloading.clone(), progress)?;
         Ok((accepted, usage))
     }
     /// The connection's entry decides what it may call before any method is
@@ -1940,6 +2119,9 @@ pub(crate) struct RpcService {
     pub stopping: CancellationToken,
     pub control: Arc<ServerControl>,
     pub config: Arc<ServerConfig>,
+    /// The callers the providers of this process recorded, by row instance
+    /// and connection id: what `callChannel` serves to other languages.
+    pub callers: Arc<Callers>,
     /// Session MCP follow/refresh availability, not a host management service.
     /// The actual owners are acquired from the Session and followed across reload.
     pub mcp: Option<()>,
@@ -1992,6 +2174,7 @@ pub(crate) struct RpcPlugin {
     control: Key<ServerControl>,
     loader: Key<rutis_loader::Loader>,
     management: Key<crate::methods::ManagementMethods>,
+    callers: Key<Callers>,
 }
 impl RpcPlugin {
     pub fn new(names: &Names<'_>, config: Arc<ServerConfig>, root: Ctx) -> rutis::Result<Self> {
@@ -2004,6 +2187,7 @@ impl RpcPlugin {
             control: names.key()?,
             loader: names.key()?,
             management: names.key()?,
+            callers: names.key()?,
         })
     }
 }
@@ -2019,6 +2203,7 @@ impl DynPlugin for RpcPlugin {
             self.control.erase(),
             self.loader.erase(),
             self.management.erase(),
+            self.callers.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -2028,6 +2213,7 @@ impl DynPlugin for RpcPlugin {
             let control = ctx.require_at(&self.control)?;
             let loader = ctx.require_at(&self.loader)?;
             let management = ctx.require_at(&self.management)?;
+            let callers = ctx.require_at(&self.callers)?;
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),
@@ -2036,6 +2222,7 @@ impl DynPlugin for RpcPlugin {
                 stopping: ctx.cancellation_token(),
                 control,
                 config: self.config.clone(),
+                callers,
                 mcp: self.config.local_execution().then_some(()),
                 commands: TaskTracker::new(),
                 unloading: CancellationToken::new(),
@@ -2055,6 +2242,9 @@ impl DynPlugin for RpcPlugin {
                 service.unloading.cancel();
                 service.commands.close();
                 service.commands.wait().await;
+                // This load admitted every call the index records; a new
+                // generation starts empty and records its own.
+                service.callers.clear();
                 Ok(())
             })?;
             handler.register(registered);
@@ -2070,4 +2260,140 @@ fn session_candidate(rpc: &RpcService, method: &str, params: &Value) -> bool {
     dim_agent_capabilities::methods::valid_name(method)
         && !rpc.management.holds(method)
         && params.get("sessionId").is_some()
+}
+
+/// The process row providing `callChannel` for parts of other languages
+/// (methods contract A.2) and the caller index Rpc records into. It depends
+/// on no other row, so a row that names `callChannel` does not reload when
+/// Rpc or the Agent index reloads.
+pub(crate) struct CallChannelPlugin {
+    callers: Key<Callers>,
+}
+impl CallChannelPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            callers: names.key()?,
+        })
+    }
+}
+impl DynPlugin for CallChannelPlugin {
+    fn name(&self) -> &str {
+        "CallChannel"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        Vec::new()
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let callers = Arc::new(Callers::default());
+            ctx.provide_at(
+                rutis_bridge::session::host_key("callChannel"),
+                Arc::new(ForeignCallChannel {
+                    callers: callers.clone(),
+                }),
+            )?;
+            ctx.provide_at(self.callers.clone(), callers)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The process service `callChannel` (methods contract A.2): the
+/// notifications a row sends to a connection that called one of its
+/// namespaces, and the wait for that connection to close. Its calls end in
+/// the same `Caller` a Rust provider sends through.
+pub(crate) struct ForeignCallChannel {
+    pub callers: Arc<Callers>,
+}
+impl HostDispatch for ForeignCallChannel {
+    fn methods(&self) -> Option<Value> {
+        Some(serde_json::json!({ "notify": "async", "closed": "async" }))
+    }
+    fn invoke(&self, method: &str, args: BridgeValue) -> BridgeReply {
+        // Read the caller inside `invoke`: a future returned here runs later
+        // and no longer sees it.
+        let row = caller_row().ok_or_else(|| {
+            BridgeError::Value(
+                "callChannel needs the calling row's context: only a row of a language runtime can call it"
+                    .into(),
+            )
+        })?;
+        let instance = row.instance();
+        match method {
+            "notify" => {
+                let NotifyRequest {
+                    connection_id,
+                    call_id,
+                    method,
+                    params,
+                } = request(args)?;
+                let callers = self.callers.clone();
+                Ok(BridgeValue::future(async move {
+                    callers
+                        .notify(instance, &connection_id, &call_id, &method, params)
+                        .map(|()| serde_json::json!({}).into())
+                        .map_err(|error| failure(&method, &connection_id, error))
+                }))
+            }
+            "closed" => {
+                let ClosedRequest { connection_id } = request(args)?;
+                let closed = self
+                    .callers
+                    .closed(instance, &connection_id)
+                    .map_err(|error| failure("closed", &connection_id, error))?;
+                Ok(BridgeValue::future(async move {
+                    closed.await;
+                    Ok(BridgeValue::Undefined)
+                }))
+            }
+            _ => Err(BridgeError::no_method(
+                "callChannel",
+                method,
+                vec!["notify", "closed"],
+            )),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NotifyRequest {
+    connection_id: String,
+    call_id: String,
+    method: String,
+    #[serde(default)]
+    params: Map<String, Value>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClosedRequest {
+    connection_id: String,
+}
+
+/// One request object; anything else is the caller's programming error.
+fn request<T: DeserializeOwned>(args: BridgeValue) -> Result<T, BridgeError> {
+    let invalid = |detail: String| {
+        BridgeError::Value(format!("expected one callChannel request object: {detail}"))
+    };
+    let Value::Array(args) = args.json()? else {
+        return Err(invalid("not an argument list".into()));
+    };
+    let [request] = <[Value; 1]>::try_from(args)
+        .map_err(|args| invalid(format!("{} arguments", args.len())))?;
+    serde_json::from_value(request).map_err(|error| invalid(error.to_string()))
+}
+
+/// The service error a caller reads, carrying the contract's code.
+fn failure(method: &str, connection: &str, error: NotifyError) -> BridgeError {
+    BridgeError::binding(
+        error.code(),
+        match error {
+            NotifyError::Undeclared => format!(
+                "notification {method} is not declared by a namespace the calling row registered"
+            ),
+            NotifyError::Gone => format!("connection {connection} is closed"),
+            NotifyError::TooLarge => format!("notification {method} exceeds the frame limit"),
+        },
+        None,
+    )
 }
