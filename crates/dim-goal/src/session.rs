@@ -2,7 +2,7 @@
 //! `session.goal.*` methods and the guide entry. It writes change inputs by
 //! branch id and never reads Goal's state.
 
-use crate::text::{self, GoalTexts, OBJECTIVE_LIMIT, SUMMARY_LIMIT};
+use crate::text::{self, OBJECTIVE_LIMIT, SUMMARY_LIMIT};
 use dim_agent_capabilities::{
     host::{HostFuture, ToolExecutionContext},
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, reply},
@@ -23,17 +23,15 @@ pub struct GoalSession {
     tools: Key<ToolRegistry>,
     methods: Key<SessionMethods>,
     guide: Key<GuideEntries>,
-    texts: Arc<GoalTexts>,
 }
 
 impl GoalSession {
-    pub fn new(names: &Names<'_>, texts: Arc<GoalTexts>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             tree: names.key()?,
             tools: names.key()?,
             methods: names.key()?,
             guide: names.key()?,
-            texts,
         })
     }
 }
@@ -81,10 +79,7 @@ impl DynPlugin for GoalSession {
                     handler: Arc::new(GoalUpdate { tree: tree.clone() }),
                 },
             )?;
-            let owner = Arc::new(Owner {
-                tree,
-                texts: self.texts.clone(),
-            });
+            let owner = Arc::new(Owner { tree });
             methods.register(
                 ctx,
                 "session.goal",
@@ -106,7 +101,6 @@ impl DynPlugin for GoalSession {
 
 struct Owner {
     tree: Arc<TreeCommands>,
-    texts: Arc<GoalTexts>,
 }
 
 impl Owner {
@@ -145,7 +139,7 @@ impl Owner {
                             ));
                         }
                     };
-                    text::set(&branch, &objective, &self.texts, judge)
+                    text::set(&branch, &objective, judge)
                 }
             }
             "pause" => text::pause(&branch),

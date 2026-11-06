@@ -5791,6 +5791,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "vec"
       ]
     },
@@ -40304,7 +40305,6 @@
       "to": "dim_goal::session",
       "references": [
         "mod session",
-        "path session",
         "path session::GoalSession::new"
       ]
     },
@@ -40416,10 +40416,12 @@
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
         "path EventKind::BranchEnded",
+        "path EventKind::BranchStart",
         "path EventKind::ExecEnded",
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::ModelStart",
+        "path EventKind::SessionForked",
         "path EventKind::StopInterrupt",
         "path EventKind::Text",
         "path EventKind::TurnEnd",
@@ -40429,6 +40431,7 @@
         "path TurnEndData",
         "path dim_agent_types::BranchCreateFailedData::Cancelled",
         "path dim_agent_types::BranchCreateFailedData::Failed",
+        "path dim_agent_types::InputMessageData",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind",
@@ -40492,20 +40495,27 @@
       "to": "dim_goal::text",
       "references": [
         "path GoalTexts",
+        "path Live",
+        "path Live::default",
         "path text",
         "path text::OBJECTIVE_KEY",
+        "path text::STATE_KEY",
         "path text::STATUS_KEY",
-        "path text::automatic_pause",
+        "path text::State",
+        "path text::State::Blocked",
+        "path text::State::Completed",
+        "path text::State::Paused",
         "path text::conclusion",
         "path text::continuation",
         "path text::evaluate_again",
-        "path text::evaluated",
         "path text::evaluated_continuation",
         "path text::evaluator_prompt",
         "path text::marker",
         "path text::start_clear",
+        "path text::state",
         "use crate::text",
-        "use crate::text::GoalTexts"
+        "use crate::text::GoalTexts",
+        "use crate::text::Live"
       ]
     },
     {
@@ -40564,15 +40574,24 @@
         "path Judge::of",
         "path Marker",
         "path OBJECTIVE_KEY",
-        "path STATUS_KEY",
+        "path STATE_KEY",
         "path text",
+        "path text::Live",
+        "path text::State",
+        "path text::State::Active",
+        "path text::State::Blocked",
+        "path text::State::Completed",
+        "path text::State::None",
+        "path text::State::Paused",
         "path text::body",
         "path text::marker",
+        "path text::state_parts",
         "path text::value",
         "use crate::text",
         "use crate::text::Judge",
         "use crate::text::Marker",
         "use crate::text::OBJECTIVE_KEY",
+        "use crate::text::STATE_KEY",
         "use crate::text::STATUS_KEY"
       ]
     },
@@ -40698,7 +40717,6 @@
       "from": "dim_goal::session",
       "to": "dim_goal::text",
       "references": [
-        "path GoalTexts",
         "path OBJECTIVE_LIMIT",
         "path SUMMARY_LIMIT",
         "path text::ENTRY",
@@ -40714,7 +40732,6 @@
         "path text::set",
         "path text::tool_schema",
         "use crate::text",
-        "use crate::text::GoalTexts",
         "use crate::text::OBJECTIVE_LIMIT",
         "use crate::text::SUMMARY_LIMIT"
       ]

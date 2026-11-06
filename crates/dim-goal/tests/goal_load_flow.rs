@@ -6,15 +6,19 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dim_agent_capabilities::history::{HistoryRenderer, context_messages, summary_message};
 use dim_agent_runtime::TimelineQueryDirection;
-use dim_agent_types::{BranchCreateAt, BranchCreateData, BranchSource, InputMode};
+use dim_agent_types::{
+    BranchCreateAt, BranchCreateData, BranchSource, ContextCompactionData, ContextCompactionResult,
+    InputMode,
+};
 use support::parts::*;
 use support::texts;
 
 /// One seeded evaluation: the set, the worker's completed request and the
 /// evaluator's creation, as the main branch wrote them.
 fn seed_evaluation(seed: &mut Seed, evaluator: &str) -> (u64, u64) {
-    let (objective, status) = texts::evaluator_set_blocks("main", "ship it");
+    let (objective, status) = texts::legacy_evaluator_set_blocks("main", "ship it");
     let set = seed.append(
         "main",
         message(
@@ -41,7 +45,7 @@ fn seed_evaluation(seed: &mut Seed, evaluator: &str) -> (u64, u64) {
         "main",
         message(
             vec![raw(
-                &texts::report("main", "completed", "all tests pass"),
+                &texts::legacy_report("main", "completed", "all tests pass"),
                 Some("goal:status"),
                 false,
             )],
@@ -91,7 +95,11 @@ fn pause(seed: &mut Seed) {
     seed.append(
         "main",
         message(
-            vec![raw(&texts::pause("main"), Some("goal:status"), false)],
+            vec![raw(
+                &texts::legacy_pause("main"),
+                Some("goal:status"),
+                false,
+            )],
             InputMode::Append,
         ),
     );
@@ -273,7 +281,7 @@ async fn e2_a_restored_evaluator_already_asked_writes_no_further_follow_up() {
 async fn pursuit_6_a_turn_end_already_in_the_restored_evaluator_history_reports_nothing() {
     let env = Env::start().await;
     let mut seed = env.seed_new("load-turn").await;
-    let (evaluation, _) = seed_evaluation(&mut seed, "eval");
+    let (_, _) = seed_evaluation(&mut seed, "eval");
     seed.append(
         "eval",
         dim_agent_types::EventKind::TurnStart(dim_agent_types::TurnStartData {
@@ -321,10 +329,17 @@ async fn pursuit_6_a_turn_end_already_in_the_restored_evaluator_history_reports_
         "completed",
         &[("r2", &["BLOCKED: a deploy key"])],
     );
-    let blocked = env.wait_for("main", r#"by="evaluator""#).await;
+    let blocked = env.wait_for("main", r#"status="blocked""#).await;
+    let conclusion = env
+        .writes("main")
+        .await
+        .iter()
+        .find(|block| block.marker.contains(r#"kind="report""#))
+        .expect("the evaluator's conclusion")
+        .sequence;
     assert_eq!(
         blocked.text,
-        texts::evaluated("main", "blocked", evaluation, "a deploy key")
+        texts::evaluated("main", "ship it", "blocked", "a deploy key", conclusion)
     );
     env.close().await;
 }
@@ -362,7 +377,7 @@ async fn pursuit_6_7_10_a_reload_creates_no_second_evaluator() {
         env.settled("main")
             .await
             .iter()
-            .all(|block| !block.text.contains(r#"by="evaluator""#)),
+            .all(|block| !block.text.contains(r#"status="completed""#)),
         "foreign or stale conclusions decide nothing"
     );
     env.close().await;
@@ -391,7 +406,7 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
     ];
     let env = Env::start_refusing().await;
     let mut seed = env.seed_new("load-kinds").await;
-    let (objective, status) = texts::set_blocks("main", "ship it");
+    let (objective, status) = texts::legacy_set_blocks("main", "ship it");
     let set = seed.append(
         "main",
         message(
@@ -477,26 +492,38 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
     let rebuilds: Vec<Read> = env
         .reads()
         .into_iter()
-        .filter(|read| read.include_publishing)
+        .filter(|read| read.include_publishing && read.kinds == expected)
         .collect();
     assert!(
         !rebuilds.is_empty(),
-        "the restore ran the rebuild and the store saw its read"
+        "the restore ran the full fold and the store saw its read"
     );
     for read in rebuilds {
         assert_eq!(
             read.branch, "main",
             "the rebuild reads the branch it folds: {read:?}"
         );
-        assert!(
-            !read.kinds.is_empty(),
-            "the rebuild names the kinds it folds: {read:?}"
-        );
-        assert_eq!(
-            read.kinds, expected,
-            "the rebuild reads exactly the fold's kinds: {read:?}"
-        );
     }
+    // The cheap path reads the inputs and the opening in one scan (D4).
+    let scan: Vec<String> = [
+        "input/message",
+        "input/deleted",
+        "branch/start",
+        "session/forked",
+    ]
+    .iter()
+    .map(|kind| (*kind).to_owned())
+    .collect();
+    let probes: Vec<Read> = env
+        .reads()
+        .into_iter()
+        .filter(|read| read.include_publishing && read.kinds == scan)
+        .collect();
+    assert!(
+        !probes.is_empty(),
+        "the rebuild probes for a goal before folding: {:?}",
+        env.reads()
+    );
     env.close().await;
 }
 
@@ -598,6 +625,415 @@ async fn e2_an_inherited_check_reads_its_ancestor_page_by_page() {
     assert_eq!(
         bounds, expected,
         "the pages walk the prefix downward without skipping: {scan:?}"
+    );
+    env.close().await;
+}
+
+/// D3: a change trigger the previous generation never answered is answered
+/// once at load, naming the trigger; the next load writes nothing more.
+#[tokio::test]
+async fn e2_a_load_answers_an_unanswered_change_once() {
+    let env = Env::start().await;
+    let mut seed = env.seed_new("load-unanswered").await;
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: None,
+            create_event: None,
+        }),
+    );
+    let set = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::set("main", "ship it"), None, false)],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::set_state("main", "ship it", set.sequence, false),
+                Some("goal:state"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    let pause = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::pause("main"), None, false)],
+            InputMode::Append,
+        ),
+    );
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-unanswered").await;
+    let record = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="state" status="paused" reason="user" after="{}""#,
+                pause.sequence
+            ),
+        )
+        .await;
+    assert_eq!(
+        record.text,
+        texts::paused("main", "ship it", "user", "", pause.sequence, false)
+    );
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="state""#))
+            .count(),
+        2,
+        "the answered change and the one answered at load: {writes:#?}"
+    );
+
+    env.close().await;
+
+    // A history whose newest record already answers the pause answers nothing
+    // when it loads.
+    let env = Env::start().await;
+    let mut seed = env.seed_new("load-answered").await;
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: None,
+            create_event: None,
+        }),
+    );
+    let set = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::set("main", "ship it"), None, false)],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::set_state("main", "ship it", set.sequence, false),
+                Some("goal:state"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    let pause = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::pause("main"), None, false)],
+            InputMode::Append,
+        ),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::paused("main", "ship it", "user", "", pause.sequence, false),
+                Some("goal:state"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    seed.finish().await;
+    let env = env.restore_seeded("load-answered").await;
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="state""#))
+            .count(),
+        2,
+        "a load repeats no answer: {writes:#?}"
+    );
+    env.close().await;
+}
+
+/// D5: an old two-key history reads by the old rules, is not backfilled at
+/// load, and its first answered change writes the state record.
+#[tokio::test]
+async fn e2_an_old_history_answers_its_first_change_with_a_state_record() {
+    let env = Env::start().await;
+    let mut seed = env.seed_new("load-old").await;
+    let (objective, status) = texts::legacy_set_blocks("main", "ship it");
+    let set = seed.append(
+        "main",
+        message(
+            vec![
+                raw(&objective, Some("goal:objective"), false),
+                raw(&status, Some("goal:status"), false),
+            ],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-old").await;
+    let before = env.settled("main").await;
+    assert_eq!(before.len(), 1, "no backfill at load: {before:#?}");
+    // The old keys still read: a turn end continues the goal.
+    let end = env.turn_ids("main", &[]);
+    let continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    assert_eq!(
+        continuation.text,
+        texts::continuation("main", 1, None, 0, end.sequence)
+    );
+
+    // The first change answered after the upgrade writes the record.
+    let pause = env
+        .goal("pause", serde_json::json!({}))
+        .await
+        .expect("pause writes")["sequence"]
+        .as_u64()
+        .expect("a sequence");
+    env.wait_for("main", r#"op="pause" reason="user""#).await;
+    let record = env
+        .wait_for(
+            "main",
+            &format!(r#"kind="state" status="paused" reason="user" after="{pause}""#),
+        )
+        .await;
+    assert_eq!(
+        record.text,
+        texts::paused("main", "ship it", "user", "", pause, false)
+    );
+    let input = env
+        .written_input("main", r#"kind="state" status="paused""#)
+        .await;
+    let dim_agent_types::InputBlock::Raw { key, .. } = &input.blocks[0];
+    assert_eq!(key.as_deref(), Some("goal:state"));
+    env.close().await;
+}
+
+/// R1: the first state record written on an old history retires the old keys
+/// in its own input, so the keyed baseline — what `session.keys` lists and a
+/// compaction copies — holds only the record, and the next request after a
+/// compaction carries the paused state and no old block.
+#[tokio::test]
+async fn e2_the_first_state_record_retires_the_old_keys() {
+    let env = Env::start().await;
+    let mut seed = env.seed_new("load-retire").await;
+    let (objective, status) = texts::legacy_set_blocks("main", "ship it");
+    let set = seed.append(
+        "main",
+        message(
+            vec![
+                raw(&objective, Some("goal:objective"), false),
+                raw(&status, Some("goal:status"), false),
+            ],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    seed.finish().await;
+    let env = env.restore_seeded("load-retire").await;
+
+    // The user pauses; the record that answers states the branch, and the old
+    // keys still live ride in the same input as retires.
+    let pause = env
+        .goal("pause", serde_json::json!({}))
+        .await
+        .expect("pause writes")["sequence"]
+        .as_u64()
+        .expect("a sequence");
+    let trigger = env.wait_for("main", r#"op="pause""#).await;
+    let record = env
+        .wait_for(
+            "main",
+            &format!(r#"kind="state" status="paused" reason="user" after="{pause}""#),
+        )
+        .await;
+    let input = env
+        .written_input("main", r#"kind="state" status="paused""#)
+        .await;
+    let keys: Vec<_> = input
+        .blocks
+        .iter()
+        .map(|block| {
+            let dim_agent_types::InputBlock::Raw { key, retire, .. } = block;
+            (key.as_deref(), *retire)
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            (Some("goal:state"), false),
+            (Some("goal:objective"), true),
+            (Some("goal:status"), true),
+        ],
+        "the record retires the old keys in its own input"
+    );
+
+    // A turn consumes the change and the record: the delivered keyed state
+    // from here on is what `session.keys` lists and a compaction copies.
+    let end = env.turn("main", &[&trigger, &record]);
+    let renderer = HistoryRenderer::default();
+    let timeline = env.timeline("main");
+    let (_, history) = renderer
+        .rendered_context(&timeline, timeline.sequence())
+        .await
+        .expect("the branch renders");
+    let baseline = history.last().expect("the record's entry").baseline.clone();
+    assert_eq!(
+        baseline
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>(),
+        ["goal:state"],
+        "no old key stays live: {baseline:#?}"
+    );
+    let stated = match &baseline[0].message.content {
+        dim_agent_types::MessageContent::Text(text) => text.clone(),
+        other => panic!("a state record is one text: {other:?}"),
+    };
+    assert!(
+        stated.contains(r#"kind="state" status="paused""#),
+        "{stated}"
+    );
+
+    // A compaction after the consume copies that baseline; the next request
+    // carries the paused record and no old block.
+    env.emit(
+        "main",
+        dim_agent_types::EventKind::ContextCompaction(ContextCompactionData {
+            turn_id: None,
+            request_id: None,
+            command: None,
+            start: None,
+            through: end.sequence,
+            outcome: ContextCompactionResult::Completed {
+                retain_from: end.id.clone(),
+                replacement: vec![summary_message("compacted")],
+                strategy: "test".into(),
+                diagnostics: Box::new(
+                    serde_json::from_value(serde_json::json!({
+                        "reason":"auto", "trigger":"threshold", "estimatedInputTokens":1,
+                        "entriesReplaced":1, "modelCallCount":1, "durationMs":1,
+                        "strategy":{"kind":"test"}
+                    }))
+                    .unwrap(),
+                ),
+                context_baseline: baseline.to_vec(),
+                replacement_parts: None,
+                pinned_inputs: None,
+                digest_entries: None,
+            },
+        }),
+    );
+    let (context, history) = renderer
+        .rendered_context(&timeline, timeline.sequence())
+        .await
+        .expect("the compacted branch renders");
+    let request = context_messages(&context, &history)
+        .iter()
+        .filter_map(|message| match &message.content {
+            dim_agent_types::MessageContent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        request.contains(r#"kind="state" status="paused""#),
+        "the paused state is carried: {request}"
+    );
+    assert!(
+        !request.contains(r#"kind="goal" op="set""#),
+        "no old objective block: {request}"
+    );
+    assert!(
+        !request.contains(r#"kind="status" status="active""#),
+        "no old status block: {request}"
+    );
+    env.close().await;
+}
+
+/// D4: a branch whose own segment carries no Goal block rebuilds without the
+/// full fold: the probes read the opening and the inputs, and none of the 13
+/// kinds is read.
+#[tokio::test]
+async fn e2_a_branch_without_a_goal_skips_the_full_fold() {
+    let env = Env::start_refusing().await;
+    let mut seed = env.seed_new("load-cheap").await;
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: None,
+            create_event: None,
+        }),
+    );
+    for index in 0..40 {
+        seed.append("main", user(&format!("note {index}"), InputMode::Queue));
+    }
+    seed.finish().await;
+
+    let before = env.reads().len();
+    let env = env.restore_seeded("load-cheap").await;
+    assert!(
+        env.settled("main").await.is_empty(),
+        "no goal, so nothing is written"
+    );
+    const KEYS: [&str; 13] = [
+        "branch/start",
+        "session/forked",
+        "branch/create",
+        "branch/create-failed",
+        "branch/ended",
+        "input/message",
+        "input/consumed",
+        "input/deleted",
+        "turn/start",
+        "turn/end",
+        "stop/interrupt",
+        "exec/started",
+        "exec/ended",
+    ];
+    let expected: Vec<String> = KEYS.iter().map(|kind| (*kind).to_owned()).collect();
+    let reads = env.reads();
+    let reads = &reads[before..];
+    let full: Vec<&Read> = reads
+        .iter()
+        .filter(|read| read.include_publishing && read.kinds == expected)
+        .collect();
+    assert!(full.is_empty(), "the full fold never runs: {full:?}");
+    // The cheap path reads the inputs and the opening in one scan (D4).
+    let scan: Vec<String> = [
+        "input/message",
+        "input/deleted",
+        "branch/start",
+        "session/forked",
+    ]
+    .iter()
+    .map(|kind| (*kind).to_owned())
+    .collect();
+    let probes: Vec<&Read> = reads
+        .iter()
+        .filter(|read| read.include_publishing && read.kinds == scan)
+        .collect();
+    assert!(
+        !probes.is_empty(),
+        "the rebuild probes for a goal: {reads:?}"
+    );
+    assert!(
+        probes.iter().all(|read| read.branch == "main"),
+        "the probes read the branch itself: {probes:?}"
     );
     env.close().await;
 }

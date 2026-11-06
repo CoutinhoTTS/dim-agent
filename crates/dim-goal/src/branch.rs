@@ -4,7 +4,7 @@
 //! role instead (Pursuit §4.2).
 
 use crate::fold::{self, Conclusion, ConclusionAction, Decision, Fold, TurnEnd};
-use crate::text::{self, GoalTexts};
+use crate::text::{self, GoalTexts, Live};
 use dim_agent_capabilities::timeline_tree::TreeCommands;
 use dim_agent_runtime::{
     AgentError, BoxFuture, BranchLifecycle, BranchOptions, Dispatcher, Names, SessionLifecycle,
@@ -50,6 +50,21 @@ const KEYS: &[&str] = &[
 const INHERITED_PAGE: u64 = 64;
 /// Facts one page of the reply read keeps.
 const REPLY_PAGE: u64 = 256;
+/// Inputs one page of the new-goal scan keeps (D4).
+const SCAN_PAGE: u64 = 256;
+
+/// One cheap rebuild's scan (D4): the newest Goal block on the branch's own
+/// segment, or the opening the scan reached without finding one.
+struct SegmentScan {
+    /// The newest local Goal block: its sequence and whether it is a retired
+    /// state record.
+    newest: Option<(u64, bool)>,
+    /// The segment's opening: its sequence and whether it is a fork. Absent
+    /// when a Goal block stopped the scan above it.
+    opening: Option<(u64, bool)>,
+    /// The read's cutoff.
+    through: u64,
+}
 
 /// The Settings document Goal declares.
 #[derive(Deserialize)]
@@ -131,6 +146,7 @@ impl DynPlugin for GoalBranch {
                 tasks: TaskTracker::new(),
                 resolved,
                 state: Mutex::new(State::default()),
+                write: tokio::sync::Mutex::new(()),
             });
             let cleanup = owner.clone();
             ctx.effect(move || async move {
@@ -223,11 +239,9 @@ struct State {
     in_flight: HashSet<String>,
     /// What a key asked for while its work was running waits for.
     retry: HashMap<String, Retry>,
-    /// The evaluation whose `continue` conclusion Goal has answered with a
-    /// write the fold has not consumed yet. A retry that runs before that
-    /// input is folded must not answer the same evaluation again. A newer
-    /// turn end or an operator input clears it.
-    answered: Option<u64>,
+    /// The `after` values of the state records Goal has written: a second pass
+    /// that runs before the fold consumes a write must not state it again.
+    written: std::collections::BTreeSet<u64>,
 }
 
 struct Owner {
@@ -243,6 +257,10 @@ struct Owner {
     /// Set once the branch's identity is read; every decision waits for it.
     resolved: watch::Sender<bool>,
     state: Mutex<State>,
+    /// Serializes state records: each is composed from the fold as it stands
+    /// when the lock is taken and commits before the next one is composed, so
+    /// the newest record is the one that states the newest state (D3).
+    write: tokio::sync::Mutex<()>,
 }
 
 impl Owner {
@@ -329,8 +347,29 @@ impl Owner {
     /// Folds this branch's facts through the cutoff of one read, unpublished
     /// tail included, and releases only what lies above it (A.6). The read
     /// selects `KEYS`, the kinds the fold consumes, never the whole branch
-    /// (ADR 020 D3).
+    /// (ADR 020 D3). A branch with no goal of its own takes the cheap path
+    /// first (D4): no goal, no 13-kind fold.
     async fn rebuild(self: &Arc<Self>) -> Result<u64, AgentError> {
+        // An evaluator line needs its turn history (`turn_ends` tells its
+        // first turn from a later one) and its own segment may carry no Goal
+        // block, because its prompt lives in the `branch/create` that opened
+        // it. Its identity is tree metadata, so it is read before the cheap
+        // path; an unreadable identity folds, the safe side.
+        let evaluator = match self.tree.info(self.branch_id.clone()) {
+            Ok(info) => matches!(
+                &info.source,
+                Some(BranchSource::Host { operation_id })
+                    if fold::evaluation_of_operation(operation_id).is_some()
+            ),
+            Err(_) => true,
+        };
+        if !evaluator && let Some(through) = self.rebuild_without_goal().await? {
+            let start = self.state.lock().unwrap().start;
+            if let Some(start) = start {
+                self.decide_start(start);
+            }
+            return Ok(through);
+        }
         let reply = rebuild_facts(&self.timeline, KEYS).await?;
         for event in &reply.events {
             self.ingest(event, false);
@@ -357,13 +396,178 @@ impl Owner {
         if let Some(start) = start {
             self.decide_start(start);
         }
+        self.answer_change();
         Ok(through)
+    }
+
+    /// The cheap rebuild (D4): when the branch's own segment has no Goal block,
+    /// or its newest one is a retired state record, the branch has no goal.
+    /// Returns the cutoff live delivery continues from, or `None` when the
+    /// full fold is owed.
+    ///
+    /// Nothing else Goal decides reads a fact that could exist here: every
+    /// decision begins with `Fold::running`, which is false without an
+    /// objective, and the settle pass needs an evaluation it cannot know
+    /// without one. A fork still reads its copied prefix once, for the one
+    /// thing the opening needs: which keys it left live (D5).
+    async fn rebuild_without_goal(self: &Arc<Self>) -> Result<Option<u64>, AgentError> {
+        let Some(scan) = self.newest_goal_block().await? else {
+            return Ok(None);
+        };
+        if scan.newest.is_some_and(|(_, retired)| !retired) {
+            return Ok(None);
+        }
+        // Only a branch with no local Goal block can owe the start clear, so
+        // the copied prefix is read only then. That is also the only case that
+        // reaches the opening: a scan that finds a Goal block stops above it.
+        let copied_live = match scan.opening {
+            Some((opening, true)) if scan.newest.is_none() => {
+                Some(self.copied_keys(opening).await?)
+            }
+            _ => None,
+        };
+        let mut state = self.state.lock().unwrap();
+        if let Some((opening, _)) = scan.opening {
+            state.start = Some(opening);
+        }
+        state
+            .fold
+            .start_without_goal(copied_live, scan.newest.map(|(sequence, _)| sequence));
+        Ok(Some(scan.through))
+    }
+
+    /// The newest Goal block on this branch's own segment and, when it holds
+    /// none, the segment's opening (D4): one descending scan of the inputs from
+    /// the committed head down to the opening, skipping inputs `input/deleted`
+    /// removed. The scan stops at the newest Goal block or at the opening,
+    /// whichever it meets first; a segment that holds no opening owes the full
+    /// fold, and returns `None`.
+    async fn newest_goal_block(&self) -> Result<Option<SegmentScan>, AgentError> {
+        let mut deleted = HashSet::new();
+        let mut from = None;
+        let mut through;
+        loop {
+            let mut query = read_page(TimelineQueryScope::Branch, from, SCAN_PAGE, true);
+            query.kinds = vec![
+                "input/message".into(),
+                "input/deleted".into(),
+                "branch/start".into(),
+                "session/forked".into(),
+            ];
+            query.direction = TimelineQueryDirection::Descending;
+            let reply = self.timeline.query(query).await?;
+            through = reply.through;
+            for event in &reply.events {
+                match &event.kind {
+                    EventKind::InputDeleted(data) => {
+                        deleted.insert(data.input_id.clone());
+                    }
+                    EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
+                        if let Some(retired) = goal_record(data) {
+                            return Ok(Some(SegmentScan {
+                                newest: Some((event.sequence, retired)),
+                                opening: None,
+                                through,
+                            }));
+                        }
+                    }
+                    EventKind::BranchStart(_) | EventKind::SessionForked(_) => {
+                        return Ok(Some(SegmentScan {
+                            newest: None,
+                            opening: Some((
+                                event.sequence,
+                                matches!(event.kind, EventKind::SessionForked(_)),
+                            )),
+                            through,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+            let Some(last) = reply.events.last().map(|event| event.sequence) else {
+                return Ok(None);
+            };
+            if (reply.events.len() as u64) < SCAN_PAGE || last <= 1 {
+                return Ok(None);
+            }
+            from = Some(last - 1);
+        }
+    }
+
+    /// Which Goal keys a fork's copied prefix left live (D5): one descending
+    /// scan below the opening, the newest block of each key deciding.
+    async fn copied_keys(&self, opening: u64) -> Result<Live, AgentError> {
+        let mut live = Live::default();
+        let mut found = (false, false, false);
+        let mut deleted = HashSet::new();
+        let mut from = opening.checked_sub(1).filter(|from| *from > 0);
+        while let Some(start) = from {
+            let mut query = read_page(TimelineQueryScope::Branch, Some(start), SCAN_PAGE, true);
+            query.kinds = vec!["input/message".into(), "input/deleted".into()];
+            query.direction = TimelineQueryDirection::Descending;
+            let reply = self.timeline.query(query).await?;
+            for event in &reply.events {
+                match &event.kind {
+                    EventKind::InputDeleted(data) => {
+                        deleted.insert(data.input_id.clone());
+                    }
+                    EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
+                        for block in data.blocks.iter().rev() {
+                            let InputBlock::Raw {
+                                text: raw,
+                                key,
+                                retire,
+                            } = block;
+                            if text::marker(raw).is_none() {
+                                continue;
+                            }
+                            let slot = match key.as_deref() {
+                                Some(text::STATE_KEY) => &mut found.0,
+                                Some(text::OBJECTIVE_KEY) => &mut found.1,
+                                Some(text::STATUS_KEY) => &mut found.2,
+                                _ => continue,
+                            };
+                            if *slot {
+                                continue;
+                            }
+                            *slot = true;
+                            match key.as_deref() {
+                                Some(text::STATE_KEY) => live.state = !retire,
+                                Some(text::OBJECTIVE_KEY) => live.objective = !retire,
+                                _ => live.status = !retire,
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(last) = reply.events.last().map(|event| event.sequence) else {
+                break;
+            };
+            if found == (true, true, true) || (reply.events.len() as u64) < SCAN_PAGE || last <= 1 {
+                break;
+            }
+            from = Some(last - 1);
+        }
+        Ok(live)
     }
 
     /// Folds one consumed local event and takes the decisions it carries. The
     /// rebuild's facts take decisions only through its closing steps.
     fn ingest(self: &Arc<Self>, event: &AgentEvent, live: bool) {
         let turn_start = self.state.lock().unwrap().fold.turn_start;
+        // A held change input Goal already answered leaves a record stating a
+        // state the branch no longer has when InputQueue deletes it; the
+        // deletion is stated again after the fold drops the input (D3).
+        let answered_change = match &event.kind {
+            EventKind::InputDeleted(data) => self
+                .state
+                .lock()
+                .unwrap()
+                .fold
+                .answered_change(&data.input_id),
+            _ => false,
+        };
         self.state.lock().unwrap().fold.apply(event);
         let sequence = event.sequence;
         if fold::is_opening(&event.kind) {
@@ -384,7 +588,7 @@ impl Owner {
                 };
                 let evaluation = self.state.lock().unwrap().fold.evaluation_of(branch);
                 if let Some(evaluation) = evaluation {
-                    self.evaluation_failed(evaluation);
+                    self.evaluation_failed(evaluation, sequence);
                 }
             }
             EventKind::BranchCreate(_) => self.settle(),
@@ -396,33 +600,29 @@ impl Owner {
                         && !state.fold.conclusions.contains_key(&evaluation)
                     {
                         drop(state);
-                        self.evaluation_failed(evaluation);
+                        self.evaluation_failed(evaluation, sequence);
                     }
                 }
             }
-            EventKind::TurnEnd(data) => {
-                self.state.lock().unwrap().answered = None;
-                self.turn_decision(sequence, turn_start, data.clone())
-            }
+            EventKind::TurnEnd(data) => self.turn_decision(sequence, turn_start, data.clone()),
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn => {
                 self.interrupted(sequence)
             }
             EventKind::InputMessage(data) => {
-                let operator = data.user.is_some()
-                    && !data.blocks.first().is_some_and(|block| match block {
-                        InputBlock::Raw { text, .. } => text.starts_with("<dim-"),
-                    });
-                if operator {
-                    self.state.lock().unwrap().answered = None;
-                }
                 if let Some(conclusion) = data.blocks.first().and_then(|block| match block {
                     InputBlock::Raw { text, .. } => fold::conclusion_of(text),
                 }) {
                     self.conclude(sequence, conclusion);
                 }
+                self.answer_change();
                 self.settle();
             }
-            EventKind::InputDeleted(_) => self.decide_end(),
+            EventKind::InputDeleted(_) => {
+                self.decide_end();
+                if answered_change {
+                    self.answer_deletion(sequence);
+                }
+            }
             // A cancelled background end does not wake (BackgroundExec's
             // `wakes`); when it closes the last open task of an idle branch,
             // the deferred conclusion or turn end decides now. Other statuses
@@ -476,27 +676,31 @@ impl Owner {
             return;
         }
         if let Some(live) = copied {
-            if live {
-                self.started_clear(at);
+            if live.any() {
+                self.started_clear(at, live);
             }
             return;
         }
         self.task(format!("start:{at}"), None, move |owner| {
             Box::pin(async move {
-                if owner.inherited_live().await? {
-                    owner.started_clear(at);
+                let live = owner.inherited_keys().await?;
+                if live.any() {
+                    owner.started_clear(at, live);
                 }
                 Ok(())
             })
         });
     }
 
-    fn started_clear(self: &Arc<Self>, at: u64) {
+    fn started_clear(self: &Arc<Self>, at: u64, live: Live) {
         self.task(format!("clear:{at}"), None, move |owner| {
             Box::pin(async move {
+                let _write = owner.write.lock().await;
                 let write = {
                     let state = owner.state.lock().unwrap();
-                    !state.fold.is_decided(at) && state.fold.local_blocks == 0
+                    !state.fold.is_decided(at)
+                        && state.fold.local_blocks == 0
+                        && state.fold.last_change == 0
                 };
                 if !write {
                     return Ok(());
@@ -505,7 +709,7 @@ impl Owner {
                     .tree
                     .input(
                         owner.branch_id.clone(),
-                        text::start_clear(&owner.branch_id, at),
+                        text::start_clear(&owner.branch_id, at, live),
                     )
                     .await?;
                 Ok(())
@@ -516,21 +720,85 @@ impl Owner {
     fn interrupted(self: &Arc<Self>, at: u64) {
         self.task(format!("interrupt:{at}"), None, move |owner| {
             Box::pin(async move {
-                let decision = {
+                let reason = {
                     let state = owner.state.lock().unwrap();
-                    fold::decide_interrupt(&state.fold, at)
+                    match fold::decide_interrupt(&state.fold, at) {
+                        Some(Decision::Pause { reason }) => reason,
+                        _ => return Ok(()),
+                    }
                 };
-                if let Some(Decision::Pause { reason }) = decision {
-                    owner
-                        .tree
-                        .input(
-                            owner.branch_id.clone(),
-                            text::automatic_pause(&owner.branch_id, reason, at),
-                        )
-                        .await?;
-                }
-                Ok(())
+                owner
+                    .record(at, Some(text::State::Paused(reason.to_owned())), false)
+                    .await
             })
+        });
+    }
+
+    /// Writes one state record for `after` (D2, D3): the state the fold states
+    /// now, or `state` when the write decides a new status (a pause, a
+    /// completion, a failure). Serialized with every other record, and skipped
+    /// when a newer change trigger asked for another state, so the newest
+    /// record always states the newest state. The old keys the fold still
+    /// holds live are retired in the same input (R1). `answer` marks the write
+    /// as the answer to the newest pending change: it is skipped when another
+    /// record already answered that change, as a deletion does.
+    async fn record(
+        self: &Arc<Self>,
+        after: u64,
+        state: Option<text::State>,
+        answer: bool,
+    ) -> Result<(), AgentError> {
+        let _write = self.write.lock().await;
+        let (objective, state, judge, live) = {
+            let mut lock = self.state.lock().unwrap();
+            if answer && lock.fold.pending_change() != Some(after) {
+                return Ok(());
+            }
+            if lock.fold.last_change > after || !lock.written.insert(after) {
+                return Ok(());
+            }
+            let fold = &lock.fold;
+            (
+                fold.objective.clone(),
+                state.clone().unwrap_or_else(|| fold.state.clone()),
+                fold.judge,
+                fold.live,
+            )
+        };
+        let input = text::state(
+            &self.branch_id,
+            objective.as_deref(),
+            state,
+            judge,
+            after,
+            live,
+            &self.texts,
+        );
+        if let Err(error) = self.tree.input(self.branch_id.clone(), input).await {
+            self.state.lock().unwrap().written.remove(&after);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// States the newest change trigger, once (D3): the record names the
+    /// trigger in `after`, so the fold and every client read the same state.
+    fn answer_change(self: &Arc<Self>) {
+        let Some(last) = self.state.lock().unwrap().fold.pending_change() else {
+            return;
+        };
+        self.task(format!("state:{last}"), None, move |owner| {
+            Box::pin(async move { owner.record(last, None, true).await })
+        });
+    }
+
+    /// States the branch again after the deletion of a change input Goal had
+    /// answered (D3): the deleted input is gone from the fold and the record
+    /// that named it states a state the branch no longer has, so the state as
+    /// it stands is stated with the deletion's sequence.
+    fn answer_deletion(self: &Arc<Self>, at: u64) {
+        self.task(format!("delete:{at}"), None, move |owner| {
+            Box::pin(async move { owner.record(at, None, false).await })
         });
     }
 
@@ -620,12 +888,12 @@ impl Owner {
                 && !self.created(after).await?
                 && self.state.lock().unwrap().fold.is_current(after)
             {
-                self.tree
-                    .input(
-                        self.branch_id.clone(),
-                        text::automatic_pause(&self.branch_id, "evaluation_failed", after),
-                    )
-                    .await?;
+                self.record(
+                    after,
+                    Some(text::State::Paused("evaluation_failed".to_owned())),
+                    false,
+                )
+                .await?;
             }
             self.settle();
             return Ok(());
@@ -675,13 +943,17 @@ impl Owner {
         let Some(decision) = decision else {
             return Ok(());
         };
-        let input = match decision {
+        match decision {
             Decision::Continuation { count, idle } => {
-                text::continuation(&self.branch_id, count, limit, idle, after, &self.texts)
+                let input =
+                    text::continuation(&self.branch_id, count, limit, idle, after, &self.texts);
+                self.tree.input(self.branch_id.clone(), input).await?;
             }
-            Decision::Pause { reason } => text::automatic_pause(&self.branch_id, reason, after),
-        };
-        self.tree.input(self.branch_id.clone(), input).await?;
+            Decision::Pause { reason } => {
+                self.record(after, Some(text::State::Paused(reason.to_owned())), false)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -874,7 +1146,7 @@ impl Owner {
         Ok(reply)
     }
 
-    fn evaluation_failed(self: &Arc<Self>, evaluation: u64) {
+    fn evaluation_failed(self: &Arc<Self>, evaluation: u64, at: u64) {
         self.task(format!("failed:{evaluation}"), None, move |owner| {
             Box::pin(async move {
                 let current = owner.state.lock().unwrap().fold.is_current(evaluation);
@@ -882,13 +1154,12 @@ impl Owner {
                     return Ok(());
                 }
                 owner
-                    .tree
-                    .input(
-                        owner.branch_id.clone(),
-                        text::automatic_pause(&owner.branch_id, "evaluation_failed", evaluation),
+                    .record(
+                        at,
+                        Some(text::State::Paused("evaluation_failed".to_owned())),
+                        false,
                     )
-                    .await?;
-                Ok(())
+                    .await
             })
         });
     }
@@ -910,11 +1181,6 @@ impl Owner {
         conclusion: Conclusion,
     ) -> Result<(), AgentError> {
         let evaluation = conclusion.evaluation;
-        // The write for this evaluation is committed before the fold consumes
-        // it; a retry that runs in between must not answer it again.
-        if self.state.lock().unwrap().answered == Some(evaluation) {
-            return Ok(());
-        }
         let action = {
             let state = self.state.lock().unwrap();
             fold::decide_conclusion(&state.fold, sequence, &conclusion)
@@ -925,27 +1191,19 @@ impl Owner {
         let named = evaluation.to_string();
         match action {
             ConclusionAction::Failed => {
-                self.tree
-                    .input(
-                        self.branch_id.clone(),
-                        text::automatic_pause(&self.branch_id, "evaluation_failed", evaluation),
-                    )
-                    .await?;
+                self.record(
+                    sequence,
+                    Some(text::State::Paused("evaluation_failed".to_owned())),
+                    false,
+                )
+                .await?;
             }
             ConclusionAction::Completed(text) => {
-                self.tree
-                    .input(
-                        self.branch_id.clone(),
-                        text::evaluated(&self.branch_id, "completed", &named, &text),
-                    )
+                self.record(sequence, Some(text::State::Completed(text)), false)
                     .await?;
             }
             ConclusionAction::Blocked(text) => {
-                self.tree
-                    .input(
-                        self.branch_id.clone(),
-                        text::evaluated(&self.branch_id, "blocked", &named, &text),
-                    )
+                self.record(sequence, Some(text::State::Blocked(text)), false)
                     .await?;
             }
             ConclusionAction::Continue => {
@@ -970,8 +1228,8 @@ impl Owner {
                 // C7 measures the branch's own continuations; the evaluator
                 // judged this turn, so this path reads no progress (Pursuit §5).
                 let decision = {
-                    let mut state = self.state.lock().unwrap();
-                    if state.answered == Some(evaluation)
+                    let state = self.state.lock().unwrap();
+                    if state.written.contains(&sequence)
                         || fold::decide_conclusion(&state.fold, sequence, &conclusion)
                             != Some(ConclusionAction::Continue)
                         || state.fold.turn_end.as_ref().map(|end| end.sequence)
@@ -979,34 +1237,39 @@ impl Owner {
                     {
                         return Ok(());
                     }
-                    let decision = fold::decide_evaluated_continuation(&state.fold, limit);
-                    if decision.is_some() {
-                        // The write is committed before the fold consumes it;
-                        // a retry in between must not answer this evaluation
-                        // again.
-                        state.answered = Some(evaluation);
-                    }
-                    decision
+                    fold::decide_evaluated_continuation(&state.fold, limit)
                 };
                 let Some(decision) = decision else {
                     return Ok(());
                 };
-                let input = match decision {
-                    Decision::Continuation { count, idle } => text::evaluated_continuation(
-                        &self.branch_id,
-                        count,
-                        limit,
-                        idle,
-                        evaluation,
-                        &named,
-                    ),
-                    Decision::Pause { reason } => {
-                        text::automatic_pause(&self.branch_id, reason, evaluation)
+                match decision {
+                    Decision::Continuation { count, idle } => {
+                        let input = text::evaluated_continuation(
+                            &self.branch_id,
+                            count,
+                            limit,
+                            idle,
+                            evaluation,
+                            &named,
+                        );
+                        // The input is committed before the fold consumes it; a
+                        // retry in between must not answer it again.
+                        if !self.state.lock().unwrap().written.insert(sequence) {
+                            return Ok(());
+                        }
+                        if let Err(error) = self.tree.input(self.branch_id.clone(), input).await {
+                            self.state.lock().unwrap().written.remove(&sequence);
+                            return Err(error);
+                        }
                     }
-                };
-                if let Err(error) = self.tree.input(self.branch_id.clone(), input).await {
-                    self.state.lock().unwrap().answered = None;
-                    return Err(error);
+                    Decision::Pause { reason } => {
+                        self.record(
+                            sequence,
+                            Some(text::State::Paused(reason.to_owned())),
+                            false,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
@@ -1068,14 +1331,18 @@ impl Owner {
         }
     }
 
-    /// The goal an inherited prefix left live, read newest first one ancestor
-    /// at a time, if the branch has no copied facts to answer it (A11).
+    /// The Goal keys an inherited prefix left live, read newest first one
+    /// ancestor at a time, if the branch has no copied facts to answer it
+    /// (A11, D5).
     ///
     /// `Timeline::ancestors` is root first and the direct parent is pushed
     /// after that list (`timeline_tree.rs`, `restore` and `branch`), so the
-    /// reverse is nearest first: the first keyed block found is the nearest
-    /// one, which is the one the chain read returned before.
-    async fn inherited_live(&self) -> Result<bool, AgentError> {
+    /// reverse is nearest first. Each key is decided by its newest block: the
+    /// start clear retires all three, and an old key a history left live is
+    /// retired with it.
+    async fn inherited_keys(&self) -> Result<Live, AgentError> {
+        let mut live = Live::default();
+        let mut found = (false, false, false);
         for (branch, cut) in self.timeline.ancestors().iter().rev() {
             // A cut of zero contributes nothing to the chain (the chain read
             // skips it), and a read cannot start at sequence zero.
@@ -1097,24 +1364,30 @@ impl Owner {
                     let EventKind::InputMessage(data) = &event.kind else {
                         continue;
                     };
-                    let mut live = None;
-                    for block in &data.blocks {
+                    for block in data.blocks.iter().rev() {
                         let InputBlock::Raw {
                             text: block_text,
                             key,
                             retire,
                         } = block;
-                        if text::marker(block_text).is_some()
-                            && key.as_deref().is_some_and(|key| {
-                                key == text::OBJECTIVE_KEY || key == text::STATUS_KEY
-                            })
-                        {
-                            live = Some(!retire);
+                        if text::marker(block_text).is_none() {
+                            continue;
                         }
+                        let (slot, value) = match key.as_deref() {
+                            Some(text::STATE_KEY) => (&mut found.0, &mut live.state),
+                            Some(text::OBJECTIVE_KEY) => (&mut found.1, &mut live.objective),
+                            Some(text::STATUS_KEY) => (&mut found.2, &mut live.status),
+                            _ => continue,
+                        };
+                        if *slot {
+                            continue;
+                        }
+                        *slot = true;
+                        *value = !retire;
                     }
-                    if let Some(live) = live {
-                        return Ok(live);
-                    }
+                }
+                if found == (true, true, true) {
+                    return Ok(live);
                 }
                 let Some(last) = reply.events.last().map(|event| event.sequence) else {
                     break;
@@ -1125,8 +1398,28 @@ impl Owner {
                 from = last - 1;
             }
         }
-        Ok(false)
+        Ok(live)
     }
+}
+
+/// Whether `data` carries a Goal block, and whether the newest one is a
+/// retired state record (D4). Any marker counts: an evaluator's prompt and a
+/// continuation are Goal's blocks too, and a branch that has them has history
+/// the fold must read.
+fn goal_record(data: &dim_agent_types::InputMessageData) -> Option<bool> {
+    let mut record = None;
+    for block in &data.blocks {
+        let InputBlock::Raw {
+            text: raw,
+            key,
+            retire,
+        } = block;
+        if text::marker(raw).is_none() {
+            continue;
+        }
+        record = Some(key.as_deref() == Some(text::STATE_KEY) && *retire);
+    }
+    record
 }
 
 /// One page of this branch's facts, oldest first from `from` in ascending

@@ -83,11 +83,9 @@ impl DynPlugin for GoalPlugin {
                 },
             )?;
             let parts = ctx.require_at(&self.parts)?;
-            let session = self.texts.clone();
             parts.register(ctx, PartScope::Session, SESSION_PART, move |mount| {
                 Ok(Some(
-                    Box::new(session::GoalSession::new(mount.names, session.clone())?)
-                        as Box<dyn DynPlugin>,
+                    Box::new(session::GoalSession::new(mount.names)?) as Box<dyn DynPlugin>
                 ))
             })?;
             let branch = self.texts.clone();
