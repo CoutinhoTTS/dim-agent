@@ -2791,7 +2791,8 @@ impl TimelineStore for SqliteTimelineStore {
                     }
                 };
             }
-            let result = validate_session(&self.db, session_id, &directory).await;
+            let mut reader = self.reader(RequestBodies::Unused);
+            let result = validate_session(&self.db, session_id, &directory, &mut reader).await;
             match result {
                 Ok(branches) => {
                     self.validated
@@ -3187,38 +3188,40 @@ fn check_references(
     Ok(())
 }
 
-/// Validates `session`'s stored rows and returns its branch directory. The
-/// pass decodes every event without its request bodies and checks that each
-/// content reference a record names resolves to a content row; a body is
-/// loaded, decoded and hash-checked only by the reads that use it (§7 of the
-/// request storage design).
+/// Validates `session`'s stored rows and returns its branch directory.
+/// `reader` decides what the pass does with request bodies: restore passes a
+/// reader without bodies, so the pass checks that every content reference a
+/// record names and every node's parent resolve, and a body is loaded,
+/// decoded and hash-checked only by the reads that use it (§7 of the request
+/// storage design); export passes a rebuilding reader, so every body is
+/// rebuilt and hash-checked before the export writes its first line.
 pub(super) async fn validate_session(
     db: &Arc<SqliteStorage>,
     session: &str,
     directory: &ValidatedDirectory,
+    reader: &mut Reader,
 ) -> Result<Vec<StoredBranch>> {
     let id = session.to_owned();
-    let orphan: bool = db
-        .run_read(move |connection| {
-            connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM timeline_events e LEFT JOIN timeline_branches b \
+    db.run_read(move |connection| {
+        let orphan: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM timeline_events e LEFT JOIN timeline_branches b \
              ON b.session_id=e.session_id AND b.branch_id=e.branch_id \
              WHERE e.session_id=?1 AND b.branch_id IS NULL)",
-                    [&id],
-                    |row| row.get(0),
-                )
-                .map_err(error)
-        })
-        .await?;
-    if orphan {
-        return Err(error("Timeline event references a missing branch"));
-    }
+                [&id],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if orphan {
+            return Err(error("Timeline event references a missing branch"));
+        }
+        Ok(())
+    })
+    .await?;
     let branches = directory.branches()?;
     let mut event_ids = BTreeSet::new();
     let mut created = BTreeSet::new();
     let mut completions = vec![];
-    let mut reader = Reader::without_request_bodies(CONTENT_BUDGET);
     for (id, _info, sequence) in &directory.branches {
         let mut next = 1;
         let mut batch_end = 0;
@@ -3227,7 +3230,7 @@ pub(super) async fn validate_session(
                 session_id: session.into(),
                 branch_id: id.clone(),
             };
-            let pass = holds(db, &mut reader, ValidationPass::default(), move |connection, reader, pass: &mut ValidationPass| {
+            let pass = holds(db, reader, ValidationPass::default(), move |connection, reader, pass: &mut ValidationPass| {
                 let rows = match pass.rows.as_mut() {
                     Some(rows) => rows,
                     None => {
@@ -3337,7 +3340,7 @@ pub(super) async fn validate_session(
             session_id: session.into(),
             branch_id: parent.clone(),
         };
-        let create = read_range(db, &mut reader, &parent_key, anchor..=anchor, false)
+        let create = read_range(db, reader, &parent_key, anchor..=anchor, false)
             .await?
             .pop()
             .ok_or_else(|| error("branch create event is missing"))?;
@@ -3361,7 +3364,7 @@ pub(super) async fn validate_session(
             branch_id: branch.clone(),
         };
         if through > 0 {
-            read_range(db, &mut reader, &key, through..=through, true)
+            read_range(db, reader, &key, through..=through, true)
                 .await
                 .map_err(|_| error("compaction preparation boundary is inside an atomic batch"))?;
         }
