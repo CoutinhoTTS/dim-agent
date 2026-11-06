@@ -15,7 +15,7 @@ registerHooks({
   },
 })
 
-const { failureDetails, failureLine, retrySeconds, retryStatus, FAILURE_KINDS } = await import("./failures.ts")
+const { failureDetails, failureLine, retryAnnouncement, retrySeconds, retryStatus, FAILURE_KINDS } = await import("./failures.ts")
 const { i18n } = await import("./i18n/index.ts")
 const { default: en } = await import("./i18n/en.ts")
 const { default: zhCN } = await import("./i18n/zh-CN.ts")
@@ -49,7 +49,7 @@ function inLocale(locale, body) {
 test("a failure is one line with no prefix", () => {
   assert.equal(
     failureLine(failure(), false),
-    "The provider reported a server error: The server is overloaded. Try again later or choose another model.",
+    "The provider reported a server error: The server is overloaded. Try again later or choose another model. Tried 3 times over 4 s.",
   )
 })
 
@@ -57,7 +57,7 @@ test("a failure line is worded in Chinese", () => {
   inLocale("zh-CN", () => {
     assert.equal(
       failureLine(failure(), false),
-      "提供方报告了服务器错误: The server is overloaded. 稍后重试或换一个模型。",
+      "提供方报告了服务器错误: The server is overloaded. 稍后重试或换一个模型。 已尝试 3 次，历时 4 秒。",
     )
   })
 })
@@ -65,7 +65,14 @@ test("a failure line is worded in Chinese", () => {
 test("a failure after output starts with the incomplete sentence", () => {
   assert.equal(
     failureLine(failure(), true),
-    "The response above is incomplete. The provider reported a server error: The server is overloaded. Try again later or choose another model.",
+    "The response above is incomplete. The provider reported a server error: The server is overloaded. Try again later or choose another model. Tried 3 times over 4 s.",
+  )
+})
+
+test("a single attempt has no tried suffix", () => {
+  assert.equal(
+    failureLine(failure({ attempts: 1, waitedMs: 0 }), false),
+    "The provider reported a server error: The server is overloaded. Try again later or choose another model.",
   )
 })
 
@@ -107,4 +114,13 @@ test("the retry status counts down and stops at zero", () => {
   assert.equal(retrySeconds(10_000, 10_000), 0)
   assert.equal(retrySeconds(10_000, 12_000), 0)
   assert.equal(retryStatus(retry, retrySeconds(10_000, 6_000)), "Retrying 3/8 in 4 s · The provider reported a server error: The server is overloaded · Stop response")
+  assert.equal(retryStatus(retry, retrySeconds(10_000, 10_000)), "Waiting for the provider · The provider reported a server error: The server is overloaded · Stop response")
+})
+
+test("the announcement follows the attempt, not the countdown", () => {
+  const retry = { attempt: 3, maxAttempts: 8, retryAtMs: 10_000, kind: "server_error", reason: "The server is overloaded." }
+  const first = retryAnnouncement(retry)
+  assert.equal(retryAnnouncement({ ...retry, retryAtMs: 20_000 }), first)
+  assert.notEqual(retryAnnouncement({ ...retry, attempt: 4 }), first)
+  assert.equal(retryAnnouncement(undefined), "")
 })

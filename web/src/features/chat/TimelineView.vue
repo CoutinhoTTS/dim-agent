@@ -8,7 +8,7 @@ import ChatMarkdown from "./ChatMarkdown.vue"
 import TimelineUserMessage from "./TimelineUserMessage.vue"
 import TimelineWorkRow from "./TimelineWorkRow.vue"
 import { groupRows } from "./work"
-import { failureDetails, retrySeconds, retryStatus } from "../../failures"
+import { failureDetails, retryAnnouncement, retrySeconds, retryStatus } from "../../failures"
 import type { ModelRetryProgress } from "../../rpc/protocol"
 import { RAIL_MIN_MARKERS, timelineMarkers } from "../../timeline-markers"
 
@@ -53,6 +53,8 @@ watch(() => props.retry, (retry) => {
 onBeforeUnmount(() => clearInterval(countdown))
 
 const retryText = computed(() => props.retry === undefined ? "" : retryStatus(props.retry, retrySeconds(props.retry.retryAtMs, now.value)))
+/** The live region text: it follows the attempt, not the visible countdown. */
+const retryLive = computed(() => retryAnnouncement(props.retry))
 
 function toggleDetails(key: string): void {
   expandedDetails.value[key] = expandedDetails.value[key] !== true
@@ -201,7 +203,11 @@ onMounted(() => void toEnd())
           </template>
         </div>
       </div>
-      <div v-if="running" class="processing-row" role="status"><LoaderCircle :size="14" class="is-spinning" aria-hidden="true" /><span>{{ retry === undefined ? t("work.processing") : retryText }}</span></div>
+      <div v-if="running" class="processing-row" role="status">
+        <LoaderCircle :size="14" class="is-spinning" aria-hidden="true" />
+        <span aria-hidden="true">{{ retry === undefined ? t("work.processing") : retryText }}</span>
+        <span class="sr-only">{{ retryLive }}</span>
+      </div>
     </div>
     <nav v-if="showRail" class="timeline-rail" :aria-label="t('timeline.rail')">
       <button

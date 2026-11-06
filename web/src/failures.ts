@@ -44,7 +44,10 @@ export function failureLine(failure: ModelFailure, incomplete: boolean): string 
   const meaning = translate(meaningKey(failure.kind))
   const core = reason === undefined ? meaning : `${meaning}: ${reason}.`
   const prefix = incomplete ? `${translate("failure.incomplete")} ` : ""
-  return `${prefix}${core} ${translate(actionKey(failure.kind))}`
+  const attempts = failure.attempts > 1
+    ? ` ${translate("failure.tried", { count: failure.attempts, seconds: Math.floor((failure.waitedMs + 500) / 1000) })}`
+    : ""
+  return `${prefix}${core} ${translate(actionKey(failure.kind))}${attempts}`
 }
 
 /** The detail lines behind one error row, one fact per line. */
@@ -75,11 +78,27 @@ export function retrySeconds(retryAtMs: number, now: number): number {
 export function retryStatus(retry: ModelRetryProgress, seconds: number): string {
   const reason = bare(retry.reason)
   const meaning = translate(meaningKey(retry.kind))
+  const wording = reason === undefined ? meaning : `${meaning}: ${reason}`
+  const stop = translate("composer.stopResponse")
+  if (seconds <= 0) return translate("work.waiting", { reason: wording, stop })
   return translate("work.retrying", {
     attempt: retry.attempt,
     max: retry.maxAttempts,
-    seconds: Math.max(0, seconds),
-    reason: reason === undefined ? meaning : `${meaning}: ${reason}`,
-    stop: translate("composer.stopResponse"),
+    seconds,
+    reason: wording,
+    stop,
+  })
+}
+
+/**
+ * What a screen reader hears while a retry waits: it changes only when the
+ * attempt changes or the retry clears, never with the visible countdown.
+ */
+export function retryAnnouncement(retry: ModelRetryProgress | undefined): string {
+  if (retry === undefined) return ""
+  return translate("failure.retryAnnouncement", {
+    attempt: retry.attempt,
+    max: retry.maxAttempts,
+    reason: translate(meaningKey(retry.kind)),
   })
 }
