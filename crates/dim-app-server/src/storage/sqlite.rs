@@ -558,7 +558,7 @@ impl UpgradeProgress {
         slow_upgrade_report();
         // Reporting is best effort; the opening's own outcome does not
         // depend on it.
-        let _ = dim_agent_runtime::opening_advanced(&self.ctx);
+        dim_agent_runtime::opening_advanced(&self.ctx);
         write_startup_progress(&self.database, self.from, FORMAT, counter);
     }
 }

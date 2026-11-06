@@ -22,7 +22,7 @@ impl Plugin for Progressing {
         for _ in 0..self.steps {
             tokio::time::sleep(self.gap).await;
             if self.reports {
-                opening_advanced(ctx)?;
+                opening_advanced(ctx);
             }
         }
         Ok(())
@@ -33,7 +33,7 @@ async fn opened(reports: bool) -> dim_agent_runtime::Result<()> {
     let root = Ctx::root().unwrap();
     let view = root.plugin(Progressing {
         steps: 6,
-        gap: Duration::from_millis(100),
+        gap: Duration::from_millis(60),
         reports,
     });
     let result = wait_active(
@@ -47,8 +47,8 @@ async fn opened(reports: bool) -> dim_agent_runtime::Result<()> {
     result
 }
 
-/// Six 100 ms waits with a report after each outlast the 300 ms interval and
-/// still complete.
+/// Six 60 ms waits, a fifth of the 300 ms interval, with a report after each
+/// outlast the interval and still complete.
 #[tokio::test]
 async fn an_opening_that_reports_progress_outlives_its_interval() {
     opened(true)
