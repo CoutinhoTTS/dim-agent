@@ -3201,6 +3201,7 @@
       "parent": null,
       "file": "crates/dim-cli/src/lib.rs",
       "unexpandedMacros": [
+        "env",
         "eprintln",
         "format",
         "matches",
@@ -4620,7 +4621,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "assert_ne"
+        "assert_ne",
+        "vec"
       ]
     },
     {
@@ -20673,6 +20675,7 @@
         "path RpcError",
         "path RpcError::app",
         "path RpcError::closed",
+        "path RpcError::daemon_busy",
         "path RpcError::from",
         "path RpcError::invalid",
         "path RpcError::reloading",
@@ -28298,6 +28301,7 @@
       "references": [
         "mod client",
         "path client",
+        "path client::DaemonNotice",
         "path client::connect_inner",
         "path client::shutdown",
         "path client::stop",
@@ -28531,7 +28535,8 @@
       "to": "dim_cli::sanitize",
       "references": [
         "mod sanitize",
-        "path crate::sanitize::safe"
+        "path crate::sanitize::safe",
+        "path sanitize::safe"
       ]
     },
     {
@@ -28849,6 +28854,7 @@
         "path ConnectionConfig",
         "path DaemonProfile::Configured",
         "path DaemonProfile::Product",
+        "path RpcError",
         "path Server",
         "path app_error",
         "use dim_client::Client",
@@ -31147,7 +31153,8 @@
       "from": "dim_cli::plugins",
       "to": "dim_cli",
       "references": [
-        "path crate::Result"
+        "path crate::Result",
+        "path crate::daemon_notice"
       ]
     },
     {
@@ -31173,6 +31180,7 @@
         "path client",
         "path client::connect_inner",
         "path client::web_hint",
+        "path crate::client::DaemonNotice",
         "use crate::client"
       ]
     },
@@ -34311,6 +34319,14 @@
       "to": "dim_agent_types::events",
       "references": [
         "path dim_agent_types::ModelFailureKind::ALL"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli",
+      "references": [
+        "path crate::DAEMON_BUSY",
+        "path crate::DAEMON_BUSY_COUNTS"
       ]
     },
     {

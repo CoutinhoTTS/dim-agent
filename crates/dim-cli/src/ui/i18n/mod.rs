@@ -290,6 +290,48 @@ mod tests {
     }
 
     #[test]
+    fn every_locale_translates_the_daemon_notice_strings() {
+        // The strings the notice prints, so a changed text cannot pass here
+        // while every locale silently falls back to English.
+        const PLAIN: &str = crate::DAEMON_BUSY;
+        const COUNTS: &str = crate::DAEMON_BUSY_COUNTS;
+        let previous = active();
+        for (locale, code, _) in LOCALES {
+            if locale == Locale::En {
+                continue;
+            }
+            for key in [PLAIN, COUNTS] {
+                let translated = table(locale, key);
+                assert!(translated.is_some(), "{code} lacks {key:?}");
+                assert_ne!(translated.unwrap(), key, "{code} copies {key:?}");
+            }
+            set(locale);
+            for (key, args) in [
+                (
+                    PLAIN,
+                    vec![("server", "9.9.9-old"), ("client", "9.9.9-new")],
+                ),
+                (
+                    COUNTS,
+                    vec![
+                        ("server", "9.9.9-old"),
+                        ("client", "9.9.9-new"),
+                        ("connections", "2"),
+                        ("attached", "1"),
+                        ("running", "1"),
+                    ],
+                ),
+            ] {
+                let text = tf(key, &args);
+                for (_, value) in args {
+                    assert!(text.contains(value), "{code} drops {value} from {key:?}");
+                }
+            }
+        }
+        set(previous);
+    }
+
+    #[test]
     fn environment_values_map_as_the_ts_build_does() {
         let of = Locale::from_env_value;
         assert_eq!(of("zh_CN.UTF-8"), Some(Locale::ZhCn));

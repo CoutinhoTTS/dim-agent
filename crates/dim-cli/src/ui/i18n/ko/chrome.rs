@@ -540,6 +540,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The first message was not sent; your new draft was kept." => {
             "첫 메시지는 전송되지 않았습니다. 새 초안은 유지되었습니다."
         }
+        "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server가 아직 {server}입니다. 다른 클라이언트가 사용 중이라 이 {client} 클라이언트도 그것을 사용합니다. 끝나면 `dimcode daemon stop`을 실행하세요. 다음 시작에서는 {client}가 실행됩니다."
+        }
+        "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server가 아직 {server}입니다. 다른 클라이언트가 사용 중입니다(연결: {connections}, 연결된 세션: {attached}, 실행 중인 턴: {running}). 이 {client} 클라이언트도 그것을 사용합니다. 끝나면 `dimcode daemon stop`을 실행하세요. 다음 시작에서는 {client}가 실행됩니다."
+        }
         _ => return None,
     })
 }

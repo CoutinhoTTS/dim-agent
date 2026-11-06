@@ -970,7 +970,9 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
     let socket = home.0.join("rust/daemon.sock");
     let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","daemon.shutdown.completed"]}));
+        wire.reply(&hello,json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.summaries","daemon.shutdown.completed"]}));
+        let summaries = wire.read("session.summaries");
+        wire.reply(&summaries, json!([]));
         let shutdown = wire.read("daemon.shutdown");
         fs::remove_file(&socket).unwrap();
         let successor = UnixListener::bind(&socket).unwrap();

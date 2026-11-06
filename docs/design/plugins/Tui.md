@@ -62,9 +62,15 @@ Ctx::root()  ── client tree
 root.plugin(DaemonLink{options})
   apply:
     native home <home>/rust (0700, owned by user)
+    start: lock <native home>/daemon.start.lock; one client decides,
+           every other waits and then runs the same decision
     try connect daemon.sock
       ├─ ok ──────────────────────────────────────► hello {profile}
       │                                            ◄ Hello {features, daemonProfile}
+      │  same build: reuse
+      │  another build, idle (daemon.shutdown.ifIdle, else
+      │  empty session.summaries): stop it, spawn the successor
+      │  another build, in use: keep it and print one notice
       └─ missing / refused:
            spawn `<home>/rust/dimcode-server app-server
                   --unix <sock> --no-ws --home <native home>
@@ -398,7 +404,9 @@ listener of their names. The contract reserved here is unchanged:
 
 | Case | Decision |
 | --- | --- |
-| Two clients start at once with no daemon | Both spawn; the second daemon fails to bind and exits; both clients connect to the survivor within the poll window. Unchanged behaviour, now inside `DaemonLink::apply`. |
+| Two clients start at once, with no daemon or with a daemon of another build | One holds `<native home>/daemon.start.lock` and decides; the other waits (its bound is one verified shutdown plus one startup, with a margin) and then runs the same decision, finding the survivor at its own version. Exactly one spawn or replacement happens, and a waiter that outlasts the bound fails naming `daemon.log`; it never spawns without the lock. |
+| A daemon of another build is idle | `daemon.shutdown {ifIdle:true}` stops it with verified shutdown and the client spawns its own successor. A daemon older than that parameter is judged by `session.summaries`: no Session with an attached client and none running. That reading leaves a window in which an attach between the read and the shutdown is closed with the daemon. |
+| A daemon of another build is in use | It is kept and used; one notice carries the counts a `daemon_busy` refusal reported (connections, attached Sessions, running turns) and names `dimcode daemon stop` as the way to upgrade later. The next start by a client of another build that finds it idle replaces it. |
 | Daemon still assembling when the client polls | The socket does not exist yet; the client keeps polling until the deadline. The daemon's `startup_timeout` is independent of the client's 10 s; a slow managed-plugin start surfaces as "App Server startup timed out; see daemon.log". |
 | Connection drops while the TUI runs | **Not a provider replacement.** The TUI keeps its draft and reports the failure. There is no automatic reconnect in the session thread. |
 | `apply` of `Tui` fails after raw mode was entered | The terminal effect was registered before raw mode, so rutis runs it on the failed load; the error is printed on a restored terminal. |
@@ -412,7 +420,7 @@ listener of their names. The contract reserved here is unchanged:
 | Leaf process killed | Its session ends; the daemon disposes the `UiLeaf` and removes the registration. |
 | Leaf `Tui` never attaches | Closed after `START` (20 s from `ui.open`'s reply), as for `ui.close`; a replacement it was making leaves the old interface running. |
 | Daemon shutdown with leaves | Graceful: disposing `UiHostPlugin` waits for every `UiLeaf` disposal, each closing its session. Forced: the sessions end with the process; each leaf disposes its tree when its session ends. |
-| Replacing the executable while a daemon runs | Unchanged: the server link is remade on the next start; `daemon stop` with the matching CLI first ([release packaging](../../release/README.md#upgrade-compatibility)). |
+| Replacing the executable while a daemon runs | The old executable stays the daemon. A client of the new build keeps it while other clients use it and replaces it on a later start that finds it idle; `daemon stop` with the matching CLI remains the immediate upgrade ([release packaging](../../release/README.md#upgrade-compatibility)). |
 
 ### Connection loss and terminal content
 

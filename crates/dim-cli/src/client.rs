@@ -256,9 +256,99 @@ pub async fn shutdown(mut client: Client) -> Result<()> {
     Ok(())
 }
 
+/// A connection the daemon decision produced, with the notice a reused
+/// daemon of another build produces.
+pub struct Link {
+    pub client: Client,
+    pub notice: Option<DaemonNotice>,
+}
+
+/// A kept daemon of another build, as its client reports it.
+pub struct DaemonNotice {
+    /// The daemon's build, from `hello`.
+    pub server: String,
+    /// The counts a `daemon_busy` refusal carried, when it sent them.
+    pub counts: Option<BusyCounts>,
+}
+
+/// What a refused `daemon.shutdown {ifIdle}` reported in use.
+#[derive(Clone, Copy, Default)]
+pub struct BusyCounts {
+    pub connections: u64,
+    pub attached_sessions: u64,
+    pub running: u64,
+}
+
+/// What `daemon.shutdown {ifIdle: true}` decided.
+enum IdleShutdown {
+    /// The daemon was idle and is closing; its successor can be spawned.
+    Stopped,
+    /// The daemon is in use and stays; the counts it reported, when sent.
+    Busy(Option<BusyCounts>),
+}
+
+/// The counts a `daemon_busy` refusal carries, when the daemon sent them.
+fn busy_counts(error: &crate::Error) -> Option<BusyCounts> {
+    let error = error.downcast_ref::<RpcError>()?;
+    let data = error.data.as_ref()?;
+    let count = |name: &str| data.get(name).and_then(serde_json::Value::as_u64);
+    Some(BusyCounts {
+        connections: count("connections")?,
+        attached_sessions: count("attachedSessions")?,
+        running: count("running")?,
+    })
+}
+
+/// Asks the daemon to stop only if it is idle and waits for it to settle. A
+/// `daemon_busy` refusal keeps the connection for reuse.
+async fn shutdown_if_idle(client: &mut Client) -> Result<IdleShutdown> {
+    tokio::time::timeout(DAEMON_SHUTDOWN_TIMEOUT, async {
+        match client.rpc("daemon.shutdown", json!({"ifIdle": true})).await {
+            Ok(_) => {
+                client.wait_closed().await?;
+                Ok(IdleShutdown::Stopped)
+            }
+            Err(error) if app_error(&error) == Some("daemon_busy") => {
+                Ok(IdleShutdown::Busy(busy_counts(&error)))
+            }
+            Err(error) => Err(error),
+        }
+    })
+    .await
+    .map_err(|_| "Daemon shutdown timed out; it is still settling and was not force-killed")?
+}
+
+/// Whether an older daemon's `session.summaries` reports a client attached to
+/// a Session or a running turn. The call is advertised together with
+/// `daemon.shutdown.completed`; a failed call or an unexpected answer counts
+/// as busy, so an unknown state never replaces a daemon that may be in use.
+/// The read and the shutdown that follows are separate requests, so an attach
+/// landing between them is not seen: that window is the cost of supporting a
+/// daemon that predates `daemon.shutdown.ifIdle`.
+async fn daemon_in_use(client: &mut Client) -> bool {
+    let Ok(summaries) = client.rpc("session.summaries", json!({})).await else {
+        return true;
+    };
+    let Some(sessions) = summaries.as_array() else {
+        return true;
+    };
+    sessions.iter().any(|session| {
+        let attached = session
+            .get("attachedClients")
+            .and_then(serde_json::Value::as_u64);
+        let running = session.get("running").and_then(serde_json::Value::as_bool);
+        match (attached, running) {
+            (Some(attached), Some(running)) => attached > 0 || running,
+            _ => true,
+        }
+    })
+}
+
 /// The connection to the daemon of `options.home` after `hello`. Without a
-/// daemon, starts one when `start` and waits for it; else `None`.
-pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>> {
+/// daemon, starts one when `start` and waits for it; else `None`. With
+/// `start`, one client at a time decides under `<native_home>/daemon.start.lock`
+/// whether to reuse the daemon, replace it, or start one.
+pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Link>> {
     let profile = if !start {
         None
     } else {
@@ -335,9 +425,42 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
             let version = client.hello().await?;
             if !(start && server.embedded && version != env!("CARGO_PKG_VERSION")) {
                 let _ = std::fs::remove_file(&startup_note);
-                return Ok(Some(client));
+                return Ok(Some(Link {
+                    client,
+                    notice: None,
+                }));
             }
-            shutdown(client).await?;
+            // A daemon of another build is replaced only while it is idle:
+            // one that serves other clients is kept, and the client says so.
+            // `hello` already proved the protocol and the required methods,
+            // so the stale build is usable; the restart happens on a later
+            // start that finds it idle.
+            if client.offers("daemon.shutdown.ifIdle") {
+                if let IdleShutdown::Busy(counts) = shutdown_if_idle(&mut client).await? {
+                    let _ = std::fs::remove_file(&startup_note);
+                    return Ok(Some(Link {
+                        client,
+                        notice: Some(DaemonNotice {
+                            server: version.clone(),
+                            counts,
+                        }),
+                    }));
+                }
+            } else if client.offers("daemon.shutdown.completed") && daemon_in_use(&mut client).await
+            {
+                let _ = std::fs::remove_file(&startup_note);
+                return Ok(Some(Link {
+                    client,
+                    notice: Some(DaemonNotice {
+                        server: version.clone(),
+                        counts: None,
+                    }),
+                }));
+            } else {
+                // A daemon without verified shutdown is reported by
+                // `shutdown` as before.
+                shutdown(client).await?;
+            }
         }
         Err(error) if missing(&error) => {}
         Err(error) => return Err(error.into()),
@@ -447,7 +570,10 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
             Ok(mut client) => {
                 client.hello().await?;
                 let _ = std::fs::remove_file(&startup_note);
-                return Ok(Some(client));
+                return Ok(Some(Link {
+                    client,
+                    notice: None,
+                }));
             }
             Err(error)
                 if missing(&error) || cfg!(unix) && error.kind() == io::ErrorKind::WouldBlock => {}

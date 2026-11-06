@@ -217,7 +217,10 @@ async fn hold_web(
     port: Option<u16>,
     open_browser: bool,
 ) -> Result<i32> {
-    daemon_link(root, options, true).await?;
+    let (_, connection) = daemon_link(root, options, true).await?;
+    if let Some(notice) = connection.take_notice() {
+        eprintln!("{}", daemon_notice(&notice));
+    }
     let (done, held) = tokio::sync::oneshot::channel();
     let hold = root.plugin(plugins::WebHold {
         port,
@@ -261,6 +264,41 @@ fn plugin_error(error: Arc<rutis::host::ErrorKind>) -> Error {
     match &*error {
         rutis::host::ErrorKind::PluginFailed(source) => source.to_string().into(),
         other => other.to_string().into(),
+    }
+}
+
+/// The line a client prints when it keeps a busy daemon of another build:
+/// line mode and `exec` put it on stderr, and the TUI shows it once in its
+/// notice area; stdout and JSON output stay unchanged.
+pub(crate) const DAEMON_BUSY: &str = "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}.";
+/// [`DAEMON_BUSY`] with the counts a `daemon_busy` refusal carried.
+pub(crate) const DAEMON_BUSY_COUNTS: &str = "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}.";
+
+/// The notice for a kept daemon of another build, with the refusal's counts
+/// when it sent them.
+pub(crate) fn daemon_notice(notice: &client::DaemonNotice) -> String {
+    let server = sanitize::safe(&notice.server);
+    let client_version = env!("CARGO_PKG_VERSION");
+    match &notice.counts {
+        Some(counts) => {
+            let connections = counts.connections.to_string();
+            let attached = counts.attached_sessions.to_string();
+            let running = counts.running.to_string();
+            crate::ui::i18n::tf(
+                DAEMON_BUSY_COUNTS,
+                &[
+                    ("server", &server),
+                    ("client", client_version),
+                    ("connections", &connections),
+                    ("attached", &attached),
+                    ("running", &running),
+                ],
+            )
+        }
+        None => crate::ui::i18n::tf(
+            DAEMON_BUSY,
+            &[("server", &server), ("client", client_version)],
+        ),
     }
 }
 
@@ -420,9 +458,13 @@ fn prepare() -> Result<Option<Options>> {
 
 async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>) -> Result<i32> {
     let mut signals = plugins::Signals::listen()?;
-    let client = client::connect_inner(options, true)
+    let linked = client::connect_inner(options, true)
         .await?
         .ok_or("App Server did not start")?;
+    if let Some(notice) = &linked.notice {
+        eprintln!("{}", daemon_notice(notice));
+    }
+    let client = linked.client;
     let (gateway, finished) = dim_acp::AcpGateway::new(
         client,
         dim_acp::Io {
@@ -489,9 +531,13 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         ..
     } = &options.action
     {
-        let mut client = client::connect_inner(&options, true)
+        let linked = client::connect_inner(&options, true)
             .await?
             .ok_or("App Server did not start")?;
+        if let Some(notice) = &linked.notice {
+            eprintln!("{}", daemon_notice(notice));
+        }
+        let mut client = linked.client;
         let (provider, device) = dim_acp::auth::terminal_method(&mut client, method).await?;
         options.device = device;
         return login::login(&mut client, &options, Some(&provider)).await;
@@ -563,6 +609,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
     let (_, connection) = daemon_link(root, &options, !stop).await?;
     if stop {
         return client::stop(connection.take()).await;
+    }
+    if let Some(notice) = connection.take_notice() {
+        eprintln!("{}", daemon_notice(&notice));
     }
     let mut client = connection.take().ok_or("App Server did not start")?;
     match &options.action {
