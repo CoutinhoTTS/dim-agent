@@ -1037,3 +1037,86 @@ async fn e2_a_branch_without_a_goal_skips_the_full_fold() {
     );
     env.close().await;
 }
+
+/// R3: a start clear that also retires the old keys is one retired state
+/// record; the old-key retires in the same input belong to its statement. A
+/// reload whose newest Goal input is one takes the cheap path, not the full
+/// fold.
+#[tokio::test]
+async fn e2_a_start_clear_with_old_key_retires_skips_the_full_fold() {
+    let env = Env::start_refusing().await;
+    let mut seed = env.seed_new("load-start-clear").await;
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: None,
+            create_event: None,
+        }),
+    );
+    // The opening's start clear, with both old keys retired in its input.
+    let cleared = texts::start_clear("main", 1, (true, true));
+    seed.append(
+        "main",
+        message(
+            vec![
+                raw(&cleared[0], Some("goal:state"), true),
+                raw(&cleared[1], Some("goal:objective"), true),
+                raw(&cleared[2], Some("goal:status"), true),
+            ],
+            InputMode::Append,
+        ),
+    );
+    for index in 0..10 {
+        seed.append("main", user(&format!("note {index}"), InputMode::Queue));
+    }
+    seed.finish().await;
+
+    let before = env.reads().len();
+    let env = env.restore_seeded("load-start-clear").await;
+    assert_eq!(
+        env.writes("main").await.len(),
+        1,
+        "the opening's clear is the only Goal input; the rebuild writes nothing"
+    );
+    const KEYS: [&str; 13] = [
+        "branch/start",
+        "session/forked",
+        "branch/create",
+        "branch/create-failed",
+        "branch/ended",
+        "input/message",
+        "input/consumed",
+        "input/deleted",
+        "turn/start",
+        "turn/end",
+        "stop/interrupt",
+        "exec/started",
+        "exec/ended",
+    ];
+    let expected: Vec<String> = KEYS.iter().map(|kind| (*kind).to_owned()).collect();
+    let reads = env.reads();
+    let reads = &reads[before..];
+    let full: Vec<&Read> = reads
+        .iter()
+        .filter(|read| read.include_publishing && read.kinds == expected)
+        .collect();
+    assert!(full.is_empty(), "the full fold never runs: {full:?}");
+    let scan: Vec<String> = [
+        "input/message",
+        "input/deleted",
+        "branch/start",
+        "session/forked",
+    ]
+    .iter()
+    .map(|kind| (*kind).to_owned())
+    .collect();
+    let probes: Vec<&Read> = reads
+        .iter()
+        .filter(|read| read.include_publishing && read.kinds == scan)
+        .collect();
+    assert!(
+        !probes.is_empty(),
+        "the rebuild probes the newest Goal block: {reads:?}"
+    );
+    env.close().await;
+}

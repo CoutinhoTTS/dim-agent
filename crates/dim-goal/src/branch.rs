@@ -1442,10 +1442,11 @@ impl Owner {
     }
 }
 
-/// Whether `data` carries a Goal block, and whether the newest one is a
-/// retired state record (D4). Any marker counts: an evaluator's prompt and a
-/// continuation are Goal's blocks too, and a branch that has them has history
-/// the fold must read.
+/// Whether `data` carries a Goal block, and whether it states a retired state
+/// record (D4). Any marker counts: an evaluator's prompt and a continuation
+/// are Goal's blocks too, and a branch that has them has history the fold must
+/// read. An input with a `goal:state` block is classified by that block: the
+/// old-key retires that ride with it belong to its statement (R3).
 fn goal_record(data: &dim_agent_types::InputMessageData) -> Option<bool> {
     let mut record = None;
     for block in &data.blocks {
@@ -1457,7 +1458,10 @@ fn goal_record(data: &dim_agent_types::InputMessageData) -> Option<bool> {
         if text::marker(raw).is_none() {
             continue;
         }
-        record = Some(key.as_deref() == Some(text::STATE_KEY) && *retire);
+        if key.as_deref() == Some(text::STATE_KEY) {
+            return Some(*retire);
+        }
+        record = Some(false);
     }
     record
 }
