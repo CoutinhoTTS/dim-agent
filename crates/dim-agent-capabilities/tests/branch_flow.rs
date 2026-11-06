@@ -7208,3 +7208,385 @@ async fn a_chain_read_continues_past_a_page_that_ended_in_an_ancestor() {
     }
     soon(agent.close()).await.unwrap();
 }
+
+/// #1165: the tree's directory lists open lines and ended lines, `main`
+/// first, and an ended line's `endEvent` is its own `branch/end`, cascaded
+/// ends included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_directory_lists_open_and_cascade_ended_lines_with_their_end_events() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("ancestor".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let cut = session.sequence("main").unwrap();
+    let parent = soon(session.branch("main".into(), cut, options("parent")))
+        .await
+        .unwrap();
+    soon(session.idle(&parent)).await.unwrap();
+    let grandchild = soon(session.branch(parent.clone(), 0, options("grandchild")))
+        .await
+        .unwrap();
+    soon(session.idle(&grandchild)).await.unwrap();
+
+    let directory = session.directory();
+    assert_eq!(
+        directory.first().map(|entry| entry.info.id.as_str()),
+        Some("main"),
+        "the directory starts with main"
+    );
+    let open = directory
+        .iter()
+        .find(|entry| entry.info.id == parent)
+        .expect("the parent is listed while open");
+    assert_eq!(open.state, BranchDirectoryState::Open);
+    assert_eq!(open.end_event, None);
+    assert_eq!(open.head, session.sequence(&parent).unwrap());
+    let child = directory
+        .iter()
+        .find(|entry| entry.info.id == grandchild)
+        .expect("the grandchild is listed while open");
+    assert_eq!(child.info.parent.as_deref(), Some(parent.as_str()));
+
+    let source = BranchSource::Host {
+        operation_id: "op:directory".into(),
+    };
+    soon(session.end_branch(&parent, source.clone()))
+        .await
+        .unwrap();
+
+    let own_end = |events: Vec<Arc<AgentEvent>>| -> u64 {
+        events
+            .iter()
+            .find_map(|event| {
+                matches!(event.kind, EventKind::BranchEnd(_)).then_some(event.sequence)
+            })
+            .expect("the line holds its own end")
+    };
+    let parent_end = own_end(local_events(&session, &parent).await);
+    let grandchild_end = own_end(local_events(&session, &grandchild).await);
+
+    let directory = session.directory();
+    assert_eq!(
+        directory.first().map(|entry| entry.info.id.as_str()),
+        Some("main"),
+        "main stays first after the end"
+    );
+    assert_eq!(
+        directory[0].state,
+        BranchDirectoryState::Open,
+        "main cannot end"
+    );
+    let ended = directory
+        .iter()
+        .find(|entry| entry.info.id == parent)
+        .expect("the ended parent is listed");
+    assert_eq!(ended.state, BranchDirectoryState::Ended);
+    assert_eq!(ended.end_event, Some(parent_end));
+    assert_eq!(ended.head, session.sequence(&parent).unwrap());
+    let cascaded = directory
+        .iter()
+        .find(|entry| entry.info.id == grandchild)
+        .expect("the cascaded grandchild is listed");
+    assert_eq!(cascaded.state, BranchDirectoryState::Ended);
+    assert_eq!(cascaded.end_event, Some(grandchild_end));
+    assert_eq!(cascaded.head, session.sequence(&grandchild).unwrap());
+    soon(agent.close()).await.unwrap();
+}
+
+/// #1165: a tool-sourced end commits while the turn that wrote it still runs;
+/// the directory reports the line as ending with its committed `branch/end`
+/// and a live head, then as ended with the same event and a fixed head.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_directory_reports_a_line_whose_end_is_pending_as_ending() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let ancestor = soon(session.branch("main".into(), 0, options("ancestor")))
+        .await
+        .unwrap();
+    soon(session.idle(&ancestor)).await.unwrap();
+    let child = soon(session.branch(
+        ancestor.clone(),
+        0,
+        BranchOptions {
+            prompt: "tool line".into(),
+            source: BranchSource::Tool {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call_id: "call".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    session
+        .submit(
+            r#"double:branch {"action":"end","content":"the work is done"} | wait {"millis":20000}"#
+                .into(),
+            InputMode::Queue,
+            &child,
+        )
+        .await
+        .unwrap();
+    soon(async {
+        loop {
+            if tool_results(&session, &child)
+                .await
+                .iter()
+                .any(|result| matches!(&result.content, ToolContent::Text(text) if text.contains("is ending")))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let end = local_events(&session, &child)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchEnd(_) => Some(event.sequence),
+            _ => None,
+        })
+        .expect("the line ended itself");
+    let directory = session.directory();
+    let ending = directory
+        .iter()
+        .find(|entry| entry.info.id == child)
+        .expect("the ending line is listed");
+    assert_eq!(
+        ending.state,
+        BranchDirectoryState::Ending,
+        "the end is committed and the turn still runs"
+    );
+    assert_eq!(
+        ending.end_event,
+        Some(end),
+        "the pending end carries its own branch/end"
+    );
+    assert!(
+        ending.head >= end,
+        "the ending head includes the committed end"
+    );
+    assert!(
+        ending.head <= session.sequence(&child).unwrap(),
+        "the ending head is a live value"
+    );
+    assert_eq!(
+        directory
+            .iter()
+            .find(|entry| entry.info.id == ancestor)
+            .expect("the ancestor is listed")
+            .state,
+        BranchDirectoryState::Open,
+        "the ancestor is untouched"
+    );
+
+    soon(session.end_branch(
+        &ancestor,
+        BranchSource::Host {
+            operation_id: "op:end".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let directory = session.directory();
+    let ended = directory
+        .iter()
+        .find(|entry| entry.info.id == child)
+        .expect("the ended line is listed");
+    assert_eq!(
+        ended.state,
+        BranchDirectoryState::Ended,
+        "the turn ended and the line closed"
+    );
+    assert_eq!(
+        ended.end_event,
+        Some(end),
+        "the same branch/end is the result"
+    );
+    assert_eq!(ended.head, session.sequence(&child).unwrap());
+    assert!(
+        ended.head > ending.head,
+        "the line published past the head it had while ending"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// #1165: a host end commits `branch/end` and closes the line in one flow.
+/// While the close is held, the directory reports the line as ending with its
+/// own end event and a live head, before its ended row exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_directory_reports_a_host_end_as_ending_before_its_ended_row() {
+    let probe = Arc::new(Probe::default());
+    let gate = Arc::new(Gate::default());
+    let agent = MinimalHost::start(&gated(&probe, &gate)).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = soon(session.branch("main".into(), 0, options("host line")))
+        .await
+        .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    *gate.target.lock().unwrap() = Some(line.clone());
+    gate.armed.store(true, Ordering::SeqCst);
+    let ender = {
+        let session = session.clone();
+        let line = line.clone();
+        tokio::spawn(async move {
+            session
+                .end_branch(
+                    &line,
+                    BranchSource::Host {
+                        operation_id: "op:end".into(),
+                    },
+                )
+                .await
+        })
+    };
+    soon(gate.entered.notified()).await;
+    let end = local_events(&session, &line)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchEnd(_) => Some(event.sequence),
+            _ => None,
+        })
+        .expect("the host end committed on the line");
+    assert!(
+        session.ended_head(&line).is_none(),
+        "the ended row is still ahead while the close is held"
+    );
+    let directory = session.directory();
+    let ending = directory
+        .iter()
+        .find(|entry| entry.info.id == line)
+        .expect("the ending line is listed");
+    assert_eq!(
+        ending.state,
+        BranchDirectoryState::Ending,
+        "the host end committed and the close is held"
+    );
+    assert_eq!(
+        ending.end_event,
+        Some(end),
+        "the ending line carries its own branch/end"
+    );
+    assert!(
+        ending.head >= end && ending.head <= session.sequence(&line).unwrap(),
+        "the ending head is live and includes the committed end"
+    );
+
+    gate.release.notify_one();
+    patient(ender).await.unwrap().unwrap();
+    let directory = session.directory();
+    let ended = directory
+        .iter()
+        .find(|entry| entry.info.id == line)
+        .expect("the ended line is listed");
+    assert_eq!(ended.state, BranchDirectoryState::Ended);
+    assert_eq!(
+        ended.end_event,
+        Some(end),
+        "the same branch/end is the result"
+    );
+    assert_eq!(ended.head, session.sequence(&line).unwrap());
+    soon(agent.close()).await.unwrap();
+}
+
+/// #1165: a cascade end commits a descendant's own `branch/end`. While that
+/// descendant's close is held, the directory reports it as ending with its own
+/// end event, before its ended row exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_directory_reports_a_cascaded_end_as_ending_before_its_ended_row() {
+    let probe = Arc::new(Probe::default());
+    let gate = Arc::new(Gate::default());
+    let agent = MinimalHost::start(&gated(&probe, &gate)).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let ancestor = soon(session.branch("main".into(), 0, options("ancestor")))
+        .await
+        .unwrap();
+    soon(session.idle(&ancestor)).await.unwrap();
+    let child = soon(session.branch(ancestor.clone(), 0, options("cascaded child")))
+        .await
+        .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    *gate.target.lock().unwrap() = Some(child.clone());
+    gate.armed.store(true, Ordering::SeqCst);
+    let ender = {
+        let session = session.clone();
+        let ancestor = ancestor.clone();
+        tokio::spawn(async move {
+            session
+                .end_branch(
+                    &ancestor,
+                    BranchSource::Host {
+                        operation_id: "op:end".into(),
+                    },
+                )
+                .await
+        })
+    };
+    soon(gate.entered.notified()).await;
+    let end = local_events(&session, &child)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchEnd(_) => Some(event.sequence),
+            _ => None,
+        })
+        .expect("the cascade committed the child's own branch/end");
+    assert!(
+        session.ended_head(&child).is_none(),
+        "the child's ended row is still ahead while the close is held"
+    );
+    assert!(
+        !local_events(&session, &ancestor)
+            .await
+            .iter()
+            .any(|event| matches!(&event.kind,
+                EventKind::BranchEnded(data) if data.branch == child)),
+        "the child's result is not recorded yet"
+    );
+    let directory = session.directory();
+    let ending = directory
+        .iter()
+        .find(|entry| entry.info.id == child)
+        .expect("the ending child is listed");
+    assert_eq!(
+        ending.state,
+        BranchDirectoryState::Ending,
+        "the cascaded end committed and the child's close is held"
+    );
+    assert_eq!(
+        ending.end_event,
+        Some(end),
+        "the cascaded child carries its own branch/end"
+    );
+
+    gate.release.notify_one();
+    patient(ender).await.unwrap().unwrap();
+    let directory = session.directory();
+    let ended = directory
+        .iter()
+        .find(|entry| entry.info.id == child)
+        .expect("the ended child is listed");
+    assert_eq!(ended.state, BranchDirectoryState::Ended);
+    assert_eq!(
+        ended.end_event,
+        Some(end),
+        "the same branch/end is the result"
+    );
+    assert_eq!(ended.head, session.sequence(&child).unwrap());
+    soon(agent.close()).await.unwrap();
+}

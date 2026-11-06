@@ -148,6 +148,27 @@ not the user source.
 - `mcp.test` probes one configuration without attaching a Session; the
   [MCP configuration management](../../docs/design/appserver/mcp-management.md#45-probe-mcptest)
   contract defines its outcome, latency, tools and auth report.
+- `mcp.import.sources({cwd?})` reports the known MCP stores of other local clients — Claude Code,
+  Codex and OMP — with each store's id, client, scope, display path, state (`ready`, `absent`,
+  `unreadable`, `too-large` or `malformed`) and entry count, or the owner's message. Each request
+  reads the fixed files its scope names once; it never returns an entry or a value, and writes
+  nothing. The
+  [MCP configuration management](../../docs/design/appserver/mcp-management.md#49-discovery-mcpimportsources-and-from)
+  contract owns the source table, the Codex mapping and the bounds.
+- `mcp.import.preview({source, document? | from?, cwd?})` decodes a client-supplied standard
+  `mcpServers` document and reports each entry's `id`, `transport`, `status` (`identical`,
+  `changed`, `conflict` or `invalid`), the changed field names and JSON kinds, the `unsupported`
+  members (`kept-unused` or `dropped`) and the entry's error, plus `unknownTopLevel` and the
+  target `revision`; it writes nothing. With `from` the owner reads one known store itself and
+  the converted text never leaves the daemon; the reply then also carries `sourceRevision`.
+  `mcp.import.apply` takes the same input, the preview's revision as `expectedVersion` (and, with
+  `from`, `sourceRevision` as `expectedSourceRevision`) and one resolution per entry (`import`,
+  `skip`, `replace` or `rename` with `newId`), re-validates them against the source and writes
+  every accepted entry with one compare-and-set; an import never enables an entry, and a project
+  import writes each entry as its public skeleton and puts the withheld values in the user-scope
+  `mcp-secrets` record, as a move into project does. The
+  [MCP configuration management](../../docs/design/appserver/mcp-management.md#48-import-mcpimportpreview-mcpimportapply)
+  contract defines the statuses, the resolutions and the errors.
 - `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.
 - `mcp.set_enabled` additionally takes `enabled`. A user entry's `enabled` field changes and the
   rest of the entry is preserved. For a project entry, enabling checks `expectedVersion` against
@@ -222,8 +243,10 @@ and `mcp.set_enabled` refuse them, while `mcp.disconnect` and sign-in work as fo
 Successful configuration mutations return `{}` after persistence, not after connection/tool
 adoption; disabling or removing an entry also waits until its running generations have closed in
 every Session. The catalog also returns `userApplication`, `pluginApplication` and optional `projectApplication`, each with
-`appliedRevision`, `error` and `cleanupError`. Application describes source eligibility
-and instance creation failures; it does not confirm a network connection or tool adoption.
+`appliedRevision`, `error` and `cleanupError`. `appliedRevision` is the source token of the
+applied configuration — `userRevision` or `projectRevision` — so a client comparing it with the
+token it read sees whether that configuration is the one applied. Application describes source
+eligibility and instance creation failures; it does not confirm a network connection or tool adoption.
 An application error leaves persisted intent intact. Cleanup errors remain visible for that
 source during this publisher's lifetime, including after later successful application.
 Read `session.mcp` for runtime state. A conflict requires rereading the source;
@@ -442,7 +465,7 @@ dim_app_server::cli::process_entry(
 
 `ManagedProviderRow` registers the plugin's process row given the product root's FileStorage index and returns the row name; `ServerConfig.managed_provider` carries it for embedders. It is installed only with a product home, beside `ManagedProviderBinding`, which hands the provider to `ManagedProviders`. The plugin owns its account schema, authentication, token refresh and catalog normalization; the host does not interpret supplier-specific responses. Files it keeps under the product root go through FileStorage; `auth.json` is plain JSON shared with the native subscription providers, each owning its own root fields.
 
-`process_entry` is the process entry: on Unix it closes every descriptor above standard error that the process inherited, then calls `run_with`, so a process `main` calls it before it opens anything. Linux closes the range in one `close_range` call; where that call is unavailable, and on the other Unix systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes every number the listing names; when no listing can be read it closes 3 up to the process's descriptor limit, which is the soft limit, else the hard limit, else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no inherited descriptor stays open. `run_with` and `run` do not touch the descriptors the process has open and are the entries for an embedder that keeps its own. `process_entry` and `run_with` take a native-profile installer, `fn(&mut AgentBuilder)`, called when the product-home or model-config execution profile is assembled. It contributes host-selected plugins through the existing builder API. `run` and the standalone server choose no additional native plugins; `dimcode` installs its product plugins from their own crates (`dim_session_title::install`, `dim_agent_scheduler::install` and `dim_goal::install`). The Scheduler and the Goal are among those plugins and are no longer default TypeScript plugins, so a host that wants `schedule.*` and the `schedule` tool calls `dim_agent_scheduler::install` from its installer, one that wants `goal_update`, `session.goal.*` and continuation calls `dim_goal::install`, and the plain `dim-app-server` binary serves none of them.
+`process_entry` is the process entry: on Unix it closes every descriptor above standard error that the process inherited, then calls `run_with`, so a process `main` calls it before it opens anything. Linux closes the range in one `close_range` call; where that call is unavailable, and on the other Unix systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes every number the listing names; when no listing can be read it closes 3 up to the process's descriptor limit, which is the soft limit, else the hard limit, else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no inherited descriptor stays open. `run_with` and `run` do not touch the descriptors the process has open and are the entries for an embedder that keeps its own. `process_entry` and `run_with` take a native-profile installer, `fn(&mut AgentBuilder)`, called when the product-home or model-config execution profile is assembled. It contributes host-selected plugins through the existing builder API. `run` and the standalone server choose no additional native plugins; `dimcode` installs its product plugins from their own crates (`dim_session_title::install`, `dim_agent_scheduler::install`, `dim_goal::install` and `dim_modality::install`) for both profiles. The Scheduler and the Goal are among those plugins and are no longer default TypeScript plugins, so a host that wants `schedule.*` and the `schedule` tool calls `dim_agent_scheduler::install` from its installer, one that wants `goal_update`, `session.goal.*` and continuation calls `dim_goal::install`, one that wants `modality.*` calls `dim_modality::install`, and the plain `dim-app-server` binary serves none of them.
 
 The Dim account (`dimcode-api-oauth`) is such a plugin, in [`crates/dim-oauth`](../dim-oauth/README.md); `dimcode` built with the account's client IDs is the account build. See the [development contract](../../docs/architecture/development.md#managed-provider-boundary) and [release packaging](../../docs/release/README.md#local-packaging).
 

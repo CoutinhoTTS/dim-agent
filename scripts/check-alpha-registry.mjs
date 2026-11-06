@@ -13,19 +13,21 @@ assert(receipt && ['source', 'snapshot', 'promote', 'npm', 'mirror'].includes(mo
 assert(flag !== '--apply' || ['promote', 'mirror'].includes(mode), 'Only promotion and mirror sync write remote state');
 const state = JSON.parse(readFileSync(receipt));
 const wrapper = 'dimcode-alpha';
-const names = [...Object.keys(JSON.parse(readFileSync(new URL('../npm/package.json', import.meta.url))).optionalDependencies), wrapper];
+const names = state.npmPackages?.map(({ name }) => name)
+  ?? [...Object.keys(JSON.parse(readFileSync(new URL('../npm/package.json', import.meta.url))).optionalDependencies), wrapper];
 const upstream = 'https://registry.npmjs.org';
 const registry = mode === 'mirror' ? 'https://registry.npmmirror.com' : 'https://registry.npmjs.org';
 const alpha = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha\.(0|[1-9]\d*)$/;
 
-async function json(url) {
+async function json(url, allowMissing = false) {
   const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  if (allowMissing && response.status === 404) return {};
   assert(response.ok, `${url}: HTTP ${response.status}`);
   return response.json();
 }
 
 async function tags(name) {
-  return json(`${upstream}/-/package/${name}/dist-tags`);
+  return json(`${upstream}/-/package/${name}/dist-tags`, true);
 }
 
 const protectedTags = (name, values) => Object.fromEntries(Object.entries(values)
@@ -33,6 +35,7 @@ const protectedTags = (name, values) => Object.fromEntries(Object.entries(values
 
 async function snapshot() {
   const all = Object.fromEntries(await Promise.all(['dimcode', ...names].map(async name => [name, await tags(name)])));
+  state.npmPackages ??= names.map(name => ({ name }));
   state.protectedTags = Object.fromEntries(Object.entries(all).map(([name, values]) => [name, protectedTags(name, values)]));
   state.wrapperTags = all[wrapper];
   console.log(`Recorded ${wrapper} tags: ${JSON.stringify(state.wrapperTags)}`);
@@ -97,9 +100,9 @@ function compare(left, right) {
   return index === -1 ? 0 : a[index] < b[index] ? -1 : 1;
 }
 
-function command(args) {
+function command(args, timeout = 120_000) {
   console.log(`$ npm ${args.join(' ')}`);
-  const result = spawnSync('npm', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
+  const result = spawnSync('npm', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout });
   assert.ifError(result.error);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 }
@@ -192,7 +195,7 @@ if (mode === 'snapshot' || mode === 'source') {
     try {
       const prefix = path.join(temporary, 'prefix');
       command(['install', '--global', '--prefix', prefix, '--cache', path.join(temporary, 'cache'), '--include=optional',
-        '--ignore-scripts', '--no-audit', '--no-fund', '--registry', registry, spec]);
+        '--ignore-scripts', '--no-audit', '--no-fund', '--registry', registry, spec], 300_000);
       const metadata = JSON.parse(readFileSync(path.join(prefix, 'lib/node_modules', wrapper, 'package.json')));
       checkWrapper(metadata, version);
       const binary = spawnSync(path.join(prefix, 'bin/dima'), ['--version'], {

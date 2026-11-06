@@ -30,6 +30,7 @@ globalThis.Document = class {}
 globalThis.ShadowRoot = class {}
 
 const { readMcp, readMcpConfiguration } = await import("../src/rpc/general-settings.ts")
+const { RpcError } = await import("../src/rpc/client.ts")
 const { default: McpSettings } = await import("../src/features/settings/McpSettings.vue")
 
 const node = (type, text = "") => ({
@@ -244,4 +245,272 @@ test("changing MCP scope keeps cancelled or failed drafts and saves only to the 
   assert.equal(saves[1].cwd, "/project")
   assert.equal(saves[1].source, "project")
   assert.equal(saves[1].expectedVersion, "project:1")
+})
+
+/// The owner's import preview for `entries`, read at `revision`.
+function importPreviewReply(entries, revision = "user:1", unknownTopLevel = [], sourceRevision, store) {
+  return { revision, entries, unknownTopLevel, ...(sourceRevision === undefined ? {} : { sourceRevision }), ...(store === undefined ? {} : { store }) }
+}
+const importEntry = (overrides) => ({ id: "docs", transport: "stdio", status: "changed", changes: [], unsupported: [], omitted: 0, ...overrides })
+function mountImport({ preview, catalogs, apply, sources = [] }) {
+  const calls = []
+  let served = 0
+  globalThis.window = { confirm: () => true }
+  globalThis.settingsConnection = reactive({
+    phase: "connected", supports: () => true,
+    client: { call: async (method, params, read) => {
+      calls.push({ method, params })
+      if (method === "mcp.catalog") {
+        const reply = catalogs[Math.min(served, catalogs.length - 1)]
+        served += 1
+        return read(reply)
+      }
+      if (method === "mcp.import.sources") return read({ sources })
+      if (method === "mcp.import.preview") return read(preview)
+      if (method === "mcp.import.apply") {
+        if (apply) return apply(params, read)
+        return read({ revision: "user:2" })
+      }
+      throw new Error(`unexpected method ${method}`)
+    } },
+  })
+  const root = node("root")
+  const app = renderer.createApp(McpSettings)
+  app.mount(root)
+  const mounted = flush().then(() => ({ root, app, calls }))
+  return mounted
+}
+async function chooseImportFile(root, document) {
+  const input = all(root).find((element) => element.type === "input" && element.props.type === "file")
+  await input.props.onChange({ target: { files: [{ text: async () => document }], value: "" } })
+  await flush()
+}
+const importSelects = (root) => all(root).filter((element) => element.type === "select" && element.props["aria-label"] === "Import action")
+const closeImport = (app) => { app.unmount(); delete globalThis.settingsConnection; delete globalThis.window }
+
+test("an import preview shows every status and its fields without a value", async () => {
+  const secret = "sk-web-secret-never-print"
+  const document = `{"mcpServers":{"docs":{"env":{"TOKEN":"${secret}"}}}}`
+  const preview = importPreviewReply([
+    importEntry({ id: "keeps", status: "identical" }),
+    importEntry({ id: "docs", changes: [{ field: "args", kind: "array" }, { field: "enabled", kind: "boolean" }], unsupported: [{ field: "x-extra", effect: "kept-unused" }], omitted: 7 }),
+    importEntry({ id: "taken", transport: "http", status: "conflict", changes: [{ field: "url", kind: "string" }] }),
+    importEntry({ id: "broken", transport: undefined, status: "invalid", unsupported: [{ field: "auth.audience", effect: "dropped" }], error: "broken: type is stdio, http or sse" }),
+  ], "user:1", ["otherTopLevel"])
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined)] })
+  try {
+    await chooseImportFile(root, document)
+    const previewCall = calls.find((call) => call.method === "mcp.import.preview")
+    assert.equal(previewCall.params.source, "user")
+    assert.equal(previewCall.params.document, document)
+    assert.equal(previewCall.params.document.includes(secret), true)
+    assert.equal("cwd" in previewCall.params, false)
+    const shown = text(root)
+    assert.match(shown, /keeps · identical · stdio/)
+    assert.match(shown, /docs · changed · stdio/)
+    assert.match(shown, /Changed fields: args \(array\), enabled \(boolean\)/)
+    assert.match(shown, /Not carried: x-extra \(kept unused\)/)
+    assert.match(shown, /7 more field names are not listed\./)
+    assert.match(shown, /taken · conflict · http/)
+    assert.match(shown, /broken · invalid/)
+    assert.match(shown, /auth\.audience \(dropped\)/)
+    assert.match(shown, /broken: type is stdio, http or sse/)
+    assert.match(shown, /Top-level members the import does not carry: otherTopLevel\./)
+    assert.equal(shown.includes(secret), false)
+    assert.match(shown, /Import into: user configuration/)
+    // A preview of the page's own document names no store.
+    assert.equal(shown.includes("From store"), false)
+    // Every entry that decodes has an action; the invalid one can only skip.
+    assert.equal(importSelects(root).length, 3)
+    assert.match(shown, /This entry does not decode, so it can only be skipped\./)
+    // No default action is a rename, so no entry asks for a new id.
+    assert.equal(all(root).find((element) => element.type === "label" && text(element).startsWith("New id")), undefined)
+    assert.equal(button(root, "Apply import").props.disabled, false)
+  } finally { closeImport(app) }
+})
+
+test("applying the default import sends changed and identical entries and refreshes the catalog", async () => {
+  const preview = importPreviewReply([
+    importEntry({ id: "keeps", status: "identical" }),
+    importEntry({ id: "docs" }),
+    importEntry({ id: "taken", status: "conflict", transport: "http" }),
+    importEntry({ id: "broken", status: "invalid", transport: undefined }),
+  ])
+  const refreshed = { ...catalog(undefined), servers: [...catalog(undefined).servers, { id: "grafana", source: "user", enabled: false, transport: "stdio" }] }
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined), refreshed] })
+  try {
+    await chooseImportFile(root, "{}")
+    await button(root, "Apply import").props.onClick()
+    await flush()
+    const applied = calls.find((call) => call.method === "mcp.import.apply")
+    assert.equal(applied.params.source, "user")
+    assert.equal(applied.params.expectedVersion, "user:1")
+    assert.deepEqual(applied.params.resolutions, [
+      { id: "keeps", action: "import" },
+      { id: "docs", action: "import" },
+      { id: "taken", action: "skip" },
+      { id: "broken", action: "skip" },
+    ])
+    assert.equal(calls.filter((call) => call.method === "mcp.catalog").length, 2)
+    assert.match(text(root), /grafana/)
+    assert.match(text(root), /Imported 1, replaced 0, renamed 0, skipped 2, unchanged 1\./)
+    assert.match(text(root), /Imported entries start disabled/)
+    assert.equal(button(root, "Apply import"), undefined)
+  } finally { closeImport(app) }
+})
+
+test("rename and replace actions are sent as the owner's resolutions", async () => {
+  const preview = importPreviewReply([
+    importEntry({ id: "docs" }),
+    importEntry({ id: "taken", status: "conflict", transport: "http" }),
+  ])
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined)] })
+  try {
+    await chooseImportFile(root, "{}")
+    const [docs, taken] = importSelects(root)
+    enter(docs, "rename"); await flush()
+    enter(field(root, "New id"), "docs2"); await flush()
+    enter(taken, "replace"); await flush()
+    assert.equal(button(root, "Apply import").props.disabled, false)
+    await button(root, "Apply import").props.onClick(); await flush()
+    const applied = calls.find((call) => call.method === "mcp.import.apply")
+    assert.deepEqual(applied.params.resolutions, [
+      { id: "docs", action: "rename", newId: "docs2" },
+      { id: "taken", action: "replace" },
+    ])
+    assert.match(text(root), /Imported 0, replaced 1, renamed 1, skipped 0, unchanged 0\./)
+  } finally { closeImport(app) }
+})
+
+test("a project import applies without confirmation and says where withheld values go", async () => {
+  const preview = importPreviewReply([
+    importEntry({ id: "keeps", status: "identical" }),
+    importEntry({ id: "docs", changes: [{ field: "args", kind: "array" }, { field: "env", kind: "object" }] }),
+  ], "project:1")
+  const projectCatalog = { ...catalog(undefined), projectRevision: "project:1" }
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined), projectCatalog] })
+  try {
+    await field(root, "Configuration scope").props.onChange({ target: { value: "/project" } })
+    await flush()
+    assert.match(text(root), /Import into: project \/project/)
+    await chooseImportFile(root, "{}")
+    const previewCall = calls.find((call) => call.method === "mcp.import.preview")
+    assert.equal(previewCall.params.source, "project")
+    assert.equal(previewCall.params.cwd, "/project")
+    assert.match(text(root), /The workspace file receives each entry's public skeleton/)
+    assert.match(text(root), /never to the workspace file\./)
+    assert.equal(all(root).find((element) => element.type === "input" && element.props.type === "checkbox"), undefined)
+    assert.equal(button(root, "Apply import").props.disabled, false)
+    await button(root, "Apply import").props.onClick(); await flush()
+    const applied = calls.find((call) => call.method === "mcp.import.apply")
+    assert.deepEqual(applied.params.resolutions, [
+      { id: "keeps", action: "import" },
+      { id: "docs", action: "import" },
+    ])
+  } finally { closeImport(app) }
+})
+
+test("an entry that does not decode offers no action but skip", async () => {
+  const preview = importPreviewReply([
+    importEntry({ id: "broken", transport: undefined, status: "invalid", error: "broken: type is stdio, http or sse" }),
+  ])
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined)] })
+  try {
+    await chooseImportFile(root, "{}")
+    assert.equal(importSelects(root).length, 0)
+    assert.match(text(root), /This entry does not decode, so it can only be skipped\./)
+    assert.equal(button(root, "Apply import").props.disabled, false)
+    await button(root, "Apply import").props.onClick(); await flush()
+    const applied = calls.find((call) => call.method === "mcp.import.apply")
+    assert.deepEqual(applied.params.resolutions, [{ id: "broken", action: "skip" }])
+  } finally { closeImport(app) }
+})
+
+test("discovery lists known stores and previews a ready one by id", async () => {
+  const preview = importPreviewReply([importEntry({ id: "docs" })], "user:1", [], "9f2c", { id: "claude-code:user", client: "claude-code", scope: "user", path: "~/.claude.json" })
+  const sources = [
+    { id: "claude-code:user", client: "claude-code", scope: "user", path: "~/.claude.json", state: "ready", entries: 2 },
+    { id: "codex:user", client: "codex", scope: "user", path: "~/.codex/config.toml", state: "malformed", error: `the file is not valid TOML at line 2 column 1` },
+    { id: "omp:user", client: "omp", scope: "user", path: "~/.omp/agent/mcp.json", state: "absent" },
+  ]
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined)], sources })
+  try {
+    await button(root, "Discover…").props.onClick()
+    await flush()
+    const shown = text(root)
+    assert.match(shown, /claude-code:user · claude-code · user · ready/)
+    assert.match(shown, /~\/.claude\.json/)
+    assert.match(shown, /Entries: 2/)
+    assert.match(shown, /codex:user · codex · user · malformed/)
+    assert.match(shown, /the file is not valid TOML at line 2 column 1/)
+    assert.match(shown, /omp:user · omp · user · absent/)
+    // Only a ready store offers a preview; the others show their state.
+    const previews = all(root).filter((element) => element.type === "button" && text(element) === "Preview")
+    assert.equal(previews.length, 1)
+    await previews[0].props.onClick()
+    await flush()
+    const call = calls.find((item) => item.method === "mcp.import.preview")
+    assert.equal(call.params.from, "claude-code:user")
+    assert.equal("document" in call.params, false)
+    assert.equal(call.params.source, "user")
+    // The preview names the store it read, in the words the store list uses.
+    assert.match(text(root), /From store claude-code:user · claude-code · user · ~\/\.claude\.json · its text stays in the daemon\./)
+    assert.match(text(root), /Import preview · user · user:1/)
+    // Apply sends the store id and the digest the preview answered, never a
+    // document.
+    await button(root, "Apply import").props.onClick()
+    await flush()
+    const applied = calls.find((item) => item.method === "mcp.import.apply")
+    assert.equal(applied.params.from, "claude-code:user")
+    assert.equal(applied.params.expectedSourceRevision, "9f2c")
+    assert.equal("document" in applied.params, false)
+    assert.equal(applied.params.expectedVersion, "user:1")
+  } finally { closeImport(app) }
+})
+
+test("a preview from a store keeps its line when the daemon sends no store row", async () => {
+  // A daemon older than the reply's `store` row answers the digest only. The
+  // page still knows the id it asked for and names it, without the details.
+  const preview = importPreviewReply([importEntry({ id: "docs" })], "user:1", [], "9f2c")
+  const sources = [{ id: "claude-code:user", client: "claude-code", scope: "user", path: "~/.claude.json", state: "ready", entries: 2 }]
+  const { root, app } = await mountImport({ preview, catalogs: [catalog(undefined)], sources })
+  try {
+    await button(root, "Discover…").props.onClick()
+    await flush()
+    await button(root, "Preview").props.onClick()
+    await flush()
+    const shown = text(root)
+    assert.match(shown, /From store claude-code:user · its text stays in the daemon\./)
+    assert.equal(shown.includes("~/.claude.json · its text stays"), false)
+  } finally { closeImport(app) }
+})
+
+test("discovery with no known store says so", async () => {
+  const preview = importPreviewReply([importEntry({ id: "docs" })])
+  const { root, app } = await mountImport({ preview, catalogs: [catalog(undefined)] })
+  try {
+    await button(root, "Discover…").props.onClick()
+    await flush()
+    assert.match(text(root), /No known store was found\./)
+  } finally { closeImport(app) }
+})
+
+test("a stale source shows preview again and re-reads the same document", async () => {
+  const document = '{"mcpServers":{"docs":{"command":"server"}}}'
+  const preview = importPreviewReply([importEntry({ id: "docs" })])
+  const stale = () => { throw new RpcError(-32000, "settings changed; read the current version before updating", "mcp_settings_conflict") }
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined)], apply: stale })
+  try {
+    await chooseImportFile(root, document)
+    await button(root, "Apply import").props.onClick(); await flush()
+    assert.match(text(root), /The MCP source changed since this preview; no entry was imported, and an entry it would have replaced may now be disabled\. Preview again before applying\./)
+    assert.ok(button(root, "Preview again"))
+    await button(root, "Preview again").props.onClick(); await flush()
+    const previews = calls.filter((call) => call.method === "mcp.import.preview")
+    assert.equal(previews.length, 2)
+    assert.equal(previews[1].params.document, document)
+    assert.equal(previews[1].params.source, "user")
+    assert.equal(button(root, "Preview again"), undefined)
+    assert.ok(button(root, "Apply import"))
+  } finally { closeImport(app) }
 })

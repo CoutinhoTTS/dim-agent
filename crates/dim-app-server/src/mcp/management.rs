@@ -3,6 +3,8 @@ use super::auth::{AuthState, McpAuth, McpAuthError, credential_key, stored_key};
 use super::config::{
     self, BearerAuth, McpSecretEntry, McpServerSettings, McpSettings, RemoteTransport,
 };
+use super::discovery::{self, StoreId};
+use super::import::{self, ImportResolution};
 use super::{McpChange, McpError, McpService, McpSource};
 use crate::{
     methods::{ManagementMethods, SelectionScope},
@@ -26,7 +28,7 @@ pub enum McpScope {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum MoveScope {
+pub enum WritableScope {
     User,
     Project,
 }
@@ -37,8 +39,8 @@ pub struct MoveMcp {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub cwd: Option<String>,
     pub id: String,
-    pub from: MoveScope,
-    pub to: MoveScope,
+    pub from: WritableScope,
+    pub to: WritableScope,
     pub expected_from_version: String,
     pub expected_to_version: String,
 }
@@ -74,6 +76,48 @@ pub struct SaveMcp {
 impl std::fmt::Debug for SaveMcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SaveMcp").finish_non_exhaustive()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreviewImportMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    cwd: Option<String>,
+    source: WritableScope,
+    document: Option<String>,
+    from: Option<String>,
+}
+impl std::fmt::Debug for PreviewImportMcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreviewImportMcp").finish_non_exhaustive()
+    }
+}
+
+/// `mcp.import.sources`: the known stores, with no document.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportSourcesMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplyImportMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    cwd: Option<String>,
+    source: WritableScope,
+    document: Option<String>,
+    from: Option<String>,
+    expected_version: String,
+    expected_source_revision: Option<String>,
+    #[serde(default)]
+    resolutions: Vec<ImportResolution>,
+}
+impl std::fmt::Debug for ApplyImportMcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApplyImportMcp").finish_non_exhaustive()
     }
 }
 
@@ -460,6 +504,7 @@ pub(crate) fn error(error: McpError) -> RpcError {
         McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
         McpError::Settings(SettingsError::Invalid(_))
         | McpError::Settings(SettingsError::Document(_))
+        | McpError::Settings(SettingsError::DocumentShape { .. })
         | McpError::InvalidId
         | McpError::InvalidEntry(_) => "mcp_invalid_config",
         McpError::UnknownServer => "mcp_unknown_server",
@@ -467,6 +512,8 @@ pub(crate) fn error(error: McpError) -> RpcError {
         McpError::MovePartial { .. } => "mcp_move_partial",
         McpError::CredentialsAreUserScoped => "mcp_credentials_are_user_scoped",
         McpError::StaleSecretRecord => "mcp_stale_secret_record",
+        McpError::ImportConflict { .. } => "mcp_import_conflict",
+        McpError::ImportPartial => "mcp_import_partial",
         McpError::Closed | McpError::Settings(SettingsError::Closed) => {
             return RpcError::reloading();
         }
@@ -494,9 +541,33 @@ pub(crate) fn error(error: McpError) -> RpcError {
             }
             McpError::CredentialsAreUserScoped => "MCP secret fields are stored in user scope; call mcp.move {id, from: 'project', to: 'user', cwd, expectedFromVersion, expectedToVersion} to edit them".into(),
             McpError::StaleSecretRecord => "MCP withheld record remains for this id without a project entry; call mcp.remove {source: 'project', id, cwd, expectedVersion} to delete it (it answers mcp_unknown_server after cleaning), then save again".into(),
+            McpError::ImportPartial => "MCP import is partial: the source entries were written and their withheld values were not; replace them again to retry".into(),
             other => other.to_string(),
         },
     )
+}
+
+/// The authorized workspace of a request's `cwd`: its Settings root, its
+/// canonical path and the string the request named it by. Claude Code records
+/// its local store under either spelling, so both are carried.
+async fn authorized_workspace(
+    settings: &Arc<SettingsService>,
+    cwd: Option<String>,
+    stopping: &CancellationToken,
+) -> Result<Option<(usize, discovery::Workspace)>, RpcError> {
+    let Some(cwd) = cwd else { return Ok(None) };
+    let canonical = canonical_cwd(&cwd).await?;
+    let root = settings
+        .authorize_project(canonical.clone(), stopping)
+        .await
+        .map_err(|e| error(e.into()))?;
+    Ok(Some((
+        root,
+        discovery::Workspace {
+            canonical,
+            request: cwd,
+        },
+    )))
 }
 
 async fn project(
@@ -504,13 +575,50 @@ async fn project(
     cwd: Option<String>,
     stopping: &CancellationToken,
 ) -> Result<Option<usize>, RpcError> {
-    let Some(cwd) = cwd else { return Ok(None) };
-    let cwd = canonical_cwd(&cwd).await?;
-    settings
-        .authorize_project(cwd, stopping)
-        .await
-        .map(Some)
-        .map_err(|e| error(e.into()))
+    Ok(authorized_workspace(settings, cwd, stopping)
+        .await?
+        .map(|(root, _)| root))
+}
+
+/// The document an import request names: the client's own text, or one known
+/// store's converted text. A store document answers its digest, so an apply
+/// can require the text the preview read. Nothing is written here.
+async fn import_document(
+    document: Option<String>,
+    from: Option<String>,
+    workspace: Option<&(usize, discovery::Workspace)>,
+    stopping: &CancellationToken,
+) -> Result<(String, Option<String>, Option<discovery::Identity>), RpcError> {
+    match (document, from) {
+        (Some(document), None) => Ok((document, None, None)),
+        (None, Some(id)) => {
+            let store = StoreId::parse(&id)
+                .ok_or_else(|| RpcError::invalid(format!("unknown MCP source {id}")))?;
+            if store.requires_workspace() && workspace.is_none() {
+                return Err(RpcError::invalid("Project MCP sources require cwd"));
+            }
+            let workspace = workspace.map(|(_, workspace)| workspace.clone());
+            let read = tokio::task::spawn_blocking(move || {
+                let environment = discovery::Environment::from_process();
+                // The identity row comes from the one read of the store the
+                // preview converts, so naming it reads nothing else.
+                discovery::document(store, &environment, workspace.as_ref())
+            })
+            .await
+            .map_err(|_| RpcError::app(-32000, "mcp_unavailable", "MCP worker failed"))?;
+            let (document, source) = read.map_err(|error| {
+                let code = error.code();
+                RpcError::app(-32000, code, error.message)
+            })?;
+            if stopping.is_cancelled() {
+                return Err(RpcError::interrupted());
+            }
+            Ok((document.text, Some(document.revision), Some(source)))
+        }
+        _ => Err(RpcError::invalid(
+            "mcp.import takes exactly one of document and from",
+        )),
+    }
 }
 
 fn source(scope: McpScope, project: Option<usize>) -> Result<McpSource, RpcError> {
@@ -538,6 +646,16 @@ fn writable(source: McpSource) -> Result<SettingsScope, RpcError> {
         .ok_or_else(|| RpcError::invalid("plugin MCP entries change through their plugin"))
 }
 
+/// The source an import writes: the user source or an authorized workspace.
+fn writable_scope(scope: WritableScope, project: Option<usize>) -> Result<SettingsScope, RpcError> {
+    match scope {
+        WritableScope::User => Ok(SettingsScope::User),
+        WritableScope::Project => project
+            .map(SettingsScope::Project)
+            .ok_or_else(|| RpcError::invalid("Project MCP operations require cwd")),
+    }
+}
+
 pub(super) fn provide(
     ctx: &Ctx,
     methods: &ManagementMethods,
@@ -560,6 +678,9 @@ pub(super) fn provide(
             "mcp.remove",
             "mcp.set_enabled",
             "mcp.move",
+            "mcp.import.sources",
+            "mcp.import.preview",
+            "mcp.import.apply",
             "mcp.disconnect",
             "mcp.auth.start",
             "mcp.auth.complete",
@@ -567,7 +688,7 @@ pub(super) fn provide(
             "mcp.auth.logout",
         ]
         .into_iter()
-        .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.configuration" | "mcp.inspect" | "mcp.temporary.capabilities"), Interruption::Report))
+        .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.configuration" | "mcp.inspect" | "mcp.temporary.capabilities" | "mcp.import.preview" | "mcp.import.sources"), Interruption::Report))
         .collect(),
         Arc::new(move |method, value, stopping, _| {
             let directory = directory.clone();
@@ -898,13 +1019,13 @@ pub(super) fn provide(
                         }
                         let project = project(&settings, p.cwd, &stopping).await?;
                         let (from, to) = match (p.from, p.to) {
-                            (MoveScope::User, MoveScope::Project) => (
+                            (WritableScope::User, WritableScope::Project) => (
                                 McpSource::User,
                                 McpSource::Project(project.ok_or_else(|| {
                                     RpcError::invalid("Project MCP operations require cwd")
                                 })?),
                             ),
-                            (MoveScope::Project, MoveScope::User) => (
+                            (WritableScope::Project, WritableScope::User) => (
                                 McpSource::Project(project.ok_or_else(|| {
                                     RpcError::invalid("Project MCP operations require cwd")
                                 })?),
@@ -927,6 +1048,92 @@ pub(super) fn provide(
                             )
                             .await
                             .map_err(error)?;
+                    }
+                    "mcp.import.sources" => {
+                        let p: ImportSourcesMcp = params(value)?;
+                        let workspace =
+                            authorized_workspace(&settings, p.cwd, &stopping).await?;
+                        let sources = tokio::task::spawn_blocking(move || {
+                            let workspace = workspace.map(|(_, workspace)| workspace);
+                            discovery::sources(
+                                &discovery::Environment::from_process(),
+                                workspace.as_ref(),
+                            )
+                        })
+                        .await
+                        .map_err(|_| {
+                            RpcError::app(-32000, "mcp_unavailable", "MCP worker failed")
+                        })?;
+                        return Ok(serde_json::json!({"sources": sources}));
+                    }
+                    "mcp.import.preview" => {
+                        let p: PreviewImportMcp = params(value)?;
+                        let workspace =
+                            authorized_workspace(&settings, p.cwd, &stopping).await?;
+                        let source = writable_scope(
+                            p.source,
+                            workspace.as_ref().map(|(root, _)| *root),
+                        )?;
+                        let (document, source_revision, store) =
+                            import_document(p.document, p.from, workspace.as_ref(), &stopping)
+                                .await?;
+                        let document = import::parse_document(&document).map_err(error)?;
+                        let mut preview = directory
+                            .preview_import(source, document, &stopping)
+                            .await
+                            .map_err(error)?;
+                        preview.source_revision = source_revision;
+                        preview.store = store;
+                        return reply(preview);
+                    }
+                    "mcp.import.apply" => {
+                        let p: ApplyImportMcp = params(value)?;
+                        match (&p.from, &p.expected_source_revision) {
+                            (Some(_), None) => {
+                                return Err(RpcError::invalid(
+                                    "an import from a source takes expectedSourceRevision",
+                                ));
+                            }
+                            (None, Some(_)) => {
+                                return Err(RpcError::invalid(
+                                    "expectedSourceRevision is only for an import from a source",
+                                ));
+                            }
+                            _ => {}
+                        }
+                        let workspace =
+                            authorized_workspace(&settings, p.cwd, &stopping).await?;
+                        let source = writable_scope(
+                            p.source,
+                            workspace.as_ref().map(|(root, _)| *root),
+                        )?;
+                        let (document, source_revision, _) =
+                            import_document(p.document, p.from, workspace.as_ref(), &stopping)
+                                .await?;
+                        if let (Some(expected), Some(actual)) =
+                            (&p.expected_source_revision, &source_revision)
+                            && expected != actual
+                        {
+                            return Err(RpcError::app(
+                                -32000,
+                                "mcp_settings_conflict",
+                                "The MCP source store changed since the preview; preview again",
+                            ));
+                        }
+                        let document = import::parse_document(&document).map_err(error)?;
+                        let resolutions = import::check_resolutions(&document, &p.resolutions)
+                            .map_err(RpcError::invalid)?;
+                        let revision = directory
+                            .import_entries(
+                                source,
+                                p.expected_version,
+                                document,
+                                resolutions,
+                                &stopping,
+                            )
+                            .await
+                            .map_err(error)?;
+                        return Ok(serde_json::json!({"revision": revision}));
                     }
                     "mcp.disconnect" => {
                         let p: McpTarget = params(value)?;

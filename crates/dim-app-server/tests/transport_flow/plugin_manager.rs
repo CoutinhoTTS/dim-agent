@@ -2372,6 +2372,135 @@ async fn plugin_broken_manifest_runs_none_of_its_content() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// §A.2: a refusal whose cause has a static reason reaches the client
+/// with that reason, in the mutation reply and in `plugin.list`; a
+/// refusal without one keeps the generic message at the client boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refusal_named_from_the_closed_set_reaches_the_client() {
+    let home = home();
+    let config = config(&home);
+    let source = home.join("src/kit");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("mcp.json"), r#"{"servers": {}}"#).unwrap();
+    std::fs::write(
+        source.join("dim-plugin.json"),
+        json!({"name": "kit", "mcp": "mcp.json"}).to_string(),
+    )
+    .unwrap();
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert_eq!(
+        installed["result"]["refused"][0],
+        json!({"kind": "mcp", "error": "MCP document must contain an mcpServers object"}),
+        "{installed}"
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"][0],
+        json!({"kind": "mcp", "error": "MCP document must contain an mcpServers object"}),
+        "{list}"
+    );
+
+    // A document-shape cause with a static reason: the client reads the
+    // owner's reason, never the `reason` member that carries it inside.
+    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": 5}"#).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"][0],
+        json!({"kind": "mcp", "error": "mcpServers must be a JSON object"}),
+        "{reloaded}"
+    );
+    assert!(!reloaded.to_string().contains("\"reason\""), "{reloaded}");
+
+    // A content file that is not JSON is PluginManager's own refusal, for
+    // both kinds: the client reads its static reason, never the path, in
+    // the mutation reply and in `plugin.list`.
+    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": {},}"#).unwrap();
+    std::fs::write(source.join("hooks.json"), r#"{"hooks": {},}"#).unwrap();
+    std::fs::write(
+        source.join("dim-plugin.json"),
+        json!({"name": "kit", "mcp": "mcp.json", "hooks": "hooks.json"}).to_string(),
+    )
+    .unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"],
+        json!([
+            {"kind": "mcp", "error": "the file is not valid JSON"},
+            {"kind": "hooks", "error": "the file is not valid JSON"},
+        ]),
+        "{reloaded}"
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        json!([
+            {"kind": "mcp", "error": "the file is not valid JSON"},
+            {"kind": "hooks", "error": "the file is not valid JSON"},
+        ]),
+        "{list}"
+    );
+    assert!(!reloaded.to_string().contains("mcp.json"), "{reloaded}");
+    assert!(!reloaded.to_string().contains("hooks.json"), "{reloaded}");
+    assert!(
+        !reloaded.to_string().contains(home.to_str().unwrap()),
+        "{reloaded}"
+    );
+    let refused = item(&list, "kit")["refused"].to_string();
+    assert!(!refused.contains("mcp.json"), "{list}");
+    assert!(!refused.contains("hooks.json"), "{list}");
+    assert!(!refused.contains(home.to_str().unwrap()), "{list}");
+
+    // A refusal whose cause carries no static reason keeps the generic
+    // message at the client, in the mutation reply and in `plugin.list`:
+    // a broken MCP entry refuses the document with the entry's own error.
+    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": {"leaky": 5}}"#).unwrap();
+    std::fs::write(source.join("hooks.json"), r#"{"hooks": {}}"#).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"],
+        json!([{"kind": "mcp", "error": "Plugin content was refused"}]),
+        "{reloaded}"
+    );
+    assert!(!reloaded.to_string().contains("leaky"), "{reloaded}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        json!([{"kind": "mcp", "error": "Plugin content was refused"}]),
+        "{list}"
+    );
+    assert!(!list.to_string().contains("leaky"), "{list}");
+
+    // A content path that resolves to a directory passes `Manifest::read`
+    // and fails the read itself: the client reads that reason, not the path.
+    std::fs::remove_file(source.join("mcp.json")).unwrap();
+    std::fs::create_dir(source.join("mcp.json")).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"],
+        json!([{"kind": "mcp", "error": "the file could not be read"}]),
+        "{reloaded}"
+    );
+    assert!(!reloaded.to_string().contains("mcp.json"), "{reloaded}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        json!([{"kind": "mcp", "error": "the file could not be read"}]),
+        "{list}"
+    );
+    assert!(!list.to_string().contains("mcp.json"), "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// §3.7: with the owner off a kind is skipped and no refusal is kept;
 /// turning the owner on reads the file, and `plugin.list` shows the
 /// refusal.

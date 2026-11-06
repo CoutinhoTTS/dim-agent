@@ -30,7 +30,7 @@ concurrency:
 jobs:
   verify:
     if: github.repository == 'arcships/dim' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       sha: ${{ steps.release.outputs.sha }}
@@ -103,7 +103,7 @@ jobs:
     needs: verify
     if: inputs.publish && vars.NPM_ALPHA_PUBLISH_ENABLED == 'true' && github.repository == 'arcships/dim' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     environment: npm-release
     permissions:
       contents: read
@@ -124,13 +124,6 @@ jobs:
         with:
           name: nightly-source
           digest-mismatch: error
-      - name: Snapshot all protected dist-tags
-        if: needs.verify.outputs.repair != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo '{}' > npm-publication.json
-          node scripts/check-alpha-registry.mjs npm-publication.json snapshot
       - name: Recheck the Release and publish dependencies before dimcode-alpha
         if: needs.verify.outputs.repair != 'true'
         env:
@@ -149,6 +142,8 @@ jobs:
           jq -e '.prerelease == true' staging/github-release.json > /dev/null
           [[ "$(gh api "repos/$GITHUB_REPOSITORY/commits/refs%2Ftags%2F$RELEASE_TAG" --jq .sha)" == "$SOURCE_SHA" ]]
           gh release download "$RELEASE_TAG" --dir staging/npm --pattern '*.tgz' --pattern release-manifest.json
+          cp staging/npm/release-manifest.json npm-publication.json
+          node scripts/check-alpha-registry.mjs npm-publication.json snapshot
           node scripts/publish-npm.mjs staging/npm "${RELEASE_TAG#v}" "$SOURCE_SHA" --publish staging/github-release.json
       - name: Record published Release provenance
         if: needs.verify.outputs.repair != 'true'
@@ -158,10 +153,9 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           import { readFileSync, writeFileSync } from 'node:fs';
-          const manifest = JSON.parse(readFileSync('staging/npm/release-manifest.json'));
           const release = JSON.parse(readFileSync('staging/github-release.json'));
           const snapshot = JSON.parse(readFileSync('npm-publication.json'));
-          writeFileSync('npm-publication.json', JSON.stringify({ ...manifest, ...snapshot, releaseId: release.id, releaseTag: process.env.RELEASE_TAG }));
+          writeFileSync('npm-publication.json', JSON.stringify({ ...snapshot, releaseId: release.id, releaseTag: process.env.RELEASE_TAG }));
           NODE
       - name: Reuse the complete published nightly without rebuilding
         if: needs.verify.outputs.repair == 'true'
@@ -176,9 +170,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   acceptance:
-    needs: publish
+    needs: [verify, publish]
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -196,5 +190,10 @@ jobs:
       - name: Sync the Alibaba mirror and verify both fresh dima installations
         run: node scripts/check-alpha-registry.mjs npm-publication.json mirror --apply
       - name: Record acceptance
+        env:
+          REPAIR: ${{ needs.verify.outputs.repair }}
         run: |
-          jq -r '"Verified nightly \(.version) from \(.sourceCommit). npm and npmmirror latest/alpha agree; default and @alpha installations both passed package-version and dima --version checks with fresh prefixes and caches. All protected dist-tags are unchanged. No build is needed for an already published source."' npm-publication.json >> "$GITHUB_STEP_SUMMARY"
+          jq -r '"Verified nightly \(.version) from \(.sourceCommit). npm and npmmirror latest/alpha agree; default and @alpha installations both passed package-version and dima --version checks with fresh prefixes and caches. All protected dist-tags are unchanged."' npm-publication.json >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$REPAIR" == true ]]; then
+            echo 'No build is needed for this already published source.' >> "$GITHUB_STEP_SUMMARY"
+          fi

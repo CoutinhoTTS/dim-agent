@@ -226,8 +226,8 @@ test('rejects an alpha that would outrank the newest beta before registry writes
   assert.equal(readFileSync(release.log,'utf8'),'');
 });
 
-function nightlyRegistry(t) {
-  const { root, manifest, names } = fixture(t, '1.2.3-alpha.10');
+function nightlyRegistry(t, shipped = platforms) {
+  const { root, manifest, names } = fixture(t, '1.2.3-alpha.10', shipped);
   const receipt = path.join(root, 'npm-publication.json');
   writeFileSync(receipt, JSON.stringify(manifest));
   const remote = path.join(root, 'registry.json');
@@ -259,6 +259,11 @@ function nightlyRegistry(t) {
       }
       if (pathname.startsWith('/-/package/')) {
         const name = pathname.split('/')[3];
+        assert(name === 'dimcode' || names.includes(name));
+        if (failure === 'tag-auth') return new Response('', { status: 401 });
+        if (failure === 'tag-server') return new Response('', { status: 503 });
+        if (failure === 'tag-network') throw new Error('network failure');
+        if (!state.tags[name]) return new Response('', { status: 404 });
         if (failure === 'race' && name === 'dimcode-alpha' && ++wrapperReads === 3) {
           state.tags[name].latest = '1.2.3-alpha.11';
           writeFileSync(remote, JSON.stringify(state));
@@ -329,6 +334,7 @@ function nightlyRegistry(t) {
 
 test('reuses a complete nightly, repairs only its wrapper tags and verifies both installations on both registries', (t) => {
   const registry = nightlyRegistry(t);
+  writeFileSync(registry.receipt, JSON.stringify({ sourceCommit }));
   for (const [mode, flag] of [['source', '--dry-run'], ['promote', '--dry-run']]) {
     const result = registry.run(mode, flag);
     assert.equal(result.status, 0, result.stderr);
@@ -368,7 +374,7 @@ test('reuses a complete nightly, repairs only its wrapper tags and verifies both
 test('fails closed on registry errors, incomplete builds, concurrent promotion and stale installations', (t) => {
   const registry = nightlyRegistry(t);
   assert.equal(registry.run('snapshot').status, 0);
-  for (const failure of ['auth', 'network', 'server', 'integrity', 'bin', 'dependencies']) {
+  for (const failure of ['tag-auth', 'tag-network', 'tag-server', 'auth', 'network', 'server', 'integrity', 'bin', 'dependencies']) {
     const result = registry.run('source', '--dry-run', failure);
     assert.notEqual(result.status, 0, failure);
     assert.equal(result.error, undefined, `${failure}: should fail, not hang`);
@@ -392,6 +398,38 @@ test('fails closed on registry errors, incomplete builds, concurrent promotion a
     assert.equal(result.error, undefined, `${mode}: ${failure} should fail, not hang`);
   }
   for (const { prefix } of registry.read().installs) assert.equal(existsSync(prefix), false);
+});
+
+test('promotes a new publication after snapshotting an older alpha and an unpublished dependency', (t) => {
+  const registry = nightlyRegistry(t);
+  const before = registry.read();
+  before.tags['dimcode-alpha'].alpha = '1.2.3-alpha.9';
+  delete before.tags['dimcode-web'];
+  writeFileSync(registry.remote, JSON.stringify(before));
+  const snapshot = registry.run('snapshot');
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.deepEqual(registry.read(), before);
+  const published = structuredClone(before);
+  published.tags['dimcode-alpha'].alpha = '1.2.3-alpha.10';
+  published.tags['dimcode-web'] = { alpha: '1.2.3-alpha.10' };
+  writeFileSync(registry.remote, JSON.stringify(published));
+  const promoted = registry.run('promote', '--apply');
+  assert.equal(promoted.status, 0, promoted.stderr);
+  published.tags['dimcode-alpha'].latest = '1.2.3-alpha.10';
+  assert.deepEqual(registry.read(), published);
+  const installed = registry.run('npm');
+  assert.equal(installed.status, 0, installed.stderr);
+});
+
+test('retries a release using its recorded package set instead of the dispatch checkout', (t) => {
+  const registry = nightlyRegistry(t, platforms.slice(0, -1));
+  for (const mode of ['snapshot', 'promote', 'npm', 'mirror']) {
+    const result = registry.run(mode, mode === 'promote' ? '--apply' : '--dry-run');
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const { protectedTags } = JSON.parse(readFileSync(registry.receipt));
+  assert.equal(Object.hasOwn(protectedTags, 'dimcode-windows-x64'), false);
+  assert.equal(registry.read().installs.length, 4);
 });
 
 test('does not reuse a nightly when a native manifest comes from another commit', (t) => {

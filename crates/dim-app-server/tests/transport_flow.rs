@@ -37,6 +37,9 @@ mod tool_cleanup;
 #[path = "transport_flow/branch_events.rs"]
 mod branch_events;
 
+#[path = "transport_flow/branches.rs"]
+mod branches;
+
 #[path = "transport_flow/branch_end.rs"]
 mod branch_end;
 
@@ -46,6 +49,9 @@ mod tree;
 #[path = "transport_flow/history_window.rs"]
 mod history_window;
 
+#[path = "transport_flow/history_forward.rs"]
+mod history_forward;
+
 #[path = "transport_flow/keyed_blocks.rs"]
 mod keyed_blocks;
 
@@ -54,6 +60,9 @@ mod reload;
 
 #[path = "transport_flow/agents.rs"]
 mod agents;
+
+#[path = "transport_flow/agent_get.rs"]
+mod agent_get;
 
 #[path = "transport_flow/collaboration.rs"]
 mod collaboration;
@@ -79,6 +88,12 @@ mod barrier;
 
 #[path = "transport_flow/product_protocol.rs"]
 mod product_protocol;
+
+#[path = "transport_flow/mcp_import.rs"]
+mod mcp_import;
+
+#[path = "transport_flow/mcp_discovery.rs"]
+mod mcp_discovery;
 
 #[path = "transport_flow/model_startup.rs"]
 mod model_startup;
@@ -124,8 +139,6 @@ mod agent_models;
 mod foreign_rows;
 #[path = "transport_flow/guide_entries.rs"]
 mod guide_entries;
-#[path = "transport_flow/modality.rs"]
-mod modality;
 #[path = "transport_flow/plugin_manager.rs"]
 mod plugin_manager;
 #[path = "transport_flow/process_typescript.rs"]
@@ -377,6 +390,11 @@ async fn launch_inner(
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     install_collaboration(&mut builder);
+    // A product profile serves Modality through its installer, as the product
+    // does; the other profiles do not load it.
+    if config.product_home.is_some() {
+        dim_modality::install(&mut builder);
+    }
     extra(&mut builder);
     serve(builder, config).await
 }

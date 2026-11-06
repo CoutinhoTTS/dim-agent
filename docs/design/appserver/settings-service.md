@@ -19,7 +19,8 @@ the source name, its files, a JSON Schema (with `default` values) and its user-o
 
 - the process service `settings`, which the owner uses: `register`, `read`, `update` (CAS on
   the revision) and `projects`;
-- the client management methods `settings.read`, `settings.update` and `settings.sources`;
+- the client management methods `settings.read`, `settings.update`, `settings.sources` and
+  `settings.projects`;
 - the same rutis events as S8a, `settings.changed` and `settings.project_authorized`. Their
   payloads become serializable. There is no `subscribe(source)`.
 
@@ -104,7 +105,7 @@ depended on a store nobody owned. That service and the `*Ref` rule are withdrawn
  |         settings.project_authorized on settings/projects                |
  +------^-------------------------------^----------------------------------+
         | register/read/update/projects | settings.read / settings.update
-        |                               | settings.sources
+        |                               | settings.sources / settings.projects
         |                               |
   TypeScript owner (rutis runtime row)  Rpc  <--  local client
 ```
@@ -242,6 +243,7 @@ with `managementMethods` (§4.5). They are never served to paired devices (overv
 | `settings.read` | `{source, scope}` | `{revision, document}` | invalid params (bad scope), `settings_unknown_source`, `settings_failed` |
 | `settings.update` | `{source, scope, expectedRevision, document}` | `{revision, document}` | invalid params (bad scope, schema violation), `settings_unknown_source`, `settings_conflict`, `settings_unsynced`, `settings_failed` |
 | `settings.sources` | `{}` | `{dialect, sources: [...]}` (`Sources`, §4.1) | invalid params |
+| `settings.projects` | `{}` | `{projects: [{root, cwd}]}`: the authorized project roots now, as the service's `projects` answers them (§4.2) | invalid params |
 
 - Only registered declared sources are served. A Rust source (for example `mcp`) is
   `settings_unknown_source`.
@@ -265,6 +267,16 @@ with `managementMethods` (§4.5). They are never served to paired devices (overv
 - `settings.sources` is never served to paired devices (§4.3 opening) and is absent from the
   Web entry's allowlist, so the Web entry answers `unknown_method` (§11 items 7–8): discovery
   is local-only like the rest of the namespace.
+- `settings.projects` is the read a client needs before it can pass `{project: root}`: it
+  answers the same `{projects: [{root, cwd}]}` as the owner-facing `projects` service (§4.2),
+  in cwd order, and the same Web-entry and paired-device rule applies (absent from the
+  allowlist, so `unknown_method`). **`root` is a process-local number** (§4.1): it holds for the
+  life of the daemon process, is not a durable identity, and a client re-reads
+  `settings.projects` after it reconnects to a restarted daemon rather than storing a root. The
+  list only grows while the process runs — authorizing the same cwd again adds no item and
+  emits nothing (§4.4) — so no event or push carries it; the client reads it when it opens a
+  project-scoped form. A `{project: root}` this process has not authorized is invalid params,
+  the same answer as for a source without project scope.
 
 ### 4.4 Events
 
@@ -353,10 +365,20 @@ impl SettingsService {
   Permission presets and tool lists do not write this source.
 - The file and native paths are shared with `BusinessDocument`, keyed by source name instead of
   `D::NAMESPACE`. CAS, the gate, leases, the unsynced case and `publish` stay as they are.
-- `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope` and
-  `Document(message)`. A written document that breaks the schema or is not an object is `Document` with the validator's message (the instance path, never the value); the
-  client path maps it to invalid params. A persisted document that breaks the schema stays
-  `Invalid` (`invalid_document` / `settings_failed`).
+- `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope`,
+  `Document(message)` and `DocumentShape { reason, position }`. A written document that
+  breaks the schema or is not an object is `Document` with the validator's message (the
+  instance path, never the value). `DocumentShape` is how `McpSettings` refuses an MCP
+  document as a whole — not an object, no `mcpServers` object, `mcpServers` not an object,
+  an empty server entry id, a file that is not JSON: the owner's static `reason`, which a
+  client may see, and `position` when the document was read from bytes. Its `Display` is
+  byte for byte what `Document` printed for the same text. No other owner has adopted it:
+  HooksSettings refuses a hook document as `Invalid("invalid hook document")`, and a
+  persisted file that the default `BusinessDocument` decode or a declared source cannot
+  parse is `Invalid("invalid settings document")`. `reason()` reports the static message of `Invalid` and of `DocumentShape`, and
+  `None` for every other variant, `Document` included, whose text is arbitrary. The
+  client path maps `Document` and `DocumentShape` to invalid params. A persisted document
+  that breaks the schema stays `Invalid` (`invalid_document` / `settings_failed`).
 - The `settings` service is a `HostDispatch` under `host_key("settings")`, and assembly registers
   `settings` in the `ServiceCatalog`, as `pluginFiles` is done today. Replies use
   the envelope of `sessions`: `{ok: true, value}` or `{ok: false, error: {code, message}}`.
@@ -548,6 +570,12 @@ through C4's path):
    registered declared source with its schema verbatim, its scopes, its user-only pointers and
    its `writeOnly` hint, never lists a Rust source, and drops a declared source's entry the
    moment its owner unloads, when `settings.read` answers `settings_unknown_source` again.
+10. `settings.projects` replies `{projects: []}` before anything is authorized, then lists the
+    root `session.create` authorized with its canonical cwd, and that root serves
+    `settings.read` with `{project: root}`; a second authorization of the same cwd adds no item,
+    a root this process never authorized is invalid params, and a root a client authorized
+    through `hooks.catalog` for a cwd with no Session is listed too. The list starts empty again
+    after a daemon restart on the same home.
 
 ## 12. Implementation status
 
@@ -563,8 +591,11 @@ Corrections made against the code (reflected in §4.3 and §4.5):
   (methods contract §3.2; ADR 004 D4 boundary). This is the only new plugin row; the §2 diagram's
   `managementMethods settings` sits in that part, and §9's ADR 002 D2 answer holds for it as for
   PermissionRules: it is the client path of the Settings data, not a wiring module.
-- `SettingsError` has `InvalidScope` and `Document(message)` besides the two named variants, so
-  the client path can tell invalid params from a persisted failure.
+- `SettingsError` has `InvalidScope`, `Document(message)` and
+  `DocumentShape { reason, position }` besides the two named variants, so the client path
+  can tell invalid params from a persisted failure; `reason()` reports the static message
+  behind `Invalid` and `DocumentShape`, and `DocumentShape`'s `Display` stays byte for
+  byte what `Document` printed.
 - The service reply envelope is the one of `sessions`.
 
 Acceptance (§11) covered by Rust flow tests, with the owner calling the `settings` service through

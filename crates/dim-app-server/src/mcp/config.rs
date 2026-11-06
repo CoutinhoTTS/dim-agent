@@ -78,6 +78,12 @@ pub struct McpSettings {
     dirty: BTreeSet<String>,
     pub extra: BTreeMap<String, Value>,
 }
+
+/// A document with a server entry whose id is empty: it names no entry a
+/// management call could address, so the whole document is refused.
+pub(crate) const EMPTY_ENTRY_ID: SettingsError =
+    SettingsError::shape("MCP server entry id is empty", None);
+
 impl McpSettings {
     /// Replaces an entry. Only this entry is serialised from its typed value
     /// on the next write.
@@ -119,6 +125,11 @@ impl McpSettings {
         self.mcp_servers.get(id)
     }
 
+    /// Every entry's value as the document wrote it, decoded or broken.
+    pub(crate) fn raw_entries(&self) -> &Map<String, Value> {
+        &self.raw
+    }
+
     /// Whether `id` names a decoded entry.
     pub fn contains(&self, id: &str) -> bool {
         self.mcp_servers.contains_key(id)
@@ -143,9 +154,7 @@ impl McpSettings {
     /// any management call could address, so it fails the whole document.
     fn from_entries(entries: Map<String, Value>, extra: BTreeMap<String, Value>) -> Result<Self> {
         if entries.keys().any(|id| id.trim().is_empty()) {
-            return Err(SettingsError::Document(
-                "MCP server entry id is empty".to_owned(),
-            ));
+            return Err(EMPTY_ENTRY_ID);
         }
         let mut document = Self {
             extra,
@@ -171,21 +180,24 @@ impl McpSettings {
         let object = match value {
             Value::Object(object) => object,
             _ => {
-                return Err(SettingsError::Document(
-                    "MCP document must be a JSON object".to_owned(),
+                return Err(SettingsError::shape(
+                    "MCP document must be a JSON object",
+                    None,
                 ));
             }
         };
         let servers = match object.get("mcpServers") {
             Some(Value::Object(servers)) => servers.clone(),
             Some(_) => {
-                return Err(SettingsError::Document(
-                    "mcpServers must be a JSON object".to_owned(),
+                return Err(SettingsError::shape(
+                    "mcpServers must be a JSON object",
+                    None,
                 ));
             }
             None => {
-                return Err(SettingsError::Document(
-                    "MCP document must contain an mcpServers object".to_owned(),
+                return Err(SettingsError::shape(
+                    "MCP document must contain an mcpServers object",
+                    None,
                 ));
             }
         };
@@ -200,22 +212,21 @@ impl McpSettings {
     /// `mcpServers` that is not an object fail the whole document.
     pub fn from_file(bytes: &[u8]) -> Result<Self> {
         let value: Value = serde_json::from_slice(bytes).map_err(|error| {
-            SettingsError::Document(format!(
-                "MCP document is not valid JSON at line {} column {}",
-                error.line(),
-                error.column()
-            ))
+            SettingsError::shape(
+                "MCP document is not valid JSON",
+                Some((error.line(), error.column())),
+            )
         })?;
         let object = match value.as_object() {
             Some(object) => object,
             None => {
                 let position = serde_json::from_slice::<BTreeMap<String, Value>>(bytes)
                     .err()
-                    .map(|error| format!(" at line {} column {}", error.line(), error.column()))
-                    .unwrap_or_default();
-                return Err(SettingsError::Document(format!(
-                    "MCP document must be a JSON object{position}"
-                )));
+                    .map(|error| (error.line(), error.column()));
+                return Err(SettingsError::shape(
+                    "MCP document must be a JSON object",
+                    position,
+                ));
             }
         };
         let servers = match object.get("mcpServers") {
@@ -223,20 +234,20 @@ impl McpSettings {
             Some(_) => {
                 let position = serde_json::from_slice::<RequiredServers>(bytes)
                     .err()
-                    .map(|error| format!(" at line {} column {}", error.line(), error.column()))
-                    .unwrap_or_default();
-                return Err(SettingsError::Document(format!(
-                    "mcpServers must be a JSON object{position}"
-                )));
+                    .map(|error| (error.line(), error.column()));
+                return Err(SettingsError::shape(
+                    "mcpServers must be a JSON object",
+                    position,
+                ));
             }
             None => {
                 let position = serde_json::from_slice::<RequiredServers>(bytes)
                     .err()
-                    .map(|error| format!(" at line {} column {}", error.line(), error.column()))
-                    .unwrap_or_default();
-                return Err(SettingsError::Document(format!(
-                    "MCP document must contain an mcpServers object{position}"
-                )));
+                    .map(|error| (error.line(), error.column()));
+                return Err(SettingsError::shape(
+                    "MCP document must contain an mcpServers object",
+                    position,
+                ));
             }
         };
         let extra = object
@@ -434,9 +445,18 @@ const MAX_TIMEOUT_MILLIS: u64 = 86_400_000;
 /// one of these: an unknown name there is the user's extension field, but a
 /// known name would be written back as the entry's own member
 /// (`merge_secret`).
-const ENTRY_MEMBERS: &[&str] = &[
+pub(crate) const ENTRY_MEMBERS: &[&str] = &[
     "type", "command", "args", "env", "cwd", "enabled", "timeout", "url", "headers", "auth",
     "oauth",
+];
+
+/// The members of `oauth` the decoder reads. Any other name is an extension
+/// field, kept in `McpOAuthSettings::extra` and unused.
+pub(crate) const OAUTH_MEMBERS: &[&str] = &[
+    "clientId",
+    "callbackPort",
+    "authServerMetadataUrl",
+    "scopes",
 ];
 
 fn field_timeout(
@@ -662,15 +682,9 @@ fn decode_oauth(
             ));
         }
     };
-    let known = [
-        "clientId",
-        "callbackPort",
-        "authServerMetadataUrl",
-        "scopes",
-    ];
     let extra = oauth
         .iter()
-        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .filter(|(key, _)| !OAUTH_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Ok(Some(Box::new(McpOAuthSettings {
@@ -833,6 +847,11 @@ pub struct McpSecrets {
     pub entries: BTreeMap<String, BTreeMap<String, McpSecretEntry>>,
 }
 impl McpSecrets {
+    /// The records one workspace withholds, by id: the overlay a project
+    /// source's entries and its revision token are computed with.
+    pub(crate) fn overlays(&self, workspace: &str) -> BTreeMap<String, McpSecretEntry> {
+        self.entries.get(workspace).cloned().unwrap_or_default()
+    }
     pub(crate) fn get(&self, workspace: &str, id: &str) -> Option<&McpSecretEntry> {
         self.entries
             .get(workspace)
@@ -1297,9 +1316,7 @@ impl BusinessDocument for McpSettings {
             return Err(SettingsError::Invalid("reserved MCP configuration field"));
         }
         if self.mcp_servers.keys().any(|id| id.trim().is_empty()) {
-            return Err(SettingsError::Document(
-                "MCP server entry id is empty".to_owned(),
-            ));
+            return Err(EMPTY_ENTRY_ID);
         }
         Ok(())
     }
@@ -2092,6 +2109,42 @@ mod tests {
     }
 
     #[test]
+    fn a_document_shape_refusal_carries_its_static_reason() {
+        let cases: [(&[u8], &str); 4] = [
+            (br#"{"mcpServers": {},}"#, "MCP document is not valid JSON"),
+            (b"[]", "MCP document must be a JSON object"),
+            (br#"{"mcpServers": 5}"#, "mcpServers must be a JSON object"),
+            (
+                br#"{"servers": {}}"#,
+                "MCP document must contain an mcpServers object",
+            ),
+        ];
+        for (bytes, reason) in cases {
+            let error = McpSettings::from_file(bytes).err().unwrap();
+            assert_eq!(error.reason(), Some(reason), "{bytes:?}");
+            let display = error.to_string();
+            assert!(
+                display.starts_with(&format!(
+                    "invalid settings document: {reason} at line 1 column "
+                )),
+                "{display}"
+            );
+        }
+
+        let value = McpSettings::from_value(json!({"servers": {}}))
+            .err()
+            .unwrap();
+        assert_eq!(
+            value.reason(),
+            Some("MCP document must contain an mcpServers object")
+        );
+        assert_eq!(
+            value.to_string(),
+            "invalid settings document: MCP document must contain an mcpServers object"
+        );
+    }
+
+    #[test]
     fn null_optional_members_read_as_absent() {
         let document = McpSettings::from_file(
             br#"{"mcpServers":{
@@ -2158,7 +2211,11 @@ mod tests {
             br#"{"mcpServers":{"   ": {"command": "server"}}}"#.as_slice(),
         ] {
             let error = McpSettings::from_file(source).err().unwrap();
-            assert!(matches!(error, SettingsError::Document(_)), "{error}");
+            assert_eq!(
+                error.reason(),
+                Some("MCP server entry id is empty"),
+                "{error}"
+            );
             let text = error.to_string();
             assert!(text.contains("entry id is empty"), "{text}");
             assert!(!text.contains("command") && !text.contains('{'), "{text}");

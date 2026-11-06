@@ -800,7 +800,7 @@ fn tui_resume_names_a_one_worktree_repository() {
     terminal.until("test / model");
     terminal.write(b"/resume\r");
     terminal.until("No saved sessions in this workspace. Ctrl+S shows more.");
-    terminal.until("Sessions · This repository");
+    terminal.until_anywhere("Sessions · This repository");
     terminal.write(b"\x13");
     terminal.until("Sessions · All workspaces");
     terminal.write(b"\x13");

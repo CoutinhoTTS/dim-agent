@@ -53,6 +53,16 @@ Commands:\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
   mcp add PATH                     Create an entry from PATH, or from stdin for -\n\
+  mcp import PATH [--yes]          Preview a standard mcpServers document; with\n\
+                                   --yes, import the entries the flags select:\n\
+                                   --replace ID, --rename OLD=NEW and --only ID.\n\
+                                   --source user|project picks the writable\n\
+                                   source (default: user)\n\
+  mcp import --from ID [--yes]     The same preview and import from one known\n\
+                                   store of another local client\n\
+  mcp import --discover [--cwd DIR]\n\
+                                   List those stores with their states; no\n\
+                                   value is printed\n\
   mcp edit ID                      Edit an entry's patch in the editor\n\
   mcp set ID PATH                  Write an entry's patch from PATH,\n\
                                    or from stdin for -\n\
@@ -227,6 +237,29 @@ Exit codes: 0 success, 1 configuration/transport error, a delete that removed\n\
 const USAGE_SESSION: &str =
     "Use session export, session rename, session delete or session cleanup; see --help";
 
+/// `mcp import PATH`, `mcp import --from ID` or `mcp import --discover`:
+/// preview a standard `mcpServers` document and, with `--yes`, apply the
+/// entries the flags select. With `--from`, the owner reads one known store of
+/// another local client and its text never reaches the client. Every status
+/// and refusal comes from the owner.
+#[derive(Clone, Debug)]
+pub struct McpImport {
+    /// The document, or `-` for stdin; absent with `--from` and `--discover`.
+    pub path: Option<String>,
+    /// List the known stores instead of previewing one.
+    pub discover: bool,
+    /// One known store id instead of a file.
+    pub from: Option<String>,
+    /// Apply the selected entries after the preview.
+    pub yes: bool,
+    /// Entries whose resolution replaces the target source's entry.
+    pub replace: Vec<String>,
+    /// `OLD=NEW` resolutions that write the entry under a new id.
+    pub rename: Vec<(String, String)>,
+    /// The only ids the import accepts; every other entry is skipped.
+    pub only: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum Action {
     Chat,
@@ -284,6 +317,7 @@ pub enum Action {
         enabled: bool,
     },
     McpDisconnect(String),
+    McpImport(McpImport),
     /// `<area> ...`: one request to a management area's owner.
     Management(crate::model::session::ManagementRequest),
     /// `<area> edit [ID]`: the area's document in the external editor, or one
@@ -558,11 +592,49 @@ impl Options {
                         return Err("Supply --keep only once".into());
                     }
                 }
-                "--yes" => {
-                    let Action::SessionCleanup { yes, .. } = &mut options.action else {
-                        return Err("--yes requires session cleanup".into());
+                "--yes" => match &mut options.action {
+                    Action::SessionCleanup { yes, .. } => *yes = true,
+                    Action::McpImport(import) => import.yes = true,
+                    _ => return Err("--yes requires session cleanup or mcp import".into()),
+                },
+                "--discover" => {
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--discover requires mcp import".into());
                     };
-                    *yes = true;
+                    import.discover = true;
+                }
+                "--from" => {
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--from requires mcp import".into());
+                    };
+                    if import.from.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --from only once".into());
+                    }
+                }
+                "--replace" => {
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--replace requires mcp import".into());
+                    };
+                    import.replace.push(value(&mut args)?);
+                }
+                "--rename" => {
+                    let given = value(&mut args)?;
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--rename requires mcp import".into());
+                    };
+                    let Some((old, new)) = given.split_once('=') else {
+                        return Err("--rename takes OLD=NEW".into());
+                    };
+                    if old.trim().is_empty() || new.trim().is_empty() {
+                        return Err("--rename takes OLD=NEW with both ids nonempty".into());
+                    }
+                    import.rename.push((old.to_owned(), new.to_owned()));
+                }
+                "--only" => {
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--only requires mcp import".into());
+                    };
+                    import.only.push(value(&mut args)?);
                 }
                 "--home" => {
                     options.home = PathBuf::from(value(&mut args)?);
@@ -803,6 +875,23 @@ impl Options {
                             area: Area::Mcp,
                             path: value(&mut args)?.into(),
                         },
+                        "import" => {
+                            // `--discover` and `--from` stand in place of the
+                            // path, so only a value that is not a flag is one.
+                            let path = match args.peek().map(|next| next.starts_with("--")) {
+                                Some(false) => Some(value(&mut args)?),
+                                _ => None,
+                            };
+                            Action::McpImport(McpImport {
+                                path,
+                                discover: false,
+                                from: None,
+                                yes: false,
+                                replace: Vec::new(),
+                                rename: Vec::new(),
+                                only: Vec::new(),
+                            })
+                        }
                         "edit" => Action::ManagementEdit {
                             area: Area::Mcp,
                             id: Some(value(&mut args)?),
@@ -836,7 +925,7 @@ impl Options {
                             },
                         }),
                         _ => {
-                            return Err("Use mcp list, mcp add PATH, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp disconnect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                            return Err("Use mcp list, mcp add PATH, mcp import PATH [--yes] | --from ID [--yes] | --discover, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp disconnect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
                 }
@@ -1185,6 +1274,18 @@ impl Options {
         if let Some(source) = source {
             if let Action::Migration(command) = &mut options.action {
                 command.source = Some(PathBuf::from(source));
+            } else if matches!(options.action, Action::McpImport(_)) {
+                // An import writes one writable source; a plugin entry is
+                // owned by its plugin.
+                match source.as_str() {
+                    "user" | "project" => options.mcp_source = Some(source),
+                    other => {
+                        return Err(format!(
+                            "--source is user or project for mcp import, not {other}"
+                        )
+                        .into());
+                    }
+                }
             } else if names_one_mcp_entry(&options.action) {
                 if crate::mcp::source(&source).is_none() {
                     return Err(format!("--source is user, project or plugin, not {source}").into());
@@ -1192,8 +1293,31 @@ impl Options {
                 options.mcp_source = Some(source);
             } else {
                 return Err(
-                    "--source requires migration or an mcp command that names one entry".into(),
+                    "--source requires migration, mcp import or an mcp command that names one entry"
+                        .into(),
                 );
+            }
+        }
+        if let Action::McpImport(import) = &options.action {
+            let selection =
+                !(import.replace.is_empty() && import.rename.is_empty() && import.only.is_empty());
+            if import.discover {
+                if import.path.is_some() || import.from.is_some() {
+                    return Err("Use one of PATH, --from ID and --discover".into());
+                }
+                if import.yes || selection {
+                    return Err("--discover takes no --yes, --replace, --rename or --only".into());
+                }
+                if options.mcp_source.is_some() {
+                    return Err("--source is for mcp import PATH or --from".into());
+                }
+            } else {
+                if import.path.is_some() == import.from.is_some() {
+                    return Err("Use one of PATH, --from ID or --discover".into());
+                }
+                if !import.yes && selection {
+                    return Err("--replace, --rename and --only require mcp import --yes".into());
+                }
             }
         }
         if options
@@ -1581,7 +1705,8 @@ impl Options {
             | Action::McpLogin(_)
             | Action::McpLogout(_)
             | Action::McpEnable { .. }
-            | Action::McpDisconnect(_) => true,
+            | Action::McpDisconnect(_)
+            | Action::McpImport(_) => true,
             Action::Management(request) => request.area.names_workspace(),
             Action::ManagementEdit { area, .. }
             | Action::ManagementSet { area, .. }
@@ -1744,6 +1869,7 @@ mod workspace_tests {
             (vec!["mcp", "logout", "docs"], None, true),
             (vec!["mcp", "enable", "docs"], None, true),
             (vec!["mcp", "disconnect", "docs"], None, true),
+            (vec!["mcp", "import", "document.json"], None, true),
             (vec!["mcp", "edit", "docs"], None, true),
             (vec!["skills", "list"], None, true),
             (vec!["hooks", "list"], None, true),
@@ -1848,6 +1974,19 @@ mod source_tests {
         ] {
             assert!(parse(&arguments).is_err(), "{arguments:?}");
         }
+        // An import takes the one writable source it writes.
+        for arguments in [
+            vec!["mcp", "import", patch, "--source", "user"],
+            vec!["mcp", "import", patch, "--source", "project", "--yes"],
+        ] {
+            let options =
+                parse(&arguments).unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+            assert!(
+                matches!(options.mcp_source.as_deref(), Some("project" | "user")),
+                "{arguments:?}"
+            );
+        }
+        assert!(parse(&["mcp", "import", patch, "--source", "plugin"]).is_err());
         // Its values are the sources `mcp list` prints.
         assert!(parse(&["mcp", "remove", "docs", "--source", "workspace"]).is_err());
         // A migration's `--source` still names the old home.
@@ -1857,6 +1996,114 @@ mod source_tests {
                 assert_eq!(command.source, Some(PathBuf::from(directory)));
             }
             other => panic!("expected a migration, not {other:?}"),
+        }
+    }
+
+    /// `mcp import` takes its selection flags only with `--yes`: they decide
+    /// what an apply writes, and a preview writes nothing. `--rename` is one
+    /// `OLD=NEW` pair per flag.
+    #[test]
+    fn mcp_import_takes_its_selection_flags_with_yes() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let parse = |arguments: &[&str]| {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            Options::parse(args)
+        };
+        let options = parse(&[
+            "mcp",
+            "import",
+            "document.json",
+            "--yes",
+            "--source",
+            "project",
+            "--replace",
+            "docs",
+            "--rename",
+            "notes=notes2",
+            "--only",
+            "docs",
+        ])
+        .unwrap();
+        assert_eq!(options.mcp_source.as_deref(), Some("project"));
+        match options.action {
+            Action::McpImport(import) => {
+                assert_eq!(import.path.as_deref(), Some("document.json"));
+                assert!(!import.discover);
+                assert!(import.from.is_none());
+                assert!(import.yes);
+                assert_eq!(import.replace, ["docs"]);
+                assert_eq!(import.rename, [("notes".to_owned(), "notes2".to_owned())]);
+                assert_eq!(import.only, ["docs"]);
+            }
+            other => panic!("expected an import, not {other:?}"),
+        }
+        for arguments in [
+            vec!["mcp", "import", "document.json", "--replace", "docs"],
+            vec!["mcp", "import", "document.json", "--rename", "notes=notes2"],
+            vec!["mcp", "import", "document.json", "--only", "docs"],
+            vec!["mcp", "import", "document.json", "--rename", "notes"],
+            vec![
+                "mcp",
+                "import",
+                "document.json",
+                "--yes",
+                "--rename",
+                "=notes2",
+            ],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
+        }
+    }
+
+    /// `mcp import` reads one document: a path, a known store id or the list
+    /// of stores. A discovery prints no value, so it takes no selection.
+    #[test]
+    fn mcp_import_takes_exactly_one_source() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let parse = |arguments: &[&str]| {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            Options::parse(args)
+        };
+        let options = parse(&["mcp", "import", "--discover"]).unwrap();
+        match options.action {
+            Action::McpImport(import) => {
+                assert!(import.discover);
+                assert!(import.path.is_none());
+                assert!(import.from.is_none());
+                assert!(!import.yes);
+            }
+            other => panic!("expected an import, not {other:?}"),
+        }
+        let options = parse(&["mcp", "import", "--from", "codex:user", "--yes"]).unwrap();
+        match options.action {
+            Action::McpImport(import) => {
+                assert!(!import.discover);
+                assert!(import.path.is_none());
+                assert_eq!(import.from.as_deref(), Some("codex:user"));
+                assert!(import.yes);
+            }
+            other => panic!("expected an import, not {other:?}"),
+        }
+        for arguments in [
+            vec!["mcp", "import"],
+            vec!["mcp", "import", "document.json", "--from", "codex:user"],
+            vec!["mcp", "import", "document.json", "--discover"],
+            vec!["mcp", "import", "--from", "codex:user", "--discover"],
+            vec!["mcp", "import", "--discover", "--yes"],
+            vec!["mcp", "import", "--discover", "--only", "docs"],
+            vec!["mcp", "import", "--discover", "--source", "user"],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
         }
     }
 }

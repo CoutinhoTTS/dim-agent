@@ -204,6 +204,76 @@ export function readMcpAuthStart(value: unknown): { attemptId: string; authoriza
   return { attemptId: string(source.attemptId), authorizationUrl, redirectUri: string(source.redirectUri), expiresAt: number(source.expiresAt) }
 }
 
+export type McpImportSourceState = "ready" | "absent" | "unreadable" | "too-large" | "malformed"
+/** One known store of another local client: its identity, the file read, its
+ * state and the count or the owner's message. Never an entry or a value. */
+export type McpImportSource = {
+  id: string; client: string; scope: string; path: string; state: McpImportSourceState
+  entries: number | undefined; error: string | undefined
+}
+export function readMcpImportSources(value: unknown): McpImportSource[] {
+  const source = object(value)
+  return array(source.sources, (item) => {
+    const row = object(item)
+    return {
+      id: string(row.id),
+      client: string(row.client),
+      scope: string(row.scope),
+      path: string(row.path),
+      state: choice(row.state, ["ready", "absent", "unreadable", "too-large", "malformed"]),
+      entries: row.entries === undefined ? undefined : number(row.entries),
+      error: optionalString(row.error),
+    }
+  })
+}
+
+export type McpImportStatus = "identical" | "changed" | "conflict" | "invalid"
+export type McpImportField = { field: string; kind: string }
+export type McpImportUnsupported = { field: string; effect: "kept-unused" | "dropped" }
+export type McpImportEntry = {
+  id: string; transport: string | undefined; status: McpImportStatus
+  changes: McpImportField[]; unsupported: McpImportUnsupported[]; omitted: number
+  error: string | undefined
+}
+/** The owner's preview of a standard `mcpServers` document: names and kinds,
+ * never a value. */
+export type McpImportPreviewSource = { id: string; client: string; scope: string; path: string }
+export type McpImportPreview = { revision: string; sourceRevision: string | undefined; store: McpImportPreviewSource | undefined; entries: McpImportEntry[]; unknownTopLevel: string[] }
+export function readMcpImportPreview(value: unknown): McpImportPreview {
+  const source = object(value)
+  return {
+    revision: string(source.revision),
+    sourceRevision: optionalString(source.sourceRevision),
+    store: source.store === undefined ? undefined : (() => {
+      const row = object(source.store)
+      return { id: string(row.id), client: string(row.client), scope: string(row.scope), path: string(row.path) }
+    })(),
+    entries: array(source.entries, (item) => {
+      const entry = object(item)
+      return {
+        id: string(entry.id),
+        transport: optionalString(entry.transport),
+        status: choice(entry.status, ["identical", "changed", "conflict", "invalid"]),
+        changes: array(entry.changes, (item) => {
+          const field = object(item)
+          return { field: string(field.field), kind: string(field.kind) }
+        }),
+        unsupported: array(entry.unsupported, (item) => {
+          const field = object(item)
+          return { field: string(field.field), effect: choice(field.effect, ["kept-unused", "dropped"]) }
+        }),
+        omitted: number(entry.omitted),
+        error: optionalString(entry.error),
+      }
+    }),
+    unknownTopLevel: array(source.unknownTopLevel, string),
+  }
+}
+export type McpImportAction = "import" | "skip" | "replace" | "rename"
+export type McpImportResolution = { id: string; action: McpImportAction; newId?: string }
+/** The apply's reply: the source revision the import wrote. */
+export function readMcpImportApplied(value: unknown): string { return string(object(value).revision) }
+
 export type SavedSessions = { sessions: SessionSummary[]; nextCursor: string | undefined }
 export function readSavedSessions(value: unknown): SavedSessions {
   const source = object(value)

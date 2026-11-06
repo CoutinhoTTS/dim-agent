@@ -3,11 +3,13 @@
 //! starts, its owner code uses `settings`, and local clients use
 //! `settings.*`.
 use super::*;
+use dim_agent_runtime::Names;
 use dim_app_server::{
     session_typescript::SessionTypeScriptConfig,
-    settings::{SettingsChanged, settings_changes},
+    settings::{SettingsChanged, SettingsService, SourceDeclaration, settings_changes},
 };
 use rutis::Ctx;
+use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use std::path::PathBuf;
 
 const OWNER: &str = "example-owner";
@@ -62,6 +64,75 @@ fn config(home: &std::path::Path, session_typescript: SessionTypeScriptConfig) -
         target_home: Some(home.join("rust")),
         session_typescript: Some(session_typescript),
         ..Default::default()
+    }
+}
+/// A protected local profile without a TypeScript row: the client methods, the
+/// authorization map and `session.create` need no runtime of their own.
+fn local_config(home: &std::path::Path) -> ServerConfig {
+    ServerConfig {
+        model_catalog: Some(configured_models()),
+        target_home: Some(home.to_owned()),
+        ..Default::default()
+    }
+}
+/// The `--model-config` catalog: one selectable model, so `session.create`
+/// resolves a model without a product home. No request reaches it.
+fn configured_models() -> Arc<dim_agent_aimux::AimuxModels> {
+    let file: dim_agent_aimux::config::ModelConfigFile = serde_json::from_value(json!({
+        "defaultModel": {"providerId":"local","modelId":"main"},
+        "providers": [{
+            "id": "local",
+            "kind": "openai-compatible",
+            "apiKeyEnv": null,
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "compatible": null,
+            "models": [{
+                "id": "main",
+                "contextWindow": 128000,
+                "maxOutputTokens": 16384,
+                "config": {"maxTokens": 16384}
+            }]
+        }]
+    }))
+    .unwrap();
+    Arc::new(dim_agent_aimux::AimuxModels::from_config(file).unwrap())
+}
+
+/// Registers a declared source with project scope, the way a C4 owner row does
+/// (§3.1): `settings.read`/`settings.update` need one to take `{project: root}`.
+struct ProjectSource(Key<SettingsService>);
+impl ProjectSource {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self(names.key()?))
+    }
+}
+impl DynPlugin for ProjectSource {
+    fn name(&self) -> &str {
+        "test.settings-project-source"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.0.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            ctx.require_at(&self.0)?.register_declared(
+                ctx,
+                SourceDeclaration {
+                    source: "example".into(),
+                    user_file: "example.json".into(),
+                    project_file: Some("example.project.json".into()),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "maxResults": {"type": "integer", "minimum": 1, "default": 5},
+                        },
+                        "additionalProperties": false,
+                    }),
+                    user_only: vec![],
+                },
+            )?;
+            Ok(Effect::Done)
+        })
     }
 }
 
@@ -464,6 +535,10 @@ async fn a_web_entry_is_not_served_settings_sources() {
         web.rpc("settings.sources", json!({})).await["error"]["data"]["appError"],
         "unknown_method"
     );
+    assert_eq!(
+        web.rpc("settings.projects", json!({})).await["error"]["data"]["appError"],
+        "unknown_method"
+    );
     let read = web
         .rpc(
             "settings.read",
@@ -476,4 +551,129 @@ async fn a_web_entry_is_not_served_settings_sources() {
     server.join().await.unwrap();
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&assets);
+}
+
+/// §4.3: `settings.projects` is the read of the map a client needs to pass
+/// `{project: root}`. It grows with every authorization — including one a
+/// Session never made — and it is not pushed: one read answers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_client_lists_authorized_project_roots() {
+    let home = product_home();
+    let project = home.join("project");
+    let hook_only = home.join("hook-only");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&hook_only).unwrap();
+    let (server, _) = launch_with(Arc::new(MockTools), local_config(&home), |builder| {
+        builder.plugin(|names| Ok(Box::new(ProjectSource::new(names)?) as Box<dyn DynPlugin>));
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("settings.projects")),
+        "{}",
+        client.features
+    );
+    assert_eq!(
+        client.rpc("settings.projects", json!({})).await["result"],
+        json!({"projects": []})
+    );
+    assert_eq!(
+        client
+            .rpc("settings.projects", json!({"unexpected": true}))
+            .await["error"]["data"]["appError"],
+        "invalid_params"
+    );
+
+    assert_ok(&client.rpc("session.create", json!({"cwd": project})).await);
+    let cwd = project.canonicalize().unwrap();
+    let listed = client.rpc("settings.projects", json!({})).await;
+    let projects = listed["result"]["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1, "{listed}");
+    assert_eq!(projects[0]["cwd"], json!(cwd));
+    let root = projects[0]["root"].as_u64().expect("root number");
+
+    // The listed root is exactly the scope `settings.read` takes.
+    let read = client
+        .rpc(
+            "settings.read",
+            json!({"source":"example","scope":{"project": root}}),
+        )
+        .await;
+    assert_ok(&read);
+    assert_eq!(read["result"]["revision"], "missing");
+    assert_eq!(read["result"]["document"], json!({"maxResults": 5}));
+
+    // Authorizing the same cwd again adds no duplicate.
+    assert_ok(&client.rpc("session.create", json!({"cwd": project})).await);
+    assert_eq!(
+        client.rpc("settings.projects", json!({})).await["result"],
+        listed["result"]
+    );
+
+    // A root this process never authorized is not a scope.
+    let unknown = client
+        .rpc(
+            "settings.read",
+            json!({"source":"example","scope":{"project": root + 1000}}),
+        )
+        .await;
+    assert_eq!(unknown["error"]["data"]["appError"], "invalid_params");
+
+    // A root authorized for a cwd with no Session is listed too: the read is
+    // Settings' map, not the Session directory.
+    assert_ok(&client.rpc("hooks.catalog", json!({"cwd": hook_only})).await);
+    let listed = client.rpc("settings.projects", json!({})).await;
+    let projects = listed["result"]["projects"].as_array().unwrap();
+    let hook_cwd = hook_only.canonicalize().unwrap();
+    let cwds: Vec<Value> = projects
+        .iter()
+        .map(|project| project["cwd"].clone())
+        .collect();
+    assert_eq!(cwds, vec![json!(hook_cwd), json!(cwd)], "{listed}");
+    let hook_root = projects[0]["root"].as_u64().unwrap();
+    assert_ne!(hook_root, root);
+    assert_ok(
+        &client
+            .rpc(
+                "settings.read",
+                json!({"source":"example","scope":{"project": hook_root}}),
+            )
+            .await,
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// §4.1/§4.3: a root is a number this process assigned, never a durable
+/// identity. A restarted daemon on the same home lists nothing until
+/// something authorizes a project again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_roots_are_process_local_across_a_restart() {
+    let home = product_home();
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let cwd = project.canonicalize().unwrap();
+    for round in 0..2 {
+        let (server, _) = launch_with_agent(Arc::new(MockTools), local_config(&home)).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        assert_eq!(
+            client.rpc("settings.projects", json!({})).await["result"],
+            json!({"projects": []}),
+            "round {round}"
+        );
+        assert_ok(&client.rpc("session.create", json!({"cwd": project})).await);
+        let listed = client.rpc("settings.projects", json!({})).await;
+        let projects = listed["result"]["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 1, "round {round}: {listed}");
+        assert_eq!(projects[0]["cwd"], json!(cwd), "round {round}: {listed}");
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&home);
 }

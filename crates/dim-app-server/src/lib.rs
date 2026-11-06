@@ -15,7 +15,6 @@ mod managed_oauth;
 pub mod managed_provider;
 pub mod mcp;
 pub mod methods;
-pub mod modality;
 pub mod model_catalog;
 pub mod model_log;
 mod outbound;
@@ -758,9 +757,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 names,
             )?))
         })?);
-        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(modality::ModalityPlugin::new(names)?))
-        })?);
     }
     if let Some(home_root) = execution_root.or(product_root) {
         let build = rutis_loader::resolve::Build::default();
@@ -1275,7 +1271,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<mcp::Publication>(catalog, None);
     register::<hooks_settings::HooksService>(catalog, None);
     register::<methods::ManagementMethods>(catalog, None);
-    register::<modality::ModalityAdapterService>(catalog, None);
     register::<runtime_manager::RuntimeService>(catalog, None);
     register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
