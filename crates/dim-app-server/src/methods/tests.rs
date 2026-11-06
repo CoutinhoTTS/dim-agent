@@ -1,6 +1,6 @@
 //! Per-call lookup, provider-owned calls and namespace ownership contracts.
 use super::*;
-use dim_agent_capabilities::methods::{Handler, Interruption};
+use dim_agent_capabilities::methods::{Handler, Interruption, MethodCall};
 use dim_agent_runtime::{Modules, Names, names::register, register_part, wait_active};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use rutis_loader::{Layer, LoaderPlugin, Patch};
@@ -32,7 +32,7 @@ impl Owner {
                 .iter()
                 .map(|method| decl(method, Interruption::Drain))
                 .collect(),
-            handler: Arc::new(|_, _, _, _| Box::pin(async { Ok(json!({})) })),
+            handler: Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) })),
             methods: names.key()?,
         })
     }
@@ -86,7 +86,7 @@ impl DynPlugin for Waiting {
                 ctx,
                 "pending",
                 vec![decl("pending.read", Interruption::Drain)],
-                Arc::new(|_, _, _, _| Box::pin(async { Ok(json!({})) })),
+                Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) })),
             )?;
             Ok(Effect::Done)
         })
@@ -184,6 +184,7 @@ impl Assembly {
             &self.loader,
             method.into(),
             json!({}),
+            None,
             entry.clone(),
             |_| {},
         )
@@ -265,7 +266,7 @@ impl DynPlugin for Fixture {
                     decl("fixture.wait", Interruption::Report),
                     decl("fixture.read", Interruption::Drain),
                 ],
-                Arc::new(move |method, _, cancel, _| {
+                Arc::new(move |MethodCall { method, .. }, cancel, _| {
                     let state = state.clone();
                     Box::pin(async move {
                         if method == "fixture.write" {
@@ -539,4 +540,86 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
         assert!(started.elapsed() < Duration::from_secs(1));
         assembly.root.shutdown().await.unwrap();
     }
+}
+
+/// Methods contract A.2: a contributed notification may not take a built-in
+/// notification's wire name, in either table, so a provider cannot
+/// impersonate a notification its connections already read.
+#[test]
+fn both_checks_refuse_a_built_in_notification_name() {
+    let with = |name: &str, notification: &str| {
+        vec![MethodDecl {
+            notifications: vec![notification.into()],
+            ..decl(name, Interruption::Drain)
+        }]
+    };
+    let error = ManagementMethods::check()(
+        "management",
+        &with("management.read", "management.progress"),
+    )
+    .expect_err("the management table refuses a built-in notification");
+    assert!(
+        error
+            .to_string()
+            .contains("Invalid management contribution")
+    );
+    ManagementMethods::check()("management", &with("management.read", "management.changed"))
+        .expect("a name of its own is fine");
+
+    let error = reserved_for_sessions()(
+        "session.event",
+        &with("session.event.read", "session.event"),
+    )
+    .expect_err("the Session table refuses a built-in notification");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid Session namespace session.event")
+    );
+    reserved_for_sessions()(
+        "session.event",
+        &with("session.event.read", "session.event.read"),
+    )
+    .expect("a name of its own is fine");
+}
+
+/// F3: the names both tables refuse are the `Notification` enum's wire names.
+/// The enum is the one source; a variant added, renamed or left without a
+/// name fails until the list matches it.
+#[test]
+fn built_in_notification_names_are_the_notification_enums() {
+    const SOURCE: &str = include_str!("../protocol.rs");
+    let body = SOURCE
+        .split_once("pub enum Notification {")
+        .expect("the Notification enum")
+        .1;
+    let body = body.split_once("\n}\n").expect("the enum's end").0;
+    let mut names = Vec::new();
+    let mut variants = 0;
+    for line in body.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix("#[serde(rename = \"") {
+            names.push(name.split('"').next().expect("a quoted name"));
+        } else if !line.is_empty() && !line.starts_with('#') {
+            variants += 1;
+        }
+    }
+    assert_eq!(
+        names.len(),
+        variants,
+        "every Notification variant names its wire notification"
+    );
+    let mut declared: Vec<&str> = crate::protocol::BUILTIN_NOTIFICATIONS.to_vec();
+    declared.sort_unstable();
+    declared.dedup();
+    assert_eq!(
+        declared.len(),
+        crate::protocol::BUILTIN_NOTIFICATIONS.len(),
+        "the built-in list has no duplicate"
+    );
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        declared, names,
+        "the built-in list is the Notification enum's wire names"
+    );
 }

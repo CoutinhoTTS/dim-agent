@@ -9,7 +9,7 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 use dim_agent_capabilities::{
-    methods::{Handler, Interruption, MethodDecl, RpcError, params},
+    methods::{Handler, Interruption, MethodCall, MethodDecl, RpcError, params},
     settings::SettingsScope,
 };
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
@@ -220,7 +220,12 @@ impl Shared {
 }
 
 fn handler(shared: Arc<Shared>) -> Handler {
-    Arc::new(move |method, value, cancel, _progress| {
+    Arc::new(move |call, cancel, _progress| {
+        let MethodCall {
+            method,
+            params: value,
+            ..
+        } = call;
         let shared = shared.clone();
         Box::pin(async move { dispatch(&shared, &method, value, &cancel).await })
     })

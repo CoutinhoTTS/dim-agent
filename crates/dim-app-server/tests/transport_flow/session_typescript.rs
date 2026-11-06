@@ -965,6 +965,7 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .accept(
                 "session.observer.status".into(),
                 json!({"sessionId":session.id()}),
+                None,
                 CancellationToken::new(),
                 |_| {},
             )
@@ -1593,6 +1594,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
             .accept(
                 "session.typescript.status".into(),
                 json!({}),
+                None,
                 CancellationToken::new(),
                 |_| {}
             )

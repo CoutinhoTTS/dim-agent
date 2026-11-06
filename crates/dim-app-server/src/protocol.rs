@@ -833,6 +833,30 @@ pub(crate) fn is_builtin_method(method: &str) -> bool {
     builtin_methods().any(|builtin| builtin == method)
 }
 
+/// The wire name of every [`Notification`] variant, next to the built-ins a
+/// method name may not take: a contributed notification name may not collide
+/// with one, so a provider cannot impersonate a notification its connection
+/// already reads.
+pub(crate) const BUILTIN_NOTIFICATIONS: &[&str] = &[
+    "ui.extensions.changed",
+    "session.mcp.state",
+    "ui.shutdown",
+    "session.event",
+    "session.state",
+    "approval.request",
+    "approval.cancelled",
+    "approval.resolved",
+    "session.closed",
+    "session.model.progress",
+    "session.notice",
+    "management.progress",
+];
+
+/// Whether `name` is one of [`Notification`]'s wire names.
+pub(crate) fn is_builtin_notification(name: &str) -> bool {
+    BUILTIN_NOTIFICATIONS.contains(&name)
+}
+
 /// Validates the envelope and built-in calls. Runtime contributions retain raw
 /// params until the owning adapter validates its concrete request type.
 pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {

@@ -224,6 +224,7 @@ impl Connection {
                     &rpc.loader,
                     method,
                     params,
+                    None,
                     rpc.unloading.clone(),
                     progress,
                 )?;
@@ -307,7 +308,7 @@ impl Connection {
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
         }
-        let accepted = provider.accept(method, params, rpc.unloading.clone(), progress)?;
+        let accepted = provider.accept(method, params, None, rpc.unloading.clone(), progress)?;
         Ok((accepted, usage))
     }
     /// The connection's entry decides what it may call before any method is
