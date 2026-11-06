@@ -182,15 +182,15 @@ When the call returns, the helper's process tree has ended, on success too: a
 helper that exits on its own still has its tree closed, because agent commands
 keep background jobs on purpose and a host-owned helper's work ends with its
 call. A failed termination is logged and does not turn a finished helper into an
-error. A descendant that leaves the process group before the root exits — on
-macOS `setpgrp(0, 0)` does, and it survives — is not reached by the group
-tree-kill; agent commands have the same limit, and the confinement still bounds
-what it may read, write and reach.
+error. On Unix, a descendant that leaves the process group before the root
+exits — on macOS `setpgrp(0, 0)` does, and it survives — is not reached by the
+group tree-kill; agent commands have the same limit. Where the helper is
+confined, that descendant stays inside the same confinement.
 
 The helper has no temporary directory of its own: `TMPDIR` is not in the
-environment allowlist and no isolated directory is created, so a helper that
-writes to its default temporary location is refused. A caller that needs one
-sets `TMPDIR` in `spec.env` to a directory inside `write`.
+environment allowlist and no isolated directory is created, so a confined helper
+that writes to its default temporary location is refused. A caller that needs
+one sets `TMPDIR` in `spec.env` to a directory inside `write`.
 
 ## Rule check
 
