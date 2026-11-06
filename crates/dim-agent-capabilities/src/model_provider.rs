@@ -62,6 +62,7 @@ fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
         retry_after_ms: facts
             .retry_after_stop
             .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
+        retry_forbidden: facts.retry_forbidden,
     }
 }
 
@@ -95,8 +96,14 @@ impl ModelProvider {
                 model,
                 ..
             }) => {
-                let facts = model
-                    .unwrap_or_else(|| Box::new(ModelFailureFacts::unknown(Some(message.clone()))));
+                let facts = model.unwrap_or_else(|| {
+                    let mut facts = ModelFailureFacts::unknown(Some(message.clone()));
+                    if let Some(chain) = &call.failure_chain {
+                        facts.attempts = chain.attempts;
+                        facts.waited = std::time::Duration::from_millis(chain.waited_ms);
+                    }
+                    Box::new(facts)
+                });
                 tracing::error!(
                     session_id = %self.identity.session_id,
                     branch_id = %self.identity.branch_id,
@@ -179,19 +186,7 @@ impl ModelProvider {
             }
         }
         for (call, started) in open {
-            let mut facts = ModelFailureFacts::unknown(Some(CAPABILITY_RELOADING.into()));
-            if let Some(chain) = &call.failure_chain {
-                facts.attempts = chain.attempts;
-                facts.waited = std::time::Duration::from_millis(chain.waited_ms);
-            }
-            let error = HostError::Failed {
-                message: CAPABILITY_RELOADING.into(),
-                budget: None,
-                kind: HostErrorKind::Other,
-                model: Some(Box::new(facts)),
-                presentation: None,
-            };
-            self.complete(call, Err(error), &started)?;
+            self.complete(call, Err(HostError::failed(CAPABILITY_RELOADING)), &started)?;
         }
         Ok(())
     }

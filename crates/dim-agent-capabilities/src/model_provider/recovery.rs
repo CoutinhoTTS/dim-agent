@@ -82,6 +82,7 @@ pub async fn invoke<S: Send + RetryObserver, T>(
         recovery_state.attempts = chain.attempts;
         recovery_state.waited = Duration::from_millis(chain.waited_ms);
     }
+    let mut retry_forbidden = false;
     let result = if recovery_state.attempts >= MAX_ATTEMPTS || recovery_state.waited >= WAIT_BUDGET
     {
         Err(HostError::failed(SPENT_FAILURE_CHAIN))
@@ -106,6 +107,7 @@ pub async fn invoke<S: Send + RetryObserver, T>(
             let forbidden = policy
                 .as_ref()
                 .is_some_and(|policy| policy.forbids_retry(error));
+            retry_forbidden = forbidden;
             let rejection = recovery
                 .as_ref()
                 .map_or(CredentialRejection::Unrelated, |recovery| {
@@ -190,6 +192,7 @@ pub async fn invoke<S: Send + RetryObserver, T>(
             facts.attempts = recovery_state.attempts.max(1);
             facts.waited = recovery_state.waited;
             facts.retry_after_stop = recovery_state.retry_after_stop;
+            facts.retry_forbidden = retry_forbidden;
         }
         error
     })

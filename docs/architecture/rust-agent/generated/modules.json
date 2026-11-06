@@ -11101,7 +11101,6 @@
         "path HostError::Cancelled",
         "path HostError::Failed",
         "path HostError::failed",
-        "path HostErrorKind::Other",
         "path ModelConnection::Local",
         "path ModelFailureFacts",
         "path ModelFailureFacts::unknown",
