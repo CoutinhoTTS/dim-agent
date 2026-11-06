@@ -1322,6 +1322,7 @@ dependencies = [
  "dim-app-server",
  "futures-util",
  "jsonschema",
+ "libc",
  "rutis",
  "serde",
  "serde_json",

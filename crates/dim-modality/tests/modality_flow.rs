@@ -2300,8 +2300,9 @@ async fn submission_boundaries_refuse_invalid_inputs() {
                 "node_path": node_path.to_str().unwrap()}]}),
     )
     .await;
+    let canonical = std::fs::canonicalize(&node_path).unwrap();
     let meta = &task["params"]["files"][0];
-    assert_eq!(meta["node_path"], node_path.to_str().unwrap());
+    assert_eq!(meta["node_path"], canonical.to_str().unwrap());
     assert_eq!(meta["bytes"], 10);
     assert_eq!(meta["sha256"], sha256(b"node bytes"));
     assert_eq!(
@@ -2310,8 +2311,8 @@ async fn submission_boundaries_refuse_invalid_inputs() {
     );
     let job = fixture.job(task["task_id"].as_str().unwrap()).unwrap();
     assert_eq!(
-        job.files[0].path, node_path,
-        "the executor reads the caller's path; Modality never copies it"
+        job.files[0].path, canonical,
+        "the executor reads the canonical path; Modality never copies it"
     );
 
     let relative = client
@@ -3018,6 +3019,74 @@ async fn an_unload_during_submit_keeps_a_handle_for_the_next_generation() {
     assert_eq!(state_of(&finished), "succeeded", "{finished}");
     assert_eq!(fixture.submits(), 1, "the observation never submits again");
     assert!(fixture.wait_ids().contains(&task_id));
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-node-path").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+
+    // One byte over the submission budget is refused before the file is
+    // read, and nothing is written.
+    let big = home.join("big.bin");
+    let file = std::fs::File::create(&big).unwrap();
+    file.set_len(dim_modality::MAX_SUBMISSION_BYTES + 1).unwrap();
+    drop(file);
+    let tasks_dir = home.join("modality/tasks");
+    let count = || {
+        std::fs::read_dir(&tasks_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    let before = count();
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "b"},
+                "files": [{"name": "big.png", "media_type": "image/png",
+                    "node_path": big.to_str().unwrap()}]}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&refused),
+        "invalid_input",
+        "one byte over the submission budget is refused: {refused}"
+    );
+    assert_eq!(count(), before, "an over-size node_path writes nothing");
+
+    // A `node_path` that goes through a linked directory is accepted; the
+    // record and the job both carry the canonical path.
+    let real = home.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let file = real.join("image.png");
+    std::fs::write(&file, b"through a linked directory").unwrap();
+    let link = home.join("link-dir");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let through = link.join("image.png");
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "l"},
+            "files": [{"name": "in.png", "media_type": "image/png",
+                "node_path": through.to_str().unwrap()}]}),
+    )
+    .await;
+    let canonical = std::fs::canonicalize(&file).unwrap();
+    assert_eq!(
+        task["params"]["files"][0]["node_path"],
+        canonical.to_str().unwrap()
+    );
+    assert_eq!(task["params"]["files"][0]["sha256"], sha256(b"through a linked directory"));
+    assert_eq!(
+        state_of(&wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await),
+        "succeeded"
+    );
+    let job = fixture.job(task["task_id"].as_str().unwrap()).unwrap();
+    assert_eq!(job.files[0].path, canonical);
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

@@ -342,7 +342,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `realtimeSend` | 异步 | `{ channel_id, frame }` | `{}` |
 | `realtimeClose` | 异步 | `{ channel_id }` | `{}` |
 
-`Job` 为 `{ task_id, category, operation, model: {providerId, modelId}, params, files: [{ name, media_type, path }], work_dir }`。内联输入的 `path` 是 Modality 存放在 `modality/tasks/<task_id>/input/<name>` 的文件的绝对路径；通过 `node_path` 给出的输入保留调用方路径，Modality 只读取一次以取得 `bytes` 与 `sha256`，从不复制，执行方就地读取。`work_dir` 是任务的 `modality/tasks/<task_id>/work` 目录，调用前创建；每个结果文件解析为其中的普通文件。`ResolvedConnection` 是 Provider 非对话连接解析返回的数据形态（`kind`、`provider_id`、`model`、端点与凭据材料），每次调用传入，从不存储或记录日志。
+`Job` 为 `{ task_id, category, operation, model: {providerId, modelId}, params, files: [{ name, media_type, path }], work_dir }`。内联输入的 `path` 是 Modality 存放在 `modality/tasks/<task_id>/input/<name>` 的文件的绝对路径；通过 `node_path` 给出的输入记录 Modality 得到的规范路径（最后一个组件不得是链接；更早的链接会被解析），Modality 只读取一次以取得 `bytes` 与 `sha256`，从不复制，执行方就地读取。`work_dir` 是任务的 `modality/tasks/<task_id>/work` 目录，调用前创建；每个结果文件解析为其中的普通文件。`ResolvedConnection` 是 Provider 非对话连接解析返回的数据形态（`kind`、`provider_id`、`model`、端点与凭据材料），每次调用传入，从不存储或记录日志。
 
 `available` 在不重载的情况下报告运行时可用性（例如提供方端点不可达）。若某个操作的可用适配器都不服务已配置或显式指定的模型，则报告为“no adapter for the configured model”，其提交以 `unavailable` 失败。`image.understand` 不是适配器操作：它由一个可选的视觉模型服务，且只做选择。OCR 不是适配器：对每个任务，Modality 使用目标节点的 HostPlatform（缺失或不可用：`node_unavailable`），探测 `modality` 设置文档为该节点给出的 OCR 组件路径，并在那里 spawn 它；离线的对端节点使调用以 `node_unavailable` 失败，且不发生任何重载（§3.2）。`wait` 以 `task_id` 指名它等待的作业；当 `submit` 返回了 `remote_handle` 时，适配器可以改用它。带已存储 `remote_handle` 的 `wait` 必须能在新一代中工作；不返回句柄的适配器以 `task_id` 记录自己进行中的工作，且仅限同一代内，因此无法恢复。
 
@@ -394,7 +394,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 - `configure` 先校验操作以及模型在该操作的可选选项中（对 `image.understand`，可选视觉支持），再经 Settings 的所有者写入以 CAS 写入或清除该操作 key。它接受任何有默认 key 的 A.1 操作，且从不答复 `modality_unavailable`：配置是设置写入，不是运行时断言。未知类别或操作、以及操作没有默认 key 的 OCR，答复 `modality_unknown_operation`；操作有自己的 key 时（image、speech）`operation` 必填，只有按类别划分 key 的类别可以省略。`model: null` 清除该 key；清除即恢复自动解析；缺少 `model` 为 `invalid_params`。写入在回复发出之前完成，因此成功即表示默认值已持久化，且该回复与紧随其后的 `modality.capabilities` 读到的一致（除非 Provider 在此期间变化）。
 - 可配置性与可用性是两个不同的属性：前者属于设置，后者属于运行时。已持久化的默认值可以指向本构建不能运行的操作的模型；快照通过保持该操作的 `available: false` 及其 `build` 或 `adapter` 原因保持诚实，而 `effective` 仍在选项上解析（默认值可用时用默认值，否则自动解析），客户端因此无需自行实现解析。
 
-边界校验：每次提交的内联输入合计至多 8 MiB，更大的输入使用 `node_path`——控制节点上已存在普通文件的绝对路径，任一路径组件都不是链接——Modality 只读取一次以取得 `bytes` 与 `sha256`，执行方在该路径读取，从不复制；每次提交的输入文件合计至多 100 MiB（A5）。媒体类型遵循 A.1 的输入列：图像操作接受 `image/*`，视频操作接受 `image/*` 与 `video/*`，`speech.transcribe` 接受 `audio/*`，`asset` 接受 `image/*`；输入不指名文件的操作拒绝文件。每个文件名是单个组件、合法的 pluginFiles 名称，且在提交内互不相同。`node` 对提供方类别以 `invalid_input` 拒绝，否则默认为控制节点（A15）。参数在提交时按适配器的 `params_schema` 校验；非法参数以 `invalid_input` 失败且不写入任何内容。模型选择：显式 `model`；否则操作默认值；否则自动解析；否则 `no_default_model`。不可选的显式模型以 `model_unavailable` 失败，不可用的默认值以 `default_unavailable` 失败，解析出的模型没有可用适配器服务时以 `unavailable` 失败；都不回退到其他模型。解析出的模型固定在记录中。`image.understand` 与 `realtime.connect` 不是任务：为它们提交会以 `modality_unknown_operation` 失败。`ocr.recognize` 在本构建中不是适配器任务，以 `modality_unavailable` 及其 `build` 原因失败。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
+边界校验：每次提交的内联输入合计至多 8 MiB，更大的输入使用 `node_path`——控制节点上已存在普通文件的绝对路径，最后一个组件不得是链接（更早的链接会被解析）；读取前先将其长度与 100 MiB 提交预算的剩余量比较，记录的是规范路径，执行方在该路径读取，Modality 从不复制；每次提交的输入文件合计至多 100 MiB（A5）。媒体类型遵循 A.1 的输入列：图像操作接受 `image/*`，视频操作接受 `image/*` 与 `video/*`，`speech.transcribe` 接受 `audio/*`，`asset` 接受 `image/*`；输入不指名文件的操作拒绝文件。每个文件名是单个组件、合法的 pluginFiles 名称，且在提交内互不相同。`node` 对提供方类别以 `invalid_input` 拒绝，否则默认为控制节点（A15）。参数在提交时按适配器的 `params_schema` 校验；非法参数以 `invalid_input` 失败且不写入任何内容。模型选择：显式 `model`；否则操作默认值；否则自动解析；否则 `no_default_model`。不可选的显式模型以 `model_unavailable` 失败，不可用的默认值以 `default_unavailable` 失败，解析出的模型没有可用适配器服务时以 `unavailable` 失败；都不回退到其他模型。解析出的模型固定在记录中。`image.understand` 与 `realtime.connect` 不是任务：为它们提交会以 `modality_unknown_operation` 失败。`ocr.recognize` 在本构建中不是适配器任务，以 `modality_unavailable` 及其 `build` 原因失败。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
 
 ### A.4 任务记录（`pluginFiles`（扩展），格式版本 1）
 
@@ -406,7 +406,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `revision` | 整数，每次写入递增 |
 | `category`、`operation` | A.1 中的标识符 |
 | `executor` | `{ kind: "provider", provider, adapter }`，其中 `provider` 为 `{providerId, modelId}`；或 `{ kind: "host", node }` |
-| `params` | 已校验的对象；输入文件替换为 `{ name, media_type, bytes, sha256 }`（存放在 `input/` 下）或 `{ name, media_type, bytes, sha256, node_path }`（调用方路径，就地读取） |
+| `params` | 已校验的对象；输入文件替换为 `{ name, media_type, bytes, sha256 }`（存放在 `input/` 下）或 `{ name, media_type, bytes, sha256, node_path }`（规范路径，就地读取） |
 | `state` | `queued`、`running`、`succeeded`、`failed`、`cancelled`、`interrupted` |
 | `remote_handle` | 字符串或 null；在报告 `running` 进度之前写入 |
 | `progress` | `{ fraction?, message? }` 或 null；每秒至多写入一次（A10） |

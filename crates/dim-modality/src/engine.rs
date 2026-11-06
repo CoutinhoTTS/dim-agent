@@ -729,13 +729,14 @@ impl ModalityTasks {
                     });
                 }
                 (None, Some(path)) => {
-                    let (bytes, sha256) = node_path_meta(path).await?;
+                    let remaining = MAX_SUBMISSION_BYTES.saturating_sub(total_bytes);
+                    let (bytes, sha256, canonical) = node_path_meta(path, remaining).await?;
                     total_bytes += bytes;
                     inputs.push(ResolvedInput {
                         name: file.name.clone(),
                         media_type: file.media_type.clone(),
                         data: None,
-                        node_path: Some((path.clone(), bytes, sha256)),
+                        node_path: Some((canonical, bytes, sha256)),
                     });
                 }
             }
@@ -1162,27 +1163,49 @@ fn valid_file_name(name: &str) -> bool {
         && !name.contains('\0')
 }
 
-/// The `bytes` and `sha256` of a caller's `node_path` (decision 1): an
-/// absolute, existing regular file with no links, read once.
-async fn node_path_meta(path: &str) -> Result<(u64, String), RpcError> {
+/// The `bytes`, `sha256` and canonical path of a caller's `node_path`
+/// (decision 1). The path is absolute, points at an existing regular file and
+/// its last component is not a link; its length is compared with what is
+/// left of the submission budget before anything is read, and the file is
+/// opened without following a link so a last component swapped after the
+/// check is refused. Modality never copies it.
+async fn node_path_meta(path: &str, remaining: u64) -> Result<(u64, String, String), RpcError> {
     let path = PathBuf::from(path);
     if !path.is_absolute() {
         return Err(invalid_input("node_path must be absolute"));
     }
     let probe = path.clone();
-    let metadata = tokio::task::spawn_blocking(move || std::fs::symlink_metadata(&probe))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .ok_or_else(|| invalid_input("node_path does not exist"))?;
-    if !metadata.file_type().is_file() {
-        return Err(invalid_input(
-            "node_path must be a regular file with no links",
-        ));
+    let (canonical, length) = tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::symlink_metadata(&probe)?;
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the last component is a link",
+            ));
+        }
+        if !metadata.file_type().is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        Ok::<_, std::io::Error>((std::fs::canonicalize(&probe)?, metadata.len()))
+    })
+    .await
+    .map_err(|error| invalid_input(format!("node_path could not be read: {error}")))?
+    .map_err(|error| invalid_input(format!("node_path could not be read: {error}")))?;
+    if length > remaining {
+        return Err(invalid_input(format!(
+            "node_path is {length} bytes, over the {remaining} bytes left of the submission budget"
+        )));
     }
-    let read = path.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut file = std::fs::File::open(&read)?;
+    let canonical_text = canonical
+        .to_str()
+        .ok_or_else(|| invalid_input("node_path is not valid UTF-8"))?
+        .to_owned();
+    let read = canonical.clone();
+    let (bytes, sha256) = tokio::task::spawn_blocking(move || {
+        let mut file = open_without_following(&read)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 64 * 1024];
         let mut bytes = 0u64;
@@ -1191,14 +1214,39 @@ async fn node_path_meta(path: &str) -> Result<(u64, String), RpcError> {
             if count == 0 {
                 break;
             }
-            hasher.update(&buffer[..count]);
             bytes += count as u64;
+            if bytes > length {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the file grew while it was read",
+                ));
+            }
+            hasher.update(&buffer[..count]);
         }
         Ok::<_, std::io::Error>((bytes, task::hex(&hasher.finalize())))
     })
     .await
     .map_err(|error| invalid_input(format!("node_path could not be read: {error}")))?
-    .map_err(|error| invalid_input(format!("node_path could not be read: {error}")))
+    .map_err(|error| invalid_input(format!("node_path could not be read: {error}")))?;
+    Ok((bytes, sha256, canonical_text))
+}
+
+/// Opens `path` for reading without following a link in its last component;
+/// the canonical path it is given has no link there, and this keeps a swap
+/// between the check and the open from being followed.
+fn open_without_following(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::open(path)
+    }
 }
 
 impl Shared {
