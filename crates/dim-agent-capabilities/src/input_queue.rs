@@ -42,13 +42,13 @@ pub enum Withdrawal {
 /// One committed input until Loop consumes it.
 struct Entry {
     id: String,
-    mode: InputMode,
-    /// This queue decided to write its `input/applied`.
-    released: bool,
-    /// Addressed to one handover's continuation: never released, never
-    /// counted, and deleted at its turn's end or on arrival when no such
-    /// turn is open.
-    handover: Option<InputHandover>,
+    kind: EntryKind,
+}
+enum EntryKind {
+    /// An input this queue releases by its mode.
+    Input { mode: InputMode, released: bool },
+    /// Held for the turn it names, never released or counted.
+    Handover { turn_id: String },
 }
 /// What InputQueue derives from the events it consumes.
 #[derive(Default)]
@@ -76,24 +76,28 @@ impl QueueState {
                     }
                     self.entries.push(Entry {
                         id: event.id.clone(),
-                        mode: data.effective_mode(),
-                        released: false,
-                        handover: Some(handover.clone()),
+                        kind: EntryKind::Handover {
+                            turn_id: handover.turn_id.clone(),
+                        },
                     });
                     return Vec::new();
                 }
                 let mode = data.effective_mode();
                 self.entries.push(Entry {
                     id: event.id.clone(),
-                    mode,
-                    released: false,
-                    handover: None,
+                    kind: EntryKind::Input {
+                        mode,
+                        released: false,
+                    },
                 });
                 let held_queue = self.entries.iter().any(|entry| {
-                    entry.handover.is_none()
-                        && !entry.released
-                        && entry.mode == InputMode::Queue
-                        && entry.id != event.id
+                    matches!(
+                        &entry.kind,
+                        EntryKind::Input {
+                            mode: InputMode::Queue,
+                            released: false
+                        }
+                    ) && entry.id != event.id
                 });
                 match mode {
                     InputMode::Queue if self.turn.is_some() || self.starting || held_queue => {
@@ -115,17 +119,23 @@ impl QueueState {
                 self.turn = None;
                 let mut decisions = Vec::new();
                 self.entries.retain(|entry| {
-                    let ended = entry
-                        .handover
-                        .as_ref()
-                        .is_some_and(|handover| handover.turn_id == data.turn_id);
+                    let ended = matches!(
+                        &entry.kind,
+                        EntryKind::Handover { turn_id } if *turn_id == data.turn_id
+                    );
                     if ended {
                         decisions.push(Decision::Delete(entry.id.clone()));
                     }
                     !ended
                 });
                 if let Some(next) = self.entries.iter().find(|entry| {
-                    entry.handover.is_none() && !entry.released && entry.mode == InputMode::Queue
+                    matches!(
+                        &entry.kind,
+                        EntryKind::Input {
+                            mode: InputMode::Queue,
+                            released: false
+                        }
+                    )
                 }) {
                     let next = next.id.clone();
                     decisions.extend(self.release(&next));
@@ -137,11 +147,11 @@ impl QueueState {
                 Vec::new()
             }
             EventKind::InputWithdraw(data) => {
-                match self
-                    .entries
-                    .iter()
-                    .position(|entry| entry.id == data.input_id && !entry.released)
-                {
+                // An input is still unapplied unless this queue released it.
+                match self.entries.iter().position(|entry| {
+                    entry.id == data.input_id
+                        && !matches!(&entry.kind, EntryKind::Input { released: true, .. })
+                }) {
                     Some(index) => {
                         self.entries.remove(index);
                         vec![Decision::Delete(data.input_id.clone())]
@@ -158,11 +168,15 @@ impl QueueState {
         let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
             return Vec::new();
         };
-        entry.released = true;
-        if self.turn.is_none() && entry.mode != InputMode::Append {
+        let EntryKind::Input { mode, released } = &mut entry.kind else {
+            return Vec::new();
+        };
+        *released = true;
+        let mode = *mode;
+        if self.turn.is_none() && mode != InputMode::Append {
             self.starting = true;
         }
-        vec![Decision::Apply(entry.id.clone(), entry.mode)]
+        vec![Decision::Apply(entry.id.clone(), mode)]
     }
 }
 /// Consumes `input/message` and decides by its mode when Loop may consume
@@ -191,7 +205,7 @@ impl InputQueue {
             queued: state
                 .entries
                 .iter()
-                .filter(|entry| entry.handover.is_none())
+                .filter(|entry| matches!(&entry.kind, EntryKind::Input { .. }))
                 .count(),
         });
     }

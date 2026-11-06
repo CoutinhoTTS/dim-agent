@@ -2956,6 +2956,79 @@ async fn a_handover_input_written_while_idle_starts_no_turn() {
     .unwrap();
 }
 
+/// A withdrawn handover input is deleted once, by the withdrawal; its
+/// turn's end writes no second deletion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawn_handover_input_is_deleted_once() {
+    use dim_agent_capabilities::input_queue::{InputQueue, Withdrawal};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let agent = MinimalHost::start(&builder(
+            Arc::new(RecordingModel(requests.clone())),
+            Arc::new(BoundaryTools {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+        ))
+        .await
+        .unwrap();
+        let session = boundary_session(&agent).await;
+        session
+            .submit("tool:boundary {}".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        entered.notified().await;
+        let turn = open_turn(&session).await;
+        let handover = session
+            .input(handover_input("handover text", &turn, "request-1"), "main")
+            .await
+            .unwrap();
+        dispatched_past(&session, handover.sequence).await;
+        let queue = session.service::<InputQueue>("main").unwrap();
+        let (answer, replacement) = queue
+            .withdraw(
+                InputWithdrawData {
+                    input_id: handover.id.clone(),
+                    reason: Some("user removed it".into()),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let Withdrawal::Deleted { sequence } = answer else {
+            panic!("held handover input not deleted: {answer:?}")
+        };
+        assert!(replacement.is_none());
+        let events = deleted(&session, &handover.id).await;
+        let first = events
+            .iter()
+            .find(|event| {
+                matches!(&event.kind, EventKind::InputDeleted(data) if data.input_id == handover.id)
+            })
+            .unwrap();
+        assert_eq!(first.sequence, sequence);
+        release.notify_one();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(&event.kind,
+                    EventKind::InputDeleted(data) if data.input_id == handover.id))
+                .count(),
+            1,
+            "the turn's end writes no second deletion"
+        );
+        assert!(!events.iter().any(|event| matches!(&event.kind,
+            EventKind::InputApplied(data) if data.input_id == handover.id)));
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 fn model_with_vision(model_id: &str, vision: bool) -> ModelSelection {
     ModelSelection {
         provider_id: "test".into(),

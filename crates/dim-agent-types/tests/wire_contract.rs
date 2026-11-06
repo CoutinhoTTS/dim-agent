@@ -281,10 +281,10 @@ fn failure_chain_roundtrips_and_rejects_invalid_contracts() {
 #[test]
 fn handover_roundtrips_and_rejects_invalid_contracts() {
     use std::sync::Arc;
-    // Input events do not appear among the frozen TypeScript fixtures, so
-    // the old record is the internal shape every writer produces today. A
-    // binary without `handover` cannot decode a record that carries it:
-    // `InputMessageData` denies unknown fields.
+    // The frozen fixtures hold `input/message` records only in the v1
+    // {text, mode} shape, so the old record below is written in the
+    // internal shape by hand. A binary without `handover` cannot decode a
+    // record that carries it: `InputMessageData` denies unknown fields.
     let old = json!({
         "id": "event-1",
         "sequence": 1,
@@ -305,6 +305,23 @@ fn handover_roundtrips_and_rejects_invalid_contracts() {
     equal_json(&serde_json::to_value(&decoded).unwrap(), &event);
     let outbound = serde_json::to_value(v1::SharedEvent::new(Arc::new(decoded)).unwrap()).unwrap();
     assert!(outbound["data"].get("handover").is_none(), "{outbound}");
+
+    // The v1 inbound view knows only text and mode, so it refuses the
+    // field like every field it does not know.
+    let mut v1_event = json!({
+        "id": "event-1",
+        "sequence": 1,
+        "create_at": 1790000000123u64,
+        "type": "input",
+        "name": "message",
+        "data": {"text": "handover", "mode": "queue"}
+    });
+    assert!(serde_json::from_value::<v1::AgentEvent>(v1_event.clone()).is_ok());
+    v1_event["data"]["handover"] = json!({"turn_id": "turn-2", "request_id": "request-3"});
+    assert!(
+        serde_json::from_value::<v1::AgentEvent>(v1_event.clone()).is_err(),
+        "{v1_event}"
+    );
 
     for handover in [
         json!(null),
