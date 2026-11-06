@@ -15,6 +15,20 @@ outside this boundary ([ADR 003 D1](../adr/003-approval-scope.md)). The App Serv
 connections, MCP servers and trusted plugins are outside it. Hooks and MCP commands run because of
 configuration and need no host-local approval ([ADR 003](../adr/003-approval-scope.md)).
 
+## Host-owned helpers
+
+A process plugin may start a helper of its own — an OCR component, for example — through
+`HostPlatform::spawn_confined` ([HostPlatform](../../architecture/rust-agent/plugins/HostPlatform.md#confined-helpers)).
+That is a second boundary, not the switch: the switch governs agent-decided commands, while a
+host-owned helper is always confined where the platform can confine, whatever the user selected.
+The helper reads the system baseline that runs a program and the files its caller grants, writes
+only the caller's directories, has no network, receives the minimal environment plus the caller's
+own entries, and runs in the caller's first write directory. The timeout, either output cap and
+the caller's cancellation kill the helper's process tree with the existing tree-kill. Windows and
+a Linux host without bubblewrap run the helper with the same limits and report that it was not
+confined; the caller decides whether that is acceptable. No setting, policy default or
+user-facing control changes for this operation.
+
 ## Process isolation
 
 The TUI's single `Process isolation` control replaces `Settings > Execution` and any separate
