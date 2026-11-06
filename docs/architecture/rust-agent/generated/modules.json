@@ -17338,6 +17338,7 @@
         "path PluginFileError::InvalidData",
         "path PluginFileError::InvalidPath",
         "path PluginFileError::Io",
+        "path PluginFileError::Locked",
         "path PluginFileTransactions",
         "use dim_app_server::plugin_files::PluginFileError",
         "use dim_app_server::plugin_files::PluginFileTransactions"
@@ -23862,8 +23863,11 @@
       "from": "dim_app_server::plugin_files",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
+        "path DirectoryEntry",
+        "path EntryKind",
         "path FileLease",
         "path FilePath",
+        "path FileReader",
         "path FileStorage",
         "path FileStorageError",
         "path FileStorageError::Cancelled",
@@ -23872,8 +23876,11 @@
         "path FileStorageError::Io",
         "path FileStorageError::Locked",
         "path FileStorageError::Worker",
+        "use dim_agent_capabilities::file_storage::DirectoryEntry",
+        "use dim_agent_capabilities::file_storage::EntryKind",
         "use dim_agent_capabilities::file_storage::FileLease",
         "use dim_agent_capabilities::file_storage::FilePath",
+        "use dim_agent_capabilities::file_storage::FileReader",
         "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
       ]
