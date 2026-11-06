@@ -384,10 +384,11 @@ pub struct Fold {
     /// `after` names one of them states a change that never took effect and is
     /// stepped as no statement at all (R2).
     deleted_sequences: HashSet<u64>,
-    /// The `after` values of the state records this fold has stepped, deleted
-    /// changes included. A deletion asks whether a record naming the withdrawn
-    /// change, or a later record, exists (R2).
-    record_afters: BTreeSet<u64>,
+    /// The highest `after` among the state records this fold has stepped,
+    /// deleted changes included; `0` before the first (sequences start at
+    /// one). A deletion asks whether a record naming the withdrawn change, or
+    /// a later record, exists (R2), which only the highest can answer.
+    record_after: u64,
     /// A state record that names its trigger by submission id (R5): it states
     /// its change when the very next event is that trigger, and states
     /// nothing when any other event comes first.
@@ -673,7 +674,7 @@ impl Fold {
             return;
         };
         self.live.state = !retire;
-        self.record_afters.insert(after);
+        self.record_after = self.record_after.max(after);
         if self.deleted_sequences.contains(&after) {
             return;
         }
@@ -867,7 +868,7 @@ impl Fold {
     /// stepped: the newest live record states that state, not the withdrawn
     /// change's (R2).
     pub fn recorded_at_or_after(&self, after: u64) -> bool {
-        self.record_afters.range(after..).next().is_some()
+        self.record_after >= after
     }
 }
 
