@@ -74,8 +74,6 @@ enum Block {
     State {
         input: String,
         retire: bool,
-        /// The sequence of the change the record answers (Goal §A.5, D6).
-        after: Option<u64>,
         objective: Option<String>,
         status: Option<Status>,
         evaluator: bool,
@@ -132,7 +130,6 @@ impl Fold {
                         self.blocks.push(Block::State {
                             input: event.id.clone(),
                             retire: *retire,
-                            after: attribute(text, "after").and_then(|after| after.parse().ok()),
                             objective: (!*retire).then(|| objective_of(text)).flatten(),
                             status: (!*retire).then(|| state_of(text)).flatten(),
                             evaluator: attribute(text, "judge").as_deref() == Some("evaluator"),
@@ -264,22 +261,6 @@ impl Fold {
             status: status.unwrap_or(Status::None),
             evaluator: judge,
         })
-    }
-
-    /// Whether the newest `goal:state` record answers the change at
-    /// `sequence`: its `after` names the change, so a later record is owed
-    /// while it does not (D6, D3).
-    pub fn answered(&self, sequence: u64) -> bool {
-        let mut after = None;
-        for block in &self.blocks {
-            if self.deleted.contains(block.input()) {
-                continue;
-            }
-            if let Block::State { after: record, .. } = block {
-                after = Some(*record);
-            }
-        }
-        after.flatten().is_some_and(|after| after >= sequence)
     }
 }
 

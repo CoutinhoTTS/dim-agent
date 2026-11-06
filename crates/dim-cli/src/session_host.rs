@@ -2119,12 +2119,13 @@ impl Worker {
         }
         let branch = pending.branch.clone();
         if let Some((call, sequence)) = pending.written {
-            // The method writes a change input; Goal's branch part states the
-            // state in a record that names the change, and the report shows the
-            // state after it (Goal D3, D6).
-            if self.cursors.get(&branch).copied().unwrap_or(0) >= sequence
-                && self.projection_on(&branch).goal_answered(sequence)
-            {
+            // The method writes a change input and replies with its sequence.
+            // The report is released at that sequence for every daemon, as on
+            // main: a daemon that publishes the old keys answers with the same
+            // sequence but writes no record, and must not leave the command
+            // parked (R6). The displayed goal follows the newest record or the
+            // old-key state as it arrives through the keyed projection.
+            if self.cursors.get(&branch).copied().unwrap_or(0) >= sequence {
                 self.finish_goal(&branch, Some(call));
             }
             return;

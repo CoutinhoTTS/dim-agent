@@ -44,6 +44,15 @@ fn set(sequence: u64, text: &str) -> Value {
     change(sequence, vec![state(sequence, "active", text)])
 }
 
+/// A `set` a daemon built from main publishes: the old two keys, no state
+/// record.
+fn old_set(sequence: u64, text: &str) -> Value {
+    change(
+        sequence,
+        vec![objective("main", "set", text), active("main")],
+    )
+}
+
 fn edit(sequence: u64, text: &str) -> Value {
     change(sequence, vec![state(sequence, "active", text)])
 }
@@ -297,6 +306,60 @@ fn line_goal_takes_an_objective_spelled_like_a_form_after_set() {
     terminal.write(b"/goal edit\n");
     terminal.until(USAGE);
     terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// R6: a daemon built from main answers `session.goal.set` with the sequence
+/// but publishes the old keys, not a state record. The command is released at
+/// that sequence, as on main, and the following `/goal` shows the goal it
+/// wrote instead of a command still in progress.
+#[test]
+fn tui_goal_set_is_released_by_a_daemon_that_publishes_the_old_keys() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.methods"]);
+        wire.created();
+        wire.attached();
+        // `/goal set Ship it`: the line is read, then the method is written.
+        let read = wire.read("session.methods");
+        wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(8, vec![]));
+        let write = wire.read("session.goal.set");
+        assert_eq!(
+            write["params"],
+            json!({"sessionId":"session","branchId":"main","objective":"Ship it"})
+        );
+        wire.reply(&write, json!({"sequence":9}));
+        // The daemon's answer: the old two keys, no state record.
+        let history = wire.read("session.history");
+        wire.reply(&history, page(9, vec![old_set(9, "Ship it")]));
+        // The following `/goal` reads the line again.
+        let read = wire.read("session.methods");
+        wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(9, vec![]));
+        wire.detach();
+    });
+    let mut terminal = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"/goal set Ship it\n");
+    terminal.until("Goal set on main · active");
+    terminal.until("  Ship it");
+    terminal.until("\n> ");
+    terminal.write(b"/goal\n");
+    terminal.until(USAGE);
+    terminal.until("Goal on main · active");
+    terminal.until("  Ship it");
+    assert!(
+        !terminal
+            .transcript
+            .contains("Goal: a /goal is still in progress on this line"),
+        "the command was released at the returned sequence: {}",
+        terminal.transcript
+    );
     terminal.write(b"/exit\n");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
