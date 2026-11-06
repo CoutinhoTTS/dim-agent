@@ -2513,7 +2513,6 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/plugin_files.rs",
       "unexpandedMacros": [
-        "format",
         "json",
         "tokio::select",
         "unreachable",
@@ -23662,6 +23661,7 @@
       "from": "dim_app_server::plugin_files",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
+        "path DirectoryEntry",
         "path EntryKind",
         "path FileLease",
         "path FilePath",
@@ -23674,6 +23674,7 @@
         "path FileStorageError::Io",
         "path FileStorageError::Locked",
         "path FileStorageError::Worker",
+        "use dim_agent_capabilities::file_storage::DirectoryEntry",
         "use dim_agent_capabilities::file_storage::EntryKind",
         "use dim_agent_capabilities::file_storage::FileLease",
         "use dim_agent_capabilities::file_storage::FilePath",

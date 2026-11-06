@@ -301,6 +301,16 @@ optional cancellation Promise cancels acquisition when it settles. Settle it on
 ordinary completion too, so it cannot hold runtime drain open. rutis does
 not encode an `AbortSignal` as this argument.
 
+`readBytes()` and `replaceBytes(bytes)` use the same names and lease for raw
+bytes: no text envelope is involved, a text file's bytes are its stored
+envelope, and a file over 8 MiB fails `invalid_data` before it is read. The
+scope's `list(prefix)` returns one level of a directory, sorted, with each
+entry's name relative to the authorized root and its kind, ready to pass to
+another operation; `remove(name)` removes a file or a directory tree and
+returns `locked` while a lease holds it or a file beneath it. Plugins that must
+handle larger files keep them out of JavaScript: there is no streaming on this
+side.
+
 Native storage locking and durability do not make remote side effects atomic.
 After an uncertain external outcome, use that system's reconciliation contract
 before retrying. Full semantics and fixed storage error codes are in

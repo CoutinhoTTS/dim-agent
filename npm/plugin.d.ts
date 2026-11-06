@@ -1,17 +1,33 @@
 import type { AgentEvent, JsonValue, JsonObject } from "./client-protocol.js";
 export type { AgentEvent, JsonValue, JsonObject } from "./client-protocol.js";
 /** Named services implemented by Dim's App Server. No runtime code is exported. */
-export type FileError = 'closed' | 'exists' | 'invalid_data' | 'invalid_path' | 'internal' | 'io';
+export type FileError = 'closed' | 'exists' | 'invalid_data' | 'invalid_path' | 'internal' | 'io' | 'locked';
 export type FileResult<T> = { ok: true; value: T } | { ok: false; error: FileError };
+
+export type FileKind = 'file' | 'directory' | 'other';
+/** One entry of `FileScope.list`: a path relative to the authorized root, ready
+ * for another operation, and what it is without following links. */
+export interface FileEntry { name: string; kind: FileKind }
 
 export interface FileLease {
   read(): Promise<FileResult<string | null>>;
   replace(text: string): Promise<FileResult<null>>;
   backup(suffix: string): Promise<FileResult<null>>;
+  /** The raw file, envelope included, up to 8 MiB; null when absent. Text
+   * files are read as their stored envelope bytes. */
+  readBytes(): Promise<FileResult<Uint8Array | null>>;
+  /** Replaces the file with raw bytes, up to 8 MiB, atomically. No envelope. */
+  replaceBytes(bytes: Uint8Array): Promise<FileResult<null>>;
 }
 
 export interface FileScope {
   withLock<T>(path: string, work: (file: FileLease) => T | Promise<T>, cancelled?: Promise<void>): Promise<FileResult<T>>;
+  /** One level of the directory `prefix`, sorted, never entering a directory
+   * entry and never listing the root itself. */
+  list(prefix: string): Promise<FileResult<FileEntry[]>>;
+  /** Removes a file, or a directory and everything beneath it; `locked` while
+   * a lease holds it or a file beneath it. */
+  remove(name: string): Promise<FileResult<null>>;
   quiesce(): null;
   close(): Promise<null>;
 }

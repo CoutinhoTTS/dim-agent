@@ -1,7 +1,7 @@
 //! Generic, host-owned file transactions for an explicitly authorized plugin root.
 //! No account formats or provider policy belong at this boundary.
 use dim_agent_capabilities::file_storage::{
-    EntryKind, FileLease, FilePath, FileReader, FileStorage, FileStorageError,
+    DirectoryEntry, EntryKind, FileLease, FilePath, FileReader, FileStorage, FileStorageError,
 };
 use dim_agent_runtime::Names;
 use rutis::Ctx;
@@ -36,6 +36,7 @@ fn failure(error: FileStorageError) -> Value {
     let code = match error {
         FileStorageError::Closed | FileStorageError::Cancelled => "closed",
         FileStorageError::InvalidPath(_) => "invalid_path",
+        FileStorageError::Locked => "locked",
         FileStorageError::Worker(_) => "internal",
         FileStorageError::Io(ref error) if error.kind() == io::ErrorKind::AlreadyExists => "exists",
         FileStorageError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -89,12 +90,22 @@ impl Scope {
     }
     fn value(self: Arc<Self>) -> Value {
         let transaction = self.clone();
+        let listing = self.clone();
+        let removal = self.clone();
         let quiesce = self.clone();
         Value::Record(
             [
                 (
                     "withLock".into(),
                     Value::callback(move |args| transaction.with_lock(args)),
+                ),
+                (
+                    "list".into(),
+                    Value::callback(move |args| listing.list(args)),
+                ),
+                (
+                    "remove".into(),
+                    Value::callback(move |args| removal.remove(args)),
                 ),
                 (
                     "quiesce".into(),
@@ -117,6 +128,72 @@ impl Scope {
             ]
             .into(),
         )
+    }
+    /// The value of the named directory's entries, one level, relative to the
+    /// authorized root.
+    fn list(self: &Arc<Self>, args: Value) -> Reply {
+        self.operation(args, |files, prefix, path, cancel| {
+            Box::pin(async move {
+                Ok(match files.storage.list(&path, &cancel).await {
+                    Ok(entries) => success(entries_value(&prefix, entries)),
+                    Err(error) => failure(error),
+                })
+            })
+        })
+    }
+    /// The value of removing `name`, a file or a directory tree.
+    fn remove(self: &Arc<Self>, args: Value) -> Reply {
+        self.operation(args, |files, _, path, cancel| {
+            Box::pin(async move {
+                Ok(match files.storage.remove(&path, &cancel).await {
+                    Ok(()) => success(json!(null).into()),
+                    Err(error) => failure(error),
+                })
+            })
+        })
+    }
+    /// Runs `operation` on the path the single argument of `args` names. A
+    /// quiesced or closed scope refuses it; an issued operation settles before
+    /// `close` resolves.
+    fn operation(
+        self: &Arc<Self>,
+        args: Value,
+        operation: impl FnOnce(
+            Arc<Files>,
+            String,
+            FilePath,
+            CancellationToken,
+        ) -> BoxFuture<'static, Reply>
+        + Send
+        + 'static,
+    ) -> Reply {
+        let mut args = args.list()?.into_iter();
+        let name: String = serde_json::from_value(args.next().ok_or_else(invalid)?.json()?)
+            .map_err(|_| invalid())?;
+        if args.next().is_some() {
+            return Err(invalid());
+        }
+        let path = match self.files.storage.path(self.files.root, &name) {
+            Ok(path) => path,
+            Err(error) => return Ok(Value::future(async move { Ok(failure(error)) })),
+        };
+        let _admission = self.files.admission.lock().unwrap();
+        if self.stopping.is_cancelled() {
+            return Ok(Value::future(async {
+                Ok(failure(FileStorageError::Closed))
+            }));
+        }
+        let scope = self.clone();
+        let stopping = self.stopping.child_token();
+        let owner = self.files.tasks.token();
+        let task = self.tasks.spawn(async move {
+            let _owner = owner;
+            operation(scope.files.clone(), name, path, stopping).await
+        });
+        Ok(Value::future(async move {
+            task.await
+                .unwrap_or_else(|error| Ok(failure(FileStorageError::Worker(error))))
+        }))
     }
     fn with_lock(self: &Arc<Self>, args: Value) -> Reply {
         let mut args = args.list()?.into_iter();
@@ -199,9 +276,39 @@ impl Scope {
     }
 }
 
+/// One entry of the JSON `list` reply: its path relative to the authorized
+/// root and its kind. An entry name that is not UTF-8 is omitted, because
+/// these operations address names as strings.
+fn entries_value(prefix: &str, entries: Vec<DirectoryEntry>) -> Value {
+    Value::List(
+        entries
+            .into_iter()
+            .filter_map(|entry| {
+                Some(Value::Record(
+                    [
+                        (
+                            "name".into(),
+                            json!(join_name(prefix, entry.name.to_str()?)).into(),
+                        ),
+                        ("kind".into(), json!(entry.kind).into()),
+                    ]
+                    .into(),
+                ))
+            })
+            .collect(),
+    )
+}
+
+/// The one argument a lease method takes.
+enum LeaseArgument {
+    None,
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
 fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTracker) -> Value {
     Value::Record(
-        ["read", "replace", "backup"]
+        ["read", "replace", "backup", "readBytes", "replaceBytes"]
             .into_iter()
             .map(|method| {
                 let lease = lease.clone();
@@ -209,12 +316,15 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
                 (
                     method.into(),
                     Value::callback(move |args| {
-                        let args = args.json()?;
-                        let args = args.as_array().ok_or_else(invalid)?;
+                        let args = args.list()?;
                         let argument = match (method, args.as_slice()) {
-                            ("read", []) => None,
-                            ("replace" | "backup", [serde_json::Value::String(value)]) => {
-                                Some(value.clone())
+                            ("read" | "readBytes", []) => LeaseArgument::None,
+                            (
+                                "replace" | "backup",
+                                [Value::Data(serde_json::Value::String(text))],
+                            ) => LeaseArgument::Text(text.clone()),
+                            ("replaceBytes", [Value::Bytes(bytes)]) => {
+                                LeaseArgument::Bytes(bytes.clone())
                             }
                             _ => return Err(invalid()),
                         };
@@ -225,8 +335,8 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
                                 return Ok(failure(FileStorageError::Closed));
                             };
                             let cancel = CancellationToken::new();
-                            let result = match method {
-                                "read" => match lease.read(&cancel).await {
+                            let result = match (method, argument) {
+                                ("read", LeaseArgument::None) => match lease.read(&cancel).await {
                                     Ok(bytes) => match serde_json::from_slice::<StoredFile>(&bytes)
                                     {
                                         Ok(StoredFile {
@@ -244,11 +354,22 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
                                     }
                                     Err(error) => Err(error),
                                 },
-                                "replace" => lease
+                                ("readBytes", LeaseArgument::None) => {
+                                    match lease.read_limited(MAX_WHOLE_FILE_BYTES, &cancel).await {
+                                        Ok(bytes) => Ok(Value::Bytes(bytes)),
+                                        Err(FileStorageError::Io(error))
+                                            if error.kind() == io::ErrorKind::NotFound =>
+                                        {
+                                            Ok(json!(null).into())
+                                        }
+                                        Err(error) => Err(error),
+                                    }
+                                }
+                                ("replace", LeaseArgument::Text(text)) => lease
                                     .replace(
                                         serde_json::to_vec(&StoredFile {
                                             version: FORMAT_VERSION,
-                                            text: argument.unwrap(),
+                                            text,
                                         })
                                         .expect("text records contain only serializable fields"),
                                         private_permissions(),
@@ -256,8 +377,22 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
                                     )
                                     .await
                                     .map(|_| json!(null).into()),
-                                "backup" => lease
-                                    .backup(&argument.unwrap(), private_permissions(), &cancel)
+                                ("replaceBytes", LeaseArgument::Bytes(bytes))
+                                    if bytes.len() <= MAX_WHOLE_FILE_BYTES =>
+                                {
+                                    lease
+                                        .replace(bytes, private_permissions(), &cancel)
+                                        .await
+                                        .map(|_| json!(null).into())
+                                }
+                                ("replaceBytes", LeaseArgument::Bytes(_)) => {
+                                    Err(FileStorageError::Io(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "file exceeds the whole-buffer byte limit",
+                                    )))
+                                }
+                                ("backup", LeaseArgument::Text(suffix)) => lease
+                                    .backup(&suffix, private_permissions(), &cancel)
                                     .await
                                     .map(|_| json!(null).into()),
                                 _ => unreachable!(),
@@ -321,14 +456,19 @@ fn file_error(error: FileStorageError) -> PluginFileError {
 }
 
 /// The name of `leaf` under `prefix`, as these operations spell relative
-/// names: one `/` between the two, whatever separators the caller wrote.
+/// names: the prefix's components joined by `/`, whatever separators or `.`
+/// components the caller wrote, and `leaf` appended.
 fn join_name(prefix: &str, leaf: &str) -> String {
-    let prefix = prefix.trim_end_matches(['/', '\\']);
-    if prefix.is_empty() {
-        leaf.to_owned()
-    } else {
-        format!("{prefix}/{leaf}")
+    let mut name = prefix
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    if !name.is_empty() {
+        name.push('/');
     }
+    name.push_str(leaf);
+    name
 }
 
 /// Typed transactions on files under the authorized root, for process plugins
