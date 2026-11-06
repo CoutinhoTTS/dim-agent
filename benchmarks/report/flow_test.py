@@ -285,7 +285,10 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
 
     def test_failures_are_explained_and_known_causes_are_not_news(self) -> None:
         regression = {"category": "agent", "cause": "The grep output was cut off.",
-                      "evidence": "result: output truncated", "same_as_known": False,
+                      "evidence": "result: output truncated",
+                      "agent_gap": "The agent never ran the failing test after editing.",
+                      "improvement": "Run the task's test command before finishing.",
+                      "same_as_known": False,
                       "suspects": [{"pr": "#548", "confidence": "medium", "reason": "Lowers LIMIT."},
                                    {"pr": "#999", "confidence": "high", "reason": "Not in the window."}]}
         hard = {"category": "agent", "cause": "Never finds the key.", "evidence": "step 3",
@@ -310,6 +313,8 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertEqual(track.title, "[eval] frontier: 2 tracked failure(s)")
         self.assertIn("There is no baseline yet", track.body)
         self.assertIn("#548 (medium): Lowers LIMIT.", track.body)
+        self.assertIn("**Agent gap:** The agent never ran the failing test after editing.", track.body)
+        self.assertIn("**Improvement:** Run the task's test command before finishing.", track.body)
         self.assertIn("#### `tb/hard` — agent · failing since 2026-10-20 (5 night(s))", track.body)
         self.assertIn("tb/regex", track.news)
         self.assertNotIn("tb/hard", track.news)
