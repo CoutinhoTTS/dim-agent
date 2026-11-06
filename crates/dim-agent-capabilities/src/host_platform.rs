@@ -23,9 +23,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod confined;
 mod exec_shell_settings;
 #[cfg(unix)]
 mod isolation;
+pub use confined::{ConfinedError, ConfinedOutput, ConfinedSpec, ConfinedStream, Confinement};
 pub use exec_shell_settings::{ExecShellSettings, ExecShellSettingsError, ShellChoice};
 
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
@@ -185,6 +187,27 @@ fn platform_roots() -> Vec<PathBuf> {
     }
     roots
 }
+
+/// The environment names a prepared process keeps from the captured host
+/// environment: agent commands take them by this list, and a host-owned
+/// confined helper starts from them. Everything else the service holds is
+/// dropped.
+const ENVIRONMENT: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "NO_COLOR",
+    "PAGER",
+    "GIT_PAGER",
+    "GH_PAGER",
+    #[cfg(target_os = "macos")]
+    "DEVELOPER_DIR",
+    #[cfg(target_os = "macos")]
+    "XDG_CONFIG_HOME",
+];
 
 /// Process facts and the source of the exec shell preference.
 #[derive(Clone)]
