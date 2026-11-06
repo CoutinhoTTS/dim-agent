@@ -326,6 +326,7 @@
         "format",
         "json",
         "panic",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -2329,6 +2330,13 @@
         "matches",
         "unreachable"
       ]
+    },
+    {
+      "id": "dim_app_server::mcp::import::testing",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::import",
+      "file": "crates/dim-app-server/src/mcp/import.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_app_server::mcp::management",
@@ -7243,21 +7251,18 @@
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::Failed",
+        "path HostErrorKind",
         "path HostErrorKind::Http",
         "path HostErrorKind::InvalidRequest",
         "path HostErrorKind::Other",
         "path HostErrorKind::Transport",
         "path HostErrorKind::Unsupported",
         "path ModelFailureFacts",
-        "path ModelFailureOrigin::HttpResponse",
-        "path ModelFailureOrigin::StreamEvent",
-        "path ModelFailureOrigin::Transport",
         "path ModelStream",
         "use dim_agent_capabilities::host::HostError",
         "use dim_agent_capabilities::host::HostErrorKind",
         "use dim_agent_capabilities::host::ModelChunk",
         "use dim_agent_capabilities::host::ModelFailureFacts",
-        "use dim_agent_capabilities::host::ModelFailureOrigin",
         "use dim_agent_capabilities::host::ModelStopReason",
         "use dim_agent_capabilities::host::ModelStream"
       ]
@@ -7269,6 +7274,33 @@
         "path dim_agent_types::ContentMetadata",
         "path dim_agent_types::ContentMetadata::Bedrock",
         "use dim_agent_types::MessagePart"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::stream",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path FAILURE_CAUSE_CHARS",
+        "path FAILURE_CAUSE_FRAMES",
+        "path FAILURE_REASON_CHARS",
+        "path ModelFailureKind",
+        "path ModelFailureKind::AuthRejected",
+        "path ModelFailureKind::ContentFiltered",
+        "path ModelFailureKind::ContextTooLong",
+        "path ModelFailureKind::InvalidRequest",
+        "path ModelFailureKind::MalformedResponse",
+        "path ModelFailureKind::Network",
+        "path ModelFailureKind::NotFound",
+        "path ModelFailureKind::QuotaExhausted",
+        "path ModelFailureKind::RateLimited",
+        "path ModelFailureKind::ServerError",
+        "path ModelFailureKind::Unknown",
+        "path one_line",
+        "use dim_agent_types::FAILURE_CAUSE_CHARS",
+        "use dim_agent_types::FAILURE_CAUSE_FRAMES",
+        "use dim_agent_types::FAILURE_REASON_CHARS",
+        "use dim_agent_types::ModelFailureKind",
+        "use dim_agent_types::one_line"
       ]
     },
     {
@@ -7342,7 +7374,8 @@
       "from": "dim_agent_aimux::stream::tests",
       "to": "dim_agent_aimux::stream",
       "references": [
-        "path convert"
+        "path convert",
+        "path error"
       ]
     },
     {
@@ -10489,8 +10522,12 @@
       "from": "dim_agent_capabilities::host",
       "to": "dim_agent_types::events",
       "references": [
+        "path ModelFailureKind",
         "path ProviderPresentation",
-        "path ReplacementParts"
+        "path ReplacementParts",
+        "path dim_agent_types::FAILURE_REASON_CHARS",
+        "path dim_agent_types::ModelFailureKind::Unknown",
+        "path dim_agent_types::one_line"
       ]
     },
     {
@@ -10977,6 +11014,8 @@
         "path HostError::Failed",
         "path HostError::failed",
         "path ModelConnection::Local",
+        "path ModelFailureFacts",
+        "path ModelFailureFacts::unknown",
         "path ModelHost",
         "path ProviderConnectionResolver",
         "path ResolvedModelConnection"
@@ -11121,11 +11160,19 @@
         "path EventKind::TurnStart",
         "path FinishReason",
         "path ModelCallData",
+        "path ModelFailure",
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Cancelled",
         "path ModelOutputOutcome::Completed",
         "path ModelOutputOutcome::Failed",
         "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path model"
       ]
     },
     {
@@ -11173,9 +11220,18 @@
         "path HostError",
         "path HostError::Failed",
         "path ModelFailureFacts",
+        "path ModelFailureFacts::unknown",
         "path ModelHost",
         "path ModelStream",
         "path ResolvedModelConnection"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::recovery",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ModelFailureKind",
+        "use dim_agent_types::ModelFailureKind"
       ]
     },
     {
@@ -11208,6 +11264,7 @@
         "path ModelChunk::ToolStart",
         "path ModelChunk::ToolUse",
         "path ModelChunk::Usage",
+        "path ModelFailureFacts",
         "path ModelStopReason::EndTurn",
         "path ModelStopReason::MaxTokens",
         "path ModelStopReason::StopSequence",
@@ -11280,6 +11337,7 @@
         "path FinishReason::ToolUse",
         "path ModelCallData",
         "path ModelContentData",
+        "path ModelFailureKind::OutputLimit",
         "path ModelUsageData",
         "path ProviderPresentation",
         "path TextData",
@@ -22120,6 +22178,14 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::import::testing",
+      "references": [
+        "path import::testing::pause",
+        "use import::testing"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::management",
       "references": [
         "mod management",
@@ -22505,6 +22571,21 @@
     },
     {
       "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::mcp::discovery",
+      "references": [
+        "path discovery::Identity",
+        "use super::discovery"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::mcp::import::testing",
+      "references": [
+        "mod testing"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
       "to": "dim_app_server::protocol",
       "references": [
         "use crate::protocol::optional_non_null"
@@ -22632,6 +22713,7 @@
       "references": [
         "path StoreId::parse",
         "path discovery::Environment::from_process",
+        "path discovery::Identity",
         "path discovery::Workspace",
         "path discovery::document",
         "path discovery::sources",
@@ -22803,12 +22885,14 @@
         "path McpSource::User",
         "path Result",
         "path daemon_environment",
+        "path source_revision",
         "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
         "use super::Result",
         "use super::daemon_environment",
+        "use super::source_revision",
         "use super::sources_in_precedence"
       ]
     },

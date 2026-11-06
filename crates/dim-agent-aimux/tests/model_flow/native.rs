@@ -1514,10 +1514,13 @@ async fn malformed_native_block_lifecycle_is_a_classified_failure() {
             ),
             "{failure:?}"
         );
-        assert!(
-            failure.to_string().contains("invalid_response_data"),
-            "{failure}"
-        );
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &failure
+        else {
+            panic!("{failure:?}");
+        };
+        assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
         assert!(
             failure.to_string().contains(diagnostic),
             "expected {diagnostic}: {failure}"
@@ -1626,14 +1629,15 @@ async fn invoke_failure(
     }
 }
 
+/// Asserts the facts of one provider failure. `reason` is `None` for a
+/// transport failure, whose innermost cause is platform text; that case checks
+/// the chain itself.
 fn assert_model_failure(
     error: &HostError,
     (status, code): (Option<u16>, Option<&str>),
-    origin: ModelFailureOrigin,
-    error_type: Option<&str>,
-    message: Option<&str>,
+    kind: ModelFailureKind,
+    reason: Option<&str>,
     request_id: Option<&str>,
-    transient: bool,
 ) {
     let HostError::Failed {
         kind:
@@ -1649,18 +1653,25 @@ fn assert_model_failure(
     };
     assert_eq!(*actual_status, status);
     assert_eq!(actual_code.as_deref(), code);
-    assert_eq!(model.origin, origin);
-    assert_eq!(model.error_type.as_deref(), error_type);
-    assert_eq!(model.message.as_deref(), message);
+    assert_eq!(model.kind, kind);
+    assert_eq!(model.status, status);
     assert_eq!(model.request_id.as_deref(), request_id);
-    assert_eq!(model.transient, transient);
+    assert_eq!(model.attempts, 1);
+    assert_eq!(model.waited, Duration::ZERO);
+    assert_eq!(model.retry_after_stop, None);
+    if let Some(reason) = reason {
+        assert_eq!(model.reason.as_deref(), Some(reason));
+        assert_eq!(model.cause.last().map(String::as_str), Some(reason));
+    }
     let boundary = format!("{error:?} {error}");
+    assert!(!boundary.contains("127.0.0.1"), "{boundary}");
+    assert!(!boundary.contains("facts-"), "{boundary}");
     assert!(!boundary.contains("raw-body-must-not-cross"));
     assert!(!boundary.contains("private-header-must-not-cross"));
 }
 
 #[tokio::test]
-async fn native_failures_expose_only_normalized_model_facts() {
+async fn native_failures_carry_their_kind_and_a_safe_reason() {
     let chat = NativeServer::start("openai-chat").await;
     let responses = NativeServer::start("openai-responses").await;
     let anthropic = NativeServer::start("anthropic").await;
@@ -1678,11 +1689,9 @@ async fn native_failures_expose_only_normalized_model_facts() {
     assert_model_failure(
         &error,
         (Some(429), Some("rate_limit_exceeded")),
-        ModelFailureOrigin::HttpResponse,
-        Some("rate_limit_error"),
+        ModelFailureKind::RateLimited,
         Some("slow down"),
         Some("request-429"),
-        true,
     );
     let HostError::Failed {
         model: Some(model), ..
@@ -1702,21 +1711,23 @@ async fn native_failures_expose_only_normalized_model_facts() {
     assert_model_failure(
         &blank,
         (Some(400), None),
-        ModelFailureOrigin::HttpResponse,
-        None,
-        Some(" Mixed Message "),
+        ModelFailureKind::InvalidRequest,
+        Some("Mixed Message"),
         Some("Mixed-Request-ID"),
-        false,
     );
 
-    for (prompt, status, code, error_type, transient) in [
-        ("facts-501", 501, "server_error", "api_error", false),
+    for (prompt, status, code, kind) in [
+        (
+            "facts-501",
+            501,
+            "server_error",
+            ModelFailureKind::InvalidRequest,
+        ),
         (
             "facts-quota",
             429,
             "insufficient_quota",
-            "rate_limit_error",
-            false,
+            ModelFailureKind::QuotaExhausted,
         ),
     ] {
         let error =
@@ -1724,12 +1735,16 @@ async fn native_failures_expose_only_normalized_model_facts() {
         assert_model_failure(
             &error,
             (Some(status), Some(code)),
-            ModelFailureOrigin::HttpResponse,
-            Some(error_type),
+            kind,
             Some("request rejected"),
             Some("request-http"),
-            transient,
         );
+        if kind == ModelFailureKind::QuotaExhausted {
+            assert_eq!(
+                error.to_string(),
+                "The account has no quota left: request rejected. Check the plan or billing."
+            );
+        }
     }
 
     let error = invoke_failure(
@@ -1742,11 +1757,9 @@ async fn native_failures_expose_only_normalized_model_facts() {
     assert_model_failure(
         &error,
         (Some(500), Some("server_error")),
-        ModelFailureOrigin::StreamEvent,
-        Some("api_error"),
+        ModelFailureKind::ServerError,
         Some("responses unavailable"),
         Some("request-responses"),
-        true,
     );
 
     let error = invoke_failure(
@@ -1759,11 +1772,9 @@ async fn native_failures_expose_only_normalized_model_facts() {
     assert_model_failure(
         &error,
         (Some(529), None),
-        ModelFailureOrigin::StreamEvent,
-        Some("overloaded_error"),
+        ModelFailureKind::ServerError,
         Some("anthropic overloaded"),
         Some("request-anthropic"),
-        true,
     );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1776,20 +1787,212 @@ async fn native_failures_expose_only_normalized_model_facts() {
         "connection-refused",
     )
     .await;
-    assert_model_failure(
-        &error,
-        (None, None),
-        ModelFailureOrigin::Transport,
-        None,
-        None,
-        None,
-        true,
+    assert_model_failure(&error, (None, None), ModelFailureKind::Network, None, None);
+    let HostError::Failed {
+        model: Some(model), ..
+    } = &error
+    else {
+        unreachable!()
+    };
+    let reason = model
+        .reason
+        .as_deref()
+        .expect("a transport failure carries its innermost cause");
+    assert!(model.cause.len() >= 2, "{:?}", model.cause);
+    assert!(
+        model.cause[0].contains("error sending request"),
+        "{model:?}"
     );
+    let line = error.to_string();
+    assert!(
+        line.starts_with("Could not reach the provider, or the connection dropped: "),
+        "{line}"
+    );
+    assert!(line.contains(reason), "{line}");
+    assert!(line.ends_with(" Check the network or proxy."), "{line}");
 
     root.shutdown().await.unwrap();
     chat.close().await;
     responses.close().await;
     anthropic.close().await;
+}
+
+#[tokio::test]
+async fn native_http_statuses_and_codes_classify() {
+    let chat = NativeServer::start("openai-chat").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+
+    for (prompt, status, kind) in [
+        ("facts-status-401", 401, ModelFailureKind::AuthRejected),
+        ("facts-status-402", 402, ModelFailureKind::QuotaExhausted),
+        ("facts-status-404", 404, ModelFailureKind::NotFound),
+        ("facts-status-408", 408, ModelFailureKind::ServerError),
+        ("facts-status-409", 409, ModelFailureKind::InvalidRequest),
+        ("facts-status-413", 413, ModelFailureKind::ContextTooLong),
+        ("facts-status-429", 429, ModelFailureKind::RateLimited),
+        ("facts-status-500", 500, ModelFailureKind::ServerError),
+        ("facts-status-507", 507, ModelFailureKind::ServerError),
+        ("facts-status-529", 529, ModelFailureKind::ServerError),
+    ] {
+        let error =
+            invoke_failure(&host, ModelProtocol::OpenaiChat, chat.url.clone(), prompt).await;
+        let reason = format!("fixture {status}");
+        let request_id = format!("request-{status}");
+        assert_model_failure(
+            &error,
+            (Some(status), None),
+            kind,
+            Some(&reason),
+            Some(&request_id),
+        );
+    }
+
+    let error = invoke_failure(
+        &host,
+        ModelProtocol::OpenaiChat,
+        chat.url.clone(),
+        "facts-policy",
+    )
+    .await;
+    assert_model_failure(
+        &error,
+        (Some(400), Some("content_policy_violation")),
+        ModelFailureKind::ContentFiltered,
+        Some("fixture 400"),
+        Some("request-400"),
+    );
+
+    let error = invoke_failure(
+        &host,
+        ModelProtocol::OpenaiChat,
+        chat.url.clone(),
+        "facts-max-tokens",
+    )
+    .await;
+    assert_model_failure(
+        &error,
+        (Some(429), Some("max_tokens_exceeded")),
+        ModelFailureKind::InvalidRequest,
+        Some("request rejected"),
+        Some("request-max-tokens"),
+    );
+
+    let error = invoke_failure(
+        &host,
+        ModelProtocol::OpenaiChat,
+        chat.url.clone(),
+        "facts-status-429-wait",
+    )
+    .await;
+    assert_model_failure(
+        &error,
+        (Some(429), None),
+        ModelFailureKind::RateLimited,
+        Some("fixture 429"),
+        Some("request-429"),
+    );
+    let HostError::Failed {
+        model: Some(model), ..
+    } = &error
+    else {
+        unreachable!()
+    };
+    assert_eq!(model.retry_after, Some(Duration::from_millis(2000)));
+
+    chat.close().await;
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_malformed_stream_body_is_a_malformed_response() {
+    let chat = NativeServer::start("openai-chat").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+
+    let error = invoke_failure(
+        &host,
+        ModelProtocol::OpenaiChat,
+        chat.url.clone(),
+        "facts-malformed-sse",
+    )
+    .await;
+    let HostError::Failed {
+        model: Some(model), ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(model.status, None);
+    assert!(model.cause.is_empty());
+    let reason = model.reason.as_deref().expect("the parse diagnosis");
+    // The error's message embeds the frame's text; the reason comes from the
+    // parse error's cause, so the text is never stored.
+    assert!(reason.contains("expected value"), "{reason}");
+    let boundary = format!("{error:?} {error} {model:?}");
+    assert!(!boundary.contains("body-text-must-not-cross"), "{boundary}");
+    assert!(
+        error
+            .to_string()
+            .starts_with("The provider sent a response Dim could not use"),
+        "{error}"
+    );
+
+    chat.close().await;
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_reset_after_headers_is_a_network_failure() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n5\r\ndata:\r\n",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        drop(socket);
+    });
+
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let error = invoke_failure(
+        &host,
+        ModelProtocol::OpenaiChat,
+        format!("http://{address}/v1"),
+        "reset-after-headers",
+    )
+    .await;
+    server.await.unwrap();
+    let HostError::Failed {
+        model: Some(model), ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(model.status, None);
+    assert!(model.reason.is_some(), "{model:?}");
+    assert!(!model.cause.is_empty(), "{model:?}");
+
+    root.shutdown().await.unwrap();
 }
 
 /// A stream-event failure whose code is neither permanent nor transient is not
@@ -1813,8 +2016,7 @@ async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
     else {
         panic!("{error:?}");
     };
-    assert_eq!(model.origin, ModelFailureOrigin::StreamEvent);
-    assert!(!model.transient, "{model:?}");
+    assert_eq!(model.kind, ModelFailureKind::Unknown);
     assert_eq!(
         responses.endpoint.requests.lock().unwrap().len(),
         1,
@@ -1836,6 +2038,72 @@ async fn respond_native(
         .unwrap()
         .push((uri, headers, request.clone()));
     let request_text = request.to_string();
+    if let Some(status) = request_text.split("facts-status-").nth(1).and_then(|rest| {
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u16>().ok()
+    }) {
+        let mut response = Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .header("x-request-id", format!("request-{status}"))
+            .header("x-private-fixture", "private-header-must-not-cross");
+        if request_text.contains("facts-status-429-wait") {
+            response = response.header("retry-after", "2");
+        }
+        return response
+            .body(Body::from(
+                json!({
+                    "error": {
+                        "message": format!("fixture {status}"),
+                        "fixture": "raw-body-must-not-cross"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+    }
+    if request_text.contains("facts-policy") {
+        return Response::builder()
+            .status(400)
+            .header("content-type", "application/json")
+            .header("x-request-id", "request-400")
+            .header("x-private-fixture", "private-header-must-not-cross")
+            .body(Body::from(
+                json!({
+                    "error": {
+                        "code": "content_policy_violation",
+                        "message": "fixture 400",
+                        "fixture": "raw-body-must-not-cross"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+    }
+    if request_text.contains("facts-max-tokens") {
+        return Response::builder()
+            .status(429)
+            .header("content-type", "application/json")
+            .header("x-request-id", "request-max-tokens")
+            .body(Body::from(
+                json!({
+                    "error": {
+                        "code": "max_tokens_exceeded",
+                        "message": "request rejected",
+                        "fixture": "raw-body-must-not-cross"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+    }
+    if request_text.contains("facts-malformed-sse") {
+        return Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from("data: body-text-must-not-cross\n\n"))
+            .unwrap();
+    }
     let http_failure = if request_text.contains("facts-429") {
         Some((
             429,
@@ -3549,10 +3817,13 @@ async fn a_native_stream_without_its_terminal_is_classified_and_not_retried() {
         ),
         "{failure:?}"
     );
-    assert!(
-        failure.to_string().contains("invalid_response_data"),
-        "{failure}"
-    );
+    let HostError::Failed {
+        model: Some(model), ..
+    } = &failure
+    else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
     assert_eq!(
         server.received_requests().await.unwrap().len(),
         1,

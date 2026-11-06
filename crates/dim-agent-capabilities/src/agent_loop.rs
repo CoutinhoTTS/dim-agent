@@ -635,6 +635,7 @@ impl AgentLoop {
                         error: CAPABILITY_RELOADING.into(),
                         budget: None,
                         presentation: None,
+                        failure: None,
                     },
                 })
                 .into(),
@@ -799,6 +800,7 @@ impl AgentLoop {
                                 error: error.to_string(),
                                 budget: None,
                                 presentation: None,
+                                failure: None,
                             },
                         }),
                     },

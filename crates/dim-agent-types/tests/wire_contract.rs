@@ -195,6 +195,47 @@ fn provider_presentation_roundtrips_and_rejects_invalid_contracts() {
 }
 
 #[test]
+fn model_failure_roundtrips_and_rejects_invalid_contracts() {
+    let old = fixture("step/model-output-end", Some("failed"));
+    // An event written before the failure fact still decodes and re-encodes
+    // without one.
+    let old_event: AgentEvent = serde_json::from_value(old.clone()).unwrap();
+    equal_json(&serde_json::to_value(old_event).unwrap(), &old);
+
+    let mut event = old;
+    event["data"]["failure"] = json!({
+        "kind": "rate_limited",
+        "status": 429,
+        "providerCode": "rate_limit_exceeded",
+        "requestId": "request-429",
+        "reason": "slow down",
+        "cause": ["slow down"],
+        "attempts": 3,
+        "waitedMs": 1500,
+        "retryAfterMs": 4000
+    });
+    let decoded: AgentEvent = serde_json::from_value(event.clone()).unwrap();
+    equal_json(&serde_json::to_value(decoded).unwrap(), &event);
+    let decoded_v1: v1::AgentEvent = serde_json::from_value(event.clone()).unwrap();
+    equal_json(&serde_json::to_value(decoded_v1).unwrap(), &event);
+
+    for failure in [
+        json!(null),
+        json!({"kind":"not_a_kind","attempts":1,"waitedMs":0}),
+        json!({"kind":"network","attempts":"many","waitedMs":0}),
+        json!({"kind":"network","attempts":1,"waitedMs":0,"unexpected":true}),
+        json!({"kind":"network","status":70000,"attempts":1,"waitedMs":0}),
+    ] {
+        let mut invalid = fixture("step/model-output-end", Some("failed"));
+        invalid["data"]["failure"] = failure;
+        assert!(
+            serde_json::from_value::<AgentEvent>(invalid.clone()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn omitted_modes_and_safe_integer_limits_keep_the_contract() {
     let mut value = fixture("input/message", None);
     value["sequence"] = json!(JS_MAX_SAFE_INTEGER);

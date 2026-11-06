@@ -47,11 +47,31 @@ profile does not.
 
 A provider's `max_tokens` stop fails that turn with a `max_tokens` presentation,
 the request's provider/model identity and an action to increase the output limit.
+It also writes `failure.kind = output_limit`.
 It is not a context-budget recovery signal and is never retried automatically.
 The private daemon log records model request failures with their Session, turn and request
 identities. The Session remains available for a later input or model configuration.
 A presentation supplied by the model host takes precedence; ModelFailurePolicy
 provides a presentation only when the host supplied none.
+
+## Failures
+
+A failed call's terminal `step/model-output-end` carries `failure`: the closed
+`ModelFailureKind`, the HTTP status and provider code when a response arrived,
+the provider's one-line `reason`, the `cause` chain, the attempt count, the
+total waited time, and the provider's wait when it asked for more than the
+budget left. The bridge
+([stream.rs](../../../../crates/dim-agent-aimux/src/stream.rs)) decides the kind
+from the origin, the status, the normalized codes and the `AiMuxError` variant,
+never from message text. A host with no provider boundary gets `unknown` and the
+message it already carried. `failure` is absent on events written before it
+existed and on failures that are not a provider call's: the agent loop's
+unsettled call on a reload and a context preparation failure. `error` is the
+default English line
+`<meaning>: <reason>. <action>`, and the turn that the failure ends repeats the
+same string. A `presentation` from the host or from `ModelFailurePolicy` wins
+over the client's kind table; it is an override, not the default form. The full
+contract is [Model failures](../../../design/model-failures.md).
 
 ## Tests
 

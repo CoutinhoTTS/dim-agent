@@ -1145,8 +1145,14 @@ async fn a_same_origin_301_redirect_is_not_followed_and_names_its_target() {
         let error = redirect_failure(&server.url, "301-secret").await;
         let message = error.to_string();
         assert!(message.contains(&moved), "{message}");
-        assert!(message.contains("HTTP 301"), "{message}");
         assert!(message.contains("GET without its body"), "{message}");
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(model.status, Some(301));
         assert!(!message.contains("301-secret"), "{message}");
         let hits = server.hits();
         assert_eq!(hits.len(), 1, "the target was contacted: {hits:?}");
@@ -1168,17 +1174,29 @@ async fn a_cross_origin_redirect_is_not_followed_and_names_its_target() {
         let error = redirect_failure(&server.url, "cross-origin-secret").await;
         let message = error.to_string();
         assert!(message.contains(&moved), "{message}");
-        assert!(message.contains("HTTP 307"), "{message}");
         assert!(message.contains("different origin"), "{message}");
         assert!(!message.contains("cross-origin-secret"), "{message}");
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(model.status, Some(307));
         assert!(other.hits().is_empty(), "the other origin was contacted");
         server.close().await;
         let server = RedirectServer::start(StatusCode::FOUND, &moved).await;
         let error = redirect_failure(&server.url, "cross-origin-secret").await;
         let message = error.to_string();
         assert!(message.contains(&moved), "{message}");
-        assert!(message.contains("HTTP 302"), "{message}");
         assert!(message.contains("different origin"), "{message}");
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(model.status, Some(302));
         assert!(other.hits().is_empty(), "the other origin was contacted");
         server.close().await;
         other.close().await;
@@ -1195,7 +1213,13 @@ async fn a_same_origin_redirect_chain_stops_at_the_limit() {
         let error = redirect_failure(&server.url, "chain-secret").await;
         let message = error.to_string();
         assert!(message.contains("redirect limit"), "{message}");
-        assert!(message.contains("HTTP 307"), "{message}");
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(model.status, Some(307));
         assert_eq!(server.hits().len(), 11, "ten hops were followed, no more");
         server.close().await;
     })
