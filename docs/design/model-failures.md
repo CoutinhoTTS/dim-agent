@@ -144,20 +144,23 @@ per-caller setting.
 | `malformed_response` | retried once per request: a second malformed response stops, whatever came before it |
 | backoff | the n-th retry sleeps 1 s × 2^(n−1), capped at 30 s, times a uniform jitter in [0.8, 1.0] |
 | `Retry-After` | used exactly as the delay, even above 30 s, while it fits in the budget left; if it does not fit, the request stops at once and records `retryAfterMs` |
-| wait budget | 300 s of sleeping per request |
+| wait budget | a request sleeps at most five minutes in all before it fails; a wait that does not fit in what is left stops the request at once |
 | unchanged | no retry after irreversible output; an interrupt cancels the sleep; one credential recovery with no delay, still within the 8 attempts; `ModelFailurePolicy::forbids_retry`; a terminal credential rejection is settled |
 
 The nominal backoff sleeps are 1, 2, 4, 8, 16, 30 and 30 s, about 91 s in all.
 The numbers follow the outage in #1197, which lasted tens of seconds: eight
-attempts ride out about 90 s, comparable agents allow 3 to 10 stream retries, a
-1 s base avoids sub-second attempts that hit the same outage, the 30 s cap
-keeps the last attempts from being minutes apart, and a server's own advice
-sets the timing without being able to extend the budget.
+attempts ride out about 90 s, a 1 s base avoids sub-second attempts that hit
+the same outage, the 30 s cap keeps the last attempts from being minutes
+apart, and a server's own advice sets the timing without being able to extend
+the budget. A request can wait up to five minutes in all before it fails;
+recovery of a rejected credential never waits, whatever advice it carried.
 
-While it sleeps, the retry is display state: `ModelProgress.retry` carries
-`attempt` (the attempt about to run, at least 2), `maxAttempts`, `retryAtMs`
-(unix milliseconds at which it starts), `kind` and the failure's bounded
-`reason`. ModelProvider sets it before the sleep and clears it when the attempt
+While it sleeps, the wait is published as `ModelProgress.retry`: `attempt` (the
+attempt about to run, at least 2), `maxAttempts`, `retryAtMs` (unix
+milliseconds at which it starts), `kind` and the failure's bounded `reason`.
+`retryAtMs` is wall-clock time for display and is advisory; the budget is
+measured on a monotonic clock, so a client must not treat it as a deadline.
+ModelProvider sets the field before the sleep and clears it when the attempt
 starts, the call ends, or the sleep is cancelled. It is not a Timeline fact: no
 later decision reads it, and the terminal fact keeps `attempts` and
 `waitedMs`.
