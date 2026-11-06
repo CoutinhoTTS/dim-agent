@@ -244,7 +244,7 @@ ModelRecovery 的计数、决定和结算属于本分支事实，内存只是其
 - **工具边界**：Loop、请求准备与工具执行所有者须按 §6.1 保证续接请求只有文本输出。Loop 接受处置前确认历史工具批次已结算，请求准备不为本次请求声明或绑定可执行工具，工具执行入口拒绝该请求发出的任何调用。已提交的工具结果仍可作为上下文。
 - **影响**：原失败和续接请求保持独立身份，预算关联可从事实重建；取消及重载不恢复旧请求。禁止策略必须覆盖原请求及其续接，不能被新 request 绕过。
 - **所有者与议题**：ModelProvider、Loop、输出/历史所有者共同在 [#1210](https://github.com/arcships/dim/issues/1210) 定义边界，各自修改自己的合同。类型和持久化扩展按第 8 节作显式兼容决定。
-- **合同落点**：[ModelProvider 的失败链](../../architecture/rust-agent/plugins/ModelProvider.md#failure-chain)。
+- **合同落点**：[ModelProvider 的失败链](../../architecture/rust-agent/plugins/ModelProvider.md#failure-chain) 与 [ToolExecution 的执行器拒绝](../../architecture/rust-agent/plugins/ToolExecution.md#toolexecutor)。
 
 ### R3. 模型可读恢复输入
 

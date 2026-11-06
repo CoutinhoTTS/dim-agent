@@ -91,7 +91,9 @@ one (it writes no `input/applied`) and does not count it in the published queue
 size. It deletes one with `input/deleted` when its turn ends without consuming
 it, or on arrival when its turn is not open. These are the only InputQueue
 rules for it; the Loop consumes it only in the batch that starts its handover's
-continuation.
+continuation. Its instruction is a raw block with no `user`, like Goal's
+automatic inputs; clients that show the operator's words never show it as the
+operator's message.
 
 A handover input is never a [state input](../../../design/model-prompts.md#5-scopes),
 so an ordering rule for state inputs leaves it last.

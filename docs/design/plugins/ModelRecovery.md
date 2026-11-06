@@ -12,9 +12,11 @@ ModelRecovery is one branch part. It registers the disposer of a failed model
 step with the Loop's port as an effect of its own `apply`; the registration
 lasts until the part unloads. It has no settings and writes no event of its
 own: its only writes are handover inputs, through the branch's normal input
-entrance. It is in the default product profile. It never runs a model or a
-tool, never writes `turn/end`, `step/model-start` or `model/call`, and never
-reads another part's state: its decisions use the branch's committed facts.
+entrance. It is in the default product profile: it has no setting, so
+default-on is what makes the continuation reach users, and a profile without
+its row runs the failure path unchanged. It never runs a model or a tool, never
+writes `turn/end`, `step/model-start` or `model/call`, and never reads another
+part's state: its decisions use the branch's committed facts.
 
 ## 1. Structure
 
@@ -66,9 +68,14 @@ named by `failure_sequence`, the request's output facts, the turn's
   settlement is not committed. `replay_safe` is
   ModelProvider's invocation-local flag, not a fact, so the disposer derives
   this condition from the committed output facts.
+- **Not forbidden.** `failure.retryForbidden` is not set. A failure the policy
+  forbids opens a handover that the disposer declines, so the prohibition
+  covers the continuation.
 - **Budget left.** The failed terminal's `failure` has `attempts` below 8 and
-  `waited_ms` below 300 s, ModelProvider's [public
-  limits](../../architecture/rust-agent/plugins/ModelProvider.md#failure-chain).
+  `waited_ms` below 300 s. The part reads ModelProvider's [public
+  limits](../../architecture/rust-agent/plugins/ModelProvider.md#failure-chain)
+  and the failure's own `attempts` and `waited_ms`; it never repeats the
+  numbers.
 - **No accepted continuation yet.** After this turn's `turn/start`, the turn
   has no `context/prepare` carrying `failure_chain`. The continuation's own
   `context/prepare` carries it, so a second failure in the same turn declines.
@@ -88,6 +95,11 @@ request_id}`; it then answers `continue {input_id}`. The content is a fixed
 instruction with three parts: continue from where the committed output ends,
 do not repeat completed work, and tools are unavailable for this reply. It
 never carries provider error text, headers, response bodies or credentials.
+The instruction is a raw block with no `user`, like Goal's automatic inputs. A
+client that shows the operator's words never shows the instruction as the
+operator's message: the v1 `Input` view takes text only from `user`, so a v1
+client sees an input with empty text, as it already does for every automatic
+input.
 
 InputQueue never applies the input; the Loop consumes it only in the batch
 that starts the handover's continuation, after every pending Append input, so
@@ -132,16 +144,17 @@ fails, the terminal `turn/end` carries that failure and is the one they read.
 | §4 rule 6 | The handover input reaches the model only through `input/consumed`. |
 | §4 rule 7 | Public facts and services only; no other part's state. |
 | §4 rule 8 | No infrastructure change. |
-| §4 rule 9 | The handover input and `step/disposition` are read by later decisions; no display-only event. |
+| §4 rule 9 | The handover input is model content and `step/disposition` orders the answer against stop and steer; no display-only event. |
 | ADR 002 D1 | Branch part, placed by the owner of its state. |
 | ADR 002 D2 | No wiring plugin, bus or notification channel. |
 | ADR 002 D3 | Declares only public services; no Session part. |
 | ADR 002 D4 | No settings or reload policy. |
-| ADR 002 D5 | No wire protocol change. |
+| ADR 002 D5 | The disposer port is a Rust-only operation, like the Permission advice precedent; its data shapes (`handover`, the answer, `step/disposition`, the handover input) are stated language-neutrally. |
 
 ## 7. Requirements raised to mechanism owners
 
 None. The contracts this design uses are stated by their owners: the Loop's
 disposer port and `step/disposition`, ModelProvider's `failure_chain`,
-InputQueue's handover input. No Timeline, Dispatcher, facade, assembly or
-rutis change is needed.
+InputQueue's handover input. No infrastructure changes: no Timeline,
+Dispatcher, facade or rutis change. The part adds its own plugin row and
+feature registration, and the generated graph and catalog follow.
