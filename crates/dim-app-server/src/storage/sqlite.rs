@@ -512,47 +512,37 @@ const UPGRADE_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const UPGRADE_PROGRESS_OPS: std::ffi::c_int = 1000;
 
 /// Reports one store format upgrade while its transaction runs. Only an
-/// upgrade activates it: a fresh store and a store at the current format
-/// report nothing extra.
+/// upgrade registers it: a fresh store and a store at the current format run
+/// no progress callback at all.
 struct UpgradeProgress {
     ctx: Ctx,
     database: PathBuf,
+    /// The format this upgrade started from.
+    from: u32,
     state: Mutex<UpgradeState>,
 }
 struct UpgradeState {
-    /// The format this upgrade started from; `None` until it starts.
-    from: Option<u32>,
     counter: u64,
     last: Option<std::time::Instant>,
 }
 impl UpgradeProgress {
-    fn new(ctx: &Ctx, database: &Path) -> Self {
+    fn new(ctx: &Ctx, database: &Path, from: u32) -> Self {
         Self {
             ctx: ctx.clone(),
             database: database.to_path_buf(),
+            from,
             state: Mutex::new(UpgradeState {
-                from: None,
                 counter: 0,
                 last: None,
             }),
         }
     }
-    /// Starts reporting an upgrade from `from`; the first report is immediate.
-    fn start(&self, from: u32) {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .from = Some(from);
-        self.report(true);
-    }
     /// Reports real progress when a second passed since the last report or
-    /// when `force`d at a step boundary; does nothing before `start` and
-    /// after `finish`.
+    /// when `force`d at a step boundary.
     fn report(&self, force: bool) {
         let now = std::time::Instant::now();
-        let (from, counter) = {
+        let counter = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(from) = state.from else { return };
             if !force
                 && state
                     .last
@@ -562,20 +552,14 @@ impl UpgradeProgress {
             }
             state.counter += 1;
             state.last = Some(now);
-            (from, state.counter)
+            state.counter
         };
         #[cfg(feature = "testing")]
         slow_upgrade_report();
         // Reporting is best effort; the opening's own outcome does not
         // depend on it.
         let _ = dim_agent_runtime::opening_advanced(&self.ctx);
-        write_startup_progress(&self.database, from, FORMAT, counter);
-    }
-    fn finish(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .from = None;
+        write_startup_progress(&self.database, self.from, FORMAT, counter);
     }
 }
 
@@ -720,7 +704,6 @@ impl SqliteStorage {
                     .ok_or_else(|| storage("database path has no file name"))?,
             )
         };
-        let progress = ctx.map(|ctx| Arc::new(UpgradeProgress::new(ctx, &path)));
         let mut lock_path = path.as_os_str().to_os_string();
         lock_path.push(".lock");
         let admission = std::fs::OpenOptions::new()
@@ -741,18 +724,6 @@ impl SqliteStorage {
         let mut connection = Connection::open(&path).map_err(storage)?;
         functions(&connection)?;
         connection.busy_handler(Some(busy)).map_err(storage)?;
-        if let Some(progress) = &progress {
-            let reports = progress.clone();
-            connection
-                .progress_handler(
-                    UPGRADE_PROGRESS_OPS,
-                    Some(move || {
-                        reports.report(false);
-                        false
-                    }),
-                )
-                .map_err(storage)?;
-        }
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
@@ -786,8 +757,21 @@ impl SqliteStorage {
                 tx.execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
                 tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
+                // Only an upgrade registers the report, and it clears it
+                // again after the commit: an ordinary open runs no progress
+                // callback.
+                let progress = ctx.map(|ctx| Arc::new(UpgradeProgress::new(ctx, &path, version)));
                 if let Some(progress) = &progress {
-                    progress.start(version);
+                    let reports = Arc::clone(progress);
+                    tx.progress_handler(
+                        UPGRADE_PROGRESS_OPS,
+                        Some(move || {
+                            reports.report(false);
+                            false
+                        }),
+                    )
+                    .map_err(storage)?;
+                    progress.report(true);
                 }
                 for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     if *from == 26 {
@@ -872,8 +856,7 @@ impl SqliteStorage {
             tx.execute_batch(sql).map_err(storage)?;
         }
         tx.commit().map_err(storage)?;
-        if let Some(progress) = &progress {
-            progress.finish();
+        if upgraded_from.is_some() {
             connection
                 .progress_handler(0, None::<fn() -> bool>)
                 .map_err(storage)?;
