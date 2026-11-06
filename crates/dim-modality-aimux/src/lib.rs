@@ -3,36 +3,53 @@
 //!
 //! The vendor is the catalog provider's identity ([`vendor`]); the connection
 //! is Provider's per-call resolution; nothing is kept between calls except the
-//! job a blocking operation is still running.
+//! job a blocking operation is still running and, for video, the handle the
+//! start call produced.
 //!
 //! A blocking operation does its whole call in `wait` and returns no handle,
 //! so a restart leaves it `interrupted` — A.2's statement for an adapter with
-//! no handle.
+//! no handle. Video starts a provider job in `submit`, stores the operation
+//! reference as the handle, and polls it in `wait`, so a restart resumes the
+//! same job instead of starting a second one.
 
 mod job;
 mod media;
 pub mod vendor;
 
 use aimux_core::AiMuxError;
+use aimux_core::video_model::VideoOperationStatus;
 use aimux_provider_utils::FetchFunction;
 use dim_agent_aimux::MediaTransport;
-use dim_agent_capabilities::host::{ModalityConnection, ModelConnection};
+use dim_agent_capabilities::host::{ModalityConnection, ModelConnection, ModelNetwork};
 use dim_agent_runtime::AgentBuilder;
 use dim_agent_types::ModelId;
 use dim_modality::{
-    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Job,
+    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Job, JobFile,
     ModalityAdapter, ModalityAdapterService, ProgressSink, RemoteCancel, Submitted,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, DynPlugin, Effect};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 use vendor::Operation;
 
+/// How long a video job may run before its task fails.
+///
+/// It exists for one failure mode: a provider job that never settles would
+/// otherwise hold a scheduler slot of its category for the life of the
+/// process (A.6 runs at most four per category). One hour is a bound, not a
+/// provider's own limit; a job past it fails `provider_error`, and the record
+/// keeps the remote handle, so an operator can still see what was running.
+pub const MAX_VIDEO_WAIT: Duration = Duration::from_secs(60 * 60);
+/// How long `wait` sleeps between two `do_status` calls.
+pub const VIDEO_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// The most a downloaded video may write; aimux's own download guard uses it.
+pub const MAX_VIDEO_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// How long a blocking job waits in the map for the `wait` that removes it.
 ///
 /// The engine can skip `wait` after a successful `submit`: a cancel during the
@@ -124,12 +141,13 @@ impl ModalityAdapter for MediaAdapter {
         for (kind, category, operation) in vendor
             .statements(edit)
             .into_iter()
-            .filter(|(kind, _, _)| matches!(kind, Operation::Image))
+            .filter(|(kind, _, _)| matches!(kind, Operation::Image | Operation::Video))
         {
             let schema = match (kind, operation) {
                 (Operation::Image, "edit") => image_edit_schema(),
                 (Operation::Image, _) => image_generate_schema(),
-                (_, _) => unreachable!("only an image statement is offered"),
+                (Operation::Video, _) => video_schema(),
+                (_, _) => unreachable!("only an image or video statement is offered"),
             };
             operations.push(AdapterOperation {
                 category: category.to_owned(),
@@ -161,16 +179,35 @@ impl ModalityAdapter for MediaAdapter {
                     vendor.catalog, job.model.model_id
                 )));
             }
-            let _ = (cancel, connection);
-            self.keep(job, Instant::now());
-            Ok(Submitted::default())
+            if kind != Operation::Video {
+                self.keep(job, Instant::now());
+                return Ok(Submitted::default());
+            }
+            let provider = media::provider(&connection, vendor, kind, &self.transport)?;
+            let model = media::video_model(&provider, &connection.model)?;
+            let options = job::video_options(&job, vendor)?;
+            let started = model
+                .do_start(&options)
+                .await
+                .map_err(|error| failure(error, &cancel, &Secrets::of(&connection)))?;
+            let handle = VideoHandle {
+                operation: started.operation,
+                job,
+                started_at: now(),
+            };
+            let handle = serde_json::to_string(&handle).map_err(|error| {
+                AdapterError::provider_error(format!("The job handle cannot be stored: {error}"))
+            })?;
+            Ok(Submitted {
+                remote_handle: Some(handle),
+            })
         })
     }
 
     fn wait(
         &self,
         task_id: &str,
-        _handle: Option<&str>,
+        handle: Option<&str>,
         connection: ModalityConnection,
         progress: ProgressSink,
         cancel: CancellationToken,
@@ -178,7 +215,13 @@ impl ModalityAdapter for MediaAdapter {
         // The record's strings are borrowed from the caller; the future owns
         // them so it never outlives the call's arguments.
         let task_id = task_id.to_owned();
+        let handle = handle.map(str::to_owned);
         Box::pin(async move {
+            if let Some(handle) = handle {
+                return self
+                    .wait_video(&handle, &connection, progress, cancel)
+                    .await;
+            }
             // A blocking operation's job belongs to this generation only: a
             // recorded task never reaches here with an empty handle (A.6).
             let pending = self.jobs.lock().unwrap().remove(&task_id).ok_or_else(|| {
@@ -206,6 +249,9 @@ impl ModalityAdapter for MediaAdapter {
                         job::image_output(result, &job.work_dir, job::requested_format(&job))?;
                     Ok(AdapterOutput { files, data: None })
                 }
+                Operation::Video => Err(AdapterError::provider_error(
+                    "A video task is waited on by its handle, not by its task id",
+                )),
                 _ => Err(AdapterError::provider_error(
                     "No such operation is served in this build",
                 )),
@@ -218,10 +264,178 @@ impl ModalityAdapter for MediaAdapter {
         _handle: &str,
         _connection: ModalityConnection,
     ) -> AdapterFuture<'_, RemoteCancel> {
-        // aimux exposes no cancel for a started provider job: the provider
-        // finishes and bills it whatever this build does (A.2 `unsupported`).
+        // aimux exposes no cancel for a video job: the provider finishes and
+        // bills it whatever this build does (A.2 `unsupported`).
         Box::pin(async { Ok(RemoteCancel::Unsupported) })
     }
+}
+
+impl MediaAdapter {
+    /// Polls one started video job, downloads what it produced, and returns
+    /// its files.
+    async fn wait_video(
+        &self,
+        handle: &str,
+        connection: &ModalityConnection,
+        progress: ProgressSink,
+        cancel: CancellationToken,
+    ) -> Result<AdapterOutput, AdapterError> {
+        let handle: VideoHandle = serde_json::from_str(handle).map_err(|error| {
+            AdapterError::provider_error(format!("The stored job handle is unreadable: {error}"))
+        })?;
+        let vendor = self.vendor(&handle.job.model)?;
+        let provider = media::provider(connection, vendor, Operation::Video, &self.transport)?;
+        let model = media::video_model(&provider, &connection.model)?;
+        let options = job::video_options(&handle.job, vendor)?;
+        let secrets = Secrets::of(connection);
+        progress.send(AdapterProgress {
+            fraction: None,
+            message: Some("Waiting for the video".into()),
+        });
+        let deadline = handle.started_at.saturating_add(MAX_VIDEO_WAIT.as_secs());
+        let result = loop {
+            if now() >= deadline {
+                return Err(AdapterError::provider_error(
+                    "the provider did not finish the job within 1 hour",
+                ));
+            }
+            let status = model
+                .do_status(&handle.operation, &options)
+                .await
+                .map_err(|error| failure(error, &cancel, &secrets))?;
+            match status {
+                VideoOperationStatus::Pending => {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            return Err(AdapterError::provider_error("The job was cancelled"));
+                        }
+                        _ = tokio::time::sleep(VIDEO_POLL_INTERVAL) => {}
+                    }
+                }
+                VideoOperationStatus::Completed(result) => break result,
+            }
+        };
+        let (mut files, links) = job::video_output(&result, &handle.job.work_dir)?;
+        if links.is_empty() {
+            return Ok(AdapterOutput { files, data: None });
+        }
+        for link in links {
+            let index = files.len() + 1;
+            let name = job::video_name(index, &link.media_type);
+            let path = handle.job.work_dir.join(&name);
+            // The credential travels only to the connection's own origin, and
+            // the client follows a redirect only as far as that credential
+            // may go.
+            let credentialed = match &connection.resolved.connection {
+                ModelConnection::Http(http) => same_origin(&link.url, &http.base_url),
+                _ => false,
+            };
+            let client = self.transport.client(network(connection)?, credentialed)?;
+            download(&link.url, connection, &client, &path, &cancel).await?;
+            files.push(JobFile {
+                name,
+                media_type: link.media_type,
+                path,
+            });
+        }
+        Ok(AdapterOutput { files, data: None })
+    }
+}
+
+/// The network facts of one connection.
+fn network(connection: &ModalityConnection) -> Result<&ModelNetwork, AdapterError> {
+    match &connection.resolved.connection {
+        ModelConnection::Http(http) => Ok(&http.network),
+        // Media::provider refuses both before a call reaches here; the fixed
+        // sentences keep one reason for a connection no media row serves.
+        ModelConnection::Bedrock(_) => Err(AdapterError::unavailable(
+            "No bundled catalog model declares media on an Amazon Bedrock connection",
+        )),
+        ModelConnection::Local => Err(AdapterError::unavailable(
+            "The model's connection is local and serves no media call",
+        )),
+    }
+}
+
+/// One started video job, as the task record keeps it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct VideoHandle {
+    /// `VideoOperationStart.operation`: the provider's own reference.
+    operation: Value,
+    /// Everything `wait` needs after a restart, which the record does not hand
+    /// back to the adapter.
+    job: Job,
+    /// When `submit` started the job, in Unix seconds: the one-hour bound
+    /// counts from here, a restart included.
+    started_at: u64,
+}
+
+/// Streams one video into `path`, counting the bytes.
+///
+/// The connection's headers reach the request only when the URL shares the
+/// connection's origin: a provider hands back a pre-signed URL on another
+/// host, and the credential must not travel there.
+async fn download(
+    url: &str,
+    connection: &ModalityConnection,
+    client: &reqwest::Client,
+    path: &Path,
+    cancel: &CancellationToken,
+) -> Result<u64, AdapterError> {
+    let mut request = client.get(url);
+    if let ModelConnection::Http(http) = &connection.resolved.connection
+        && same_origin(url, &http.base_url)
+    {
+        for (name, value) in &http.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        if let Some(bearer) = &http.bearer {
+            request = request.bearer_auth(bearer);
+        }
+    }
+    let response = tokio::select! {
+        _ = cancel.cancelled() => {
+            return Err(AdapterError::provider_error("The download was cancelled"));
+        }
+        response = request.send() => response.map_err(|_| {
+            AdapterError::provider_error("The video cannot be downloaded")
+        })?,
+    };
+    if !response.status().is_success() {
+        return Err(AdapterError::provider_error(format!(
+            "The video download answered HTTP {}",
+            response.status()
+        )));
+    }
+    let mut file = tokio::fs::File::create(path).await.map_err(|error| {
+        AdapterError::provider_error(format!("The video cannot be written: {error}"))
+    })?;
+    use futures_util::StreamExt as _;
+    use tokio::io::AsyncWriteExt as _;
+    let mut written = 0u64;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|_| AdapterError::provider_error("The video download was interrupted"))?;
+        written += chunk.len() as u64;
+        if written > MAX_VIDEO_BYTES {
+            return Err(AdapterError::provider_error(
+                "The video exceeds the 2 GiB download limit",
+            ));
+        }
+        file.write_all(&chunk).await.map_err(|error| {
+            AdapterError::provider_error(format!("The video cannot be written: {error}"))
+        })?;
+    }
+    Ok(written)
+}
+
+/// Whether two URLs share scheme, host and port.
+fn same_origin(left: &str, right: &str) -> bool {
+    url::Url::parse(left)
+        .ok()
+        .zip(url::Url::parse(right).ok())
+        .is_some_and(|(left, right)| left.origin() == right.origin())
 }
 
 /// The values one call must never write into a record: the credential, and
@@ -302,10 +516,18 @@ fn failure(error: AiMuxError, cancel: &CancellationToken, secrets: &Secrets) -> 
     }
 }
 
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
 /// The aimux operation a job's `<category>.<operation>` names.
 fn kind_of(job: &Job) -> Result<Operation, AdapterError> {
     match (job.category.as_str(), job.operation.as_str()) {
         ("image", "generate") | ("image", "edit") => Ok(Operation::Image),
+        ("video", "generate") => Ok(Operation::Video),
         (category, operation) => Err(AdapterError::invalid_input(format!(
             "The aimux adapter serves no {category}.{operation}"
         ))),
@@ -339,6 +561,23 @@ fn image_edit_schema() -> Value {
             "seed": {"type": "integer", "minimum": 0},
             "outputFormat": {"enum": ["png", "jpeg", "webp"]},
             "mask": {"type": "string"},
+            "providerOptions": {"type": "object"}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn video_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string"},
+            "aspectRatio": {"type": "string", "pattern": "^[0-9]+:[0-9]+$"},
+            "resolution": {"type": "string", "pattern": "^[0-9]+x[0-9]+$"},
+            "durationSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
+            "fps": {"type": "integer", "minimum": 1, "maximum": 60},
+            "seed": {"type": "integer", "minimum": 0},
+            "generateAudio": {"type": "boolean"},
             "providerOptions": {"type": "object"}
         },
         "additionalProperties": false

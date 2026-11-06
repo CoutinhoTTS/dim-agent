@@ -10,6 +10,7 @@ use aimux_core::image_model::{
     ImageCallOptions, ImageFile, ImageFileData, ImageOutputs, ImageResult,
 };
 use aimux_core::shared::{AspectRatio, SharedProviderOptions, Size};
+use aimux_core::video_model::{VideoCallOptions, VideoData, VideoFile, VideoFileData, VideoResult};
 use dim_modality::{AdapterError, Job, JobFile};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -66,6 +67,36 @@ pub fn requested_format(job: &Job) -> Option<&str> {
     text(&job.params, "outputFormat")
 }
 
+/// One video call's options.
+pub fn video_options(job: &Job, vendor: &Vendor) -> Result<VideoCallOptions, AdapterError> {
+    let params = &job.params;
+    let mut options = VideoCallOptions::new(text(params, "prompt").unwrap_or_default());
+    if text(params, "prompt").is_none() {
+        options.prompt = None;
+    }
+    options.n = 1;
+    options.aspect_ratio = text(params, "aspectRatio")
+        .map(AspectRatio::parse)
+        .transpose()
+        .map_err(invalid_input)?;
+    options.resolution = text(params, "resolution")
+        .map(Size::parse)
+        .transpose()
+        .map_err(invalid_input)?;
+    options.duration = integer(params, "durationSeconds")?.map(|value| value as u32);
+    options.fps = integer(params, "fps")?.map(|value| value as u32);
+    options.seed = integer(params, "seed")?;
+    options.generate_audio = boolean(params, "generateAudio")?;
+    options.provider_options = provider_options(params, vendor);
+    if let Some(file) = job.files.first() {
+        options.image = Some(VideoFile::File {
+            media_type: file.media_type.clone(),
+            data: VideoFileData::Binary(read(file.path.as_path())?),
+        });
+    }
+    Ok(options)
+}
+
 /// The caller's provider options, under the package's own namespace.
 ///
 /// `params.providerOptions` is aimux's namespaced map when it carries the
@@ -119,6 +150,16 @@ fn integer(params: &Value, key: &str) -> Result<Option<u64>, AdapterError> {
     }
 }
 
+fn boolean(params: &Value, key: &str) -> Result<Option<bool>, AdapterError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| AdapterError::invalid_input(format!("`{key}` must be a boolean"))),
+    }
+}
+
 fn invalid_input(message: String) -> AdapterError {
     AdapterError::invalid_input(message)
 }
@@ -164,6 +205,79 @@ pub fn image_output(
     Ok(files)
 }
 
+/// One video a provider returned as a URL: the adapter downloads it itself so
+/// a large video streams to disk.
+pub struct VideoLink {
+    pub url: String,
+    pub media_type: String,
+}
+
+/// The files one video call produced, and the URLs the caller must download
+/// itself.
+pub fn video_output(
+    result: &VideoResult,
+    work_dir: &Path,
+) -> Result<(Vec<JobFile>, Vec<VideoLink>), AdapterError> {
+    let mut written = Vec::new();
+    let mut links = Vec::new();
+    for video in &result.videos {
+        match video {
+            VideoData::Url { url, media_type } => links.push(VideoLink {
+                url: url.clone(),
+                media_type: video_media_type(media_type),
+            }),
+            VideoData::Base64 { data, media_type } => {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|error| {
+                        AdapterError::provider_error(format!(
+                            "The provider returned a video that is not base64: {error}"
+                        ))
+                    })?;
+                let index = written.len() + 1;
+                written.push(video_file(work_dir, index, media_type, &bytes)?);
+            }
+            VideoData::Binary { data, media_type } => {
+                let index = written.len() + 1;
+                written.push(video_file(work_dir, index, media_type, data)?);
+            }
+        }
+    }
+    Ok((written, links))
+}
+
+fn video_file(
+    work_dir: &Path,
+    index: usize,
+    media_type: &str,
+    bytes: &[u8],
+) -> Result<JobFile, AdapterError> {
+    let media_type = video_media_type(media_type);
+    let name = video_name(index, &media_type);
+    let path = write(work_dir, &name, bytes)?;
+    Ok(JobFile {
+        name,
+        media_type,
+        path,
+    })
+}
+
+/// The name one video is written under.
+pub fn video_name(index: usize, media_type: &str) -> String {
+    format!("video-{index}.{}", video_extension(media_type))
+}
+
+/// A video's media type: aimux names `video/mp4` when a provider reports none
+/// or a generic type, and a record must not say `application/octet-stream`.
+fn video_media_type(media_type: &str) -> String {
+    match media_type {
+        "" | "application/octet-stream" => "video/mp4".to_owned(),
+        media_type => media_type.to_owned(),
+    }
+}
+
+/// Writes `bytes` as `name` inside `work_dir`.
 pub fn write(work_dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, AdapterError> {
     let path = work_dir.join(name);
     std::fs::write(&path, bytes).map_err(|error| {
@@ -187,5 +301,15 @@ fn requested_image_kind(requested: Option<&str>) -> (&'static str, &'static str)
         Some("jpeg") => ("jpg", "image/jpeg"),
         Some("webp") => ("webp", "image/webp"),
         _ => ("png", "image/png"),
+    }
+}
+
+/// The extension and media type of a video, from the media type its provider
+/// reported.
+fn video_extension(media_type: &str) -> &'static str {
+    match media_type {
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        _ => "mp4",
     }
 }

@@ -7,6 +7,7 @@
 use aimux_core::AiMuxError;
 use aimux_core::image_model::ImageModel;
 use aimux_core::provider::Provider;
+use aimux_core::video_model::VideoModel;
 use aimux_provider_utils::{FetchFunction, Resolvable};
 use aimux_providers::PresetSettings;
 use dim_agent_aimux::MediaTransport;
@@ -31,6 +32,28 @@ impl Transport {
         match self {
             Self::Shared(transport) => transport.resolve(network, base_url),
             Self::Fixed(fetch) => (base_url.to_owned(), fetch.clone()),
+        }
+    }
+    /// The client a video download streams through: the connection's proxy,
+    /// and the redirect rule the download's credential allows.
+    ///
+    /// `credentialed` is true when the URL shares the connection's origin and
+    /// the request therefore carries its headers; the client then follows a
+    /// same-origin 307 or 308 only.
+    pub fn client(
+        &self,
+        network: &ModelNetwork,
+        credentialed: bool,
+    ) -> Result<reqwest::Client, AdapterError> {
+        match self {
+            Self::Shared(_) => MediaTransport::client(Some(network), credentialed)
+                .map_err(AdapterError::provider_error),
+            // A scripted transport answers the provider calls; a download goes
+            // to whatever address the script hands back. It applies the same
+            // redirect rule, so a test sees the production policy.
+            Self::Fixed(_) => {
+                MediaTransport::client(None, credentialed).map_err(AdapterError::provider_error)
+            }
         }
     }
 }
@@ -123,5 +146,30 @@ pub fn image_model(
         Err(error) => Err(AdapterError::unavailable(format!(
             "The provider refused `{model}`: {error}"
         ))),
+    }
+}
+
+/// The video model of `provider`; a package without one answers `unavailable`.
+pub fn video_model(
+    provider: &Arc<dyn Provider>,
+    model: &str,
+) -> Result<Arc<dyn VideoModel>, AdapterError> {
+    optional(provider.video_model(model), "video", model)
+}
+
+/// One of aimux's optional media constructors, refused as `unavailable`.
+fn optional<T: ?Sized>(
+    model: Option<Result<Arc<T>, AiMuxError>>,
+    kind: &str,
+    id: &str,
+) -> Result<Arc<T>, AdapterError> {
+    let refusal =
+        || AdapterError::unavailable(format!("The provider serves no {kind} model `{id}`"));
+    match model {
+        Some(Ok(model)) => Ok(model),
+        Some(Err(error)) => Err(AdapterError::unavailable(format!(
+            "The provider refused the {kind} model `{id}`: {error}"
+        ))),
+        None => Err(refusal()),
     }
 }

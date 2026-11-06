@@ -257,6 +257,50 @@ impl MediaTransport {
         let (base, query) = split_query(base_url);
         (base, fetch(&self.transport, network, query))
     }
+    /// The client a media download streams through: the connection's proxy
+    /// and the redirect rule its credential allows.
+    ///
+    /// `credentialed` is true when the request carries the connection's
+    /// headers because its URL shares the connection's origin. Only a
+    /// same-origin 307 or 308 is then followed, the rule
+    /// [`follow_redirects`] applies: reqwest strips `Authorization` on a
+    /// cross-origin redirect but not a provider's own header, so another hop
+    /// could carry `x-goog-api-key` or `xi-api-key` to a different host. An
+    /// uncredentialed URL is a pre-signed one the provider minted; it carries
+    /// no secret, so the default policy follows its redirects.
+    ///
+    /// The connection's timeout is not applied: it bounds one provider
+    /// exchange, and a download is a body of its own size. The error is a
+    /// fixed sentence, because a proxy URL may carry a credential.
+    pub fn client(
+        network: Option<&ModelNetwork>,
+        credentialed: bool,
+    ) -> Result<reqwest::Client, String> {
+        let mut builder = reqwest::Client::builder();
+        if let Some(proxy) = network.and_then(|network| network.proxy.as_ref()) {
+            builder = builder.proxy(
+                reqwest::Proxy::all(proxy)
+                    .map_err(|_| "the connection's proxy URL cannot be used".to_owned())?,
+            );
+        }
+        if credentialed {
+            builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+                let original = attempt.previous().first().map(url::Url::origin);
+                let same_origin = original == Some(attempt.url().origin());
+                if matches!(attempt.status().as_u16(), 307 | 308)
+                    && same_origin
+                    && attempt.previous().len() < MAX_REDIRECTS
+                {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }));
+        }
+        builder
+            .build()
+            .map_err(|_| "the media download client cannot be built".to_owned())
+    }
 }
 impl Default for MediaTransport {
     fn default() -> Self {
