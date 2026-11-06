@@ -7,13 +7,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dim_agent_capabilities::history::{HistoryRenderer, context_messages, summary_message};
-use dim_agent_runtime::TimelineQueryDirection;
+use dim_agent_runtime::{BranchOptions, TimelineQueryDirection};
 use dim_agent_types::{
     BranchCreateAt, BranchCreateData, BranchSource, ContextCompactionData, ContextCompactionResult,
     InputMode,
 };
 use support::parts::*;
 use support::texts;
+use tokio_util::sync::CancellationToken;
 
 /// One seeded evaluation: the set, the worker's completed request and the
 /// evaluator's creation, as the main branch wrote them.
@@ -1599,6 +1600,117 @@ async fn e3_a_restatement_yields_to_the_record_a_later_decision_writes() {
         env.keys("main").await[0].1,
         pause.text,
         "and the state still holds"
+    );
+    env.close().await;
+}
+
+/// R6.2: a change issued while the branch part is still rebuilding waits for
+/// the rebuild and the facts it held, so its record states the change applied
+/// to the complete fold.
+///
+/// The change is a `goal_update` call: `session.goal.*` checks the tree first
+/// (`crates/dim-goal/src/session.rs:164`), so it refuses a branch that is still
+/// building, while the tool reaches the Owner directly
+/// (`crates/dim-goal/src/session.rs:217`). The child line is opened without
+/// waiting for the create, and its Goal part's first read is held, so the
+/// change meets the Owner before its rebuild has folded anything. A child has
+/// no goal of its own, so the complete fold leaves the state retired: what the
+/// case pins is that the change waits instead of composing against the empty
+/// fold and failing on the unpublished branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e3_a_change_waits_for_the_branch_rebuild() {
+    const SCAN: [&str; 4] = [
+        "input/message",
+        "input/deleted",
+        "branch/start",
+        "session/forked",
+    ];
+    let env = Env::start_gated().await;
+    // The child's scan, not any read main still owes.
+    let (entered, release) = env.gated().hold_read_other_than(&SCAN, Some("main"));
+    // The create is not awaited: its build waits for the rebuild it starts.
+    let commands = env.probe.commands("main");
+    let at = env.probe.timeline("main").sequence();
+    let create = tokio::spawn(async move {
+        commands
+            .branch(
+                "main".to_owned(),
+                at,
+                BranchOptions {
+                    prompt: "line work".into(),
+                    source: BranchSource::Host {
+                        operation_id: "r62-child".into(),
+                    },
+                },
+                CancellationToken::new(),
+            )
+            .await
+    });
+    // The child's id is on the parent's committed `branch/create`; the Owner
+    // enters the table at the start of its part's apply, before the rebuild.
+    let child = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(create) = env.creates("main").await.last() {
+                return create.branch.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the parent holds its branch/create");
+    tokio::time::timeout(Duration::from_secs(15), entered)
+        .await
+        .expect("the child's rebuild reached its scan")
+        .expect("the gate signals");
+
+    // The change must wait for the rebuild, never compose from the one that
+    // has not run yet.
+    let tools = env.probe.tools();
+    let handler = tools
+        .contributed("goal_update")
+        .expect("goal_update is registered")
+        .handler
+        .clone();
+    let call = dim_agent_types::ToolCall {
+        id: "r62-call".to_owned(),
+        name: "goal_update".to_owned(),
+        input: serde_json::json!({"status": "blocked", "summary": "wait for the rebuild"})
+            .as_object()
+            .cloned()
+            .expect("an object"),
+    };
+    let context = dim_agent_capabilities::host::ToolExecutionContext {
+        turn_id: "r62-turn".to_owned(),
+        request_id: "r62-request".to_owned(),
+        branch_id: child.clone(),
+    };
+    let mut report = Box::pin(handler.execute(call, context, CancellationToken::new()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut report)
+            .await
+            .is_err(),
+        "the change composed before the rebuild finished"
+    );
+    release.send(()).expect("the gate is armed");
+    let result = report.await.expect("the tool runs");
+    let opened = tokio::time::timeout(Duration::from_secs(15), create)
+        .await
+        .expect("the child opens")
+        .expect("the create task");
+    assert_eq!(opened.expect("the child branch").id(), child);
+    let dim_agent_types::ToolContent::Text(text) = &result.content else {
+        panic!("the change replies with text: {result:?}");
+    };
+    assert!(
+        text.contains("goal_update recorded: blocked."),
+        "the change ran once the branch was ready: {result:?}"
+    );
+    let trigger = env.wait_for(&child, r#"op="blocked""#).await;
+    let record = env.wait_for(&child, r#"status="cleared""#).await;
+    assert_eq!(
+        record.text,
+        texts::cleared(&child, &texts::trigger(&trigger)),
+        "the record states the change applied to the complete fold"
     );
     env.close().await;
 }

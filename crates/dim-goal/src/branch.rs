@@ -219,6 +219,7 @@ impl DynPlugin for GoalBranch {
             let stop = CancellationToken::new();
             let (resolved, _) = watch::channel(false);
             let (stepped, _) = watch::channel(0);
+            let (ready, _) = watch::channel(false);
             let owner = Arc::new(Owner {
                 branch_id: identity.branch_id.clone(),
                 timeline,
@@ -231,6 +232,7 @@ impl DynPlugin for GoalBranch {
                 tasks: TaskTracker::new(),
                 resolved,
                 stepped,
+                ready,
                 state: Mutex::new(State::default()),
                 write: tokio::sync::Mutex::new(()),
             });
@@ -295,6 +297,9 @@ impl DynPlugin for GoalBranch {
                     }),
                 )
                 .await?;
+            // The rebuild has returned and every fact it held is folded, so a
+            // change can compose from the complete fold (R6.2).
+            owner.ready.send_replace(true);
             Ok(Effect::Done)
         })
     }
@@ -359,6 +364,9 @@ struct Owner {
     /// The sequence of the newest event the fold has stepped, so a change can
     /// wait for the fold's position before composing its record (R5).
     stepped: watch::Sender<u64>,
+    /// Set once the rebuild has returned and the facts it held are folded
+    /// (R6.2): a change composes only from that complete fold.
+    ready: watch::Sender<bool>,
     state: Mutex<State>,
     /// Serializes state records: each is composed from the fold as it stands
     /// when the lock is taken and commits before the next one is composed, so
@@ -388,6 +396,48 @@ impl Owner {
         state.last_write = state.last_write.max(event.sequence);
         drop(state);
         Ok(event)
+    }
+
+    /// Waits until this generation's rebuild has returned and folded the facts
+    /// it held (R6.2): before that, the fold is partial and a record composed
+    /// from it would state a state the branch does not have. The batch is
+    /// written through the tree, which resolves a branch only once its build
+    /// returned (`TimelineTree::get`,
+    /// crates/dim-agent-capabilities/src/timeline_tree.rs:118); the branch's
+    /// own activation is that signal (R7.2). Bounded by `stop` like every
+    /// wait; a generation that ends first fails the call.
+    async fn await_ready(&self) -> Result<(), AgentError> {
+        let mut ready = self.ready.subscribe();
+        loop {
+            if *ready.borrow_and_update() {
+                break;
+            }
+            tokio::select! {
+                result = ready.changed() => {
+                    if result.is_err() {
+                        return Err(AgentError::Reloading("Goal".into()));
+                    }
+                }
+                _ = self.stop.cancelled() => {
+                    return Err(AgentError::Closed(self.branch_id.clone()));
+                }
+            }
+        }
+        // The batch is written through the tree, which resolves a branch only
+        // once its build returned; the branch's own activation is that signal.
+        // A branch that closes without starting never publishes, so it ends
+        // the call like `stop`.
+        tokio::select! {
+            active = self.phase.activated() => {
+                if !active {
+                    return Err(AgentError::Closed(self.branch_id.clone()));
+                }
+            }
+            _ = self.stop.cancelled() => {
+                return Err(AgentError::Closed(self.branch_id.clone()));
+            }
+        }
+        Ok(())
     }
 
     /// Waits until the fold has stepped this generation's newest Goal write,
@@ -420,6 +470,7 @@ impl Owner {
     /// state record and the trigger as one atomic batch, the record first, so
     /// the trigger's turn starts with the record already ahead of it (R5).
     async fn change(self: &Arc<Self>, change: Change) -> Result<u64, AgentError> {
+        self.await_ready().await?;
         let _write = self.write.lock().await;
         self.await_fold().await?;
         let trigger = change.trigger(&self.branch_id);
