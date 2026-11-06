@@ -10983,6 +10983,7 @@
         "path EventKind::TurnStart",
         "path InputAppliedData",
         "path InputDeletedData",
+        "path InputHandover",
         "path InputMessageData",
         "path InputMode",
         "path InputMode::Append",
