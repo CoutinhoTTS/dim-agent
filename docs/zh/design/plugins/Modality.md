@@ -434,7 +434,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `dimcode modality task list\|status\|wait\|cancel` | 任务方法；`wait --out <path>` 取回结果 |
 | `dimcode image generate\|edit\|enhance`、`video`、`speech synthesize\|transcribe`、`music`、`audio`、`asset`、`motion` | 提交；8 MiB 以内的输入内联发送，更大的用 `node_path`；默认等待并将结果写到 `--out` 或当前目录；`--no-wait` 打印 id；`--json` 打印记录 |
 | `dimcode ocr <file> [--node <id>]` | 提交 `ocr.recognize`；打印文本 |
-| `dimcode realtime` | 打开连接，将 stdin 行作为文本帧转发，打印事件 |
+| `dimcode realtime [--operation <operation>] [--model <provider>/<model>]` | `realtime.open`，`params` 为 `{}`；将 stdin 行作为 text 帧转发，事件与 `ended` 打印为 JSON 行，EOF 或 Ctrl+C 时关闭；`direct` 回复打印其 connection 并保持（[CLI 命令](../cli-commands.md#realtime-会话)） |
 
 调用不可用的类别时打印与列表相同的原因。前台等待期间第一次 Ctrl+C 停止等待并打印任务 id；任务继续（A8）。
 

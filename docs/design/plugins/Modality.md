@@ -434,7 +434,7 @@ The record is `modality/tasks/<task_id>/task.json` in the host's version 1 text 
 | `dimcode modality task list\|status\|wait\|cancel` | Task methods; `wait --out <path>` retrieves results |
 | `dimcode image generate\|edit\|enhance`, `video`, `speech synthesize\|transcribe`, `music`, `audio`, `asset`, `motion` | Submit; inputs up to 8 MiB are sent inline and larger ones by `node_path`; by default waits and writes results to `--out` or the current directory; `--no-wait` prints the id; `--json` prints the record |
 | `dimcode ocr <file> [--node <id>]` | Submit `ocr.recognize`; prints text |
-| `dimcode realtime` | Open, relay stdin lines as text frames, print events |
+| `dimcode realtime [--operation <operation>] [--model <provider>/<model>]` | `realtime.open` with `params: {}`; relay stdin lines as text frames, print events and `ended` as JSON lines, and close on EOF or Ctrl+C; a `direct` reply prints its connection and holds ([CLI commands](../cli-commands.md#realtime-sessions)) |
 
 Invoking an unavailable category prints the same reason as the listing. The first Ctrl+C during a foreground wait stops waiting and prints the task id; the task continues (A8).
 
