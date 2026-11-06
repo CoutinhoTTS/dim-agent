@@ -40,9 +40,12 @@ unconfined Linux: a process that left the group may still write to the `write` d
 that it was not confined; the caller decides whether that is acceptable. No setting, policy
 default or user-facing control changes for this operation.
 
-The Linux guarantee rests on bubblewrap running a minimal PID 1 that exits to clean up the sandbox
-(`--as-pid-1` documents that default) and on `pid_namespaces(7)`: when the namespace's init
-process terminates, the kernel ends the rest of the namespace.
+The Linux guarantee rests on documented behaviour. bwrap exits when the helper it started exits,
+reporting the helper's status (bwrap(1), DESCRIPTION). With `--die-with-parent`, bwrap's death
+kills every process in the sandbox (bwrap(1), `--die-with-parent`). When the namespace's init
+process terminates, the kernel ends the rest of the namespace (`pid_namespaces(7)`). The minimal
+PID 1 that DESCRIPTION also describes exits only once no other process is left, so it is not what
+ends a descendant that outlives the helper.
 
 ## Process isolation
 
