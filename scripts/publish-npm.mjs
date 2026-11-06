@@ -120,10 +120,12 @@ if (mode) {
   for (const [index, archive] of archives.entries()) {
     const name = names[index];
     if (fromRelease && tag === 'alpha') {
-      const current = registryField(name + '@alpha', 'version');
-      if (current !== undefined) {
-        assert(/^\d+\.\d+\.\d+-alpha\.\d+$/.test(current), `Unexpected alpha tag on ${name}: ${current}`);
-        assert(current.localeCompare(version, 'en', { numeric: true }) <= 0, `${name}@alpha already points to newer ${current}`);
+      for (const label of name === wrapper ? ['alpha', 'latest'] : ['alpha']) {
+        const current = registryField(name + '@' + label, 'version');
+        if (current !== undefined) {
+          assert(/^\d+\.\d+\.\d+-alpha\.\d+$/.test(current), `Unexpected ${label} tag on ${name}: ${current}`);
+          assert(current.localeCompare(version, 'en', { numeric: true }) <= 0, `${name}@${label} already points to newer ${current}`);
+        }
       }
     }
     const metadata = registryField(name + '@' + version, 'dist');
@@ -138,7 +140,7 @@ if (mode) {
   if (mode !== '--check-release') {
     for (const archive of pending) {
       const published = spawnSync('npm', ['publish', archive, '--access', 'public', '--tag', tag,
-        '--ignore-scripts', '--registry', 'https://registry.npmjs.org'], { stdio: 'inherit' });
+        '--ignore-scripts', '--registry', 'https://registry.npmjs.org'], { stdio: fromRelease ? ['ignore', 'inherit', 'inherit'] : 'inherit' });
       assert.ifError(published.error);
       assert.equal(published.status, 0, `npm publish failed: ${path.basename(archive)}`);
     }
