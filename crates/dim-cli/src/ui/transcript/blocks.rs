@@ -664,7 +664,8 @@ fn detail_rows(
     }
     lines
         .iter()
-        .flat_map(|line| gutter_text(" ", line, width, &p.muted))
+        .map(|line| crate::sanitize::safe_line(line))
+        .flat_map(|line| gutter_text(" ", &line, width, &p.muted))
         .collect()
 }
 
@@ -678,6 +679,28 @@ mod tests {
         assert_eq!(gutter_width(40), 2);
         assert_eq!(gutter_mark("◆", 1), "◆");
         assert_eq!(gutter_mark("◆", 2), "◆ ");
+    }
+
+    #[test]
+    fn failure_details_are_sanitized() {
+        use crate::model::view::FailureDetail;
+        use crate::ui::theme::{Appearance, ColorMode, Theme};
+        let details = FailureDetail {
+            kind: dim_agent_types::ModelFailureKind::ServerError,
+            status: Some(503),
+            provider_code: Some("bad\x1b[31mcode".into()),
+            request_id: Some("req-1".into()),
+            attempts: 3,
+            waited_ms: 4200,
+            retry_after_ms: None,
+            cause: vec!["upstream \x1b[31mframe".into()],
+        };
+        let mut palette = Theme::system(ColorMode::TrueColor, Appearance::Dark, None).palette;
+        palette.muted.clear();
+        let rows = detail_rows(&details, 80, &palette).join("\n");
+        assert!(!rows.contains('\x1b'), "{rows:?}");
+        assert!(rows.contains("bad") && rows.contains("code"), "{rows:?}");
+        assert!(rows.contains("frame"), "{rows:?}");
     }
 
     #[test]
