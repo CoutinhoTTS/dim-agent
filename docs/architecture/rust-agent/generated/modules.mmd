@@ -594,16 +594,17 @@ flowchart LR
   m590["dim_modality"]
   m591["dim_modality::adapter"]
   m592["dim_modality::engine"]
-  m593["dim_modality::task"]
-  m594["dim_modality::task::tests"]
-  m595["dim_ocr"]
-  m596["dim_ocr::args"]
-  m597["dim_ocr::contract"]
-  m598["dim_ocr::helper"]
-  m599["dim_ocr::pdf"]
-  m600["dim_ocr::platform"]
-  m601["dim_ocr::vision"]
-  m602["dim_session_title"]
+  m593["dim_modality::engine::tests"]
+  m594["dim_modality::task"]
+  m595["dim_modality::task::tests"]
+  m596["dim_ocr"]
+  m597["dim_ocr::args"]
+  m598["dim_ocr::contract"]
+  m599["dim_ocr::helper"]
+  m600["dim_ocr::pdf"]
+  m601["dim_ocr::platform"]
+  m602["dim_ocr::vision"]
+  m603["dim_session_title"]
   m0 --> m1
   m0 -.-> m2
   m0 -.-> m3
@@ -4001,6 +4002,7 @@ flowchart LR
   m588 --> m574
   m589 --> m574
   m590 --> m58
+  m590 --> m59
   m590 --> m68
   m590 --> m87
   m590 --> m124
@@ -4013,49 +4015,57 @@ flowchart LR
   m590 --> m259
   m590 --> m591
   m590 --> m592
-  m590 --> m593
+  m590 --> m594
+  m590 --> m601
   m591 --> m58
   m591 --> m169
   m592 --> m48
   m592 --> m58
+  m592 --> m59
+  m592 --> m60
   m592 --> m68
   m592 --> m169
   m592 --> m233
   m592 --> m259
   m592 --> m590
   m592 --> m591
-  m592 --> m593
-  m593 --> m169
-  m593 --> m233
-  m593 --> m591
-  m593 -.-> m594
-  m594 --> m593
-  m595 --> m596
-  m595 --> m597
-  m595 --> m598
-  m595 -.-> m599
-  m595 --> m600
-  m595 -.-> m601
+  m592 -.-> m593
+  m592 --> m594
+  m592 --> m598
+  m592 --> m601
+  m593 --> m60
+  m593 --> m592
+  m594 --> m169
+  m594 --> m233
+  m594 --> m591
+  m594 -.-> m595
+  m595 --> m594
   m596 --> m597
-  m598 --> m596
-  m598 --> m597
-  m598 --> m599
-  m598 --> m601
+  m596 --> m598
+  m596 --> m599
+  m596 -.-> m600
+  m596 --> m601
+  m596 -.-> m602
+  m597 --> m598
   m599 --> m597
-  m601 --> m597
-  m601 --> m600
-  m602 --> m58
-  m602 --> m68
-  m602 --> m85
-  m602 --> m87
-  m602 --> m124
-  m602 --> m126
-  m602 --> m136
-  m602 --> m138
-  m602 --> m158
-  m602 --> m160
-  m602 --> m169
-  m602 --> m259
-  m602 --> m260
-  m602 --> m273
-  m602 --> m276
+  m599 --> m598
+  m599 --> m600
+  m599 --> m602
+  m600 --> m598
+  m602 --> m598
+  m602 --> m601
+  m603 --> m58
+  m603 --> m68
+  m603 --> m85
+  m603 --> m87
+  m603 --> m124
+  m603 --> m126
+  m603 --> m136
+  m603 --> m138
+  m603 --> m158
+  m603 --> m160
+  m603 --> m169
+  m603 --> m259
+  m603 --> m260
+  m603 --> m273
+  m603 --> m276

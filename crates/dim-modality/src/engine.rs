@@ -13,13 +13,16 @@ use crate::task::{
     self, Executor, Expect, InputFile, ResultFile, TaskError, TaskRecord, TaskResult, TaskState,
     Write,
 };
-use crate::{Evaluation, catalog_category, is_understand};
+use crate::{Evaluation, HostTargetSpec, catalog_category, host_target, is_understand};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use dim_agent_capabilities::file_storage::EntryKind;
 use dim_agent_capabilities::host::{
     ModalityConnection, ModalityConnectionHost, ModalityTarget, ModelSelectionHost,
     SelectableModelsHost,
+};
+use dim_agent_capabilities::host_platform::{
+    ConfinedError, ConfinedOutput, ConfinedSpec, Confinement, HostPlatform, SystemServices,
 };
 use dim_agent_capabilities::methods::{Progress, RpcError};
 use dim_agent_types::ModelId;
@@ -30,7 +33,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ffi::OsString;
 use std::io::Read;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -66,6 +71,17 @@ pub const SUBMIT_CANCEL_GRACE: Duration = Duration::from_secs(3);
 /// The name this build records for its single process adapter; the per-task
 /// lookup (#861) will record the resolved adapter's name instead.
 pub const ADAPTER_NAME: &str = "modalityAdapter";
+/// The time one OCR helper call may take (decision 7): a 500-page PDF at
+/// 200 dpi is the slowest input the contract accepts.
+const OCR_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// The most bytes the OCR helper may write to standard output.
+const OCR_STDOUT_LIMIT: usize = 64 * 1024;
+/// The most bytes the OCR helper may write to standard error.
+const OCR_STDERR_LIMIT: usize = 64 * 1024;
+/// The most page text `data.pages` carries in one task record; later pages
+/// keep their number only and `data.textTruncated` points at `text.txt`.
+const MAX_DATA_TEXT_BYTES: u64 = 1024 * 1024;
+
 /// Terminal tasks older than this many days are deleted (A.4, A2).
 const RETENTION_DAYS: i64 = 30;
 /// At most this many terminal tasks are kept; older ones are deleted (A.4,
@@ -174,6 +190,97 @@ pub(crate) fn resolve_task_model(
             row.id(category)
         ))),
     }
+}
+
+/// The model a host task runs (decision 4): the build's own target, which the
+/// caller may name explicitly and which the persisted default must also name.
+pub(crate) fn resolve_host_model(
+    evaluation: &Evaluation,
+    category: &str,
+    row: &crate::OperationRow,
+    target: &HostTargetSpec,
+    explicit: Option<&ModelId>,
+) -> Result<ModelId, RpcError> {
+    let model = ModelId {
+        provider_id: target.provider_id.to_owned(),
+        model_id: target.model_id.to_owned(),
+    };
+    if let Some(explicit) = explicit {
+        if explicit != &model {
+            let reason =
+                evaluation.unavailable_reason(explicit, category, row.operation, &row.id(category));
+            return Err(model_unavailable(reason.detail));
+        }
+        return match evaluation.host_reason() {
+            Some(reason) => Err(unavailable(reason.detail)),
+            None => Ok(model),
+        };
+    }
+    let snapshot = evaluation.operation(category, row);
+    if let Some(default) = &snapshot.default {
+        if default.available {
+            return Ok(ModelId {
+                provider_id: default.provider_id.clone(),
+                model_id: default.model_id.clone(),
+            });
+        }
+        return Err(default_unavailable(
+            default
+                .reason
+                .as_ref()
+                .map(|reason| reason.detail.clone())
+                .unwrap_or_else(|| "The configured default is unavailable".into()),
+        ));
+    }
+    match &snapshot.effective {
+        Some(effective) => Ok(ModelId {
+            provider_id: effective.provider_id.clone(),
+            model_id: effective.model_id.clone(),
+        }),
+        None => Err(match evaluation.host_reason() {
+            Some(reason) => unavailable(reason.detail),
+            None => no_default_model(format!("No model serves {}", row.id(category))),
+        }),
+    }
+}
+
+/// The parameters `ocr.recognize` accepts (A.1): the requested output mode.
+/// The record also carries the reserved `files` metadata, which is read with
+/// the record, not here.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OcrParams {
+    #[serde(default)]
+    output_mode: dim_ocr::OutputMode,
+    /// The record's reserved input metadata; present at run time, never read
+    /// here.
+    #[allow(dead_code)]
+    #[serde(default)]
+    files: Option<Value>,
+}
+
+/// Parses and validates `ocr.recognize` parameters (decision 4).
+fn ocr_params(params: &Value) -> Result<OcrParams, RpcError> {
+    serde_json::from_value(params.clone())
+        .map_err(|error| invalid_input(format!("Invalid ocr.recognize parameters: {error}")))
+}
+
+/// The success line the helper prints: `{ "ok": true, "pageCount": N }`.
+#[derive(Debug, Deserialize)]
+struct HelperSuccess {
+    ok: bool,
+}
+
+/// A typed failure line the helper prints for exit 2.
+#[derive(Debug, Deserialize)]
+struct HelperFailure {
+    ok: bool,
+    error: HelperFailureBody,
+}
+#[derive(Debug, Deserialize)]
+struct HelperFailureBody {
+    code: dim_ocr::HelperErrorCode,
+    message: String,
 }
 
 /// `modality.task.submit` (A.3).
@@ -290,6 +397,8 @@ pub(crate) struct Shared {
     pub(crate) tasks: TaskTracker,
     pub(crate) wake: Notify,
     pub(crate) state: Mutex<State>,
+    /// The executable host targets run (`ocr-helper`), from the installer.
+    pub(crate) ocr_helper: Option<PathBuf>,
 }
 
 impl Shared {
@@ -300,6 +409,7 @@ impl Shared {
         selectable: Arc<SelectableModelsHost>,
         ctx: Ctx,
         clock: Arc<dyn Clock>,
+        ocr_helper: Option<PathBuf>,
     ) -> Self {
         Self {
             files,
@@ -312,6 +422,7 @@ impl Shared {
             tasks: TaskTracker::new(),
             wake: Notify::new(),
             state: Mutex::new(State::default()),
+            ocr_helper,
         }
     }
 
@@ -640,14 +751,8 @@ impl ModalityTasks {
                 row.id(category.name)
             )));
         }
-        if category.name == "ocr" {
-            return Err(RpcError::app(
-                -32000,
-                "modality_unavailable",
-                "Not in this build",
-            ));
-        }
-        if params.node.is_some() {
+        let target = host_target(category.name, row.operation);
+        if params.node.is_some() && target.is_none() {
             return Err(invalid_input(format!(
                 "node is only for host-executed categories, not {}",
                 category.name
@@ -687,29 +792,45 @@ impl ModalityTasks {
             &shared.selectable,
             &shared.selection,
             &shared.ctx,
+            shared.ocr_helper.as_deref(),
             cancel,
         )
         .await?;
-        let model = resolve_task_model(&evaluation, category.name, row, params.model.as_ref())?;
-        let spec = evaluation.operation_spec(&model, category.name, row.operation);
-        let Some(spec) = spec else {
-            return Err(unavailable(format!(
-                "No available adapter serves {} for this model",
-                row.id(category.name)
-            )));
+        let model = match target {
+            Some(target) => resolve_host_model(
+                &evaluation,
+                category.name,
+                row,
+                target,
+                params.model.as_ref(),
+            )?,
+            None => resolve_task_model(&evaluation, category.name, row, params.model.as_ref())?,
         };
-        let validator = jsonschema::draft202012::new(&spec.params_schema).map_err(|error| {
-            RpcError::app(
-                -32000,
-                "provider_error",
-                format!("The adapter's parameter schema is invalid: {error}"),
-            )
-        })?;
-        if let Err(error) = validator.validate(&params.params) {
-            return Err(invalid_input(format!(
-                "Invalid {} parameters: {error}",
-                row.id(category.name)
-            )));
+        if target.is_some() {
+            // A host operation validates its own parameters; there is no
+            // adapter schema (decision 4).
+            ocr_params(&params.params)?;
+        } else {
+            let spec = evaluation.operation_spec(&model, category.name, row.operation);
+            let Some(spec) = spec else {
+                return Err(unavailable(format!(
+                    "No available adapter serves {} for this model",
+                    row.id(category.name)
+                )));
+            };
+            let validator = jsonschema::draft202012::new(&spec.params_schema).map_err(|error| {
+                RpcError::app(
+                    -32000,
+                    "provider_error",
+                    format!("The adapter's parameter schema is invalid: {error}"),
+                )
+            })?;
+            if let Err(error) = validator.validate(&params.params) {
+                return Err(invalid_input(format!(
+                    "Invalid {} parameters: {error}",
+                    row.id(category.name)
+                )));
+            }
         }
         // Boundary: names, media types and sizes (decision 1, decision 2).
         let allowed = allowed_media_types(category.name, row.operation);
@@ -786,6 +907,12 @@ impl ModalityTasks {
                 "Files are at most {MAX_SUBMISSION_BYTES} bytes per submission"
             )));
         }
+        if target.is_some() && inputs.len() != 1 {
+            return Err(invalid_input(format!(
+                "{} takes one input file",
+                row.id(category.name)
+            )));
+        }
         let task_id = format!("mt_{}", uuid::Uuid::new_v4());
         let created = shared.now_text();
         let mut record_params = params.params.clone();
@@ -810,9 +937,18 @@ impl ModalityTasks {
             revision: 0,
             category: category.name.to_owned(),
             operation: row.operation.to_owned(),
-            executor: Executor::Provider {
-                provider: model,
-                adapter: ADAPTER_NAME.to_owned(),
+            executor: match target {
+                Some(target) => Executor::Host {
+                    node: params.node.clone(),
+                    target: task::HostTarget {
+                        provider_id: target.provider_id.to_owned(),
+                        model_id: target.model_id.to_owned(),
+                    },
+                },
+                None => Executor::Provider {
+                    provider: model,
+                    adapter: ADAPTER_NAME.to_owned(),
+                },
             },
             params: record_params,
             state: TaskState::Queued,
@@ -1190,6 +1326,7 @@ fn allowed_media_types(category: &str, operation: &str) -> &'static [&'static st
         ("video", _) => &["image/", "video/"],
         ("speech", "transcribe") => &["audio/"],
         ("asset", _) => &["image/"],
+        ("ocr", "recognize") => &["image/", "application/pdf"],
         _ => &[],
     }
 }
@@ -1619,6 +1756,12 @@ impl Shared {
         slot: &Arc<Slot>,
         record: &TaskRecord,
     ) -> Option<Option<String>> {
+        if matches!(record.executor, Executor::Host { .. }) {
+            // A host task runs to its terminal outcome here; `None` keeps
+            // the drive from waiting on an executor handle.
+            self.run_host(slot, record).await;
+            return None;
+        }
         let Some(adapter) = self.ctx.get::<ModalityAdapterService>() else {
             if !slot.cancel_requested() {
                 self.fail(slot, "unavailable", "No adapter in this build")
@@ -1787,6 +1930,283 @@ impl Shared {
                 self.fail(slot, error.code.as_str(), error.message).await;
             }
         }
+    }
+
+    /// Runs one host task on the control node (A.14, decision 4): the
+    /// helper under its confinement, then the terminal write its exit status
+    /// and artifacts decide (decision 7).
+    async fn run_host(self: &Arc<Self>, slot: &Arc<Slot>, record: &TaskRecord) {
+        let Executor::Host { node, target } = &record.executor else {
+            return;
+        };
+        if node.is_some() {
+            if !slot.cancel_requested() {
+                self.fail(
+                    slot,
+                    "node_unavailable",
+                    "The task names a node this daemon does not control",
+                )
+                .await;
+            }
+            return;
+        }
+        let Some(platform) = self.ctx.get::<HostPlatform>() else {
+            if !slot.cancel_requested() {
+                self.fail(slot, "unavailable", "The host platform is unavailable")
+                    .await;
+            }
+            return;
+        };
+        let Some(helper) = self.ocr_helper.clone() else {
+            if !slot.cancel_requested() {
+                self.fail(slot, "unavailable", "No OCR helper in this build")
+                    .await;
+            }
+            return;
+        };
+        if !dim_ocr::apple_vision_available()
+            || target.provider_id != dim_ocr::APPLE_VISION_PROVIDER
+            || target.model_id != dim_ocr::APPLE_VISION_MODEL
+        {
+            if !slot.cancel_requested() {
+                self.fail(slot, "unavailable", "The host target is unavailable")
+                    .await;
+            }
+            return;
+        }
+        let params = match ocr_params(&record.params) {
+            Ok(params) => params,
+            Err(error) => {
+                if !slot.cancel_requested() {
+                    self.fail(slot, "invalid_input", error.message).await;
+                }
+                return;
+            }
+        };
+        let input = match self.job_files(record).await {
+            Ok(mut files) if files.len() == 1 => files.remove(0),
+            Ok(_) => {
+                if !slot.cancel_requested() {
+                    self.fail(slot, "invalid_input", "The OCR task needs one input file")
+                        .await;
+                }
+                return;
+            }
+            Err(error) => {
+                if !slot.cancel_requested() {
+                    self.fail(slot, "storage_error", error).await;
+                }
+                return;
+            }
+        };
+        let (work, tmp, cache) = match self.host_directories(record).await {
+            Ok(paths) => paths,
+            Err(error) => {
+                if !slot.cancel_requested() {
+                    self.fail(slot, "storage_error", error).await;
+                }
+                return;
+            }
+        };
+        // The framework resolves its cache through the user home, so the
+        // helper's HOME is the plugin's own cache directory (decision 1).
+        let spec = ConfinedSpec {
+            executable: helper,
+            args: vec![
+                OsString::from("ocr-helper"),
+                OsString::from("--input"),
+                input.path.clone().into_os_string(),
+                OsString::from("--artifacts"),
+                work.clone().into_os_string(),
+                OsString::from("--output-mode"),
+                OsString::from(params.output_mode.as_str()),
+            ],
+            env: vec![
+                (OsString::from("HOME"), cache.clone().into_os_string()),
+                (
+                    OsString::from("CFFIXED_USER_HOME"),
+                    cache.clone().into_os_string(),
+                ),
+                (OsString::from("TMPDIR"), tmp.clone().into_os_string()),
+            ],
+        };
+        let confinement = Confinement {
+            read: vec![input.path.clone()],
+            write: vec![work.clone(), tmp, cache],
+            timeout: OCR_TIMEOUT,
+            stdout_limit: OCR_STDOUT_LIMIT,
+            stderr_limit: OCR_STDERR_LIMIT,
+            services: SystemServices::OnDeviceRecognition,
+        };
+        let outcome = platform
+            .spawn_confined(spec, confinement, slot.cancel.child_token())
+            .await;
+        if slot.cancel_requested() {
+            return;
+        }
+        let output = match outcome {
+            Ok(output) => output,
+            Err(ConfinedError::Cancelled) => return,
+            Err(error) => {
+                self.fail(slot, confinement_code(&error), error.to_string())
+                    .await;
+                return;
+            }
+        };
+        self.settle_host(slot, &work, output).await;
+    }
+
+    /// The work, temporary and cache directories one host task uses.
+    async fn host_directories(
+        &self,
+        record: &TaskRecord,
+    ) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+        let task_dir = task::task_dir(&record.task_id);
+        let work = self
+            .files
+            .directory(&task::work_name(&record.task_id))
+            .await
+            .map_err(|error| error.to_string())?;
+        let tmp = self
+            .files
+            .directory(&format!("{task_dir}/tmp"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let cache = self
+            .files
+            .directory(task::OCR_CACHE_DIR)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((work, tmp, cache))
+    }
+
+    /// Maps one finished helper call to a terminal outcome (decision 7):
+    /// exit 0 publishes the artifacts, exit 2 carries a typed code, anything
+    /// else is `executor_error` with the tail of standard error.
+    async fn settle_host(self: &Arc<Self>, slot: &Arc<Slot>, work: &Path, output: ConfinedOutput) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        match output.status.code() {
+            Some(0) => {
+                let ok = serde_json::from_str::<HelperSuccess>(stdout.trim())
+                    .is_ok_and(|payload| payload.ok);
+                if !ok {
+                    self.fail(
+                        slot,
+                        "executor_error",
+                        format!(
+                            "The OCR helper printed no success line{}",
+                            stderr_tail(&output.stderr)
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+                self.publish_host(slot, work).await;
+            }
+            Some(2) => {
+                let failure = serde_json::from_str::<HelperFailure>(stdout.trim())
+                    .ok()
+                    .filter(|payload| !payload.ok);
+                match failure {
+                    Some(payload) => {
+                        let code = match payload.error.code {
+                            dim_ocr::HelperErrorCode::InvalidInput
+                            | dim_ocr::HelperErrorCode::EncryptedPdf
+                            | dim_ocr::HelperErrorCode::ResourceLimitExceeded => "invalid_input",
+                            dim_ocr::HelperErrorCode::LocalRuntimeUnavailable => "unavailable",
+                            dim_ocr::HelperErrorCode::LocalRuntimeFailed => "executor_error",
+                        };
+                        self.fail(slot, code, payload.error.message).await;
+                    }
+                    None => {
+                        self.fail(
+                            slot,
+                            "executor_error",
+                            "The OCR helper printed no valid error line",
+                        )
+                        .await;
+                    }
+                }
+            }
+            _ => {
+                self.fail(
+                    slot,
+                    "executor_error",
+                    format!("The OCR helper failed{}", stderr_tail(&output.stderr)),
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Publishes the artifacts one successful call wrote: `result.json`,
+    /// `text.txt` and the rasterized page images, with `data.pages` read
+    /// from `result.json` and bounded by [`MAX_DATA_TEXT_BYTES`] (decision 8).
+    async fn publish_host(self: &Arc<Self>, slot: &Arc<Slot>, work: &Path) {
+        let result = work.join(dim_ocr::RESULT_FILE);
+        let text = work.join(dim_ocr::TEXT_FILE);
+        let parsed = {
+            let result = result.clone();
+            tokio::task::spawn_blocking(move || dim_ocr::read_pages(&result, MAX_DATA_TEXT_BYTES))
+        }
+        .await;
+        let Ok(Ok(pages)) = parsed else {
+            self.fail(
+                slot,
+                "executor_error",
+                "The OCR helper wrote no readable result",
+            )
+            .await;
+            return;
+        };
+        if !text.is_file() {
+            self.fail(slot, "executor_error", "The OCR helper wrote no text")
+                .await;
+            return;
+        }
+        let listed = {
+            let work = work.to_owned();
+            tokio::task::spawn_blocking(move || page_images(&work))
+        }
+        .await;
+        let images = match listed {
+            Ok(Ok(images)) => images,
+            _ => {
+                self.fail(slot, "executor_error", "The OCR artifacts cannot be read")
+                    .await;
+                return;
+            }
+        };
+        let mut files = vec![
+            JobFile {
+                name: dim_ocr::RESULT_FILE.to_owned(),
+                media_type: "application/json".to_owned(),
+                path: result,
+            },
+            JobFile {
+                name: dim_ocr::TEXT_FILE.to_owned(),
+                media_type: "text/plain".to_owned(),
+                path: text,
+            },
+        ];
+        for name in images {
+            files.push(JobFile {
+                name: name.clone(),
+                media_type: "image/png".to_owned(),
+                path: work.join(name),
+            });
+        }
+        let mut data = json!({ "pages": pages.pages });
+        if pages.text_truncated {
+            // The record carries no more page text than MAX_DATA_TEXT_BYTES;
+            // the client reads text.txt for the rest.
+            data["textTruncated"] = json!(true);
+        }
+        let output = AdapterOutput {
+            files,
+            data: Some(data),
+        };
+        self.settle_output(slot, output).await;
     }
 
     /// Streams the adapter's output files into `result/` and writes the
@@ -1998,5 +2418,57 @@ impl Shared {
                 })
                 .await;
         });
+    }
+}
+
+/// The record error code of a confinement failure (decision 7): a path the
+/// call cannot resolve is the caller's input, everything else the executor.
+fn confinement_code(error: &ConfinedError) -> &'static str {
+    match error {
+        ConfinedError::InvalidPath { .. } => "invalid_input",
+        _ => "executor_error",
+    }
+}
+
+/// The page images a layout-mode call wrote, in page order.
+fn page_images(work: &Path) -> std::io::Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(work)?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| name.starts_with(dim_ocr::PAGE_IMAGE_PREFIX) && name.ends_with(".png"))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// The tail of a helper's standard error, for a failure message.
+fn stderr_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut tail: Vec<char> = text.chars().rev().take(500).collect();
+    tail.reverse();
+    format!(": {}", tail.into_iter().collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confinement_code;
+    use dim_agent_capabilities::host_platform::{ConfinedError, ConfinedStream};
+
+    #[test]
+    fn a_confinement_failure_is_the_callers_only_when_a_path_is_invalid() {
+        let gone = ConfinedError::InvalidPath {
+            path: std::path::PathBuf::from("/input.png"),
+            reason: "No such file or directory".into(),
+        };
+        assert_eq!(confinement_code(&gone), "invalid_input");
+        assert_eq!(confinement_code(&ConfinedError::TimedOut), "executor_error");
+        let limit = ConfinedError::OutputLimit {
+            stream: ConfinedStream::Stdout,
+        };
+        assert_eq!(confinement_code(&limit), "executor_error");
     }
 }

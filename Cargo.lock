@@ -1329,6 +1329,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "dim-ocr",
  "futures-util",
  "jsonschema",
  "libc",

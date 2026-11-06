@@ -6117,8 +6117,19 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "tokio::select",
-        "tracing::warn"
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_modality::engine::tests",
+      "crate": "dim_modality",
+      "parent": "dim_modality::engine",
+      "file": "crates/dim-modality/src/engine.rs",
+      "unexpandedMacros": [
+        "assert_eq"
       ]
     },
     {
@@ -42586,6 +42597,13 @@
     },
     {
       "from": "dim_modality",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path dim_agent_capabilities::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_modality",
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
@@ -42761,6 +42779,15 @@
       ]
     },
     {
+      "from": "dim_modality",
+      "to": "dim_ocr::platform",
+      "references": [
+        "path dim_ocr::APPLE_VISION_MODEL",
+        "path dim_ocr::APPLE_VISION_PROVIDER",
+        "path dim_ocr::apple_vision_available"
+      ]
+    },
+    {
       "from": "dim_modality::adapter",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -42798,6 +42825,32 @@
         "use dim_agent_capabilities::host::ModalityTarget",
         "use dim_agent_capabilities::host::ModelSelectionHost",
         "use dim_agent_capabilities::host::SelectableModelsHost"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use dim_agent_capabilities::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_agent_capabilities::host_platform::confined",
+      "references": [
+        "path ConfinedError",
+        "path ConfinedError::Cancelled",
+        "path ConfinedError::InvalidPath",
+        "path ConfinedOutput",
+        "path ConfinedSpec",
+        "path Confinement",
+        "path SystemServices::OnDeviceRecognition",
+        "use dim_agent_capabilities::host_platform::ConfinedError",
+        "use dim_agent_capabilities::host_platform::ConfinedOutput",
+        "use dim_agent_capabilities::host_platform::ConfinedSpec",
+        "use dim_agent_capabilities::host_platform::Confinement",
+        "use dim_agent_capabilities::host_platform::SystemServices"
       ]
     },
     {
@@ -42840,15 +42893,19 @@
       "to": "dim_modality",
       "references": [
         "path Evaluation",
+        "path HostTargetSpec",
         "path ModalityAdapterService",
         "path catalog_category",
         "path crate::OperationRow",
         "path crate::evaluate",
         "path crate::unknown_operation",
+        "path host_target",
         "path is_understand",
         "use crate::Evaluation",
+        "use crate::HostTargetSpec",
         "use crate::ModalityAdapterService",
         "use crate::catalog_category",
+        "use crate::host_target",
         "use crate::is_understand"
       ]
     },
@@ -42868,6 +42925,13 @@
         "use crate::adapter::JobFile",
         "use crate::adapter::ProgressSink",
         "use crate::adapter::RemoteCancel"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_modality::engine::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -42896,6 +42960,8 @@
         "path Write::Written",
         "path task",
         "path task::FORMAT_VERSION",
+        "path task::HostTarget",
+        "path task::OCR_CACHE_DIR",
         "path task::TASKS_DIR",
         "path task::create",
         "path task::hex",
@@ -42922,6 +42988,50 @@
         "use crate::task::TaskResult",
         "use crate::task::TaskState",
         "use crate::task::Write"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_ocr::contract",
+      "references": [
+        "path dim_ocr::HelperErrorCode",
+        "path dim_ocr::HelperErrorCode::EncryptedPdf",
+        "path dim_ocr::HelperErrorCode::InvalidInput",
+        "path dim_ocr::HelperErrorCode::LocalRuntimeFailed",
+        "path dim_ocr::HelperErrorCode::LocalRuntimeUnavailable",
+        "path dim_ocr::HelperErrorCode::ResourceLimitExceeded",
+        "path dim_ocr::OutputMode",
+        "path dim_ocr::PAGE_IMAGE_PREFIX",
+        "path dim_ocr::RESULT_FILE",
+        "path dim_ocr::TEXT_FILE",
+        "path dim_ocr::read_pages"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_ocr::platform",
+      "references": [
+        "path dim_ocr::APPLE_VISION_MODEL",
+        "path dim_ocr::APPLE_VISION_PROVIDER",
+        "path dim_ocr::apple_vision_available"
+      ]
+    },
+    {
+      "from": "dim_modality::engine::tests",
+      "to": "dim_agent_capabilities::host_platform::confined",
+      "references": [
+        "path ConfinedError::InvalidPath",
+        "path ConfinedError::OutputLimit",
+        "path ConfinedStream::Stdout",
+        "use dim_agent_capabilities::host_platform::ConfinedError",
+        "use dim_agent_capabilities::host_platform::ConfinedStream"
+      ]
+    },
+    {
+      "from": "dim_modality::engine::tests",
+      "to": "dim_modality::engine",
+      "references": [
+        "use super::confinement_code"
       ]
     },
     {
