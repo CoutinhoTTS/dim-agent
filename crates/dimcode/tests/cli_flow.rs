@@ -7792,7 +7792,9 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
         wire.reply(&providers, json!([]));
         wait_release.recv_timeout(PATIENCE).unwrap();
     });
-    let mut terminal = Terminal::resume_tui(home.command());
+    let mut command = home.command();
+    sized(&mut command, 100, 36);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"keep this draft");
     terminal.until("keep this draft");
@@ -7814,6 +7816,33 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     terminal.write(b"\r");
     terminal.until("Disconnected; draft kept");
     assert!(!home.0.join("input-history.json").exists());
+    for (cols, rows) in [(45, 18), (100, 36)] {
+        let start = terminal.transcript.len();
+        terminal.consumed = start;
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::ioctl(
+                    terminal.master.as_ref().unwrap().as_raw_fd(),
+                    libc::TIOCSWINSZ,
+                    &size,
+                )
+            },
+            0
+        );
+        terminal.signal(libc::SIGWINCH);
+        terminal.until("\x1b[3J");
+        terminal.until("keep this draft");
+        let rewritten = strip_ansi(&terminal.transcript[start..]);
+        assert!(rewritten.contains("Error: App Server connection closed"));
+        assert!(rewritten.contains("Disconnected; draft kept."));
+        assert!(rewritten.contains("dimcode --resume session"));
+    }
     terminal.write(b"\x04");
     terminal.until("Bye!");
     terminal.until("\x1b[?2004l");

@@ -440,7 +440,7 @@ fn run_terminal(
         let due = last_frame.is_none_or(|at| now.duration_since(at) >= FRAME_INTERVAL)
             && !terminal.writing();
         if dirty && due && resize.is_none() {
-            let size = terminal.size();
+            let size = current;
             let frame = app.frame(size);
             let bytes = match &mut full {
                 Some(full) => full.render(&frame, size, &app.palette, &app),
@@ -4590,10 +4590,20 @@ impl App {
             } else {
                 format!("dimcode --resume {}", self.session_id)
             };
-            frame.commits.push(pad_block(&[tf(
-                "Disconnected; draft kept. Exit and run: {command}",
-                &[("command", &resume)],
-            )]));
+            let block = Block::Status {
+                text: tf(
+                    "Disconnected; draft kept. Exit and run: {command}",
+                    &[("command", &resume)],
+                ),
+                tone: Tone::Muted,
+            };
+            frame.commits.push(chunk(&render_block(
+                &block,
+                width,
+                &self.palette,
+                &self.markdown,
+            )));
+            self.record(block);
         }
 
         let mut live = tail;

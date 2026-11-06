@@ -464,16 +464,22 @@ impl Screen {
             self.cursor_visible = false;
         }
         out.extend_from_slice(b"\x1b[3J\x1b[H");
+        let mut history_rows = 0;
         for row in tail {
             let text = scrub(row);
-            out.extend_from_slice(text.as_bytes());
+            let laid = lay_out(&text, size.0 as usize);
+            history_rows += laid.as_ref().map_or(1, |laid| laid.rows);
+            out.extend_from_slice(
+                laid.as_ref()
+                    .map_or(text.as_bytes(), |laid| laid.text.as_bytes()),
+            );
             out.extend_from_slice(b"\x1b[0m");
-            if !lay_out(&text, size.0 as usize).is_some_and(|laid| laid.full) {
+            if !laid.is_some_and(|laid| laid.full) {
                 out.extend_from_slice(ERASE_LINE_END);
             }
             out.extend_from_slice(b"\r\n");
         }
-        let after = tail.len().min((rows - 1) as usize) as u16;
+        let after = history_rows.min((rows - 1) as usize) as u16;
         let overflow = (after + wanted).saturating_sub(rows);
         if overflow > 0 {
             push_move(&mut out, 0, rows - 1);
@@ -484,7 +490,7 @@ impl Screen {
             push_move(&mut out, 0, top + wanted);
             out.extend_from_slice(ERASE_DOWN);
         }
-        self.scrolled = tail.len() > top as usize;
+        self.scrolled = history_rows > top as usize;
         self.content_start = 0;
         self.top = top;
         self.viewport_height = wanted;
@@ -953,7 +959,7 @@ mod tests {
     #[test]
     fn rewrite_clears_scrollback_and_writes_the_history_once() {
         for synchronized in [false, true] {
-            for history_rows in [0, 4, 40] {
+            for history_rows in [0, 5, 40] {
                 let (mut screen, mut emu) = setup(synchronized);
                 emu.feed(b"before-start\r\n");
                 screen.set_origin(1);
@@ -964,9 +970,11 @@ mod tests {
                     &frame(&["\nfirst\n", "\nsecond\n"], &live, Some((0, 0))),
                 );
                 let tail: Vec<String> = (0..history_rows)
-                    .map(|row| match row % 3 {
+                    .map(|row| match row % 5 {
                         0 => String::new(),
                         1 => "x".repeat(SIZE.0 as usize),
+                        2 => "x".repeat(2 * SIZE.0 as usize),
+                        3 => "y".repeat(SIZE.0 as usize + 1),
                         _ => format!("history {row}"),
                     })
                     .collect();
@@ -975,7 +983,19 @@ mod tests {
                 let mut bytes = screen.rewrite(SIZE, &tail, wanted);
                 bytes.extend(screen.render(&frame(&[], &live, Some((0, 0))), SIZE));
                 emu.feed(&bytes);
-                let mut expected = tail.clone();
+                let mut expected: Vec<String> = tail
+                    .iter()
+                    .flat_map(|row| {
+                        if row.is_empty() {
+                            vec![String::new()]
+                        } else {
+                            row.as_bytes()
+                                .chunks(SIZE.0 as usize)
+                                .map(|part| String::from_utf8(part.to_vec()).unwrap())
+                                .collect()
+                        }
+                    })
+                    .collect();
                 expected.extend(live.map(str::to_owned));
                 assert_eq!(emu.transcript(), expected);
                 assert_eq!(emu.flickers, flickers, "rewriting history must not flash");
