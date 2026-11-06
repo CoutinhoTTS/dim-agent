@@ -21,6 +21,7 @@ import type {
   HelloResult,
   HistoryPage,
   ModelId,
+  ModelRetryProgress,
   ModelUpdateResult,
   Notification,
   ProviderCatalog,
@@ -86,6 +87,20 @@ function bool(source: Json, key: string, at: string): boolean {
 function modelId(value: unknown, at: string): ModelId {
   const source = obj(value, at)
   return { providerId: str(source, "providerId", at), modelId: str(source, "modelId", at) }
+}
+
+/** The retry a model request is waiting to make; absent when none is pending. */
+function readRetryProgress(value: unknown, at: string): ModelRetryProgress | undefined {
+  if (value === undefined || value === null) return undefined
+  const source = obj(value, at)
+  const reason = optStr(source, "reason", at)
+  return {
+    attempt: num(source, "attempt", at),
+    maxAttempts: num(source, "maxAttempts", at),
+    retryAtMs: num(source, "retryAtMs", at),
+    kind: str(source, "kind", at),
+    ...(reason === undefined ? {} : { reason }),
+  }
 }
 
 
@@ -651,6 +666,7 @@ export function readNotification(method: string, value: unknown): Notification |
       }
     case "session.model.progress": {
       const requestId = optStr(params, "requestId", method)
+      const retry = readRetryProgress(params.retry, `${method}.retry`)
       return {
         method,
         progress: {
@@ -661,6 +677,7 @@ export function readNotification(method: string, value: unknown): Notification |
           textOffset: num(params, "textOffset", method),
           thinking: str(params, "thinking", method),
           thinkingOffset: num(params, "thinkingOffset", method),
+          ...(retry === undefined ? {} : { retry }),
         },
       }
     }

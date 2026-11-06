@@ -1,5 +1,5 @@
 use crate::{Branch, Result};
-use dim_agent_types::{ModelSelection, PromptScope};
+use dim_agent_types::{ModelFailureKind, ModelSelection, PromptScope};
 use rutis::host::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -34,6 +34,21 @@ pub struct ModelProgress {
     pub thinking_offset: u64,
     /// Started calls whose arguments are not complete, in start order.
     pub tools: Vec<ToolProgress>,
+    /// The retry this request is waiting to make, while it sleeps.
+    pub retry: Option<RetryProgress>,
+}
+/// A retry a request is waiting for, shown while it sleeps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryProgress {
+    /// The attempt about to run, at least 2.
+    pub attempt: u8,
+    /// The total cap on attempts.
+    pub max_attempts: u8,
+    /// Unix milliseconds at which the attempt starts.
+    pub retry_at_ms: u64,
+    pub kind: ModelFailureKind,
+    /// The failure's bounded reason.
+    pub reason: Option<String>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolProgress {
