@@ -1053,7 +1053,10 @@ impl McpService {
 
     /// Mutate exactly one persisted source, not the merged effective view.
     /// Concurrent edits fail CAS rather than overwriting another server.
-    /// Returns the revision of `source` after the change.
+    /// Returns the source's revision token after the change, the same token
+    /// `mcp.catalog` reports for it; a disable whose document could not be
+    /// read returns the caller's `expected` unchanged, since nothing was
+    /// read to compute a newer one.
     ///
     /// A project entry's enablement is the user's record (ADR 003 D3), never
     /// project files. Enabling checks `expected` against the project source and

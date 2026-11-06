@@ -850,15 +850,18 @@ moves is returned to the client.
 | `cwd` | string, required for the project side | Workspace whose `.mcp.json` is read or written; authorized as today |
 | `id` | string | Entry id; non-empty |
 | `from`, `to` | `"user"` or `"project"` | Source and destination; must differ |
-| `expectedFromVersion` | string | Source document revision |
-| `expectedToVersion` | string | Destination document revision |
+| `expectedFromVersion` | string | The source's revision token (D5): for a project side the same digest `mcp.catalog` reports as `projectRevision`, for a user side the document revision |
+| `expectedToVersion` | string | The destination's revision token (D5), in the same form |
 
 The owner reads both sources and the user-local `mcp-secrets` and `mcp-projects` records, checks
 both revisions, and refuses before writing when the source lacks the id
 (`mcp_unknown_server`), the destination already holds it (`mcp_move_conflict`), or the full entry
 is invalid (`mcp_invalid_config`). Plugin entries are not movable, and the same `from` and `to`
-is `invalid_params`. The destination source revision is `missing` when that source has no
-document, as `mcp.catalog` reports it.
+is `invalid_params`. A user side's token is `missing` when that source has no document. A project
+side's token is never that sentinel: it is the digest over the document revision — `missing`
+itself when the workspace has no `.mcp.json` — and the workspace's withheld `(id, generation)`
+records, exactly as `mcp.catalog` reports `projectRevision`. A document revision is therefore no
+substitute for a project side's token, and sends a move to `mcp_settings_conflict`.
 
 The complete entry (the overlay merged in, for a project source) is validated as one
 `mcpServers` entry before any write. The move then writes in this order:

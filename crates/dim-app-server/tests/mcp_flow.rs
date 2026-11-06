@@ -1123,6 +1123,28 @@ async fn scope_move_needs_readable_records_and_remove_cleans_the_overlay() {
     fs::remove_dir(&secrets_path).unwrap();
     let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
     assert_eq!(catalog.servers["user-only"].source, McpSource::User);
+    // A project side takes its token, never its document revision: the
+    // document revision alone is stale even when no record exists.
+    let document_revision = fixture
+        .settings
+        .read::<McpSettings>(SettingsScope::Project(1), &cancel)
+        .await
+        .unwrap()
+        .revision;
+    assert!(matches!(
+        fixture
+            .mcp
+            .move_entry(
+                McpSource::User,
+                McpSource::Project(1),
+                "user-only".into(),
+                catalog.user_revision.clone(),
+                document_revision,
+                &cancel,
+            )
+            .await,
+        Err(McpError::Settings(SettingsError::Conflict))
+    ));
     fixture
         .mcp
         .move_entry(
