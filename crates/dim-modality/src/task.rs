@@ -176,8 +176,9 @@ pub enum Expect {
     Revision(u64),
     /// The record is at this revision and has not started yet.
     Queued(u64),
-    /// The record is at this revision; the caller decided a terminal outcome
-    /// at that revision, so the first terminal write wins (§4).
+    /// The record is at this revision and is not terminal; the caller
+    /// decided a terminal outcome at that revision, so the first terminal
+    /// write wins (§4).
     NonTerminal(u64),
 }
 
@@ -250,9 +251,9 @@ pub async fn write(
                     (expected, accepted)
                 }
                 Expect::NonTerminal(expected) => {
-                    let accepted = current
-                        .as_ref()
-                        .is_some_and(|current| current.revision == expected);
+                    let accepted = current.as_ref().is_some_and(|current| {
+                        current.revision == expected && !current.state.is_terminal()
+                    });
                     (expected, accepted)
                 }
             };

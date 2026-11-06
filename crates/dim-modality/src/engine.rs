@@ -347,8 +347,6 @@ impl Shared {
         self.state.lock().unwrap().slots.get(task_id).cloned()
     }
 
-    /// A write that does not change the terminal outcome: the record is
-    /// built from the current one and the file decides whether it applies.
     /// A write that does not change the terminal outcome (the running state,
     /// a handle, progress): built from the current record and retried while a
     /// concurrent write moves the revision, stopping once it is terminal.
@@ -567,9 +565,38 @@ pub(crate) struct State {
     client_index: HashMap<String, String>,
     /// Tasks the scheduler has picked but not yet written `running` for.
     starting: BTreeSet<String>,
-    /// One lock per client task id, so duplicate submissions serialize.
-    client_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// One lock per client task id, so duplicate submissions serialize; the
+    /// entry goes away when the last submit using it ends.
+    client_locks: HashMap<String, ClientLock>,
     sequence: u64,
+}
+
+/// The submission lock of one `client_task_id` and the number of submits
+/// holding or waiting on it.
+#[derive(Default)]
+struct ClientLock {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    users: usize,
+}
+
+/// Holds a `client_task_id`'s submission lock; dropping the last guard
+/// removes the entry.
+struct ClientGuard {
+    shared: Arc<Shared>,
+    client_task_id: String,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(entry) = state.client_locks.get_mut(&self.client_task_id) {
+            entry.users = entry.users.saturating_sub(1);
+            if entry.users == 0 {
+                state.client_locks.remove(&self.client_task_id);
+            }
+        }
+    }
 }
 
 /// The `modalityTasks` process service and the `modality.task.*` methods:
@@ -1063,20 +1090,26 @@ impl ModalityTasks {
     }
 
     /// The per-client submission lock.
-    async fn client_guard(
-        &self,
-        client_task_id: Option<&str>,
-    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    async fn client_guard(&self, client_task_id: Option<&str>) -> Option<ClientGuard> {
         let client_task_id = client_task_id?;
         let lock = {
             let mut state = self.shared.state.lock().unwrap();
-            state
+            let entry = state
                 .client_locks
                 .entry(client_task_id.to_owned())
-                .or_default()
-                .clone()
+                .or_default();
+            entry.users += 1;
+            entry.lock.clone()
         };
-        Some(lock.lock_owned().await)
+        // The guard exists before the lock is awaited, so a cancelled call
+        // still gives its reference back.
+        let mut client_guard = ClientGuard {
+            shared: self.shared.clone(),
+            client_task_id: client_task_id.to_owned(),
+            guard: None,
+        };
+        client_guard.guard = Some(lock.lock_owned().await);
+        Some(client_guard)
     }
 }
 
@@ -1294,9 +1327,20 @@ impl Shared {
                 }
             }
         }
-        // Retention first, so the records it deletes get no slot (A.4).
+        // Slots are ordered by creation, so `list` stays newest first.
+        records.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.task_id.cmp(&right.task_id))
+        });
+        // Settle before retention, so a task this `apply` interrupts counts
+        // toward the retained total (A.4).
+        let mut settled = Vec::with_capacity(records.len());
+        for record in records {
+            settled.push(self.startup_settle(record).await);
+        }
         let expired: BTreeSet<String> = retention_expired(
-            records
+            settled
                 .iter()
                 .filter(|record| record.state.is_terminal())
                 .filter_map(|record| Some((record.task_id.clone(), record_time(record)?)))
@@ -1308,16 +1352,9 @@ impl Shared {
         for task_id in &expired {
             let _ = task::remove_task(&self.files, task_id).await;
         }
-        records.retain(|record| !expired.contains(&record.task_id));
-        // Slots are ordered by creation, so `list` stays newest first.
-        records.sort_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
-                .then_with(|| left.task_id.cmp(&right.task_id))
-        });
+        settled.retain(|record| !expired.contains(&record.task_id));
         let mut slots = Vec::new();
-        for (index, record) in records.into_iter().enumerate() {
-            let record = self.startup_settle(record).await;
+        for (index, record) in settled.into_iter().enumerate() {
             slots.push(Slot::new(index as u64 + 1, record));
         }
         let mut observe = Vec::new();

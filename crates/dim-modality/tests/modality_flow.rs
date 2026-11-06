@@ -2822,18 +2822,38 @@ async fn retention_keeps_the_newest_two_hundred_terminal_tasks() {
     let result = task_dir(&home, &oldest).join("result");
     std::fs::create_dir_all(&result).unwrap();
     std::fs::write(result.join("out.bin"), b"oldest").unwrap();
+    // A crash left this one queued; startup settles it `interrupted` before
+    // retention runs, so it counts toward the total in this same apply.
+    let crashed = "mt_crashed_queued";
+    write_task_record(
+        &home,
+        &seed_record(crashed, "queued", "2026-11-05T23:59:30.000000000Z"),
+    );
 
     let fixture = Arc::new(FixtureAdapter::default());
     let server =
         start_in_with_clock(home.clone(), Some(fixture.clone()), FixedClock::new(now)).await;
     let mut client = Client::new_version(&server, false, 3).await;
     create_task_provider(&mut client).await;
+    // 200 terminal tasks plus the one startup interrupted: the oldest goes.
+    let gone = client
+        .rpc("modality.task.status", json!({"task_id": oldest}))
+        .await;
+    assert_eq!(app_error(&gone), "not_found", "startup retention ran");
+    assert!(
+        !task_dir(&home, &oldest).exists(),
+        "retention deletes the task with its files"
+    );
     assert_eq!(
-        state_of(&task_status(&mut client, &oldest).await),
+        state_of(&task_status(&mut client, crashed).await),
+        "interrupted"
+    );
+    assert_eq!(
+        state_of(&task_status(&mut client, &ids[0]).await),
         "succeeded"
     );
 
-    // The 201st terminal task pushes the oldest out (A.4).
+    // The next terminal task pushes the next oldest out (A.4).
     let task = submit_task(
         &mut client,
         json!({"category": "image", "operation": "generate", "params": {"prompt": "n"}}),
@@ -2841,14 +2861,12 @@ async fn retention_keeps_the_newest_two_hundred_terminal_tasks() {
     .await;
     let finished = wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
     assert_eq!(state_of(&finished), "succeeded", "{finished}");
+    let next_oldest = &ids[198];
     let gone = client
-        .rpc("modality.task.status", json!({"task_id": oldest}))
+        .rpc("modality.task.status", json!({"task_id": next_oldest}))
         .await;
     assert_eq!(app_error(&gone), "not_found");
-    assert!(
-        !task_dir(&home, &oldest).exists(),
-        "retention deletes the task with its files"
-    );
+    assert!(!task_dir(&home, next_oldest).exists());
     assert_eq!(
         state_of(&task_status(&mut client, &ids[0]).await),
         "succeeded"
@@ -3035,7 +3053,8 @@ async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
     // read, and nothing is written.
     let big = home.join("big.bin");
     let file = std::fs::File::create(&big).unwrap();
-    file.set_len(dim_modality::MAX_SUBMISSION_BYTES + 1).unwrap();
+    file.set_len(dim_modality::MAX_SUBMISSION_BYTES + 1)
+        .unwrap();
     drop(file);
     let tasks_dir = home.join("modality/tasks");
     let count = || {
@@ -3080,7 +3099,10 @@ async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
         task["params"]["files"][0]["node_path"],
         canonical.to_str().unwrap()
     );
-    assert_eq!(task["params"]["files"][0]["sha256"], sha256(b"through a linked directory"));
+    assert_eq!(
+        task["params"]["files"][0]["sha256"],
+        sha256(b"through a linked directory")
+    );
     assert_eq!(
         state_of(&wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await),
         "succeeded"
