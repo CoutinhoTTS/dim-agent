@@ -178,6 +178,20 @@ partial output is returned with an error. `Spawn` reports a helper that could
 not start or whose output could not be read; `ConfinedOutput` carries the exit
 status and both streams only when the helper exited within them.
 
+When the call returns, the helper's process tree has ended, on success too: a
+helper that exits on its own still has its tree closed, because agent commands
+keep background jobs on purpose and a host-owned helper's work ends with its
+call. A failed termination is logged and does not turn a finished helper into an
+error. A descendant that leaves the process group before the root exits — on
+macOS `setpgrp(0, 0)` does, and it survives — is not reached by the group
+tree-kill; agent commands have the same limit, and the confinement still bounds
+what it may read, write and reach.
+
+The helper has no temporary directory of its own: `TMPDIR` is not in the
+environment allowlist and no isolated directory is created, so a helper that
+writes to its default temporary location is refused. A caller that needs one
+sets `TMPDIR` in `spec.env` to a directory inside `write`.
+
 ## Rule check
 
 - §1 and ADR 002 D1–D3: process facts and process preparation remain owned by HostPlatform.
@@ -212,7 +226,8 @@ and a refused loopback connection; `the_isolation_switch_does_not_change_a_confi
 denial with the switch on and Network allowed;
 `a_confined_helper_timeout_kills_its_grandchild`,
 `a_confined_helper_stdout_cap_kills_the_tree` and `a_confined_helper_cancel_kills_the_tree`
-check that each limit removes the helper's tree, and
+check that each limit removes the helper's tree, `a_confined_helper_leaves_no_process_after_it_exits`
+that a helper which exits on its own leaves nothing either, and
 `a_confined_helper_refuses_relative_and_missing_paths` the path refusals.
 `a_host_without_bubblewrap_runs_the_confined_helper_unconfined` covers the
 Linux fallback.

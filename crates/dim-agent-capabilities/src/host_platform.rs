@@ -1242,6 +1242,11 @@ mod unix {
 
     pub async fn terminate(tree: &mut ProcessTree) -> io::Result<()> {
         let pid = tree.pid;
+        // An empty group keeps no member, so its id is free for reuse: do not
+        // signal it. A tree that left nothing costs one probe, no grace.
+        if group_gone(tree, pid, Duration::ZERO).await {
+            return Ok(());
+        }
         signal(pid, libc::SIGTERM);
         if group_gone(tree, pid, TERMINATE_GRACE).await {
             return Ok(());

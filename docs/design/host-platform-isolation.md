@@ -24,10 +24,11 @@ host-owned helper is always confined where the platform can confine, whatever th
 The helper reads the system baseline that runs a program and the files its caller grants, writes
 only the caller's directories, has no network, receives the minimal environment plus the caller's
 own entries, and runs in the caller's first write directory. The timeout, either output cap and
-the caller's cancellation kill the helper's process tree with the existing tree-kill. Windows and
-a Linux host without bubblewrap run the helper with the same limits and report that it was not
-confined; the caller decides whether that is acceptable. No setting, policy default or
-user-facing control changes for this operation.
+the caller's cancellation kill the helper's process tree with the existing tree-kill. When the
+call returns, the helper's process tree has ended, on success too. Windows and a Linux host
+without bubblewrap run the helper with the same limits and report that it was not confined; the
+caller decides whether that is acceptable. No setting, policy default or user-facing control
+changes for this operation.
 
 ## Process isolation
 

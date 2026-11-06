@@ -745,3 +745,30 @@ async fn the_isolation_switch_does_not_change_a_confined_helper() {
     );
     std::fs::remove_dir_all(&base).unwrap();
 }
+#[tokio::test]
+async fn a_confined_helper_leaves_no_process_after_it_exits() {
+    let base = std::env::temp_dir().join(unique("dim-confined-exit"));
+    let write = base.join("write");
+    std::fs::create_dir_all(&write).unwrap();
+    let pid_file = write.join("grandchild.pid");
+    let script = format!(
+        "sleep 100 >/dev/null 2>&1 &\necho $! > {}\nexit 0\n",
+        quote(&pid_file)
+    );
+    let platform = confined_platform(switch_off());
+    let output = confined(&platform, &script, &write, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the script records its grandchild")
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(gone(pid).await, "a finished helper left {pid} running");
+    std::fs::remove_dir_all(&base).unwrap();
+}

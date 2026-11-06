@@ -130,7 +130,8 @@ impl HostPlatform {
     /// The timeout, either output limit and `cancel` kill the helper's process
     /// tree with the existing tree-kill and return the typed error. Both
     /// streams are read concurrently, so a full pipe never blocks the helper.
-    /// No partial output is returned with an error.
+    /// No partial output is returned with an error. When this call returns,
+    /// every process of the helper's tree has ended, on success too.
     pub async fn spawn_confined(
         &self,
         spec: ConfinedSpec,
@@ -159,12 +160,15 @@ impl HostPlatform {
                 status,
                 stdout,
                 stderr,
-            } => Ok(ConfinedOutput {
-                status,
-                stdout,
-                stderr,
-                confined,
-            }),
+            } => {
+                end(&mut tree).await;
+                Ok(ConfinedOutput {
+                    status,
+                    stdout,
+                    stderr,
+                    confined,
+                })
+            }
             Outcome::OutputLimit { stream } => {
                 Err(killed(&mut tree, ConfinedError::OutputLimit { stream }).await)
             }
@@ -327,13 +331,19 @@ enum Outcome {
     Cancelled,
 }
 
-/// Terminates the helper's process tree after a limit or cancellation, then
-/// returns the error to report. The tree's drop still kills what a failed
-/// termination leaves behind.
-async fn killed(tree: &mut ProcessTree, error: ConfinedError) -> ConfinedError {
+/// Ends the helper's process tree. A reaped root releases its descendants, so
+/// even a helper that exited on its own has its tree closed here. The tree's
+/// drop still kills what a failed termination leaves behind.
+async fn end(tree: &mut ProcessTree) {
     if let Err(failure) = tree.terminate().await {
         tracing::warn!(%failure, "confined helper termination failed");
     }
+}
+
+/// Ends the tree after a limit or cancellation, then returns the error to
+/// report. A finished helper stays finished.
+async fn killed(tree: &mut ProcessTree, error: ConfinedError) -> ConfinedError {
+    end(tree).await;
     error
 }
 
