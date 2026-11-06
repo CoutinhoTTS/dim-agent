@@ -321,6 +321,12 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 | — | `PreCompact`/`PostCompact`、`SessionEnd` 与 `SubagentStart`/`SubagentStop` 仍不支持，原因见 G.1 |
 | — | 原生 CLI 新增 `dimcode hooks list`、`dimcode hooks enable\|disable`、`dimcode hooks edit` 与 `dimcode hooks set PATH`（[CLI 命令](../cli-commands.md#命令)） |
 
+#### 2026-11-06
+
+| # | 决定 |
+| --- | --- |
+| — | 公共负载携带 `collaboration_role`（`leader` 或 `member`），取自 `SessionConfig.collaboration_role`。在 Dim 中子代理就是 Collaboration 成员，所以子代理身份放进成员自己的生命周期——它的 `SessionStart` 与 `Stop` 负载——而不是放进新的 `SubagentStart`/`SubagentStop` 事件（G.1） |
+
 ### 10.2 已接受的所有者改动
 
 | 事项 | 所有者 | Issue |
@@ -381,7 +387,7 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 
 | 通道 | 内容 |
 | --- | --- |
-| stdin | 一个 UTF-8 JSON 对象，然后 EOF。公共字段：`hook_event_name`、`session_id`、`cwd`、`permission_mode`（Dim 预设：`read-only`、`workspace-write`、`full-access`）、turn 范围内时的 `turn_id`，以及 Dim 字段 `branch_id`、`dim_source`（`user`、`project` 或 `plugin:<id>`）。没有 `transcript_path` |
+| stdin | 一个 UTF-8 JSON 对象，然后 EOF。公共字段：`hook_event_name`、`session_id`、`cwd`、`permission_mode`（Dim 预设：`read-only`、`workspace-write`、`full-access`）、turn 范围内时的 `turn_id`，以及 Dim 字段 `branch_id`、`dim_source`（`user`、`project` 或 `plugin:<id>`）、`collaboration_role`（不是 Collaboration 成员的每个 Session 为 `leader`，Collaboration 成员 Session 为 `member`）。没有 `transcript_path` |
 | 环境 | HostPlatform 的基础环境，加 `DIM_PROJECT_DIR`、`DIM_HOOK_EVENT`、`DIM_SESSION_ID` 与 `DIMCODE_HOME`；仅插件来源加 `DIM_PLUGIN_ROOT` |
 | 退出 0 | stdout 为空、一个 JSON 对象（A.4），或纯文本——凡不是单个 JSON 对象的值，包括其他 JSON 值——对 `SessionStart` 与 `UserPromptSubmit` 为上下文，其他事件忽略 |
 | 退出 2 | 该事件的阻止结果（A.4）；stderr（前 2 KiB）为原因 |
@@ -586,7 +592,7 @@ Dim 不读取 Claude 或 Codex 的文件，也没有导入命令。迁移时复�
 | `Stop` | `Stop` | `Stop` → Queue 续跑 | 有上限（A8） |
 | `SessionStart` | `SessionStart` | `SessionStart` → 带键 Append | 只有 `startup` |
 | `Notification` | — | `approval/request` 上的 `Notification` | 只有 `permission_prompt` |
-| `PreCompact`、`PostCompact`、`SessionEnd`、`Subagent*`、其他 | `PreCompact`、`PostCompact`、`SessionEnd`、`Interrupt`、`Subagent*` | 不支持 | 在目录中列为 `unsupported`。`PreCompact`/`PostCompact`：阻止需要 ContextCompaction 中的压缩准入端口；只观察的形式不需要所有者改动，以后可以加。压缩不从 Timeline 移除任何东西，而 `Stop` 在每轮完成后运行，所以归档不会丢失内容。`SessionEnd`：Session 关闭是生命周期，包括空闲卸载，工作必须在服务移除前结算（AGENTS 规则 8）；关闭时运行命令会拖延关闭。`SubagentStart`/`SubagentStop`：Collaboration 成员是它自己的 Session，有自己的 `SessionStart` 与 `Stop` |
+| `PreCompact`、`PostCompact`、`SessionEnd`、`Subagent*`、其他 | `PreCompact`、`PostCompact`、`SessionEnd`、`Interrupt`、`Subagent*` | 不支持 | 在目录中列为 `unsupported`。`PreCompact`/`PostCompact`：阻止需要 ContextCompaction 中的压缩准入端口；只观察的形式不需要所有者改动，以后可以加。压缩不从 Timeline 移除任何东西，而 `Stop` 在每轮完成后运行，所以归档不会丢失内容。`SessionEnd`：Session 关闭是生命周期，包括空闲卸载，工作必须在服务移除前结算（AGENTS 规则 8）；关闭时运行命令会拖延关闭。`SubagentStart`/`SubagentStop`：Collaboration 成员是它自己的 Session，有自己的 `SessionStart` 与 `Stop`，其 stdin 带 `collaboration_role: "member"`（A.3） |
 
 ### G.2 工具名
 
@@ -612,6 +618,7 @@ Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `writ
 | 项目信任 | Codex：哈希绑定信任与 `/hooks` 审查；Claude：交互会话的工作区信任对话框列出文件夹的设置将会启用的 Hook，`claude -p` 与 SDK 运行从不显示它 | 在用户启用工作区之前停用；没有哈希；之后的编辑生效（ADR 003 D4） |
 | `disableAllHooks` | Claude：最高优先级的文件胜出；项目的 `false` 覆盖用户的 `true` | 只有用户文档 |
 | 处理器类型与字段 | `command`、`http`、`mcp_tool`、`prompt`、`agent`；`args`、`if` | 只有 `command`；`args`/`if` 处理器不运行 |
+| 安装报告 | 安装插件时对它的处理器保持沉默 | `dimcode plugin install` 打印所装插件中 state 不是 `ok` 的处理器——不运行的 Dim 事件（G.1）和不支持的处理器种类——读取现有的 `hooks.catalog`，并附一行指向本附录；不声明 `hooks.catalog` 的 daemon 不会被请求，读取失败会报告，但不会让安装失败 |
 | 超时 | Claude：600 秒（`UserPromptSubmit` 为 30 秒）；Codex：600 秒 | 同 Claude |
 | stdin | `transcript_path`；`permission_mode`（`default`、`plan`、`acceptEdits`、`bypassPermissions` 等）；`tool_name` 用各产品的名称 | `transcript_path` 由 `dimcode export` 读取 Session 取代（A.3）；`permission_mode` 为 `read-only`、`workspace-write` 或 `full-access`；`tool_name` 与 `tool_input` 是 Dim 的（G.2），所以 MCP 工具的 `tool_name` 是它的 Dim 名称，不是 `mcp__<server>__<tool>` |
 | 环境 | `CLAUDE_PROJECT_DIR`、`CLAUDE_PLUGIN_ROOT` | `DIM_PROJECT_DIR`、`DIMCODE_HOME`；请替换粘贴命令中的 `$CLAUDE_PROJECT_DIR`。Dim 不设置 `CLAUDE_PLUGIN_ROOT` 与 `GROK_PLUGIN_ROOT`，引用它们的粘贴命令无法解析；插件以 `$DIM_PLUGIN_ROOT` 提供 Dim 形式 |
@@ -632,6 +639,6 @@ Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `writ
 | `HookSources` | Session 端口 `HookSourcesHost(Arc<dyn ReadHookSources>)`，由 App Server 绑定，如同 `CommandRulesHost` 与 `SkillSettingsHost` |
 | `hooks`、`hooks-projects`、`hooks-plugins` | App Server 中的 `BusinessDocument` 类型（`hooks`：`USER_FILE` 为 `hooks.json`，没有 `PROJECT_FILE`；`hooks-projects`：`USER_FILE` 为 `hooks-projects.json`；`hooks-plugins`：`USER_FILE` 为 `hooks-plugins.json`，每个插件 id 一条 `{dir, hooks}`，如同 `mcp/config.rs` 中的 `McpPluginServers`） |
 | `.dimcode/hooks.json` | 由 `HooksSettings` 经 `FileStorage::path(root, ".dimcode/hooks.json")` 与 `read_limited` 读取，`root` 来自 `SettingsService::project_root(cwd)`，解析为 `hooks` 文档类型 |
-| `register`、`withdraw`、`plugins()` | `HooksService::register_plugin(plugin: String, dir: PathBuf, document: serde_json::Value, cancel: &CancellationToken) -> Result<()>`、`withdraw_plugin(plugin: String, cancel: &CancellationToken) -> Result<()>`、`plugins(cancel: &CancellationToken) -> Result<Vec<String>>` 与 `plugin_refusal(&self, plugin: &str) -> Option<String>`，如同 `McpService` 的（`crates/dim-app-server/src/mcp.rs`）：被拒绝的文档不留条目，并为 `plugin_refusal` 记住原因；PluginManager 在其 `Owners` 中经 `names.key()` 读取该服务，`Kind::Hooks` 加入 `OWNERS` 与 `CONTENT`（[PluginManager §3.7](PluginManager.md#37-内容登记)） |
+| `register`、`withdraw`、`plugins()` | `HooksService::register_plugin(plugin: String, dir: PathBuf, document: serde_json::Value, cancel: &CancellationToken) -> Result<()>`、`withdraw_plugin(plugin: String, cancel: &CancellationToken) -> Result<()>`、`plugins(cancel: &CancellationToken) -> Result<Vec<String>>` 与 `plugin_refusal(&self, plugin: &str) -> Option<(String, Option<&'static str>)>`，如同 `McpService` 的（`crates/dim-app-server/src/mcp.rs`）：被拒绝的文档不留条目，`plugin_refusal` 报告其错误文本以及原因携带的静态 reason，两者在同一把锁下读取；PluginManager 在其 `Owners` 中经 `names.key()` 读取该服务，`Kind::Hooks` 加入 `OWNERS` 与 `CONTENT`（[PluginManager §3.7](PluginManager.md#37-内容登记)） |
 | `hooks.*` | `Keyed<ManagementMethods>`；`methods.register(ctx, "hooks", …)` |
 | 执行器 | Session 服务 `HooksRuntime`，Hooks 私有；进程来自 `HostPlatform::build_process_spec` 与 `spawn`，事件的 stdin 对象（A.3）作为初始 stdin（A.6.3），由 `ctx.effect` 持有 |

@@ -37,6 +37,9 @@ mod tool_cleanup;
 #[path = "transport_flow/branch_events.rs"]
 mod branch_events;
 
+#[path = "transport_flow/branches.rs"]
+mod branches;
+
 #[path = "transport_flow/branch_end.rs"]
 mod branch_end;
 
@@ -46,6 +49,9 @@ mod tree;
 #[path = "transport_flow/history_window.rs"]
 mod history_window;
 
+#[path = "transport_flow/history_forward.rs"]
+mod history_forward;
+
 #[path = "transport_flow/keyed_blocks.rs"]
 mod keyed_blocks;
 
@@ -54,6 +60,9 @@ mod reload;
 
 #[path = "transport_flow/agents.rs"]
 mod agents;
+
+#[path = "transport_flow/agent_get.rs"]
+mod agent_get;
 
 #[path = "transport_flow/collaboration.rs"]
 mod collaboration;

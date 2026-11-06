@@ -359,9 +359,32 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `waitingFor`，即 `Loader::waits` 给出的服务；等待运行时的行给出运行时的连接行 `session-node` 或 `py`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check` 和 `load`。
 
+客户端 RPC 边界对来源、状态错误和内容拒绝的投影，以及一次拒绝可能携带的全部 reason，见 A.2。
+
 ### A.2 错误
 
 `plugin_exists`、`plugin_not_found`、`invalid_id`、`path_outside_plugins`（两者都在任何文件系统改动之前，§7）、`plugin_locked`、`not_removable`、`not_reloadable`、`not_updatable`、`name_changed`、`invalid_manifest`（带字段和原因）、`invalid_source`（协议或参数被拒绝）、`acquire_failed`（Git 的消息）、`record_unreadable`（启动时）。配置写入之后 loader 或所有者的拒绝不是这次调用的错误：它在结果和 `plugin.list` 中报告。
+
+这些 code 在各客户端之间保持稳定。客户端 RPC 错误用稳定、可操作的描述指明其 code，不包含所有者的原始诊断消息，也不回显请求字段；上面的描述指认的是所有者的错误，并不授权发布机密。
+
+客户端 RPC 边界省略 Git 来源的 userinfo、query 和 fragment，保留仓库路径、ref 和 commit。持久化的来源不变，仍可用于 update。只有目录候选来源、顶层状态错误和直接的内容拒绝错误会被投影；插件自己的 settings 不被遍历。状态错误在这个边界上携带通用消息，包括在变更回复中：任意的 Git、loader 和清单文本可能包含凭证。
+
+内容的拒绝在原因带有静态 reason 时，以该 reason 到达客户端——reason 来自所有者，或者来自 PluginManager 自己读取内容文件时的拒绝；否则以通用的 "Plugin content was refused" 到达。reason 永远不携带源位置或原始文本；原始文本（连同其中的路径和 URL）只留在服务端日志和面向模型的 `plugin` 工具里。
+
+| 所有者 | 种类 | 原因 | Reason |
+| --- | --- | --- | --- |
+| PluginManager | `mcp` | 内容文件不是合法的 JSON | the file is not valid JSON |
+| PluginManager | `mcp` | 内容文件读不出来 | the file could not be read |
+| PluginManager | `hooks` | 内容文件不是合法的 JSON | the file is not valid JSON |
+| PluginManager | `hooks` | 内容文件读不出来 | the file could not be read |
+| McpSettings | `mcp` | 文档不是 JSON 对象 | MCP document must be a JSON object |
+| McpSettings | `mcp` | 文档没有 `mcpServers` 对象 | MCP document must contain an mcpServers object |
+| McpSettings | `mcp` | `mcpServers` 不是 JSON 对象 | mcpServers must be a JSON object |
+| McpSettings | `mcp` | 某个服务条目的 id 为空 | MCP server entry id is empty |
+| McpSettings | `mcp` | stdio 条目的 `cwd` 不是插件目录内的目录 | MCP plugin cwd must be a directory inside the plugin |
+| HooksSettings | `hooks` | 文档不是合法的 hooks 文档 | invalid hook document |
+
+这个表就是契约：客户端按精确的消息匹配一次拒绝。skills 和 UI 两种类没有 reason，因为它们的拒绝会指名文件和路径。内容文件不存在不在表里：`Manifest::read` 会解析每个内容路径，并在 PluginManager 读取之前以 `invalid_manifest` 拒绝缺失的文件。这个表列出插件自身内容能产生的全部 reason；线上还可能出现来自 Dim 自身注册状态的静态消息——例如 `hooks-plugins.json` 损坏时的 `invalid hook plugin registration`——它不在这个表内，客户端必须把任何它不认识的消息按通用消息显示。
 
 ## 附录 B. 冲突表
 

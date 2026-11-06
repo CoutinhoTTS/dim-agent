@@ -83,7 +83,7 @@
 
 | 部件 | 作用域 | Capability | 在本设计中负责 |
 | --- | --- | --- | --- |
-| TimelineTree | Session | 否 | 线的生命周期：每个子分支开启输入里的身份块、`TimelineInfo.source`、一条线的结束（`branch/end` → `branch/ended`）、线进入结束后拒绝输入、恢复规则，以及读已结束线的历史 |
+| TimelineTree | Session | 否 | 线的生命周期：每个子分支开启输入里的身份块、`TimelineInfo.source`、一条线的结束（`branch/end` → `branch/ended`）、线进入结束后拒绝输入、恢复规则、读已结束线的历史，以及分支目录（§14） |
 | TreeTimeline | 分支 | 是 | 把 `branch/end` 转给 TimelineTree，就像现在转 `branch/create`。对由工具调用发出的结束，它还转交关闭要等的那一轮结束 |
 | BranchTool | Session | 否 | 按动作区分的 `branch` 工具（§11）。它每次调用时取调用方那条线的 BranchLine，与 WorkspaceTools 取 FileReads 的方式相同 |
 | **BranchLine**（新） | 分支 | 是 | 一条线对自己相关各线的视图。它的角色（main、工具线或 host 线）和父分支来自 `TreeCommands.info(自己的 id)`。它从自己的事实折叠出未结束的工具线和当前这一轮的状态。它写名册、空闲通知和结束通知 |
@@ -114,7 +114,7 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 
 - **标记。** `<dim-branch-message from="C" to="P">`。接收方凭这个标记把消息和用户的话区分开。RPC 只接收操作者内容、不接收块，所以客户端无法伪造消息。
 - **允许的两端。** 消息：`main` 和它每条未结束的工具线之间，双向都可以。读取：一条线读它被切出来的那条线，这一对两端都可以（工具线读 `main`，`main` 读它的工具线，host 线读开出它的那条线）。其他任何组合都由工具结果拒绝，什么也不写：兄弟分支、工具线读 host 线、host 线收发消息、已结束的线。拒绝码仍是 `branch_not_kin` 和 `branch_not_tool_line`；`main` 仍然绝不通过工具读 host 线。
-- **读取。** `read {branch, after?, limit?}` 返回目标已提交历史的一页，未结束或已结束都可以，经 `TreeCommands.page` 从存储读取，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`；工具结果条目携带其工具在该结果上声明的效果（[工具契约 A.6](../contracts/session-boundary.md#a6-工具效果)），仅当结果至少声明了一个时才存在，路径原样，命令在第 200 个字符处截断并标出截断。目标是调用方被切出来的那条线；在 `main` 上则是它开的工具线。两个方向共用一条游标规则：
+- **读取。** `read {branch, after?, limit?}` 返回目标已提交历史的一页，未结束或已结束都可以，经 `TreeCommands.page` 从存储读取，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`；工具结果条目携带其工具在该结果上声明的效果（[工具契约 A.6](contracts/session-boundary.md#a6-工具效果)），仅当结果至少声明了一个时才存在，路径原样，命令在第 200 个字符处截断并标出截断。目标是调用方被切出来的那条线；在 `main` 上则是它开的工具线。两个方向共用一条游标规则：
   - 不带 `after` 时，读取从调用方上一次成功读取该线的位置继续：最后一次返回了页的读取的 `nextCursor`。此前没有读过时，一条线第一次读父线从它的切点开始，`main` 第一次读一条线从该线的第一个事件开始。
   - 显式 `after` 从该点读取。读父线时，低于切点的值会抬到切点，因为切点之前的事件已经是这条线自己的历史。`main` 的值原样使用，所以 `after: 0` 会从一条线的开头重读。
   - 每次成功读取都把游标移到它的 `nextCursor`，显式 `after` 的读取也一样；以最后一次为准。游标是调用方自己那条线的事实：BranchLine 从调用方自己的 `step/tool-use` 和 `step/tool-result` 折叠得到，所以重载和压缩都能重建它。
@@ -206,7 +206,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
   2. 这条线上没有更早的 `branch:parent` 输入仍被持有，即已提交、尚未消费；
   3. 父线在 `from = max(A, told, opened)` 之后有新活动：`A` 是这条线对父线的读取游标（还没读过时是它的切点），`told` 是这条线上最新一个 `branch:parent` 块报告的头部（没有时为 0），`opened` 是这条线的 `branch/create` 事件在父线上的序号，每个切点都不高于它。线存在之前发生的活动不算新闻，需要时线自己去读。
 - **什么算新活动。** 只有两类事件算：操作者输入，即带 `user` 内容的 `input/message`；以及工具调用。创建调用的 `step/tool-use` 写在 `opened` 之前，所以从不会被算进去。其他都不单独算：父线的文本、它的轮次结束、只有块的输入（名册、来自各线的消息）、以及创建调用的结果。规则是：父线行动时、或操作者告诉父线事情时，线被告知；只为开启它的那一轮（它的创建调用结果、文本和轮次结束）则从不告知，否则每条线都会白白读一次父线，并学会忽略这个块。
-- **检查方式。** 父线的事实通过唯一的事件查询读取（[ADR 019](../adr/019-event-query.md)）：该分支的 `input/message` 和 `step/tool-use` 事件，从新到旧分页，直到有一个符合条件，或读取到达 `from`。不折叠任何其他线的事件。
+- **检查方式。** 父线的事实通过唯一的事件查询读取（[ADR 019](../../adr/019-event-query.md)）：该分支的 `input/message` 和 `step/tool-use` 事件，从新到旧分页，直到有一个符合条件，或读取到达 `from`。不折叠任何其他线的事件。
 - **写入。** 一条带 key 的 Append，key 为 `branch:parent`，经 `TreeCommands.input` 写在这条线自己身上，属性是父线的 id、`head` 和 `after`。同一 key 的后一个块会在带 key 的基线里取代前一个。写完之后折叠记下新头部和新输入，所以队列里的第二次决定不会再写。
 - **开启时。** 子分支继承的前缀里持有活的 `branch:parent` 块时，子分支的开启输入在身份块之后再带一个原始块：key 为 `branch:parent`，活的、不 retire，名字是开出它的那条线 P，`head` 和 `after` 都等于切点 H。它像身份块取代继承的名册那样取代继承的块（§7.1），所以这条线最新的 `branch:parent` 总是名字它自己的父线，它的 `told` 从 H 开始，而 H 等于 `opened`；压缩重放的是这个块，从不重放上面那个，P 移动时照常的新块取代它。只有嵌套的线才会拿到它：从 `main` 切出来的线不继承任何 `branch:parent` 块，它的开启输入逐字节不变。TimelineTree 在写身份块的地方组合它，从子分支继承的前缀的带 key 状态判断这个 key 是否活着，绝不看渲染后的历史。它在开启子分支时读那份状态，如同读一条恢复的分支的 facts；读取失败时这次创建和任何其他开启失败一样失败（branch/create-failed）。
 - **随后发生什么。** 运行中的线在下一次模型请求时拿到这个块。空闲的线不会被唤醒：这个块在它下一轮的第一个请求里、先于开启那一轮的输入被消费，这是有文档记录的 Append 规则（[session access](contracts/session-access.md)、[Loop](../../architecture/rust-agent/plugins/Loop.md)）。重载不写任何东西；重启最多写当时已经该写的那个块。`main` 拿不到块：它上面没有东西。
@@ -277,6 +277,8 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - `main` 在 `create` 的 prompt 里给每条线分配它自己的文件或区域。
 - 一条线要改它区域之外的文件之前，先告诉 `main`。
 - 遇到 `file_modified_since_read` 时，这条线重新读取文件，告诉 `main` 之后再继续。
+
+文件改动只有工具声明的一种事实，即 `fileWritten`：`edit` 和 `write` 只要已经发布了文件，就在结果的 `effects` 中声明它和路径——成功时如此，发布之后失败（例如同步父目录失败）时也如此；在发布之前失败或被取消的调用不声明（[工具契约 A.6](contracts/session-boundary.md#a6-工具效果)）。客户端折叠这些声明得到的集合在构造上就是部分的——它漏掉 `exec`、MCP 工具以及 Dim 之外对文件的改动——所以折叠描述的是工具声明的写入，而不是工作区的改动。没有任何方法承诺一轮或一条线的完整改动集。
 
 WorkspaceTools 不变。
 
@@ -477,6 +479,14 @@ WorkspaceTools 不变。
 - `main` 与一条线之间的消息，在发送方读作已发出（它的 `branch` 工具调用），在接收方读作已收到（`◂ from C`）。
 - 切换显示的线就在一条边界行（`line C`）之下换一份记录，和切换 Session 一样，因为终端的回滚缓冲只追加。一条线的记录从它的事件折叠而来，显示与否都在折叠，所以打开一条线不读历史。
 
+**分支目录。** `session.branches {sessionId}`（v3，按与 `session.history` 相同的准入规则，在 `hello.features` 里与其他会话方法一起列出）为每条线回答一条记录：它的身份（`branchId`，有的话还有 `parentBranchId`、`branchPoint` 和 `createEvent`）、按 `TimelineInfo.source` 给出的 `source`、`state`（`open`、`ending` 或 `ended`）、`head`，处于结束中或已结束的线还有 `endEvent`。`main` 排第一，其余按 `branchId` 顺序。回复不分页：它随线的数量增长，而线的数量由 Session 自己的使用决定，不随历史增长。答案归 `TimelineTree`（`directory()`）；`branches()` 列出尚未结束的线（`open` 和 `ending`），供持有活动线的调用方使用。
+
+`head` 有三条规则，决定客户端能用它做什么：
+
+- 已结束（`ended`）线的 `head` 和 `endEvent` 固定。客户端把 `head` 作为 `through` 传给 `session.history` 读这条线；`endEvent` 是这条线自己的 `branch/end` 序号，祖先结束级联到它时也一样。
+- 结束中（`ending`）线的 `endEvent` 是它已提交的 `branch/end`，而 `head` 仍是活值：这条线的已结束记录以及 `branch/ended` 都还在后面。一条线从它自己的 `branch/end` 提交起——工具结束、host 结束或级联结束——一直读作 `ending`，直到它的已结束记录被写入，期间输入一直被拒绝。运行中的轮次里由工具发起的结束，会一直保持 `ending`，直到那一轮结束、关闭完成。重启不保留这个窗口：`branch/end` 已提交、但已结束记录从未写入的线，恢复后是 `ended`（§10）。
+- 未结束（`open`）线的 `head` 是活值。恢复会给每条未结束线追加 `branch/resume` 和中断事实，因此重启后 `head` 会前进；客户端在重连后重新读目录，不要缓存 head。
+
 这个面板与任务面板分开：任务面板列后台命令、成员和 Workflow 运行，它的 `x` 是停止任务，而结束是永久的，两者不共用按键。
 
 ```
@@ -506,11 +516,11 @@ WorkspaceTools 不变。
 | 模块 | 改动 | 原因 |
 | --- | --- | --- |
 | [设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义) | 改写：同一主体的多条线、共享事实、父子是唯一的通信和读取关系、共用交互面。关系表一行改为"只在父子之间"，读取父线已提交的事件经工具结果；Session 一行加上"结束" | 现在的文本是"平等的线，父子只记录来源"，没有通信关系 |
-| TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线。它的节点把这条线最新轮次结束的序号发布给它开出的线（§7.1.1） | 它拥有线的生命周期和开启输入 |
+| TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线。它的 `directory()` 报告未结束、结束中和已结束的线：结束中的线从工具、host 或级联写入它自己的 `branch/end` 起，到它的已结束记录被写入为止，带该事件与活头部。它的节点把这条线最新轮次结束的序号发布给它开出的线（§7.1.1） | 它拥有线的生命周期和开启输入 |
 | TreeTimeline | 消费 `branch/end`，以及由工具调用发出的结束时这条线的下一次轮次结束，并转给 TimelineTree。它把每一次 `turn/end` 报告给 TimelineTree，后者为这条线的子线发布 | 它现在就这样转 `branch/create` |
 | BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件。`read` 既能读调用方被切出来的那条线，在 `main` 上也能读它开的工具线，共用一条游标规则 | 工具的各个动作，以及一条线对自己相关各线的视图 |
 | Session 门面 | `Session::end_branch(id, source)`。已结束线的头部由 `Session::sequence` 给出；其历史在固定的头部经 `TreeCommands.page` 读取 | §17 |
-| App Server | `session.branch_end`（v3，host 来源，带生成的 `operation_id`；`session_execution` 打开、且连接的入口不是裸入口或守护进程 profile 未受保护时，`hello.features` 把它和其他会话方法一起列出）。对已结束的线，`session.history` 立即返回，截到它存储的头部。`ProductEvent::new` 在 v3 里带上两种事件，v1、v2 里不带 | 一个入口和一条读取路径，没有业务逻辑 |
+| App Server | `session.branch_end`（v3，host 来源，带生成的 `operation_id`；`session_execution` 打开、且连接的入口不是裸入口或守护进程 profile 未受保护时，`hello.features` 把它和其他会话方法一起列出）。对已结束的线，`session.history` 立即返回，截到它存储的头部。`session.branches` 读树的目录（§14）。`ProductEvent::new` 在 v3 里带上两种事件，v1、v2 里不带 | 一个入口和两条读取路径，没有业务逻辑 |
 | dim-agent-types | 在 `EventKind` 和 v1 排除列表里加入 `branch/end` 和 `branch/ended`，并在契约测试中登记。冻结样本不变 | 两种核心事实（§16） |
 | Goal（Pursuit 修订） | 从线的来源识别它的评审者，并结束它（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） | 评审者的协议归 Goal |
 | 分支 TypeScript 绑定 | 重新生成 `npm/branch-services.d.ts`：TreeCommands 新增 `end` 和 `page`，`TimelineInfo` 新增 `source`。[绑定表](../../design/branch-typescript.md)中 `treeCommands` 一行列出 `end` | TreeCommands 是导出的服务 |
@@ -520,7 +530,7 @@ WorkspaceTools 不变。
 新增的公开内容：
 
 - 两种事件；
-- 一个 RPC 方法；
+- 两个 RPC 方法；
 - 两个 TreeCommands 方法：`end(id, source)` 和 `page(id, after, limit)`；
 - `TimelineInfo.source`，由 BranchLine 和 Goal 读取；
 - `branch` 工具的新输入。
@@ -628,6 +638,12 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 15. 结束一条有子分支的 host 线时，先结束子分支（带 `ancestor`，复制 `source`），再结束这条线。
 16. `TreeCommands.list` 和 `info` 对新建和恢复的子分支返回 `source`，对 `main` 不返回。存储的目录行逐字节不变。
 
+分支目录：
+
+17. `session.branches` 先返回 `main`，其余按 `branchId` 顺序，每条带身份、来源、状态和 head。级联结束时，被结束的子分支以它自己的 `branch/end` 序号作为 `endEvent` 记入目录；把该子分支的 `head` 作为 `through` 传给 `session.history` 能读到它。一条线从它自己的 `branch/end` 提交起——工具结束、host 结束或级联结束——读作 `ending`，带该事件和活头部，直到它的已结束记录被写入；之后读作 `ended`，事件不变、头部固定。运行中的轮次里由工具发起的结束，会一直保持 `ending`，直到那一轮结束、关闭完成。
+18. 重启后目录保持 id、父分支、切点、创建事件和状态；已结束线保持 `head` 和 `endEvent`，未结束线的 `head` 不低于旧值。在一轮仍在运行时结束的线，恢复后是 `ended`，不是 `ending`。
+19. fork 的目录列出 fork 之前已结束的线，带来源记录的结束，而那些线在 fork 里没有事件。v1、v2 客户端没有 `session.branches`；已关闭的 Session 回答 `session_closed`。
+
 ## 21. 消融审查
 
 留下的部分，以及每一部分为什么必要：
@@ -642,6 +658,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 | `branch/end` 与 `branch/ended` | 没有它们，一条线无法持久结束，恢复时又会被打开 |
 | 结束上的 `source`（`BranchSource`） | 创建和结束以同样的方式记录发起方，插件的结束不会被记成这条线自己的结束 |
 | `TimelineInfo.source` | 开线的一方不用解析 prompt 文本就能找到自己的线 |
+| 目录里的 `endEvent` 与 `ending` 状态 | 没有 `endEvent`，客户端无法指出级联结束那条线的结束；这条线自己的 `branch/end` 只隔一页。没有 `ending`，从一条线自己的 `branch/end`——工具结束、host 结束或级联结束——到它的已结束记录之间的窗口会读作未结束，客户端分不清一条线还能收输入，还是已经拒绝输入 |
 | 工具限于 `main` 和工具线 | 一个协调者，创建者也保有自己的协议 |
 | 关于文件的提示词规则 | 唯一的保护是 FileReads，其余靠协议 |
 

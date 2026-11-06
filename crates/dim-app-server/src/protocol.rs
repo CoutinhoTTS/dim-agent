@@ -115,6 +115,7 @@ pub enum Call {
     ApprovalRespond(ApprovalRespond),
     BranchCreate(BranchCreate),
     BranchEnd(BranchEnd),
+    Branches(Branches),
     AgentCreate(AgentCreate),
     AgentList,
     AgentClose(AgentClose),
@@ -592,6 +593,10 @@ pub struct Catalog {
     /// Whether Sessions whose origin is `acp` are listed (#557).
     #[serde(default)]
     pub with_acp_sessions: bool,
+    /// Whether the catalog also lists Sessions this daemon closed, which
+    /// keep their stored rows. The flag is part of the cursor's filter set.
+    #[serde(default)]
+    pub include_closed: bool,
 }
 
 /// The workspaces a catalog read selects: one workspace, or any of a set.
@@ -763,6 +768,12 @@ pub struct BranchEnd {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Branches {
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BranchCreate {
     pub session_id: String,
     pub parent_branch_id: String,
@@ -774,7 +785,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 35] = [
+const BUILTIN_METHODS: [&str; 36] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -806,6 +817,7 @@ const BUILTIN_METHODS: [&str; 35] = [
     "approval.respond",
     "session.branch_create",
     "session.branch_end",
+    "session.branches",
     "agent.create",
     "agent.list",
     "agent.close",
@@ -872,6 +884,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "approval.respond" => Call::ApprovalRespond(params(raw_params)?),
             "session.branch_create" => Call::BranchCreate(params(raw_params)?),
             "session.branch_end" => Call::BranchEnd(params(raw_params)?),
+            "session.branches" => Call::Branches(params(raw_params)?),
             "agent.create" => Call::AgentCreate(params(raw_params)?),
             "agent.list" => {
                 let _: Empty = params(raw_params)?;
@@ -1241,6 +1254,7 @@ pub enum Reply {
     Submit(SubmitResult),
     InputLookup(InputLookupResult),
     History(crate::tree_protocol::HistoryResult),
+    Branches(crate::tree_protocol::BranchesResult),
     Keys(crate::tree_protocol::KeysResult),
     BranchCreate(crate::tree_protocol::CreateResult),
     Barrier(crate::tree_protocol::BarrierResult),

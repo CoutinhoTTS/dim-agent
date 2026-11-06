@@ -9,7 +9,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 目录读取改为有界的工作。SessionStore 保存一份列目录所需的投影——每个 Session 的最后活动时间（`main` 上最新一条属于 Session 自己活动的事件的时间，§3.2）、作为预览的第一条用户输入、以及工作区——由创建事务写入，之后在提交 `main` 每个携带活动的批次的事务里写入。新的内建方法 `session.catalog` 分页读取这份投影：缺省 50 行、不透明的键集游标，`query`、`cwd` 与 `withPreview` 在页边界之前的查询里应用。`session.summaries` 保留合同并读同一份投影，因此两个方法都不读历史。
 
 - **投影。** 归 SessionStore，随它的批次、并从创建起写入；本页只拥有目录如何被读取（§4）。
-- **方法。** `session.catalog {limit?, cursor?, query?, cwd?, withPreview?} -> {sessions, nextCursor?}`（§3.1）。
+- **方法。** `session.catalog {limit?, cursor?, query?, cwd?, withPreview?, includeClosed?} -> {sessions, nextCursor?}`（§3.1）。
 - **无租约。** 列目录不装载、不恢复任何 Session，也不启动模型、工具或 MCP 服务器（§3.4）。
 - **客户端。** 选择面板分页、在服务端搜索，并放弃未完成的读取（§6）。
 
@@ -28,28 +28,29 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 ### 3.1 `session.catalog`
 
-`session.catalog {limit?, cursor?, query?, cwd?, withPreview?} -> {sessions: SessionSummary[], nextCursor?: string}`
+`session.catalog {limit?, cursor?, query?, cwd?, withPreview?, includeClosed?} -> {sessions: SessionSummary[], nextCursor?: string}`
 
 | 项 | 规则 |
 | --- | --- |
 | 形态 | Rpc 内建方法。Agents 像回答目录读取那样，从目录投影联结 `agent_sessions` 行与标题元数据来回答；Rpc 校验信封 |
 | 协议 | v3。v1 与 v2 回复 `unknown_method`（"Method requires protocol v3"），与 `session.summaries` 相同 |
-| 发现 | `hello.features` 只在原生存储打开时列出它，条件与 `session.fork` 相同，因此看不到它的客户端继续用 `session.summaries`。没有存储就没有可读取的投影，`session.summaries` 与今天一样从已装载的 Session 回答（§3.3）。`session.catalog.workspaces` 在同一条件下与它并列列出，告诉客户端 `cwd` 接受一个集合 |
+| 发现 | `hello.features` 只在原生存储打开时列出它，条件与 `session.fork` 相同，因此看不到它的客户端继续用 `session.summaries`。没有存储就没有可读取的投影，`session.summaries` 与今天一样从已装载的 Session 回答（§3.3）。`session.catalog.workspaces` 与 `session.catalog.includeClosed` 在同一条件下与它并列列出：前者告诉客户端 `cwd` 接受一个集合，后者告诉客户端它接受 `includeClosed` |
 | `limit` | 1 到 200，缺省 50。更大的值被拒绝而不是截断，与 `history` 的 `limit` 相同 |
-| `cursor` | 不透明。它编码上一行返回的 `(updatedAt, sessionId)` 与请求的 `query`、`cwd`、`withPreview` 的摘要，按键集分页；调用方原样回传，它不是 Session ID。`cwd` 以它的规范集合进入摘要：`"a"` 与 `["a"]` 是同一种过滤，`["a","b"]` 与 `["b","a"]` 也是 |
+| `cursor` | 不透明。它编码上一行返回的 `(updatedAt, sessionId)` 与请求的 `query`、`cwd`、`withPreview`、`withInternal`、`withAcpSessions` 与 `includeClosed` 的摘要，按键集分页；调用方原样回传，它不是 Session ID。`cwd` 以它的规范集合进入摘要：`"a"` 与 `["a"]` 是同一种过滤，`["a","b"]` 与 `["b","a"]` 也是 |
 | 顺序 | `updatedAt` 降序，再 `sessionId` 升序 |
 | `query` | 对今天选择面板搜索的四个字段——Session ID、工作区、model ID 与预览——加上它的搜索文本从不持有的标题与 provider ID，做大小写不敏感的字面子串匹配。查询时由一个存储注册在连接上的 SQL 函数按 `str::to_lowercase` 把查询与每个字段做 Unicode 小写化（与选择面板相同的折叠）；匹配是逐字段的 `instr(fold(field), fold(query)) > 0`，因此是字面的，`%` 与 `_` 只匹配它们本身。它在目录查询里、页边界之前应用。模型取自存储的 Session 配置，即 `session.summaries` 报告的值，因此查询不解码任何事件 |
 | `cwd` | 工作区精确匹配，在页边界之前应用。字符串选择一个工作区；非空的字符串数组选择其中任意一个，去重并按路径顺序持有。空数组，或含非字符串元素的数组，被拒绝为 `invalid_params` |
 | `withPreview` | 布尔，缺省 `false`。`true` 只保留预览不为 NULL 的行，在页边界之前应用，因此隐藏无预览行的客户端拿到的是整页它显示的行；投影按预览建的局部索引让这条读取保持有界（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)） |
-| 回复 | `SessionSummary` 条目，即 `session.summaries` 返回的形态：`SessionInfo` 记录的字段加上 `preview`、`updatedAt` 与 `closed`，后者在这里恒为 false，因为这条查询不列出已关闭的 Session（§3.3）。最后一页不带 `nextCursor` |
+| `includeClosed` | 布尔，缺省 `false`，含义与 `session.summaries` 的相同（§3.3）：`true` 去掉进程内的关闭过滤，并把已关闭 Session 的行标记 `closed: true`。它属于游标的过滤集 |
+| 回复 | `SessionSummary` 条目，即 `session.summaries` 返回的形态：`SessionInfo` 记录的字段加上 `preview`、`updatedAt` 与 `closed`，后者对本进程没有关闭的 Session 为 false（§3.3）。最后一页不带 `nextCursor` |
 
-读不出的 `cursor`，或摘要与请求的 `query`、`cwd`、`withPreview` 不符的 `cursor`，被拒绝为 `invalid_params`，而不是当作第一页，客户端因此不会在不知不觉中从头再读一遍目录，也不会用另一组过滤的键接着分页。`cwd` 在那里按它的规范集合比较：单元素数组与单个工作区是同一种过滤，同一个集合的两种顺序也是。游标不带库的标记：来自另一个库的目录的游标无法分辨，也不需要分辨，因为它只按同一个顺序定位一个键。
+读不出的 `cursor`，或摘要与请求的 `query`、`cwd`、`withPreview`、`withInternal`、`withAcpSessions` 与 `includeClosed` 不符的 `cursor`，被拒绝为 `invalid_params`，而不是当作第一页，客户端因此不会在不知不觉中从头再读一遍目录，也不会用另一组过滤的键接着分页。`cwd` 在那里按它的规范集合比较：单元素数组与单个工作区是同一种过滤，同一个集合的两种顺序也是。游标不带库的标记：来自另一个库的目录的游标无法分辨，也不需要分辨，因为它只按同一个顺序定位一个键。
 
 很少命中的搜索扫描目录的行：过滤只读投影、存储的标题与存储的模型，不解码任何事件。注册这个函数需要 rusqlite 的 `functions` feature，而不是新的依赖。折叠在查询时进行，因此没有折叠值落盘，也没有折叠值需要与标题或模型保持同步。
 
 ### 3.2 顺序、游标与分页
 
-顺序是投影的活动时间，最新在前，Session ID 决定并列的次序，因此一页是某个全序里连续的一段，同一个库总是以同样的方式分页。游标是上一行的键而不是位置：两页之间变得活跃的 Session 移到第一页，后续页既不重复也不跳过任何其他 Session。它还带着取得它时的过滤（§3.1），因此一条页边界只能由同样的 `query`、`cwd` 与 `withPreview` 接着读。一组工作区按同一个顺序跨它的 Session 分页；它的游标在同一集合的任意顺序下继续可用，在其他集合或单个工作区下都不继续。单个工作区的游标在该工作区写成一个元素的数组时继续可用。
+顺序是投影的活动时间，最新在前，Session ID 决定并列的次序，因此一页是某个全序里连续的一段，同一个库总是以同样的方式分页。游标是上一行的键而不是位置：两页之间变得活跃的 Session 移到第一页，后续页既不重复也不跳过任何其他 Session。它还带着取得它时的过滤（§3.1），因此一条页边界只能由同样的 `query`、`cwd`、`withPreview`、`withInternal`、`withAcpSessions` 与 `includeClosed` 接着读。一组工作区按同一个顺序跨它的 Session 分页；它的游标在同一集合的任意顺序下继续可用，在其他集合或单个工作区下都不继续。单个工作区的游标在该工作区写成一个元素的数组时继续可用。
 
 **活动时间就是 Session 自己在 `main` 上的活动。** 它是 `main` 上最新一条属于 Session 自己活动的事件的 `create_at`：带用户部分的 `input/message`、`turn/end`、`branch/create`（父分支记下分支 prompt）或 `session/forked`。其余一切都是家事事件——没有用户部分的 `input/message`（宿主注入）、`branch/resume`、`branch/start`、`branch/ended`、`branch/end`、`branch/create-failed`、每一类 `context`/`prompt`/`model`/`step`/`tool`/`approval`/`stop`/`exec`/`permission`/`collaboration` 事件，以及扩展事件——不移动这一行。没有活动事件的 Session 停在创建时间。判断只此一处，写在投影代码旁边，投影的每个写入方都使用它；没有存储的守护进程在 `session.summaries` 里应用同一条选择（§3.3），两条列表不会给出不同答案。
 
@@ -57,7 +58,11 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 `session.summaries` 保留回复类型与按连接判定的协议 v3 规则；参数新增下面可选的 `includeClosed`。原生存储打开时，它改为从同一份投影回答而不是读历史，内容不变：投影原样应用下面的预览规则，而且它的行从 Session 创建起就存在（§5）。没有存储的守护进程没有投影，与今天一样从已装载的 Session 回答；它也不列出 `session.catalog`（§3.1）。所以找不到 `session.catalog` 的客户端靠它列目录，比本变更更旧的守护进程上的客户端也靠它；两者继续可用，因为该方法的形态不变。
 
-**`includeClosed` 与已关闭的 Session。** 本守护进程关闭的 Session（经 `session.close` 或 ACP 的 `session/close`）保留存储的行，但不进入任何目录读取：准入槽的关闭标志（[空闲卸载 §6.4](idle-unload.md#64-准入槽)）过滤的是同一条目录查询，因此恢复选择面板不会提供本守护进程拒绝附着的 Session。清理读的是存储的数据，而这类 Session 仍有数据，所以 `session.summaries` 接受 `includeClosed?: boolean`，缺省 `false`。为 `true` 时同一条查询去掉关闭过滤，每条已关闭 Session 的摘要带 `closed: true`；每条摘要都带 `closed`，本进程没有关闭它为 `false`。两种情况都只读一次：这个标志去掉查询的一个条件，而不是增加第二次读取。旧版 App Server 没有这个参数，会以 `invalid_params` 拒绝（`deny_unknown_fields`），需要这些行的客户端再去掉它重读一次。没有存储的守护进程与之前一样从已装载的 Session 回答，`closed` 来自同一个槽位事实。
+**`includeClosed` 与已关闭的 Session。** 本守护进程关闭的 Session（经 `session.close` 或 ACP 的 `session/close`）保留存储的行，但不进入任何目录读取：准入槽的关闭标志（[空闲卸载 §6.4](idle-unload.md#64-准入槽)）过滤的是同一条目录查询，因此恢复选择面板不会提供本守护进程拒绝附着的 Session。清理读的是存储的数据，而这类 Session 仍有数据，所以 `session.summaries` 与 `session.catalog` 都接受 `includeClosed?: boolean`，缺省 `false`，含义相同。为 `true` 时同一条查询去掉关闭过滤，每条已关闭 Session 的行带 `closed: true`；每行都带 `closed`，本进程没有关闭它为 `false`。两种情况都只读一次：这个标志去掉查询的一个条件，而不是增加第二次读取。旧版 App Server 没有这个参数，会以 `invalid_params` 拒绝（`deny_unknown_fields`），需要这些行的客户端再去掉它重读一次。没有存储的守护进程与之前一样从已装载的 Session 回答 `session.summaries`，`closed` 来自同一个槽位事实；它不列出目录（§3.1）。`session.catalog` 一旦接受该成员就宣告 `session.catalog.includeClosed`。
+
+关闭事实是进程内的（[空闲卸载 §6.4](idle-unload.md#64-准入槽)；[Session 删除与 fork D5](session-deletion-and-fork.md#16-实现中的设计变更)）：重启从没有任何关闭标志的状态开始，因此默认读取重新列出每个 Session，也没有行带 `closed: true`。客户端读不回上一个进程做过的关闭，目录也不把这个标志持久化。
+
+该标志属于游标的过滤集：游标只在取出它时的过滤条件下继续，因此带 `includeClosed` 取出的游标会被不带它的读取拒绝，反之亦然。把该标志加入摘要也会一次性拒绝旧版守护进程发出的每个游标，包括按缺省值取出的游标：游标是不透明的，不会比守护进程的过滤集活得更久，客户端因此重新读取第一页。
 
 **预览保持今天的规则，包括按批次完整的窗口。** 窗口是起始于 `main` 前 256 个事件内的批次，且与今天的读取一样按批次完整：承载第 256 个事件的批次整批读入，因此该批次里紧接 256 之后的用户输入也在窗口内。窗口事件里第一条带用户部分的 `input/message` 决定预览：该部分的文本块以换行连接，截到 120 个字符，更长时以 `…` 结尾。这个决定是最终的——第一条用户消息的文字为空时（例如只有图片）`preview` 为 NULL，之后的消息不再填它；窗口里没有这样的消息时也保持 NULL。投影对实时写入和回填应用同一条规则：批次只在行的预览仍未决定、且决定它的消息在窗口内时才写 `preview`，一旦决定就不再改变。因此回填行与实时行逐列相同（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)）。去掉或收窄这个窗口是对 `session.summaries` 所列内容的另一次可见变更。
 
@@ -154,11 +159,12 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 - `query` 能按六个字段中的任一个找到 Session——标题、预览、Session ID、工作区、model ID 与 provider ID——大小写不敏感，包括 ASCII 之外的大小写对，并能找到只在后面页上的 Session；`cwd` 精确匹配工作区；`withPreview` 去掉没有预览的 Session；三者都在页边界之前应用。
 - `query` 里的 `%` 或 `_` 只匹配该字符本身。
 - 带 `withPreview` 的一页即使前面有许多无预览的 Session，也返回 `limit` 行。
-- 为一种 `query`、`cwd`、`withPreview` 组合取得的游标，换另一种重放时被拒绝为 `invalid_params`。
+- 为一种 `query`、`cwd`、`withPreview`、`withInternal`、`withAcpSessions` 与 `includeClosed` 组合取得的游标，换另一种重放时被拒绝为 `invalid_params`。
 - 带两个工作区 `cwd` 的一页按声明的顺序列出两个工作区的 Session，小的 `limit` 分页会从一个工作区跨到另一个。
 - 为一个 `cwd` 集合取得的游标在同一集合的另一种顺序下被接受，在其他集合或单个工作区下被拒绝；为一个工作区取得的游标在该工作区写成一个元素的数组时被接受。
 - 空的 `cwd` 数组，以及含非字符串元素的数组，被拒绝为 `invalid_params`。
-- 有原生存储的守护进程在 `session.catalog` 旁列出 `session.catalog.workspaces`。
+- 有原生存储的守护进程在 `session.catalog` 旁列出 `session.catalog.workspaces` 与 `session.catalog.includeClosed`。
+- `includeClosed` 列出本守护进程关闭的 Session 并带 `closed: true`，缺省读取不列出它；在同一存储上重启后，缺省读取重新列出它，且没有关闭标记。
 - 创建后从未写入的 Session 从创建起就列出，`updatedAt` 等于创建时间、没有预览，与今天的 `session.summaries` 相同。
 - 预览保持按批次完整的窗口与最终性：紧接序号 256 之后、位于承载 256 的那个批次里的用户输入就是预览，实时与回填后都如此；第一条用户消息在起始于序号 256 之后的批次里的 Session 列出时没有预览；第一条用户消息只有图片的 Session 也列出为没有预览，之后的消息不会填它。
 - 没有原生存储的守护进程不列出 `session.catalog`，其 `session.summaries` 与今天一样从已装载的 Session 回答。

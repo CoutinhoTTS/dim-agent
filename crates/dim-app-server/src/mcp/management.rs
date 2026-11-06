@@ -504,6 +504,7 @@ pub(crate) fn error(error: McpError) -> RpcError {
         McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
         McpError::Settings(SettingsError::Invalid(_))
         | McpError::Settings(SettingsError::Document(_))
+        | McpError::Settings(SettingsError::DocumentShape { .. })
         | McpError::InvalidId
         | McpError::InvalidEntry(_) => "mcp_invalid_config",
         McpError::UnknownServer => "mcp_unknown_server",

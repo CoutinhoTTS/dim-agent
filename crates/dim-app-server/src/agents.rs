@@ -918,7 +918,6 @@ impl AgentIndex {
         request: crate::protocol::Catalog,
         agent: Option<String>,
         version: u32,
-        include_closed: bool,
         cancel: CancellationToken,
     ) -> dim_agent_runtime::Result<crate::protocol::CatalogResult> {
         let store = self
@@ -940,7 +939,7 @@ impl AgentIndex {
             .filter(|(_, slot)| slot.closed.load(Ordering::Acquire))
             .map(|(id, _)| id.clone())
             .collect();
-        let excluded: Vec<String> = if include_closed {
+        let excluded: Vec<String> = if request.include_closed {
             Vec::new()
         } else {
             closed.iter().cloned().collect()

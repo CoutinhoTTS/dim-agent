@@ -832,6 +832,16 @@ pub struct RequestMetadata {
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup: Option<ModelStartup>,
+    /// The Agent profile whose prompt the branch runs: the profile it last
+    /// adopted. An adoption from a profile records it; a model selection and a
+    /// preference update carry it into the new configuration, and only
+    /// another adoption replaces it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub agent_id: Option<String>,
     #[serde(flatten)]
     pub extensions: JsonObject,
 }

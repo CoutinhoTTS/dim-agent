@@ -2031,7 +2031,23 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         .await;
     assert_ok(&prompt_only);
     assert_ok(&client.rpc("session.agent.update", json!({"sessionId":sid,"branchId":"main","agentId":prompt_only["result"]["agentId"]})).await);
-    assert_eq!(adopted(), before);
+    let mut recorded = adopted();
+    assert_eq!(
+        recorded
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.agent_id.as_deref()),
+        Some(prompt_only["result"]["agentId"].as_str().unwrap()),
+        "a profile without a model records itself on the configuration it keeps"
+    );
+    recorded.metadata.as_mut().unwrap().agent_id = before
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.agent_id.clone());
+    assert_eq!(
+        recorded, before,
+        "the adopted model and preferences are kept"
+    );
     assert_ok(&client.rpc("session.prompt.refresh", branch.clone()).await);
     assert!(
         session

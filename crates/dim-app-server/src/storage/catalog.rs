@@ -218,6 +218,7 @@ impl SessionStore {
                     request.with_preview,
                     request.with_internal,
                     request.with_acp_sessions,
+                    request.include_closed,
                 ))
                 .map_err(error)?
             )
