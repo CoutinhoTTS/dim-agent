@@ -923,7 +923,6 @@ impl ModelDriver for FailingBeforeStream {
                         kind: HostErrorKind::Transport,
                         model: Some(Box::new(ModelFailureFacts {
                             kind: ModelFailureKind::Network,
-                            origin: Some(ModelFailureOrigin::Transport),
                             reason: Some("The summarizer is unavailable".into()),
                             status: None,
                             provider_code: None,

@@ -687,7 +687,6 @@ async fn parse_output(
                         kind: HostErrorKind::Other,
                         model: Some(Box::new(ModelFailureFacts {
                             kind: ModelFailureKind::OutputLimit,
-                            origin: None,
                             reason: Some(message.clone()),
                             status: None,
                             provider_code: None,

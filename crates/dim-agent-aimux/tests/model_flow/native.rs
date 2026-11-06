@@ -1635,7 +1635,6 @@ async fn invoke_failure(
 fn assert_model_failure(
     error: &HostError,
     (status, code): (Option<u16>, Option<&str>),
-    origin: Option<ModelFailureOrigin>,
     kind: ModelFailureKind,
     reason: Option<&str>,
     request_id: Option<&str>,
@@ -1654,7 +1653,6 @@ fn assert_model_failure(
     };
     assert_eq!(*actual_status, status);
     assert_eq!(actual_code.as_deref(), code);
-    assert_eq!(model.origin, origin);
     assert_eq!(model.kind, kind);
     assert_eq!(model.status, status);
     assert_eq!(model.request_id.as_deref(), request_id);
@@ -1691,7 +1689,6 @@ async fn native_failures_carry_their_kind_and_a_safe_reason() {
     assert_model_failure(
         &error,
         (Some(429), Some("rate_limit_exceeded")),
-        Some(ModelFailureOrigin::HttpResponse),
         ModelFailureKind::RateLimited,
         Some("slow down"),
         Some("request-429"),
@@ -1714,7 +1711,6 @@ async fn native_failures_carry_their_kind_and_a_safe_reason() {
     assert_model_failure(
         &blank,
         (Some(400), None),
-        Some(ModelFailureOrigin::HttpResponse),
         ModelFailureKind::InvalidRequest,
         Some("Mixed Message"),
         Some("Mixed-Request-ID"),
@@ -1739,7 +1735,6 @@ async fn native_failures_carry_their_kind_and_a_safe_reason() {
         assert_model_failure(
             &error,
             (Some(status), Some(code)),
-            Some(ModelFailureOrigin::HttpResponse),
             kind,
             Some("request rejected"),
             Some("request-http"),
@@ -1762,7 +1757,6 @@ async fn native_failures_carry_their_kind_and_a_safe_reason() {
     assert_model_failure(
         &error,
         (Some(500), Some("server_error")),
-        Some(ModelFailureOrigin::StreamEvent),
         ModelFailureKind::ServerError,
         Some("responses unavailable"),
         Some("request-responses"),
@@ -1778,7 +1772,6 @@ async fn native_failures_carry_their_kind_and_a_safe_reason() {
     assert_model_failure(
         &error,
         (Some(529), None),
-        Some(ModelFailureOrigin::StreamEvent),
         ModelFailureKind::ServerError,
         Some("anthropic overloaded"),
         Some("request-anthropic"),
@@ -1794,14 +1787,7 @@ async fn native_failures_carry_their_kind_and_a_safe_reason() {
         "connection-refused",
     )
     .await;
-    assert_model_failure(
-        &error,
-        (None, None),
-        Some(ModelFailureOrigin::Transport),
-        ModelFailureKind::Network,
-        None,
-        None,
-    );
+    assert_model_failure(&error, (None, None), ModelFailureKind::Network, None, None);
     let HostError::Failed {
         model: Some(model), ..
     } = &error
@@ -1857,7 +1843,6 @@ async fn native_http_statuses_and_codes_classify() {
         assert_model_failure(
             &error,
             (Some(status), None),
-            Some(ModelFailureOrigin::HttpResponse),
             kind,
             Some(&reason),
             Some(&request_id),
@@ -1874,7 +1859,6 @@ async fn native_http_statuses_and_codes_classify() {
     assert_model_failure(
         &error,
         (Some(400), Some("content_policy_violation")),
-        Some(ModelFailureOrigin::HttpResponse),
         ModelFailureKind::ContentFiltered,
         Some("fixture 400"),
         Some("request-400"),
@@ -1890,7 +1874,6 @@ async fn native_http_statuses_and_codes_classify() {
     assert_model_failure(
         &error,
         (Some(429), Some("max_tokens_exceeded")),
-        Some(ModelFailureOrigin::HttpResponse),
         ModelFailureKind::InvalidRequest,
         Some("request rejected"),
         Some("request-max-tokens"),
@@ -1906,7 +1889,6 @@ async fn native_http_statuses_and_codes_classify() {
     assert_model_failure(
         &error,
         (Some(429), None),
-        Some(ModelFailureOrigin::HttpResponse),
         ModelFailureKind::RateLimited,
         Some("fixture 429"),
         Some("request-429"),
@@ -1944,7 +1926,6 @@ async fn a_malformed_stream_body_is_a_malformed_response() {
         panic!("{error:?}");
     };
     assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
-    assert_eq!(model.origin, None);
     assert_eq!(model.status, None);
     assert!(model.cause.is_empty());
     let reason = model.reason.as_deref().expect("the parse diagnosis");
@@ -2007,7 +1988,6 @@ async fn a_reset_after_headers_is_a_network_failure() {
         panic!("{error:?}");
     };
     assert_eq!(model.kind, ModelFailureKind::Network);
-    assert_eq!(model.origin, Some(ModelFailureOrigin::Transport));
     assert_eq!(model.status, None);
     assert!(model.reason.is_some(), "{model:?}");
     assert!(!model.cause.is_empty(), "{model:?}");
@@ -2036,7 +2016,6 @@ async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
     else {
         panic!("{error:?}");
     };
-    assert_eq!(model.origin, Some(ModelFailureOrigin::StreamEvent));
     assert_eq!(model.kind, ModelFailureKind::Unknown);
     assert_eq!(
         responses.endpoint.requests.lock().unwrap().len(),

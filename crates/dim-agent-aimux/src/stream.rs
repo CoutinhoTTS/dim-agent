@@ -3,7 +3,7 @@ mod content;
 use std::collections::{HashMap, HashSet};
 
 use aimux_core::{
-    AbortSignal, AiMuxError, ErrorCause,
+    AbortSignal, AiMuxError, ApiCallErrorOrigin, ErrorCause,
     parse_tool_call::parse_json_input,
     result::StreamResult,
     shared::SharedProviderMetadata,
@@ -12,8 +12,8 @@ use aimux_core::{
     types::{FinishReasonUnified, Usage as NativeUsage, Warning},
 };
 use dim_agent_capabilities::host::{
-    HostError, HostErrorKind, ModelChunk, ModelFailureFacts, ModelFailureOrigin, ModelProtocol,
-    ModelStopReason, ModelStream,
+    HostError, HostErrorKind, ModelChunk, ModelFailureFacts, ModelProtocol, ModelStopReason,
+    ModelStream,
 };
 use dim_agent_types::{
     FAILURE_CAUSE_CHARS, FAILURE_CAUSE_FRAMES, FAILURE_REASON_CHARS, MessagePart, ModelFailureKind,
@@ -361,17 +361,12 @@ fn classify(failure: &AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
             };
             let code = field("code").and_then(normalize);
             let error_type = field("type").and_then(normalize);
-            let provider_code = detail.provider_code.as_deref().and_then(normalize);
-            let origin = match detail.origin {
-                aimux_core::ApiCallErrorOrigin::Transport => Some(ModelFailureOrigin::Transport),
-                aimux_core::ApiCallErrorOrigin::HttpResponse => {
-                    Some(ModelFailureOrigin::HttpResponse)
-                }
-                aimux_core::ApiCallErrorOrigin::StreamEvent => {
-                    Some(ModelFailureOrigin::StreamEvent)
-                }
-                _ => None,
-            };
+            let provider_code = detail
+                .provider_code
+                .as_deref()
+                .and_then(normalize)
+                .and_then(|code| one_line(&code, FAILURE_CAUSE_CHARS));
+            let origin = detail.origin;
             let codes = [
                 code.as_deref(),
                 error_type.as_deref(),
@@ -379,7 +374,7 @@ fn classify(failure: &AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
             ];
             let kind = classify_kind(origin, detail.status_code, &codes);
             let chain = cause_chain(detail);
-            let reason = if origin == Some(ModelFailureOrigin::Transport) {
+            let reason = if origin == ApiCallErrorOrigin::Transport {
                 chain
                     .innermost
                     .clone()
@@ -391,11 +386,10 @@ fn classify(failure: &AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
                 ["x-request-id", "request-id", "x-amzn-requestid"]
                     .iter()
                     .find_map(|name| headers.get(*name))
-                    .cloned()
+                    .and_then(|id| one_line(id, FAILURE_CAUSE_CHARS))
             });
             let facts = ModelFailureFacts {
                 kind,
-                origin,
                 reason,
                 status: detail.status_code,
                 provider_code,
@@ -444,7 +438,6 @@ fn classify(failure: &AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
             };
             let facts = ModelFailureFacts {
                 kind,
-                origin: None,
                 reason: reason_of(failure),
                 status: None,
                 provider_code: None,
@@ -498,24 +491,24 @@ fn source_diagnosis(cause: &ErrorCause) -> Option<String> {
 
 /// The user-facing kind, from the origin, status and normalized codes only.
 fn classify_kind(
-    origin: Option<ModelFailureOrigin>,
+    origin: ApiCallErrorOrigin,
     status: Option<u16>,
     codes: &[Option<&str>],
 ) -> ModelFailureKind {
     if let Some(kind) = codes.iter().flatten().find_map(|code| permanent_kind(code)) {
         return kind;
     }
-    if origin != Some(ModelFailureOrigin::StreamEvent) && matches!(status, Some(409 | 501 | 505)) {
+    if origin != ApiCallErrorOrigin::StreamEvent && matches!(status, Some(409 | 501 | 505)) {
         // These statuses were never retried, whatever code came with them.
         return ModelFailureKind::InvalidRequest;
     }
     let transient = codes.iter().flatten().find_map(|code| transient_kind(code));
-    if origin == Some(ModelFailureOrigin::StreamEvent) {
+    if origin == ApiCallErrorOrigin::StreamEvent {
         // A stream-event failure carries the response's status, not the
         // event's; only the event's code may decide.
         return transient.unwrap_or(ModelFailureKind::Unknown);
     }
-    if origin == Some(ModelFailureOrigin::Transport) {
+    if origin == ApiCallErrorOrigin::Transport {
         return ModelFailureKind::Network;
     }
     if let Some(kind) = transient {

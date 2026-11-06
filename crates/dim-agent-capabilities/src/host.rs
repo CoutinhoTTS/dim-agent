@@ -23,18 +23,10 @@ pub enum HostError {
     #[error("{0}")]
     Cancelled(String),
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelFailureOrigin {
-    Transport,
-    HttpResponse,
-    StreamEvent,
-}
 #[derive(Debug, Clone)]
 pub struct ModelFailureFacts {
     /// Decided where the provider error is read; retry reads it.
     pub kind: ModelFailureKind,
-    /// Where the failure was built; absent for errors with no provider boundary.
-    pub origin: Option<ModelFailureOrigin>,
     /// One specific sentence: the provider's message, or the innermost
     /// transport cause. One line.
     pub reason: Option<String>,
@@ -61,7 +53,6 @@ impl ModelFailureFacts {
     pub fn unknown(reason: Option<String>) -> Self {
         Self {
             kind: dim_agent_types::ModelFailureKind::Unknown,
-            origin: None,
             reason: reason.as_deref().and_then(|text| {
                 dim_agent_types::one_line(text, dim_agent_types::FAILURE_REASON_CHARS)
             }),

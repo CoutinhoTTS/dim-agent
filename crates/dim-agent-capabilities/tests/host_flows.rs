@@ -598,7 +598,6 @@ impl RecoveryProbe {
             },
             model: Some(Box::new(ModelFailureFacts {
                 kind,
-                origin: Some(ModelFailureOrigin::HttpResponse),
                 reason: Some("fixture rejection".into()),
                 status: Some(status),
                 provider_code: None,

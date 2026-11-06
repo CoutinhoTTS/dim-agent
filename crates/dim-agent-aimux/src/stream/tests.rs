@@ -657,7 +657,6 @@ fn a_timeout_is_unknown_and_not_retried() {
         panic!("unexpected failure: {failure:?}");
     };
     assert_eq!(model.kind, ModelFailureKind::Unknown);
-    assert_eq!(model.origin, None);
     assert_eq!(model.status, None);
     assert_eq!(model.cause, Vec::<String>::new());
     assert_eq!(model.reason.as_deref(), Some("model response timed out"));
@@ -772,4 +771,45 @@ fn a_repair_failure_classifies_as_its_inner_failure() {
     assert_eq!(model.reason, bare.reason);
     assert_eq!(message, bare_message);
     assert!(!message.contains("private tool input"));
+}
+
+#[test]
+fn provider_codes_and_request_ids_are_one_bounded_line() {
+    let mut detail = aimux_core::ApiCallError::new(
+        "request rejected",
+        "https://test.invalid",
+        serde_json::json!({}),
+    );
+    detail.status_code = Some(400);
+    detail.provider_code = Some(format!("code\n{}", "p".repeat(1_000)));
+    let mut headers = std::collections::HashMap::new();
+    headers.insert(
+        "x-request-id".into(),
+        format!("first\r\n{}", "r".repeat(1_000)),
+    );
+    detail.response_headers = Some(headers);
+    let failure = error(
+        AiMuxError::ApiCall(Box::new(detail)),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    let provider_code = model.provider_code.expect("a code");
+    assert!(!provider_code.contains(['\n', '\r']), "{provider_code}");
+    assert!(
+        provider_code.chars().count() <= FAILURE_CAUSE_CHARS,
+        "{provider_code}"
+    );
+    assert!(provider_code.starts_with("code "), "{provider_code}");
+    let request_id = model.request_id.expect("a request id");
+    assert!(!request_id.contains(['\n', '\r']), "{request_id}");
+    assert!(
+        request_id.chars().count() <= FAILURE_CAUSE_CHARS,
+        "{request_id}"
+    );
+    assert!(request_id.starts_with("first "), "{request_id}");
 }
