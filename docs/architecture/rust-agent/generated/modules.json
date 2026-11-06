@@ -18738,10 +18738,12 @@
       "from": "dim_app_server::agents::configuration",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path RpcError",
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path SessionMethods",
         "path params",
+        "path reply",
         "use dim_agent_capabilities::methods::Interruption",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
@@ -18765,6 +18767,14 @@
         "path prompt_sources::SESSION",
         "path prompt_sources::session_entry",
         "use dim_agent_capabilities::prompt_sources"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::configuration",
+      "to": "dim_agent_capabilities::prompt_state",
+      "references": [
+        "path PromptSnapshot",
+        "use dim_agent_capabilities::prompt_state::PromptSnapshot"
       ]
     },
     {

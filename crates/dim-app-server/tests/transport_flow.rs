@@ -61,6 +61,9 @@ mod reload;
 #[path = "transport_flow/agents.rs"]
 mod agents;
 
+#[path = "transport_flow/agent_get.rs"]
+mod agent_get;
+
 #[path = "transport_flow/collaboration.rs"]
 mod collaboration;
 
