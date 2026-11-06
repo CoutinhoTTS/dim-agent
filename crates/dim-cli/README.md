@@ -1549,6 +1549,8 @@ cargo test --locked -p dimcode --test cli_flow
 cargo clippy --locked -p dim-cli --all-targets -- -D warnings
 ```
 
+Two debug-only variables shorten the daemon startup waits for the flow tests: `DIM_TEST_DAEMON_START_TIMEOUT_MS` replaces the spawn wait's 10 s bound and `DIM_TEST_START_LOCK_TIMEOUT_MS` the start-lock wait's derived bound, so a test reaches an inactivity bound without waiting the production time. Only a debug build reads them, a release build ignores them, and the tests that set them compile only in debug builds.
+
 The production-model flow uses the actual App Server, an API-key environment reference and a local OpenAI-compatible HTTP stream fixture. It checks the production tool list, a real file read reaching the model, and continued input on the same persisted session:
 
 ```bash

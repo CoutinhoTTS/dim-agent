@@ -1501,8 +1501,10 @@ progress kind, `dimcode-startup-progress v1 pid=<pid>` with
 after each upgrade step; a fresh store or one at the current format writes
 none. Both startup waits read it: the spawn wait counts only its child's pid,
 the start-lock wait any pid, and each new counter moves the wait's bound
-forward by the bound itself (10 s for the spawn, 50 s for the lock), so
-startup is bounded by inactivity and never by a fixed total. The first such
+forward by the bound itself (10 s for the spawn, one verified shutdown plus
+one startup plus a margin for the lock). A store format upgrade is the long
+phase that reports progress and moves the bound; every other phase of
+startup is bounded by the client's fixed value. The first such
 note prints, once on stderr in every mode, `Upgrading the local store from
 format v<from> to v<to>; this can take a while on a large store.`; stdout and
 JSON output stay unchanged. A client that only knows the failure kind ignores
