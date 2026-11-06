@@ -286,9 +286,13 @@ fn entry_ids(preview: &Value) -> Vec<&str> {
 
 /// A preview's result without the store digest, so a `from` preview and the
 /// same converted text sent as `document` compare equal.
+/// The preview's result without the members that name its input: a `from`
+/// preview carries the store's digest and row, which a `document` preview of
+/// the same text does not.
 fn preview_result(mut preview: Value) -> Value {
     if let Some(result) = preview["result"].as_object_mut() {
         result.remove("sourceRevision");
+        result.remove("store");
     }
     preview["result"].clone()
 }
@@ -739,4 +743,102 @@ async fn import_inputs_are_exactly_one_of_document_and_from() {
         assert_eq!(reply["error"]["code"], json!(-32602), "{reply}");
         assert_eq!(reply["error"]["message"], json!(message), "{reply}");
     }
+}
+
+/// A preview that read a store names it, with the row `mcp.import.sources`
+/// reports; a preview of the client's own document names none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_preview_names_the_store_it_read() {
+    let fixture = Fixture::new("dm-discovery-preview-source");
+    fixture.claude();
+    fixture.codex();
+    fixture.omp();
+    let server = launch(&fixture).await;
+    let mut client = server.client().await;
+    let cwd = fixture.cwd();
+
+    let sources = read_sources(&mut client, Some(&cwd)).await;
+    let codex = row(&sources, "codex:user").clone();
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"cwd": cwd, "source": "user", "from": "codex:user"}),
+        )
+        .await;
+    assert_ok(&preview);
+    let store = &preview["result"]["store"];
+    assert_eq!(store["id"], codex["id"], "{preview}");
+    assert_eq!(store["client"], codex["client"], "{preview}");
+    assert_eq!(store["scope"], codex["scope"], "{preview}");
+    assert_eq!(store["path"], codex["path"], "{preview}");
+    assert!(store.get("entries").is_none(), "{store}");
+    assert!(store.get("state").is_none(), "{store}");
+    assert_no_value(&preview, &SECRETS);
+
+    // The local Claude row includes the `projects` record it matched, and the
+    // preview carries that same row.
+    let local = row(&sources, "claude-code:local").clone();
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"cwd": cwd, "source": "user", "from": "claude-code:local"}),
+        )
+        .await;
+    assert_ok(&preview);
+    let store = &preview["result"]["store"];
+    assert_eq!(store["id"], local["id"], "{preview}");
+    assert_eq!(store["client"], local["client"], "{preview}");
+    assert_eq!(store["scope"], local["scope"], "{preview}");
+    assert_eq!(store["path"], local["path"], "{preview}");
+    assert!(
+        store["path"].as_str().unwrap().contains("· projects["),
+        "{store}"
+    );
+    assert_no_value(&preview, &SECRETS);
+
+    let document = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"cwd": cwd, "source": "user", "document": "{\"mcpServers\":{}}"}),
+        )
+        .await;
+    assert_ok(&document);
+    assert!(
+        document["result"].get("store").is_none(),
+        "a document preview names no store: {document}"
+    );
+}
+
+/// A preview reads only the store it names: a different store unreadable in
+/// the environment neither fails the preview nor changes the row it reports.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_preview_reads_only_the_store_it_names() {
+    let fixture = Fixture::new("dm-discovery-preview-one");
+    fixture.codex();
+    fixture.omp();
+    std::fs::create_dir(fixture.home.join(".claude.json")).unwrap();
+    let server = launch(&fixture).await;
+    let mut client = server.client().await;
+    let cwd = fixture.cwd();
+
+    let sources = read_sources(&mut client, Some(&cwd)).await;
+    assert_eq!(
+        row(&sources, "claude-code:user")["state"],
+        json!("unreadable"),
+        "{sources}"
+    );
+    let codex = row(&sources, "codex:user").clone();
+    let preview = client
+        .rpc(
+            "mcp.import.preview",
+            json!({"cwd": cwd, "source": "user", "from": "codex:user"}),
+        )
+        .await;
+    assert_ok(&preview);
+    let store = &preview["result"]["store"];
+    assert_eq!(store["id"], codex["id"], "{preview}");
+    assert_eq!(store["client"], codex["client"], "{preview}");
+    assert_eq!(store["scope"], codex["scope"], "{preview}");
+    assert_eq!(store["path"], codex["path"], "{preview}");
+    assert_no_value(&preview, &SECRETS);
 }

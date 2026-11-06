@@ -1564,10 +1564,13 @@ async fn mcp_import_answers_stale_revisions_and_refuses_oversize_documents() {
         )
         .await;
     assert_ok(&preview);
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
     assert_eq!(
-        preview["result"]["revision"], "missing",
-        "a workspace without .mcp.json reports the catalog's missing revision"
+        preview["result"]["revision"], catalog["result"]["projectRevision"],
+        "a preview names the catalog's revision, also for a workspace without .mcp.json"
     );
+    let token = preview["result"]["revision"].clone();
     let applied = client
         .rpc(
             "mcp.import.apply",
@@ -1575,16 +1578,407 @@ async fn mcp_import_answers_stale_revisions_and_refuses_oversize_documents() {
                 "source":"project",
                 "cwd":project,
                 "document":project_document,
-                "expectedVersion":"missing",
+                "expectedVersion":token,
                 "resolutions":[{"id":"plain","action":"import"}]
             }),
         )
         .await;
     assert_ok(&applied);
-    assert_ne!(applied["result"]["revision"], "missing");
+    assert_ne!(applied["result"]["revision"], token);
     let stored: Value =
         serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
     assert_eq!(stored["mcpServers"]["plain"], json!({"command":"echo"}));
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The withheld `args` of one project entry, as the owner stores them.
+fn withheld_args(home: &std::path::Path, workspace: &str, id: &str) -> Value {
+    let native = std::fs::canonicalize(home.join("native")).unwrap();
+    let database = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
+    let text: String = database
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp-secrets'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let secrets: Value = serde_json::from_str(&text).unwrap();
+    secrets["entries"][workspace][id]["args"].clone()
+}
+
+/// A document whose one entry differs from the seeded one only in a withheld
+/// member, so importing it leaves `.mcp.json` byte for byte as it was.
+fn arguments_document(argument: &str) -> String {
+    json!({"mcpServers":{"guarded":{"command":"echo","args":[argument]}}}).to_string()
+}
+
+async fn preview_project(client: &mut Client, project: &std::path::Path, document: &str) -> Value {
+    client
+        .rpc(
+            "mcp.import.preview",
+            json!({"source":"project","cwd":project,"document":document}),
+        )
+        .await
+}
+
+async fn apply_project(
+    client: &mut Client,
+    project: &std::path::Path,
+    document: &str,
+    expected: &Value,
+) -> Value {
+    client
+        .rpc(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":document,
+                "expectedVersion":expected,
+                "resolutions":[{"id":"guarded","action":"replace"}]
+            }),
+        )
+        .await
+}
+
+fn conflict(value: &Value) -> bool {
+    value["error"]["data"]["appError"] == json!("mcp_settings_conflict")
+}
+
+/// A project token names the file and the workspace's withheld records, so an
+/// import that changed only a record leaves a preview's token stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_token_covers_the_withheld_records() {
+    let home = scratch("dm-import-token");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{"guarded":{"command":"echo"}}}).to_string(),
+    )
+    .unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let workspace = project.to_str().unwrap().to_owned();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+
+    // The first import writes the withheld record; its skeleton is the one
+    // already in the file.
+    let first = arguments_document("first-arg");
+    let preview = preview_project(&mut client, &project, &first).await;
+    assert_ok(&preview);
+    assert_ok(
+        &apply_project(
+            &mut client,
+            &project,
+            &first,
+            &preview["result"]["revision"],
+        )
+        .await,
+    );
+    let stored = std::fs::read(project.join(".mcp.json")).unwrap();
+    assert_eq!(
+        withheld_args(&home, &workspace, "guarded"),
+        json!(["first-arg"])
+    );
+
+    // The preview the user reads.
+    let second = arguments_document("second-arg");
+    let preview = preview_project(&mut client, &project, &second).await;
+    assert_ok(&preview);
+    let token = preview["result"]["revision"].clone();
+
+    // Another import changes only the record; the file keeps its bytes.
+    let third = arguments_document("third-arg");
+    assert_ok(&apply_project(&mut client, &project, &third, &token).await);
+    assert_eq!(
+        std::fs::read(project.join(".mcp.json")).unwrap(),
+        stored,
+        "the skeleton never changed"
+    );
+    assert_eq!(
+        withheld_args(&home, &workspace, "guarded"),
+        json!(["third-arg"])
+    );
+
+    let stale = apply_project(&mut client, &project, &second, &token).await;
+    assert!(conflict(&stale), "{stale}");
+    assert_eq!(
+        withheld_args(&home, &workspace, "guarded"),
+        json!(["third-arg"]),
+        "the refused apply writes nothing"
+    );
+
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert_ne!(
+        catalog["result"]["projectRevision"], token,
+        "the catalog names the state the apply wrote"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The same token guards `mcp.update` and `mcp.remove`, which read the entry
+/// with its record merged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_token_covers_the_withheld_records_for_update_and_remove() {
+    let home = scratch("dm-import-token-edit");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{"guarded":{"command":"echo"}}}).to_string(),
+    )
+    .unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let workspace = project.to_str().unwrap().to_owned();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let first = arguments_document("first-arg");
+    let preview = preview_project(&mut client, &project, &first).await;
+    assert_ok(&preview);
+    assert_ok(
+        &apply_project(
+            &mut client,
+            &project,
+            &first,
+            &preview["result"]["revision"],
+        )
+        .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    let token = catalog["result"]["projectRevision"].clone();
+
+    // A record-only change after the token was taken.
+    let second = arguments_document("second-arg");
+    let preview = preview_project(&mut client, &project, &second).await;
+    assert_ok(&preview);
+    assert_ok(
+        &apply_project(
+            &mut client,
+            &project,
+            &second,
+            &preview["result"]["revision"],
+        )
+        .await,
+    );
+
+    let updated = client
+        .rpc(
+            "mcp.update",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "id":"guarded",
+                "expectedVersion":token,
+                "patch":{"command":"true"}
+            }),
+        )
+        .await;
+    assert!(conflict(&updated), "{updated}");
+    let removed = client
+        .rpc(
+            "mcp.remove",
+            json!({"source":"project","cwd":project,"id":"guarded","expectedVersion":token}),
+        )
+        .await;
+    assert!(conflict(&removed), "{removed}");
+    assert_eq!(
+        withheld_args(&home, &workspace, "guarded"),
+        json!(["second-arg"])
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(stored["mcpServers"]["guarded"], json!({"command":"echo"}));
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A record written in another workspace is not part of this workspace's
+/// token, so it neither refreshes nor refuses this one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_workspaces_records_leave_a_project_token_valid() {
+    let home = scratch("dm-import-token-workspaces");
+    let first_project = home.join("first");
+    let second_project = home.join("second");
+    for project in [&first_project, &second_project] {
+        std::fs::create_dir_all(project).unwrap();
+        std::fs::write(
+            project.join(".mcp.json"),
+            json!({"mcpServers":{"guarded":{"command":"echo"}}}).to_string(),
+        )
+        .unwrap();
+    }
+    let first_project = std::fs::canonicalize(&first_project).unwrap();
+    let second_project = std::fs::canonicalize(&second_project).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let document = arguments_document("first-arg");
+    for project in [&first_project, &second_project] {
+        let preview = preview_project(&mut client, project, &document).await;
+        assert_ok(&preview);
+        assert_ok(
+            &apply_project(
+                &mut client,
+                project,
+                &document,
+                &preview["result"]["revision"],
+            )
+            .await,
+        );
+    }
+    let catalog = client
+        .rpc("mcp.catalog", json!({"cwd":first_project}))
+        .await;
+    assert_ok(&catalog);
+    let token = catalog["result"]["projectRevision"].clone();
+
+    let changed = arguments_document("second-arg");
+    let preview = preview_project(&mut client, &second_project, &changed).await;
+    assert_ok(&preview);
+    assert_ok(
+        &apply_project(
+            &mut client,
+            &second_project,
+            &changed,
+            &preview["result"]["revision"],
+        )
+        .await,
+    );
+    assert_eq!(
+        withheld_args(&home, first_project.to_str().unwrap(), "guarded"),
+        json!(["first-arg"]),
+        "the other workspace's record is untouched"
+    );
+
+    let applied = apply_project(&mut client, &first_project, &document, &token).await;
+    assert_ok(&applied);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A withheld record another import renewed between this import's plan and
+/// its record write is not replaced: the skeleton is already committed, so the
+/// import answers `mcp_import_partial` and keeps the newer record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_import_keeps_a_record_it_did_not_plan() {
+    use dim_app_server::mcp::import_testing::hold_import;
+
+    let home = scratch("dm-import-record-race");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{"guarded":{"command":"echo"}}}).to_string(),
+    )
+    .unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let workspace = project.to_str().unwrap().to_owned();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut other = Client::new_version(&server, false, 3).await;
+
+    let first = arguments_document("first-arg");
+    let preview = preview_project(&mut client, &project, &first).await;
+    assert_ok(&preview);
+    let token = preview["result"]["revision"].clone();
+
+    // The first import commits its skeleton and stops before its record.
+    let mut held = hold_import(&workspace);
+    let request = client
+        .send(
+            "mcp.import.apply",
+            json!({
+                "source":"project",
+                "cwd":project,
+                "document":first,
+                "expectedVersion":token,
+                "resolutions":[{"id":"guarded","action":"replace"}]
+            }),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(30), &mut held.arrived)
+        .await
+        .expect("the import reaches its record write")
+        .expect("the hold stays registered");
+
+    // The second import plans against the same state and writes its record.
+    let second = arguments_document("second-arg");
+    let preview = preview_project(&mut other, &project, &second).await;
+    assert_ok(&preview);
+    let applied = apply_project(
+        &mut other,
+        &project,
+        &second,
+        &preview["result"]["revision"],
+    )
+    .await;
+    assert_ok(&applied);
+    assert_eq!(
+        withheld_args(&home, &workspace, "guarded"),
+        json!(["second-arg"])
+    );
+
+    drop(held);
+    let response = client.response(request).await;
+    assert_eq!(
+        response["error"]["data"]["appError"],
+        json!("mcp_import_partial"),
+        "{response}"
+    );
+    assert_eq!(
+        withheld_args(&home, &workspace, "guarded"),
+        json!(["second-arg"]),
+        "the held import writes no record of its own"
+    );
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["mcpServers"]["guarded"],
+        json!({"command":"echo"}),
+        "both imports wrote the same skeleton"
+    );
+
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

@@ -20,7 +20,7 @@
 //! [`install`].
 use dim_agent_capabilities::{
     host::{HostError, HostErrorKind, ModelSelectionHost, SelectableModelsHost},
-    methods::{Interruption, MethodDecl, RpcError, params, reply},
+    methods::{Interruption, MethodCall, MethodDecl, RpcError, params, reply},
 };
 use dim_agent_runtime::{AgentBuilder, Names};
 use dim_agent_types::{ModalityModelSnapshot, ModelCapabilitySnapshot, ModelId};
@@ -865,7 +865,12 @@ impl DynPlugin for ModalityPlugin {
                     MethodDecl::new("modality.capabilities", false, Interruption::Report),
                     MethodDecl::new("modality.configure", true, Interruption::Report),
                 ],
-                Arc::new(move |method, value, stopping, _| {
+                Arc::new(move |call, stopping, _| {
+                    let MethodCall {
+                        method,
+                        params: value,
+                        ..
+                    } = call;
                     let settings = settings.clone();
                     let selection = selection.clone();
                     let selectable = selectable.clone();

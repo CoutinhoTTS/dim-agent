@@ -11,7 +11,9 @@ use crate::{
     protocol::{canonical_cwd, optional_non_null},
     settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
 };
-use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
+use dim_agent_capabilities::methods::{
+    Interruption, MethodCall, MethodDecl, RpcError, params, reply,
+};
 use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
@@ -588,9 +590,9 @@ async fn import_document(
     from: Option<String>,
     workspace: Option<&(usize, discovery::Workspace)>,
     stopping: &CancellationToken,
-) -> Result<(String, Option<String>), RpcError> {
+) -> Result<(String, Option<String>, Option<discovery::Identity>), RpcError> {
     match (document, from) {
-        (Some(document), None) => Ok((document, None)),
+        (Some(document), None) => Ok((document, None, None)),
         (None, Some(id)) => {
             let store = StoreId::parse(&id)
                 .ok_or_else(|| RpcError::invalid(format!("unknown MCP source {id}")))?;
@@ -600,18 +602,20 @@ async fn import_document(
             let workspace = workspace.map(|(_, workspace)| workspace.clone());
             let read = tokio::task::spawn_blocking(move || {
                 let environment = discovery::Environment::from_process();
+                // The identity row comes from the one read of the store the
+                // preview converts, so naming it reads nothing else.
                 discovery::document(store, &environment, workspace.as_ref())
             })
             .await
             .map_err(|_| RpcError::app(-32000, "mcp_unavailable", "MCP worker failed"))?;
-            let document = read.map_err(|error| {
+            let (document, source) = read.map_err(|error| {
                 let code = error.code();
                 RpcError::app(-32000, code, error.message)
             })?;
             if stopping.is_cancelled() {
                 return Err(RpcError::interrupted());
             }
-            Ok((document.text, Some(document.revision)))
+            Ok((document.text, Some(document.revision), Some(source)))
         }
         _ => Err(RpcError::invalid(
             "mcp.import takes exactly one of document and from",
@@ -688,7 +692,8 @@ pub(super) fn provide(
         .into_iter()
         .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.configuration" | "mcp.inspect" | "mcp.temporary.capabilities" | "mcp.import.preview" | "mcp.import.sources"), Interruption::Report))
         .collect(),
-        Arc::new(move |method, value, stopping, _| {
+        Arc::new(move |call, stopping, _| {
+            let MethodCall { method, params: value, .. } = call;
             let directory = directory.clone();
             let settings = settings.clone();
             let auth = auth.clone();
@@ -1072,7 +1077,7 @@ pub(super) fn provide(
                             p.source,
                             workspace.as_ref().map(|(root, _)| *root),
                         )?;
-                        let (document, source_revision) =
+                        let (document, source_revision, store) =
                             import_document(p.document, p.from, workspace.as_ref(), &stopping)
                                 .await?;
                         let document = import::parse_document(&document).map_err(error)?;
@@ -1081,6 +1086,7 @@ pub(super) fn provide(
                             .await
                             .map_err(error)?;
                         preview.source_revision = source_revision;
+                        preview.store = store;
                         return reply(preview);
                     }
                     "mcp.import.apply" => {
@@ -1104,7 +1110,7 @@ pub(super) fn provide(
                             p.source,
                             workspace.as_ref().map(|(root, _)| *root),
                         )?;
-                        let (document, source_revision) =
+                        let (document, source_revision, _) =
                             import_document(p.document, p.from, workspace.as_ref(), &stopping)
                                 .await?;
                         if let (Some(expected), Some(actual)) =

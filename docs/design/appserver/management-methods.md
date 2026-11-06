@@ -352,16 +352,19 @@ them, beside the 1024 frames and 32 MiB of replies and notifications; it
 drops a notice that does not fit, so one over 4 MiB never arrives, and stays
 open. Management
 and Session methods share this path; no management method declares `progress`
-today. Connection-bound notifications belong to the contract's
-`callChannel.notify`, which is not implemented. Settings source watches invalidate business consumers
+today. Connection-bound notifications are the contract's `callChannel.notify`
+and `closed` ([A.2](../contracts/session-boundary.md#a2-call-channel)): a
+notification is written to the calling connection only, through the reply and
+notice allowance, after the reply to the call that produced its caller.
+Settings source watches invalidate business consumers
 after successful persistence; they are not loader events or management
 notifications. Persistence does not certify runtime adoption or generation
 settlement.
 
 ## Limits and verification
 
-RemoteGateway, rutis-link export, connection-bound CallChannel notifications and
-shutdown reply handoff are not implemented in this subset. The Session method
+RemoteGateway, rutis-link export, `callChannel.takeFinalReply` and shutdown
+reply handoff are not implemented in this subset. The Session method
 table (`SessionMethods`) shares its `MethodTable`, declarations, handler, errors
 and call admission, which live in dim-agent-capabilities `methods`
 ([methods contract Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)). There is no new settings authority, loader or authorization system.

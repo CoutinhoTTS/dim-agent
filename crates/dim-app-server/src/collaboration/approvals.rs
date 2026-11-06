@@ -2,7 +2,7 @@ use super::*;
 use dim_agent_capabilities::{
     approval::{Approval, ApprovalRespondError},
     input_queue::InputQueue,
-    methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
+    methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply},
     session_broadcast::{SessionNotice, notify},
 };
 use sha2::{Digest, Sha256};
@@ -725,7 +725,8 @@ pub(super) fn install(
             false,
             Interruption::Report,
         )],
-        Arc::new(move |_, value, cancel, _| {
+        Arc::new(move |call, cancel, _| {
+            let MethodCall { params: value, .. } = call;
             let owner = owner.clone();
             Box::pin(async move { reply(owner.approval_detail(params(value)?, &cancel).await?) })
         }),
