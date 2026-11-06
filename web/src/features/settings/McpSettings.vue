@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useSettingsText } from "../../i18n/settings-general"
-import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpImportApplied, readMcpImportPreview, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpImportEntry, type McpImportResolution, type McpInspection, type McpInvalidEntry, type McpProbe, type McpServerInput, type McpView } from "../../rpc/general-settings"
+import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpImportApplied, readMcpImportPreview, readMcpImportSources, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpImportEntry, type McpImportResolution, type McpImportSource, type McpInspection, type McpInvalidEntry, type McpProbe, type McpServerInput, type McpView } from "../../rpc/general-settings"
 import { RpcError } from "../../rpc/client"
 import { configuration, patch, type Draft } from "./mcp-form"
 import { readAck } from "../../rpc/read"
@@ -28,11 +28,16 @@ const clientSecret = ref("")
 const detail = ref<{ server: McpEntry; inspection: McpInspection }>()
 const testResult = ref<{ id: string; probe: McpProbe }>()
 type ImportEntryState = McpImportEntry & { action: "import" | "skip" | "replace" | "rename"; newId: string }
-type ImportState = { source: "user" | "project"; document: string; revision: string; entries: ImportEntryState[]; unknownTopLevel: string[] }
+/// A preview names its input: the file's text the page read, or a known
+/// store id the daemon reads. A discovered store's text is never here.
+type ImportState = { source: "user" | "project"; document: string | undefined; from: string | undefined; sourceRevision: string | undefined; revision: string; entries: ImportEntryState[]; unknownTopLevel: string[] }
 const importPreview = ref<ImportState>()
 const importFile = ref<HTMLInputElement>()
 const importStale = ref(false)
 const importNotice = ref("")
+/// The known stores of other local clients, shown by Discover; absent until
+/// the user asks. A row carries no entry and no value.
+const discovery = ref<McpImportSource[]>()
 const editorForm = ref<HTMLFormElement>()
 const search = ref("")
 let mounted = true
@@ -99,6 +104,7 @@ async function load(path = loadedCwd.value): Promise<void> {
     importPreview.value = undefined
     importStale.value = false
     importNotice.value = ""
+    discovery.value = undefined
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
@@ -113,8 +119,36 @@ async function importFileChosen(event: Event): Promise<void> {
   busy.value = true
   error.value = ""
   importNotice.value = ""
-  try { await readImportPreview(await file.text()) }
+  try { discovery.value = undefined; await readImportPreview({ document: await file.text() }) }
   catch (cause) { error.value = messageFrom(cause) }
+  finally { busy.value = false }
+}
+/// The known stores of other local clients, as the owner reports them. The
+/// page never asks for a document and never watches the files.
+async function discover(): Promise<void> {
+  if (busy.value) return
+  busy.value = true
+  error.value = ""
+  importNotice.value = ""
+  try {
+    discovery.value = await connection.client.call("mcp.import.sources", scope(), readMcpImportSources)
+  } catch (cause) { error.value = messageFrom(cause) }
+  finally { busy.value = false }
+}
+function closeDiscovery(): void {
+  if (!busy.value) discovery.value = undefined
+}
+/// Previews one ready store by id: the owner reads it and answers the same
+/// entries a file preview would; its text is never sent to this page.
+async function previewDiscovered(source: McpImportSource): Promise<void> {
+  if (busy.value || source.state !== "ready") return
+  busy.value = true
+  error.value = ""
+  importNotice.value = ""
+  try {
+    await readImportPreview({ from: source.id })
+    discovery.value = undefined
+  } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
 /// The source an import writes: the project when the selector names a
@@ -127,12 +161,17 @@ function importDestination(): string {
     ? s(`Import into: project ${loadedCwd.value}`, `导入到：项目 ${loadedCwd.value}`)
     : s('Import into: user configuration', '导入到：用户配置')
 }
-async function readImportPreview(document: string): Promise<void> {
+async function readImportPreview(input: { document?: string; from?: string }): Promise<void> {
   const source = importSource()
-  const preview = await connection.client.call("mcp.import.preview", { ...scope(), source, document }, readMcpImportPreview)
+  const params: Record<string, unknown> = { ...scope(), source }
+  if (input.document !== undefined) params.document = input.document
+  if (input.from !== undefined) params.from = input.from
+  const preview = await connection.client.call("mcp.import.preview", params, readMcpImportPreview)
   importPreview.value = {
     source,
-    document,
+    document: input.document,
+    from: input.from,
+    sourceRevision: preview.sourceRevision,
     revision: preview.revision,
     unknownTopLevel: preview.unknownTopLevel,
     entries: preview.entries.map((entry) => ({
@@ -148,8 +187,10 @@ async function previewImportAgain(): Promise<void> {
   const preview = importPreview.value
   if (!preview || busy.value) return
   busy.value = true
-  try { await readImportPreview(preview.document) }
-  catch (cause) { error.value = messageFrom(cause) }
+  try {
+    if (preview.from !== undefined) await readImportPreview({ from: preview.from })
+    else if (preview.document !== undefined) await readImportPreview({ document: preview.document })
+  } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
 function closeImportPreview(): void {
@@ -172,7 +213,12 @@ async function applyImport(): Promise<void> {
       action: entry.action,
       ...(entry.action === "rename" ? { newId: entry.newId.trim() } : {}),
     }))
-    await connection.client.call("mcp.import.apply", { ...scope(), source: preview.source, document: preview.document, expectedVersion: preview.revision, resolutions }, readMcpImportApplied)
+    const params: Record<string, unknown> = { ...scope(), source: preview.source, expectedVersion: preview.revision, resolutions }
+    if (preview.from !== undefined) {
+      params.from = preview.from
+      params.expectedSourceRevision = preview.sourceRevision
+    } else params.document = preview.document
+    await connection.client.call("mcp.import.apply", params, readMcpImportApplied)
     importPreview.value = undefined
     await read()
     importNotice.value = importSummary(preview)
@@ -416,11 +462,25 @@ onBeforeUnmount(() => {
 <template>
   <article class="settings-page">
     <header><h2 data-route-heading tabindex="-1">MCP</h2><p>{{ s('Manage command and remote MCP servers. Project servers stay disabled until you explicitly enable them locally.', '管理命令和远程 MCP 服务器。项目服务器默认禁用，只有您在本地明确启用后才会运行。') }}</p></header>
-    <form class="settings-card settings-form" @submit.prevent="load()"><label><span>{{ s('Configuration scope', '配置范围') }}</span><select :value="loadedCwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User configuration', '用户配置') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('Choose a workspace to include its project MCP servers alongside user and plugin servers. This does not change a server\'s working directory.', '选择工作区后，会同时显示该项目、用户和插件提供的 MCP 服务器。这不会更改服务器的运行目录。') }}</p><div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load / refresh', '加载 / 刷新') }}</button><button class="ui-button" data-size="md" data-variant="primary" type="button" :disabled="busy || !catalog || !connection.supports('mcp.save')" @click="create">{{ s('Add server', '添加服务器') }}</button><input ref="importFile" type="file" accept="application/json,.json" hidden :disabled="busy" @change="importFileChosen" /><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy || !!draft || !connection.supports('mcp.import.preview')" @click="chooseImportFile">{{ s('Import from file…', '从文件导入…') }}</button><span class="settings-meta">{{ importDestination() }}</span></div></form>
+    <form class="settings-card settings-form" @submit.prevent="load()"><label><span>{{ s('Configuration scope', '配置范围') }}</span><select :value="loadedCwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User configuration', '用户配置') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('Choose a workspace to include its project MCP servers alongside user and plugin servers. This does not change a server\'s working directory.', '选择工作区后，会同时显示该项目、用户和插件提供的 MCP 服务器。这不会更改服务器的运行目录。') }}</p><div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load / refresh', '加载 / 刷新') }}</button><button class="ui-button" data-size="md" data-variant="primary" type="button" :disabled="busy || !catalog || !connection.supports('mcp.save')" @click="create">{{ s('Add server', '添加服务器') }}</button><input ref="importFile" type="file" accept="application/json,.json" hidden :disabled="busy" @change="importFileChosen" /><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy || !!draft || !connection.supports('mcp.import.preview')" @click="chooseImportFile">{{ s('Import from file…', '从文件导入…') }}</button><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy || !!draft || !connection.supports('mcp.import.sources')" @click="discover">{{ s('Discover…', '发现…') }}</button><span class="settings-meta">{{ importDestination() }}</span></div></form>
     <GeneralSettingsStatus :busy="busy" :error="error" @reload="load()" />
     <p v-if="importNotice" class="ui-banner settings-banner" data-tone="success" role="status">{{ importNotice }}</p>
+    <section v-if="discovery" class="settings-card" aria-live="polite">
+      <h3>{{ s('MCP stores of other local clients', '其他本地客户端的 MCP 存储') }}</h3>
+      <p>{{ s('These files belong to other clients. Dim reads them only when you open Discover or preview one, inside the daemon, and never shows or returns a value from them.', '这些文件属于其他客户端。只有您打开“发现”或预览其中一项时，Dim 才会在守护进程内读取这些文件，且绝不显示或返回其中的任何值。') }}</p>
+      <p v-if="!discovery.length" role="status">{{ s('No known store was found.', '未找到已知存储。') }}</p>
+      <div v-for="row in discovery" :key="row.id" class="runtime-detail">
+        <p><strong>{{ row.id }}</strong> · {{ row.client }} · {{ row.scope }} · {{ row.state }}</p>
+        <p>{{ row.path }}</p>
+        <p v-if="row.state === 'ready'">{{ s('Entries', '条目') }}: {{ row.entries }}</p>
+        <p v-else-if="row.error">{{ row.error }}</p>
+        <button v-if="row.state === 'ready'" class="ui-button" data-size="sm" data-variant="secondary" type="button" :disabled="busy" @click="previewDiscovered(row)">{{ s('Preview', '预览') }}</button>
+      </div>
+      <div class="settings-actions"><button class="ui-button" data-size="md" data-variant="secondary" type="button" :disabled="busy" @click="closeDiscovery">{{ s('Close discovery', '关闭发现') }}</button></div>
+    </section>
     <section v-if="importPreview" class="settings-card" aria-live="polite">
       <h3>{{ s('Import preview', '导入预览') }} · {{ importPreview.source }} · {{ importPreview.revision }}</h3>
+      <p v-if="importPreview.from">{{ s('From store', '来自存储') }} {{ importPreview.from }} · {{ s('its text stays in the daemon.', '其内容留在守护进程中。') }}</p>
       <p>{{ s('Each entry is matched against the selected source. No value is shown: changed fields are named only. Imported and replaced entries start disabled.', '每个条目会与所选来源比对。此处不显示任何值，只列出变更字段名。导入和替换的条目默认禁用。') }}</p>
       <p v-if="importPreview.source === 'project'">{{ s('The workspace file receives each entry\'s public skeleton: the command, declared working directory, URL origin and public OAuth fields. Arguments, environment and header values, the bearer token, a URL with userinfo, path, query or fragment, hidden OAuth fields and unknown members go to your user-scope mcp-secrets record, never to the workspace file.', '工作区文件只写入每个条目的公开骨架：命令、声明的运行目录、URL 来源和公开 OAuth 字段。参数、环境变量与请求头的值、Bearer 令牌、带用户信息、路径、查询或片段的 URL、隐藏的 OAuth 字段及未知成员会写入您的用户范围 mcp-secrets 记录，绝不会写入工作区文件。') }}</p>
       <p>{{ importUnknown() }}</p>

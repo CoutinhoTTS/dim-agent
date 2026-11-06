@@ -248,11 +248,11 @@ test("changing MCP scope keeps cancelled or failed drafts and saves only to the 
 })
 
 /// The owner's import preview for `entries`, read at `revision`.
-function importPreviewReply(entries, revision = "user:1", unknownTopLevel = []) {
-  return { revision, entries, unknownTopLevel }
+function importPreviewReply(entries, revision = "user:1", unknownTopLevel = [], sourceRevision) {
+  return { revision, entries, unknownTopLevel, ...(sourceRevision === undefined ? {} : { sourceRevision }) }
 }
 const importEntry = (overrides) => ({ id: "docs", transport: "stdio", status: "changed", changes: [], unsupported: [], omitted: 0, ...overrides })
-function mountImport({ preview, catalogs, apply }) {
+function mountImport({ preview, catalogs, apply, sources = [] }) {
   const calls = []
   let served = 0
   globalThis.window = { confirm: () => true }
@@ -265,6 +265,7 @@ function mountImport({ preview, catalogs, apply }) {
         served += 1
         return read(reply)
       }
+      if (method === "mcp.import.sources") return read({ sources })
       if (method === "mcp.import.preview") return read(preview)
       if (method === "mcp.import.apply") {
         if (apply) return apply(params, read)
@@ -420,6 +421,47 @@ test("an entry that does not decode offers no action but skip", async () => {
     await button(root, "Apply import").props.onClick(); await flush()
     const applied = calls.find((call) => call.method === "mcp.import.apply")
     assert.deepEqual(applied.params.resolutions, [{ id: "broken", action: "skip" }])
+  } finally { closeImport(app) }
+})
+
+test("discovery lists known stores and previews a ready one by id", async () => {
+  const preview = importPreviewReply([importEntry({ id: "docs" })], "user:1", [], "9f2c")
+  const sources = [
+    { id: "claude-code:user", client: "claude-code", scope: "user", path: "~/.claude.json", state: "ready", entries: 2 },
+    { id: "codex:user", client: "codex", scope: "user", path: "~/.codex/config.toml", state: "malformed", error: `the file is not valid TOML at line 2 column 1` },
+    { id: "omp:user", client: "omp", scope: "user", path: "~/.omp/agent/mcp.json", state: "absent" },
+  ]
+  const { root, app, calls } = await mountImport({ preview, catalogs: [catalog(undefined)], sources })
+  try {
+    await button(root, "Discover…").props.onClick()
+    await flush()
+    const shown = text(root)
+    assert.match(shown, /claude-code:user · claude-code · user · ready/)
+    assert.match(shown, /~\/.claude\.json/)
+    assert.match(shown, /Entries: 2/)
+    assert.match(shown, /codex:user · codex · user · malformed/)
+    assert.match(shown, /the file is not valid TOML at line 2 column 1/)
+    assert.match(shown, /omp:user · omp · user · absent/)
+    // Only a ready store offers a preview; the others show their state.
+    const previews = all(root).filter((element) => element.type === "button" && text(element) === "Preview")
+    assert.equal(previews.length, 1)
+    await previews[0].props.onClick()
+    await flush()
+    const call = calls.find((item) => item.method === "mcp.import.preview")
+    assert.equal(call.params.from, "claude-code:user")
+    assert.equal("document" in call.params, false)
+    assert.equal(call.params.source, "user")
+    assert.match(text(root), /From store claude-code:user · its text stays in the daemon\./)
+    assert.match(text(root), /Import preview · user · user:1/)
+    // Apply sends the store id and the digest the preview answered, never a
+    // document.
+    await button(root, "Apply import").props.onClick()
+    await flush()
+    const applied = calls.find((item) => item.method === "mcp.import.apply")
+    assert.equal(applied.params.from, "claude-code:user")
+    assert.equal(applied.params.expectedSourceRevision, "9f2c")
+    assert.equal("document" in applied.params, false)
+    assert.equal(applied.params.expectedVersion, "user:1")
   } finally { closeImport(app) }
 })
 

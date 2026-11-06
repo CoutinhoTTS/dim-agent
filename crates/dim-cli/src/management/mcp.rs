@@ -578,6 +578,61 @@ impl ImportResolution {
     }
 }
 
+/// One known store `mcp.import.sources` reports. It carries the store's
+/// identity, the file read, its state and how many entries it holds or the
+/// owner's message; never an entry id or a value.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSource {
+    pub id: String,
+    pub client: String,
+    pub scope: String,
+    pub path: String,
+    pub state: ImportSourceState,
+    #[serde(default)]
+    pub entries: Option<usize>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl ImportSource {
+    /// How many entries the store holds, or the owner's message for a store
+    /// that is not ready.
+    pub fn detail(&self) -> String {
+        match (&self.entries, &self.error) {
+            (Some(entries), _) => entries.to_string(),
+            (_, error) => error.clone().unwrap_or_else(|| "—".to_owned()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportSourceState {
+    Ready,
+    Absent,
+    Unreadable,
+    TooLarge,
+    Malformed,
+}
+
+impl ImportSourceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Absent => "absent",
+            Self::Unreadable => "unreadable",
+            Self::TooLarge => "too-large",
+            Self::Malformed => "malformed",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportSources {
+    sources: Vec<ImportSource>,
+}
+
 /// The preview `mcp.import.preview` reports: what importing the document
 /// would do to one source, read at `revision`. It names fields and kinds,
 /// never a value.
@@ -590,6 +645,10 @@ pub struct ImportPreview {
     /// them.
     #[serde(default)]
     pub unknown_top_level: Vec<String>,
+    /// With `from`: the digest of the store document the preview read; absent
+    /// for a client-supplied `document`, which the apply carries itself.
+    #[serde(default)]
+    pub source_revision: Option<String>,
 }
 
 /// One entry's place in the preview.
@@ -684,44 +743,69 @@ pub struct ImportApplied {
     pub revision: String,
 }
 
-/// The entries `document` holds, previewed against the source `source` names.
-/// It writes and executes nothing.
+/// The known stores of other local clients, read at most once per call. The
+/// owner reads the files; the reply carries no entry and no value.
+pub async fn import_sources(client: &mut Client, cwd: &str) -> crate::Result<Vec<ImportSource>> {
+    let reply: ImportSources = client
+        .typed("mcp.import.sources", json!({"cwd": cwd}))
+        .await?;
+    Ok(reply.sources)
+}
+
+/// Where an import's document comes from: the client's own text, or one known
+/// store of another local client that the owner reads.
+#[derive(Clone, Copy)]
+pub enum ImportInput<'a> {
+    Document(&'a str),
+    Store(&'a str),
+}
+
+impl ImportInput<'_> {
+    fn write(self, params: &mut Value) {
+        match self {
+            Self::Document(document) => params["document"] = json!(document),
+            Self::Store(id) => params["from"] = json!(id),
+        }
+    }
+}
+
+/// The entries the request names, previewed against the source `source`
+/// names. It writes and executes nothing.
 pub async fn preview_import(
     client: &mut Client,
     cwd: &str,
     source: &str,
-    document: &str,
+    input: ImportInput<'_>,
 ) -> crate::Result<ImportPreview> {
-    client
-        .typed(
-            "mcp.import.preview",
-            json!({"cwd": cwd, "source": source, "document": document}),
-        )
-        .await
+    let mut params = json!({"cwd": cwd, "source": source});
+    input.write(&mut params);
+    client.typed("mcp.import.preview", params).await
 }
 
 /// Writes the entries `resolutions` accept into `source`, all or nothing, at
-/// the revision the preview read (`expected`). It answers the new revision.
+/// the revision the preview read (`expected`). With `from`, it also carries
+/// the store digest the preview answered, so the owner applies the text it
+/// previewed and nothing else. It answers the new revision.
 pub async fn apply_import(
     client: &mut Client,
     cwd: &str,
     source: &str,
-    document: &str,
+    input: ImportInput<'_>,
     expected: &str,
+    expected_source_revision: Option<String>,
     resolutions: &[ImportResolution],
 ) -> crate::Result<String> {
-    let applied: ImportApplied = client
-        .typed(
-            "mcp.import.apply",
-            json!({
-                "cwd": cwd,
-                "source": source,
-                "document": document,
-                "expectedVersion": expected,
-                "resolutions": resolutions.iter().map(ImportResolution::value).collect::<Vec<_>>(),
-            }),
-        )
-        .await?;
+    let mut params = json!({
+        "cwd": cwd,
+        "source": source,
+        "expectedVersion": expected,
+        "resolutions": resolutions.iter().map(ImportResolution::value).collect::<Vec<_>>(),
+    });
+    input.write(&mut params);
+    if let Some(revision) = expected_source_revision {
+        params["expectedSourceRevision"] = json!(revision);
+    }
+    let applied: ImportApplied = client.typed("mcp.import.apply", params).await?;
     Ok(applied.revision)
 }
 

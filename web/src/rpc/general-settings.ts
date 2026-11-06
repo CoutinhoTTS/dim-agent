@@ -204,6 +204,29 @@ export function readMcpAuthStart(value: unknown): { attemptId: string; authoriza
   return { attemptId: string(source.attemptId), authorizationUrl, redirectUri: string(source.redirectUri), expiresAt: number(source.expiresAt) }
 }
 
+export type McpImportSourceState = "ready" | "absent" | "unreadable" | "too-large" | "malformed"
+/** One known store of another local client: its identity, the file read, its
+ * state and the count or the owner's message. Never an entry or a value. */
+export type McpImportSource = {
+  id: string; client: string; scope: string; path: string; state: McpImportSourceState
+  entries: number | undefined; error: string | undefined
+}
+export function readMcpImportSources(value: unknown): McpImportSource[] {
+  const source = object(value)
+  return array(source.sources, (item) => {
+    const row = object(item)
+    return {
+      id: string(row.id),
+      client: string(row.client),
+      scope: string(row.scope),
+      path: string(row.path),
+      state: choice(row.state, ["ready", "absent", "unreadable", "too-large", "malformed"]),
+      entries: row.entries === undefined ? undefined : number(row.entries),
+      error: optionalString(row.error),
+    }
+  })
+}
+
 export type McpImportStatus = "identical" | "changed" | "conflict" | "invalid"
 export type McpImportField = { field: string; kind: string }
 export type McpImportUnsupported = { field: string; effect: "kept-unused" | "dropped" }
@@ -214,11 +237,12 @@ export type McpImportEntry = {
 }
 /** The owner's preview of a standard `mcpServers` document: names and kinds,
  * never a value. */
-export type McpImportPreview = { revision: string; entries: McpImportEntry[]; unknownTopLevel: string[] }
+export type McpImportPreview = { revision: string; sourceRevision: string | undefined; entries: McpImportEntry[]; unknownTopLevel: string[] }
 export function readMcpImportPreview(value: unknown): McpImportPreview {
   const source = object(value)
   return {
     revision: string(source.revision),
+    sourceRevision: optionalString(source.sourceRevision),
     entries: array(source.entries, (item) => {
       const entry = object(item)
       return {
