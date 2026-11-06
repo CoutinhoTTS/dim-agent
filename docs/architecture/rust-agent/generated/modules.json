@@ -18106,7 +18106,6 @@
         "path crate::EventKind::ContextPrepare",
         "path crate::EventKind::InputMessage",
         "path crate::EventKind::ModelCall",
-        "path crate::EventKind::ModelOutputEnd",
         "path crate::EventKind::ToolCompleted",
         "path crate::EventKind::ToolResult",
         "path crate::InputAppliedData",

@@ -298,11 +298,8 @@ fn retry_forbidden_roundtrips_and_rejects_invalid_contracts() {
     });
     let decoded: AgentEvent = serde_json::from_value(event.clone()).unwrap();
     equal_json(&serde_json::to_value(&decoded).unwrap(), &event);
-    let mut view = event.clone();
-    view["data"]["failure"]
-        .as_object_mut()
-        .unwrap()
-        .remove("retryForbidden");
+    let decoded_v1: v1::AgentEvent = serde_json::from_value(event.clone()).unwrap();
+    equal_json(&serde_json::to_value(decoded_v1).unwrap(), &event);
     let outbound = serde_json::to_value(
         v1::SharedEvent::new(Arc::new(
             serde_json::from_value::<AgentEvent>(event.clone()).unwrap(),
@@ -310,7 +307,7 @@ fn retry_forbidden_roundtrips_and_rejects_invalid_contracts() {
         .unwrap(),
     )
     .unwrap();
-    equal_json(&outbound, &view);
+    equal_json(&outbound, &event);
 
     let mut allowed = fixture("step/model-output-end", Some("failed"));
     allowed["data"]["failure"] = json!({
