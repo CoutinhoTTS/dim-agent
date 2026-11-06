@@ -178,21 +178,6 @@ python3 benchmarks/daily_run.py --run-type baseline --head <commit> --tasks-dir 
 
 任务定义 checksum 与基线不符时**拒绝比较**，而不是给出一个看起来能比的数字。
 
-### 缓存解剖（离线）
-
-`runner/cache_anatomy.py` 读一份 `dimcode export` 的 JSONL（一个 Session 的完整
-Timeline），按 `model/call` 的请求体和 `model/usage` 的 cache token 做归因，不跑模型：
-
-```bash
-python3 benchmarks/runner/cache_anatomy.py /path/to/export.jsonl --profile deepseek --json out.json
-```
-
-输出每个分支的首请求继承占比、前缀树的共享深度/分叉点、白写与冷重付 token，以及按
-价格表折算的有效成本。加 `--simulate` 会再用同一份 trace 重算写缓存/保活策略的
-成本；`actual` 行必须复现实测成本，其余行是估计，不是实测。内置价格表是各 provider
-的**计价形状示例**，不是账单；做美元结论前用 `--prices` 指向当前 list price。输入的
-导出含 prompt、代码和工具输出，按敏感数据保管。
-
 ### 产物
 
 落在 `results/<run-id>/`。run-id 形如 `2026-09-22T0814__checkpoint__4b6281ff9__a3f1`：

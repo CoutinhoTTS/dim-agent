@@ -292,6 +292,8 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
                       "suspects": [{"pr": "#548", "confidence": "medium", "reason": "Lowers LIMIT."},
                                    {"pr": "#999", "confidence": "high", "reason": "Not in the window."}]}
         hard = {"category": "agent", "cause": "Never finds the key.", "evidence": "step 3",
+                "agent_gap": "not visible in the shown excerpt",
+                "improvement": "should be dropped",
                 "same_as_known": True, "suspects": []}
         known = {"tb/hard": {"category": "agent", "cause": "Never finds the key.",
                              "first_seen": "2026-10-20", "nights": 4},
@@ -304,6 +306,7 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertEqual(set(by_task), {"tb/regex", "tb/hard"})
         self.assertEqual([s["pr"] for s in by_task["tb/regex"].suspects], ["#548"])
         self.assertTrue(by_task["tb/hard"].known)
+        self.assertEqual(by_task["tb/hard"].improvement, "")
         self.assertEqual(updated["tb/hard"]["nights"], 5)
         self.assertEqual(updated["tb/regex"]["first_seen"], "2026-10-30")
         self.assertNotIn("tb/fixed", updated)
@@ -315,6 +318,8 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertIn("#548 (medium): Lowers LIMIT.", track.body)
         self.assertIn("**Agent gap:** The agent never ran the failing test after editing.", track.body)
         self.assertIn("**Improvement:** Run the task's test command before finishing.", track.body)
+        self.assertIn("**Agent gap:** not visible in the shown excerpt", track.body)
+        self.assertNotIn("**Improvement:** should be dropped", track.body)
         self.assertIn("#### `tb/hard` — agent · failing since 2026-10-20 (5 night(s))", track.body)
         self.assertIn("tb/regex", track.news)
         self.assertNotIn("tb/hard", track.news)
