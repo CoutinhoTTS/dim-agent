@@ -46,6 +46,9 @@ mod tree;
 #[path = "transport_flow/history_window.rs"]
 mod history_window;
 
+#[path = "transport_flow/history_forward.rs"]
+mod history_forward;
+
 #[path = "transport_flow/keyed_blocks.rs"]
 mod keyed_blocks;
 
