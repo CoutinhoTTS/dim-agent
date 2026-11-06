@@ -405,6 +405,10 @@
   },
   {
     "from": "dimcode",
+    "to": "dim-modality-aimux"
+  },
+  {
+    "from": "dimcode",
     "to": "dim-oauth"
   },
   {

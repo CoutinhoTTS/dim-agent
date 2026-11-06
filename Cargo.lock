@@ -1431,6 +1431,7 @@ dependencies = [
  "dim-cli",
  "dim-goal",
  "dim-modality",
+ "dim-modality-aimux",
  "dim-oauth",
  "dim-session-title",
  "image",
