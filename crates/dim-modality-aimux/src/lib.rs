@@ -138,16 +138,13 @@ impl ModalityAdapter for MediaAdapter {
         };
         let edit = media::serves_edit(vendor, &model.model_id);
         let mut operations = Vec::new();
-        for (kind, category, operation) in vendor
-            .statements(edit)
-            .into_iter()
-            .filter(|(kind, _, _)| matches!(kind, Operation::Image | Operation::Video))
-        {
+        for (kind, category, operation) in vendor.statements(edit) {
             let schema = match (kind, operation) {
                 (Operation::Image, "edit") => image_edit_schema(),
                 (Operation::Image, _) => image_generate_schema(),
                 (Operation::Video, _) => video_schema(),
-                (_, _) => unreachable!("only an image or video statement is offered"),
+                (Operation::Speech, _) => speech_schema(),
+                (Operation::Transcription, _) => transcription_schema(),
             };
             operations.push(AdapterOperation {
                 category: category.to_owned(),
@@ -249,11 +246,47 @@ impl ModalityAdapter for MediaAdapter {
                         job::image_output(result, &job.work_dir, job::requested_format(&job))?;
                     Ok(AdapterOutput { files, data: None })
                 }
+                Operation::Speech => {
+                    progress.send(AdapterProgress {
+                        fraction: None,
+                        message: Some("Synthesizing the audio".into()),
+                    });
+                    let provider =
+                        media::provider(&connection, vendor, Operation::Speech, &self.transport)?;
+                    let model = media::speech_model(&provider, &connection.model)?;
+                    let options = job::speech_options(&job, vendor)?;
+                    let result = aimux_core::speech_model::generate_speech(&*model, options)
+                        .await
+                        .map_err(|error| failure(error, &cancel, &secrets))?;
+                    let files =
+                        job::speech_output(result, &job.work_dir, job::requested_format(&job))?;
+                    Ok(AdapterOutput { files, data: None })
+                }
+                Operation::Transcription => {
+                    progress.send(AdapterProgress {
+                        fraction: None,
+                        message: Some("Transcribing the audio".into()),
+                    });
+                    let provider = media::provider(
+                        &connection,
+                        vendor,
+                        Operation::Transcription,
+                        &self.transport,
+                    )?;
+                    let model = media::transcription_model(&provider, &connection.model)?;
+                    let options = job::transcription_options(&job, vendor)?;
+                    let result = aimux_core::transcription_model::transcribe(&*model, options)
+                        .await
+                        .map_err(|error| failure(error, &cancel, &secrets))?;
+                    let data = job::transcription_data(&result);
+                    let files = job::transcription_output(&result, &job.work_dir)?;
+                    Ok(AdapterOutput {
+                        files,
+                        data: Some(data),
+                    })
+                }
                 Operation::Video => Err(AdapterError::provider_error(
                     "A video task is waited on by its handle, not by its task id",
-                )),
-                _ => Err(AdapterError::provider_error(
-                    "No such operation is served in this build",
                 )),
             }
         })
@@ -528,6 +561,8 @@ fn kind_of(job: &Job) -> Result<Operation, AdapterError> {
     match (job.category.as_str(), job.operation.as_str()) {
         ("image", "generate") | ("image", "edit") => Ok(Operation::Image),
         ("video", "generate") => Ok(Operation::Video),
+        ("speech", "synthesize") => Ok(Operation::Speech),
+        ("speech", "transcribe") => Ok(Operation::Transcription),
         (category, operation) => Err(AdapterError::invalid_input(format!(
             "The aimux adapter serves no {category}.{operation}"
         ))),
@@ -578,6 +613,35 @@ fn video_schema() -> Value {
             "fps": {"type": "integer", "minimum": 1, "maximum": 60},
             "seed": {"type": "integer", "minimum": 0},
             "generateAudio": {"type": "boolean"},
+            "providerOptions": {"type": "object"}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn speech_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "minLength": 1},
+            "voice": {"type": "string"},
+            "outputFormat": {"enum": ["mp3", "opus", "aac", "flac", "wav", "pcm"]},
+            "speed": {"type": "number", "minimum": 0},
+            "instructions": {"type": "string"},
+            "language": {"type": "string"},
+            "providerOptions": {"type": "object"}
+        },
+        "required": ["text"],
+        "additionalProperties": false
+    })
+}
+
+fn transcription_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "language": {"type": "string"},
+            "prompt": {"type": "string"},
             "providerOptions": {"type": "object"}
         },
         "additionalProperties": false

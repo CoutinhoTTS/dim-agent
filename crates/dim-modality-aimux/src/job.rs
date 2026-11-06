@@ -10,12 +10,42 @@ use aimux_core::image_model::{
     ImageCallOptions, ImageFile, ImageFileData, ImageOutputs, ImageResult,
 };
 use aimux_core::shared::{AspectRatio, SharedProviderOptions, Size};
+use aimux_core::speech_model::{AudioData, SpeechCallOptions, SpeechResult};
+use aimux_core::transcription_model::{AudioInput, TranscriptionCallOptions, TranscriptionResult};
 use aimux_core::video_model::{VideoCallOptions, VideoData, VideoFile, VideoFileData, VideoResult};
 use dim_modality::{AdapterError, Job, JobFile};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 use crate::vendor::Vendor;
+
+/// The `data` a transcription puts on its task result, and the file that
+/// carries the same text (A.1).
+pub fn transcription_data(result: &TranscriptionResult) -> Value {
+    let segments: Vec<Value> = result
+        .segments
+        .iter()
+        .map(|segment| {
+            serde_json::json!({
+                "start_ms": milliseconds(segment.start_second),
+                "end_ms": milliseconds(segment.end_second),
+                "text": segment.text,
+            })
+        })
+        .collect();
+    let mut data = Map::new();
+    data.insert("text".into(), Value::String(result.text.clone()));
+    data.insert("segments".into(), Value::Array(segments));
+    if let Some(language) = &result.language {
+        data.insert("language".into(), Value::String(language.clone()));
+    }
+    Value::Object(data)
+}
+
+/// Seconds as whole milliseconds, rounded: 1.2345 s is 1235 ms.
+fn milliseconds(seconds: f64) -> i64 {
+    (seconds * 1000.0).round() as i64
+}
 
 /// One image call's options.
 pub fn image_options(job: &Job, vendor: &Vendor) -> Result<ImageCallOptions, AdapterError> {
@@ -97,6 +127,64 @@ pub fn video_options(job: &Job, vendor: &Vendor) -> Result<VideoCallOptions, Ada
     Ok(options)
 }
 
+/// One speech call's options.
+pub fn speech_options(job: &Job, vendor: &Vendor) -> Result<SpeechCallOptions, AdapterError> {
+    let params = &job.params;
+    let text_body =
+        text(params, "text").ok_or_else(|| AdapterError::invalid_input("`text` is required"))?;
+    let mut options = SpeechCallOptions::new(text_body);
+    options.voice = text(params, "voice").map(str::to_owned);
+    options.output_format = text(params, "outputFormat").map(str::to_owned);
+    options.instructions = text(params, "instructions").map(str::to_owned);
+    options.speed = number(params, "speed")?;
+    options.language = text(params, "language").map(str::to_owned);
+    let mut provider = provider_options(params, vendor);
+    if let Some(language) = &options.language {
+        provider
+            .entry(vendor.options.to_owned())
+            .or_default()
+            .insert("language".into(), Value::String(language.clone()));
+    }
+    if !provider.is_empty() {
+        options.provider_options = Some(provider);
+    }
+    Ok(options)
+}
+
+/// One transcription call's options.
+pub fn transcription_options(
+    job: &Job,
+    vendor: &Vendor,
+) -> Result<TranscriptionCallOptions, AdapterError> {
+    let params = &job.params;
+    let file = job
+        .files
+        .first()
+        .ok_or_else(|| AdapterError::invalid_input("`speech.transcribe` needs one audio file"))?;
+    if job.files.len() > 1 {
+        return Err(AdapterError::invalid_input(
+            "`speech.transcribe` takes one audio file",
+        ));
+    }
+    let mut options = TranscriptionCallOptions::new(
+        AudioInput::Binary(read(file.path.as_path())?),
+        file.media_type.clone(),
+    );
+    let mut provider = provider_options(params, vendor);
+    for key in ["language", "prompt"] {
+        if let Some(value) = text(params, key) {
+            provider
+                .entry(vendor.options.to_owned())
+                .or_default()
+                .insert(key.into(), Value::String(value.into()));
+        }
+    }
+    if !provider.is_empty() {
+        options.provider_options = Some(provider);
+    }
+    Ok(options)
+}
+
 /// The caller's provider options, under the package's own namespace.
 ///
 /// `params.providerOptions` is aimux's namespaced map when it carries the
@@ -147,6 +235,16 @@ fn integer(params: &Value, key: &str) -> Result<Option<u64>, AdapterError> {
         Some(value) => value.as_u64().map(Some).ok_or_else(|| {
             AdapterError::invalid_input(format!("`{key}` must be a non-negative integer"))
         }),
+    }
+}
+
+fn number(params: &Value, key: &str) -> Result<Option<f64>, AdapterError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| AdapterError::invalid_input(format!("`{key}` must be a number"))),
     }
 }
 
@@ -203,6 +301,49 @@ pub fn image_output(
         });
     }
     Ok(files)
+}
+
+/// The file one speech call produced.
+pub fn speech_output(
+    result: SpeechResult,
+    work_dir: &Path,
+    requested: Option<&str>,
+) -> Result<Vec<JobFile>, AdapterError> {
+    let bytes = match result.audio {
+        AudioData::Base64(audio) => {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(audio)
+                .map_err(|error| {
+                    AdapterError::provider_error(format!(
+                        "The provider returned audio that is not base64: {error}"
+                    ))
+                })?
+        }
+        AudioData::Binary(audio) => audio,
+    };
+    let (extension, media_type) = audio_kind(&bytes, requested);
+    let name = format!("speech.{extension}");
+    let path = write(work_dir, &name, &bytes)?;
+    Ok(vec![JobFile {
+        name,
+        media_type: media_type.to_owned(),
+        path,
+    }])
+}
+
+/// The file one transcription produced: the text, as A.1's `transcript.txt`.
+pub fn transcription_output(
+    result: &TranscriptionResult,
+    work_dir: &Path,
+) -> Result<Vec<JobFile>, AdapterError> {
+    let name = "transcript.txt".to_owned();
+    let path = write(work_dir, &name, result.text.as_bytes())?;
+    Ok(vec![JobFile {
+        name,
+        media_type: "text/plain".to_owned(),
+        path,
+    }])
 }
 
 /// One video a provider returned as a URL: the adapter downloads it itself so
@@ -304,6 +445,40 @@ fn requested_image_kind(requested: Option<&str>) -> (&'static str, &'static str)
     }
 }
 
+/// The extension and media type of audio, from its signature.
+///
+/// Only the formats the parameters allow are covered; pcm has no signature, so
+/// it is taken as requested.
+pub fn audio_kind(bytes: &[u8], requested: Option<&str>) -> (&'static str, &'static str) {
+    if bytes.starts_with(b"OggS") {
+        return ("ogg", "audio/ogg");
+    }
+    if bytes.starts_with(b"fLaC") {
+        return ("flac", "audio/flac");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        return ("wav", "audio/wav");
+    }
+    // ADTS AAC: a sync word of `0xFFF` with the two bits that name the layer
+    // clear, before MPEG audio's own sync check.
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xF6 == 0xF0 {
+        return ("aac", "audio/aac");
+    }
+    if bytes.starts_with(b"ID3")
+        || (bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0)
+    {
+        return ("mp3", "audio/mpeg");
+    }
+    match requested {
+        Some("opus") => ("opus", "audio/opus"),
+        Some("aac") => ("aac", "audio/aac"),
+        Some("flac") => ("flac", "audio/flac"),
+        Some("wav") => ("wav", "audio/wav"),
+        Some("pcm") => ("pcm", "audio/L16"),
+        _ => ("mp3", "audio/mpeg"),
+    }
+}
+
 /// The extension and media type of a video, from the media type its provider
 /// reported.
 fn video_extension(media_type: &str) -> &'static str {
@@ -311,5 +486,44 @@ fn video_extension(media_type: &str) -> &'static str {
         "video/webm" => "webm",
         "video/quicktime" => "mov",
         _ => "mp4",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aimux_core::transcription_model::TranscriptionSegment;
+
+    /// Seconds become whole milliseconds, rounded: A10's transcription shape.
+    #[test]
+    fn transcription_segments_round_to_milliseconds() {
+        assert_eq!(milliseconds(1.2345), 1235);
+        assert_eq!(milliseconds(2.0), 2000);
+        assert_eq!(milliseconds(0.0), 0);
+    }
+
+    #[test]
+    fn transcription_data_names_text_segments_and_language() {
+        let result = TranscriptionResult {
+            text: "hello there".into(),
+            segments: vec![TranscriptionSegment {
+                text: "hello".into(),
+                start_second: 1.2345,
+                end_second: 2.5,
+            }],
+            language: Some("en".into()),
+            duration_in_seconds: Some(2.5),
+            warnings: Vec::new(),
+            request: None,
+            response: aimux_core::transcription_model::TranscriptionResponse::default(),
+            provider_metadata: None,
+        };
+        let data = transcription_data(&result);
+        assert_eq!(data["text"], "hello there");
+        assert_eq!(data["language"], "en");
+        assert_eq!(
+            data["segments"],
+            serde_json::json!([{"start_ms": 1235, "end_ms": 2500, "text": "hello"}])
+        );
     }
 }

@@ -7,6 +7,8 @@
 use aimux_core::AiMuxError;
 use aimux_core::image_model::ImageModel;
 use aimux_core::provider::Provider;
+use aimux_core::speech_model::SpeechModel;
+use aimux_core::transcription_model::TranscriptionModel;
 use aimux_core::video_model::VideoModel;
 use aimux_provider_utils::{FetchFunction, Resolvable};
 use aimux_providers::PresetSettings;
@@ -155,6 +157,23 @@ pub fn video_model(
     model: &str,
 ) -> Result<Arc<dyn VideoModel>, AdapterError> {
     optional(provider.video_model(model), "video", model)
+}
+
+/// The speech model of `provider`; a package without one answers `unavailable`.
+pub fn speech_model(
+    provider: &Arc<dyn Provider>,
+    model: &str,
+) -> Result<Arc<dyn SpeechModel>, AdapterError> {
+    optional(provider.speech_model(model), "speech", model)
+}
+
+/// The transcription model of `provider`; a package without one answers
+/// `unavailable`.
+pub fn transcription_model(
+    provider: &Arc<dyn Provider>,
+    model: &str,
+) -> Result<Arc<dyn TranscriptionModel>, AdapterError> {
+    optional(provider.transcription_model(model), "transcription", model)
 }
 
 /// One of aimux's optional media constructors, refused as `unavailable`.
