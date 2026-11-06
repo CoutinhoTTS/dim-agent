@@ -706,6 +706,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(methods::ManagementMethodsPlugin::new(names)?))
     })?);
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        Ok(Box::new(connection::CallChannelPlugin::new(names)?))
+    })?);
     rows.push(register_part(&mut builtins, builder.catalog(), |_| {
         Ok(Box::new(managed_provider::ManagedProvidersPlugin))
     })?);
@@ -1271,10 +1274,12 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<mcp::Publication>(catalog, None);
     register::<hooks_settings::HooksService>(catalog, None);
     register::<methods::ManagementMethods>(catalog, None);
+    register::<dim_agent_capabilities::methods::Callers>(catalog, None);
     register::<runtime_manager::RuntimeService>(catalog, None);
     register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
     for name in [
+        "callChannel",
         "pluginFiles",
         "sessions",
         "sessionMetadata",

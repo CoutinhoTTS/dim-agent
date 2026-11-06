@@ -762,7 +762,7 @@ impl Env {
             .expect("SessionMethods");
         let provider = methods.provider(&name).expect("the Goal method");
         let accepted = provider
-            .accept(name, params, CancellationToken::new(), |_| {})
+            .accept(name, params, None, CancellationToken::new(), |_| {})
             .expect("the method accepts");
         accepted.reply.await.expect("the method replies")
     }

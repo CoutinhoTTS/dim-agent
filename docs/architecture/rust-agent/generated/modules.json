@@ -773,6 +773,17 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::methods::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::methods",
+      "file": "crates/dim-agent-capabilities/src/methods.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::model_provider",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -2060,7 +2071,9 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/connection.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
+        "serde_json::json",
         "tokio::select",
         "tracing::error",
         "tracing::info",
@@ -2505,7 +2518,9 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/outbound.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_app_server::permission_rules",
@@ -2610,7 +2625,9 @@
       "file": "crates/dim-app-server/src/protocol.rs",
       "unexpandedMacros": [
         "env",
-        "matches"
+        "macro_rules",
+        "matches",
+        "notifications"
       ]
     },
     {
@@ -7415,6 +7432,7 @@
       "from": "dim_agent_attachments",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::closed",
@@ -7425,6 +7443,7 @@
         "path methods::reply",
         "use dim_agent_capabilities::methods",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods"
@@ -8502,12 +8521,14 @@
       "from": "dim_agent_capabilities::context_methods",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::app",
         "path SessionMethods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::MethodCall",
         "use crate::methods::MethodDecl",
         "use crate::methods::RpcError",
         "use crate::methods::SessionMethods",
@@ -10813,12 +10834,14 @@
       "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError::app",
         "path RpcError::interrupted",
         "path SessionMethods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::MethodCall",
         "use crate::methods::MethodDecl",
         "use crate::methods::RpcError",
         "use crate::methods::SessionMethods",
@@ -10966,6 +10989,13 @@
     },
     {
       "from": "dim_agent_capabilities::methods",
+      "to": "dim_agent_capabilities::methods::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::methods",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path dim_agent_runtime::SESSION_GROUP"
@@ -11001,6 +11031,15 @@
       "references": [
         "path Registrations",
         "use dim_agent_runtime::Registrations"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::methods::tests",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path CallerConnection",
+        "path Callers::default",
+        "path NotifyError"
       ]
     },
     {
@@ -12101,12 +12140,14 @@
       "from": "dim_agent_capabilities::prompt_suggestion",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::service",
         "path SessionMethods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::MethodCall",
         "use crate::methods::MethodDecl",
         "use crate::methods::RpcError",
         "use crate::methods::SessionMethods",
@@ -12570,6 +12611,7 @@
       "from": "dim_agent_capabilities::shell_input",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path Progress",
         "path RpcError",
         "path RpcError::app",
@@ -12582,6 +12624,7 @@
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::MethodCall",
         "use crate::methods::MethodDecl",
         "use crate::methods::Progress",
         "use crate::methods::RpcError",
@@ -14356,6 +14399,7 @@
       "from": "dim_agent_capabilities::workspace_tools",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError::app",
         "path RpcError::invalid",
         "path RpcError::reloading",
@@ -14363,6 +14407,7 @@
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::MethodCall",
         "use crate::methods::MethodDecl",
         "use crate::methods::RpcError",
         "use crate::methods::SessionMethods",
@@ -15407,12 +15452,14 @@
       "from": "dim_agent_questions",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::invalid",
         "path SessionMethods",
         "path params",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
@@ -17112,12 +17159,14 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Handler",
+        "path MethodCall",
         "path RpcError",
         "path RpcError::service",
         "path RpcError::unknown_method",
         "path params",
         "use dim_agent_capabilities::methods::Handler",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params"
@@ -17331,6 +17380,7 @@
       "from": "dim_agent_scheduler::session",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::invalid",
         "path RpcError::unknown_method",
@@ -17339,6 +17389,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
@@ -18067,6 +18118,7 @@
       "from": "dim_app_server",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path dim_agent_capabilities::methods::Callers",
         "path dim_agent_capabilities::methods::ReservedMethods"
       ]
     },
@@ -18222,6 +18274,7 @@
         "path ConnectionHub",
         "path ConnectionPlugin::new",
         "path RpcPlugin::new",
+        "path connection::CallChannelPlugin::new",
         "use connection::ConnectionHub",
         "use connection::ConnectionPlugin",
         "use connection::RpcPlugin"
@@ -18869,6 +18922,7 @@
       "from": "dim_app_server::agents::configuration",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::invalid",
         "path RpcError::reloading",
@@ -18876,6 +18930,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
@@ -19812,11 +19867,13 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Drain",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError::invalid",
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -20288,12 +20345,14 @@
       "from": "dim_app_server::collaboration::approvals",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::invalid",
         "path SessionMethods",
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
@@ -20414,6 +20473,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
@@ -20422,6 +20482,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -20513,6 +20574,14 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Accepted",
+        "path CallSite",
+        "path CallerConnection",
+        "path Callers",
+        "path Callers::default",
+        "path NotifyError",
+        "path NotifyError::Gone",
+        "path NotifyError::TooLarge",
+        "path NotifyError::Undeclared",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::closed",
@@ -20523,6 +20592,10 @@
         "path dim_agent_capabilities::methods::valid_name",
         "path params",
         "use dim_agent_capabilities::methods::Accepted",
+        "use dim_agent_capabilities::methods::CallSite",
+        "use dim_agent_capabilities::methods::CallerConnection",
+        "use dim_agent_capabilities::methods::Callers",
+        "use dim_agent_capabilities::methods::NotifyError",
         "use dim_agent_capabilities::methods::RpcError"
       ]
     },
@@ -20773,9 +20846,12 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::outbound",
       "references": [
+        "path Admission::Full",
+        "path Admission::TooLarge",
         "path Frame",
         "path Sender",
         "path Sender::new",
+        "use crate::outbound::Admission",
         "use crate::outbound::Frame",
         "use crate::outbound::Sender"
       ]
@@ -20841,7 +20917,7 @@
         "path DeleteResult",
         "path ForkResult",
         "path ModelUpdateResult",
-        "path Notification::Progress",
+        "path Outbound::message",
         "path Outbound::notice",
         "path Outbound::result",
         "path PermissionResult",
@@ -21009,8 +21085,7 @@
       "references": [
         "path McpRejection",
         "path McpServerStatus",
-        "path McpStateResult",
-        "path Notification::McpState"
+        "path McpStateResult"
       ]
     },
     {
@@ -21125,7 +21200,8 @@
       "to": "dim_app_server::connection",
       "references": [
         "path Connection",
-        "path RpcService"
+        "path RpcService",
+        "path request"
       ]
     },
     {
@@ -21146,19 +21222,6 @@
         "path AttachResult",
         "path ClosedNotice",
         "path EventNotice",
-        "path Notification",
-        "path Notification::ApprovalCancelled",
-        "path Notification::ApprovalRequest",
-        "path Notification::BranchState",
-        "path Notification::Closed",
-        "path Notification::Event",
-        "path Notification::ModelProgress",
-        "path Notification::Notice",
-        "path Notification::State",
-        "path Notification::TreeApprovalCancelled",
-        "path Notification::TreeApprovalRequest",
-        "path Notification::TreeApprovalResolved",
-        "path Notification::TreeEvent",
         "path Outbound::notice",
         "path Outbound::result",
         "path Reply::Attach",
@@ -21307,7 +21370,9 @@
       "to": "dim_app_server::connection",
       "references": [
         "path Connection",
-        "path RpcService"
+        "path RpcService",
+        "path failure",
+        "path request"
       ]
     },
     {
@@ -21374,7 +21439,6 @@
       "from": "dim_app_server::connection::ui_extensions",
       "to": "dim_app_server::protocol",
       "references": [
-        "path Notification::UiExtensionsChanged",
         "path Outbound::notice"
       ]
     },
@@ -21416,12 +21480,14 @@
       "from": "dim_app_server::exec_shell_settings",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::invalid",
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -21491,9 +21557,11 @@
       "from": "dim_app_server::execution_settings",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::params",
         "use dim_agent_capabilities::methods::reply"
@@ -21613,10 +21681,12 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Drain",
+        "path MethodCall",
         "path MethodDecl::new",
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::params",
         "use dim_agent_capabilities::methods::reply"
@@ -21723,6 +21793,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
@@ -21730,6 +21801,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -21959,6 +22031,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Drain",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
@@ -21966,6 +22039,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -22582,6 +22656,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
@@ -22591,6 +22666,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -23373,6 +23449,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Drain",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::invalid",
@@ -23382,6 +23459,7 @@
         "path methods::params",
         "use dim_agent_capabilities::methods",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods"
@@ -23477,6 +23555,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Accepted",
+        "path CallSite",
         "path Check",
         "path ForeignMethods",
         "path MethodDecl",
@@ -23494,6 +23573,7 @@
         "path valid_name",
         "path within",
         "use dim_agent_capabilities::methods::Accepted",
+        "use dim_agent_capabilities::methods::CallSite",
         "use dim_agent_capabilities::methods::Check",
         "use dim_agent_capabilities::methods::ForeignMethods",
         "use dim_agent_capabilities::methods::MethodDecl",
@@ -23535,7 +23615,8 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path crate::protocol::builtin_methods",
-        "path crate::protocol::is_builtin_method"
+        "path crate::protocol::is_builtin_method",
+        "path crate::protocol::is_builtin_notification"
       ]
     },
     {
@@ -23546,11 +23627,13 @@
         "path Handler",
         "path Interruption",
         "path Interruption::Drain",
+        "path MethodCall",
         "path MethodDecl",
         "path MethodDecl::new",
         "path RpcError",
         "use dim_agent_capabilities::methods::Handler",
-        "use dim_agent_capabilities::methods::Interruption"
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall"
       ]
     },
     {
@@ -23583,9 +23666,11 @@
       "to": "dim_app_server::methods",
       "references": [
         "path ManagementMethods",
+        "path ManagementMethods::check",
         "path ManagementMethodsPlugin",
         "path ManagementMethodsPlugin::new",
-        "path dispatch"
+        "path dispatch",
+        "path reserved_for_sessions"
       ]
     },
     {
@@ -23687,6 +23772,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
@@ -23695,6 +23781,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -23825,12 +23912,14 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
+        "path MethodCall",
         "path MethodDecl",
         "path MethodDecl::new",
         "path Progress",
         "path RpcError",
         "path RpcError::service",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::Progress",
         "use dim_agent_capabilities::methods::RpcError"
@@ -24323,18 +24412,11 @@
       "from": "dim_app_server::protocol",
       "to": "dim_app_server::tree_protocol",
       "references": [
-        "path crate::tree_protocol::ApprovalCancelled",
-        "path crate::tree_protocol::ApprovalRequest",
-        "path crate::tree_protocol::ApprovalResolved",
         "path crate::tree_protocol::BarrierResult",
         "path crate::tree_protocol::BranchesResult",
         "path crate::tree_protocol::CreateResult",
-        "path crate::tree_protocol::EventNotice",
-        "path crate::tree_protocol::ForwardedNotice",
         "path crate::tree_protocol::HistoryResult",
-        "path crate::tree_protocol::KeysResult",
-        "path crate::tree_protocol::ModelProgressNotice",
-        "path crate::tree_protocol::StateNotice"
+        "path crate::tree_protocol::KeysResult"
       ]
     },
     {
@@ -24988,6 +25070,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Drain",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
@@ -24995,6 +25078,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -25527,11 +25611,13 @@
       "from": "dim_app_server::runtime_manager",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError::app",
         "path RpcError::invalid",
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -25611,6 +25697,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
@@ -25619,6 +25706,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
@@ -26103,6 +26191,7 @@
       "from": "dim_app_server::settings_methods",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::invalid",
@@ -26110,6 +26199,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -26187,6 +26277,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
@@ -26195,6 +26286,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -27504,9 +27596,11 @@
       "from": "dim_app_server::ui_extensions",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::params",
         "use dim_agent_capabilities::methods::reply"
@@ -27618,12 +27712,14 @@
       "from": "dim_app_server::ui_extensions::resources",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::service",
         "path SessionMethods",
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
@@ -27686,7 +27782,6 @@
       "from": "dim_app_server::ui_host",
       "to": "dim_app_server::protocol",
       "references": [
-        "path Notification::UiShutdown",
         "path Outbound::notice",
         "path UiAttach",
         "path UiAttached",
@@ -27696,7 +27791,6 @@
         "path UiReplace",
         "path UiShutdownNotice",
         "path UiStatusResult",
-        "use crate::protocol::Notification",
         "use crate::protocol::Outbound",
         "use crate::protocol::UiAttach",
         "use crate::protocol::UiAttached",
@@ -40754,6 +40848,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Interruption::Report",
+        "path MethodCall",
         "path MethodDecl::new",
         "path RpcError",
         "path RpcError::from",
@@ -40761,6 +40856,7 @@
         "path SessionMethods",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
@@ -41989,6 +42085,7 @@
       "from": "dim_modality",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::interrupted",
@@ -41997,6 +42094,7 @@
         "path params",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
@@ -42093,12 +42191,14 @@
       "from": "dim_session_title",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path MethodCall",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::invalid",
         "path SessionMethods",
         "path reply",
         "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
@@ -42544,6 +42644,66 @@
       "path": "ClientChannel::Tui"
     },
     {
+      "module": "dim_app_server::connection",
+      "path": "Notification::Progress"
+    },
+    {
+      "module": "dim_app_server::connection::mcp",
+      "path": "Notification::McpState"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::ApprovalCancelled"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::ApprovalRequest"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::BranchState"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::Closed"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::Event"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::ModelProgress"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::Notice"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::State"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::TreeApprovalCancelled"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::TreeApprovalRequest"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::TreeApprovalResolved"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::TreeEvent"
+    },
+    {
+      "module": "dim_app_server::connection::ui_extensions",
+      "path": "Notification::UiExtensionsChanged"
+    },
+    {
       "module": "dim_app_server::managed_oauth",
       "path": "ToString::to_string"
     },
@@ -42961,7 +43121,15 @@
     },
     {
       "module": "dim_app_server::ui_host",
+      "path": "Notification::UiShutdown"
+    },
+    {
+      "module": "dim_app_server::ui_host",
       "path": "char::is_control"
+    },
+    {
+      "module": "dim_app_server::ui_host",
+      "path": "crate::protocol::Notification"
     },
     {
       "module": "dim_app_server::web::content",

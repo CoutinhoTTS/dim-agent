@@ -14,6 +14,8 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `agentIndex` | process | Agents | Rust-only | — |
 | `auxiliaryModel` | process | Provider | yes | `complete` async |
 | `auxiliaryModelHost` | process | Provider | Rust-only | — |
+| `callChannel` | process | CallChannel | yes | `closed` async, `notify` async |
+| `callers` | process | CallChannel | Rust-only | — |
 | `collaboration` | process | Collaboration | Rust-only | — |
 | `collaborationDirectory` | process | CollaborationDirectory | Rust-only | — |
 | `connectionHub` | process | Connection | Rust-only | — |

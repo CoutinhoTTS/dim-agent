@@ -751,7 +751,13 @@ async fn temporary(
         .unwrap()
         .provider(method)
         .unwrap()
-        .accept(method.into(), params, CancellationToken::new(), |_| {})
+        .accept(
+            method.into(),
+            params,
+            None,
+            CancellationToken::new(),
+            |_| {},
+        )
         .unwrap()
         .reply
         .await
@@ -770,7 +776,13 @@ async fn management(
         .expect("management methods are installed")
         .provider(method)
         .expect("the method is registered")
-        .accept(method.into(), params, CancellationToken::new(), |_| {})
+        .accept(
+            method.into(),
+            params,
+            None,
+            CancellationToken::new(),
+            |_| {},
+        )
         .expect("the method is accepted")
         .reply
         .await
