@@ -236,17 +236,17 @@ impl RecoveryState {
             }
             self.malformed += 1;
         }
-        let hint = facts.retry_after;
-        let delay = hint.unwrap_or_else(|| backoff(self.backoffs.saturating_add(1), jitter));
+        // The counter is the retry's number: every retry advances it, hinted
+        // or not, so an unhinted n-th retry waits 1 s × 2^(n−1).
+        let retry = self.backoffs.saturating_add(1);
+        let delay = facts.retry_after.unwrap_or_else(|| backoff(retry, jitter));
         if delay > WAIT_BUDGET.saturating_sub(self.waited) {
-            if hint.is_some() {
-                self.retry_after_stop = hint;
+            if facts.retry_after.is_some() {
+                self.retry_after_stop = facts.retry_after;
             }
             return FailureAction::Stop;
         }
-        if hint.is_none() {
-            self.backoffs = self.backoffs.saturating_add(1);
-        }
+        self.backoffs = retry;
         FailureAction::Retry(delay)
     }
 }

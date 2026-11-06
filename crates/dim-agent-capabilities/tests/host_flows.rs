@@ -715,7 +715,7 @@ impl ModelDriver for RecoveryProbe {
             {
                 resume.notified().await;
             }
-            if call > 0 && !matches!(self.mode, 4 | 7 | 8 | 12 | 15..=20 | 23..=31) {
+            if call > 0 && !matches!(self.mode, 4 | 7 | 8 | 12 | 15..=20 | 23..=32) {
                 return EchoModel.invoke(request, connection, cancel).await;
             }
             let special = match self.mode {
@@ -746,12 +746,20 @@ impl ModelDriver for RecoveryProbe {
                     Some(401),
                     Some(Duration::from_secs(30)),
                 )),
+                32 if call == 0 => Some(self.failure_kind(
+                    ModelFailureKind::ServerError,
+                    Some(503),
+                    Some(Duration::from_secs(5)),
+                )),
+                32 if call == 1 => {
+                    Some(self.failure_kind(ModelFailureKind::ServerError, Some(503), None))
+                }
                 _ => None,
             };
             if let Some(error) = special {
                 return Err(error);
             }
-            if matches!(self.mode, 24 | 27) {
+            if matches!(self.mode, 24 | 27) || (self.mode == 32 && call > 1) {
                 return EchoModel.invoke(request, connection, cancel).await;
             }
             let status = match self.mode {
@@ -1409,6 +1417,34 @@ async fn a_rejected_credential_recovers_without_waiting() {
     assert_eq!(failure.kind, ModelFailureKind::AuthRejected);
     assert_eq!(failure.attempts, 2);
     assert_eq!(failure.waited_ms, 0);
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_backoff_counts_every_retry() {
+    // A hinted first retry (5 s) is retry one; the unhinted second one is
+    // retry two and waits 2 s × jitter, not 1 s × jitter.
+    let (agent, session, probe) = recovery_agent(32, None).await;
+    session
+        .submit("mixed hints".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    while probe.calls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    tokio::time::advance(Duration::from_millis(1_599)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    tokio::time::advance(Duration::from_millis(401)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+    session.idle("main").await.unwrap();
     agent.close().await.unwrap();
 }
 
