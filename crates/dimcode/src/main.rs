@@ -1,5 +1,6 @@
 //! One executable for the product: the terminal client, which starts this
 //! same file as its App Server daemon with the hidden `app-server`
+//! subcommand, and as the OCR helper with the hidden `ocr-helper`
 //! subcommand.
 
 #![allow(linker_messages)]
@@ -29,7 +30,15 @@ fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
     dim_session_title::install(builder);
     dim_agent_scheduler::install(builder);
     dim_goal::install(builder);
-    dim_modality::install(builder);
+    // Host tasks run this executable with the hidden `ocr-helper`
+    // subcommand.
+    dim_modality::install_with(
+        builder,
+        dim_modality::InstallOptions {
+            ocr_helper: std::env::current_exe().ok(),
+            ..dim_modality::InstallOptions::default()
+        },
+    );
 }
 
 fn main() {
@@ -40,6 +49,15 @@ fn main() {
         }
         mallopt(-3, 64 * 1024);
         mallopt(-8, 1);
+    }
+    if std::env::args().nth(1).as_deref() == Some("ocr-helper") {
+        let mut stdout = std::io::stdout();
+        let mut stderr = std::io::stderr();
+        std::process::exit(dim_ocr::helper_main(
+            std::env::args_os().skip(2),
+            &mut stdout,
+            &mut stderr,
+        ));
     }
     if std::env::args().nth(1).as_deref() == Some("app-server") {
         let provider = CLIENT_IDS.map(|(cn, global)| {

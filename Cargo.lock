@@ -1427,6 +1427,7 @@ dependencies = [
  "dim-goal",
  "dim-modality",
  "dim-oauth",
+ "dim-ocr",
  "dim-session-title",
  "image",
  "libc",
@@ -1436,6 +1437,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-util",
  "url",
  "uuid",
 ]

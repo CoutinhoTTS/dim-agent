@@ -385,6 +385,10 @@
   },
   {
     "from": "dimcode",
+    "to": "dim-ocr"
+  },
+  {
+    "from": "dimcode",
     "to": "dim-session-title"
   },
   {
