@@ -141,6 +141,61 @@ preferences (`EXEC_SHELL_CONFIG_INVALID`), unavailable shells
 (`EXEC_SHELL_CWD_UNSUPPORTED`), a missing cwd (`cwd_not_found`), or failed Git Bash
 path mapping (`EXEC_SHELL_PATH_MAPPING_FAILED`).
 
+## Confined helpers
+
+`spawn_confined(spec, confinement, cancel).await` starts a host-owned helper, a
+program a plugin runs for itself rather than a command an agent decided, under
+its own boundary. The Process isolation switch governs agent commands; a
+host-owned helper is always confined where the platform can confine, whatever
+that switch says. The operation reads no setting, and no setting or policy
+default changes for it.
+
+`Confinement` names the files or directories the helper may read, the
+directories it may read and write (at least one; the first is its working
+directory), the timeout and the two output limits. `ConfinedSpec` names the
+program, its arguments and the environment entries it adds. The helper reads the
+system baseline that runs a program, its own executable and the `read` paths;
+writes only inside the `write` directories; has no network; receives the minimal
+environment allowlist above plus the entries `spec.env` sets, never the
+service's full environment; and runs in the first `write` directory. Every
+confinement path is absolute, existing and of the required kind, and is
+canonicalized before anything starts; a relative, missing or wrong-kind path is
+`InvalidPath` and nothing starts.
+
+macOS wraps the helper in the existing Seatbelt profile and Linux in the
+existing bubblewrap arguments, both with the network grant off; the profile and
+argv builders are those agent commands use. Where the platform cannot confine —
+Windows, and Linux without `bubblewrap` on the captured `PATH` — the helper runs
+with the same timeout, caps, environment and cancellation, and the result
+reports `confined: false`; the caller decides whether that is acceptable.
+Windows has no confinement here, as it has none for agent commands.
+
+The timeout covers the whole call, including output collection. The timeout,
+either output cap and `cancel` kill the helper's process tree with the existing
+tree-kill, then return `TimedOut`, `OutputLimit { stream }` or `Cancelled`. Both
+streams are read concurrently, so a full pipe never blocks the helper, and no
+partial output is returned with an error. `Spawn` reports a helper that could
+not start or whose output could not be read; `ConfinedOutput` carries the exit
+status and both streams only when the helper exited within them.
+
+When the root exits, the call ends its tree and then drains what the pipes still hold until EOF or
+a fixed drain bound, whichever comes first; bytes already read are returned with the root's status,
+so a descendant holding a pipe cannot turn a completed helper into a timeout. `Ok` means the
+helper's tree was confirmed ended; a failed confirmation is `Cleanup`. On Linux with bubblewrap the
+helper runs in its own PID namespace (`--unshare-pid --die-with-parent`), so every descendant ends
+with it, including one that left the process group. On Windows the job object holds every
+descendant, with no breakaway limit, and terminating the job ends them all. On macOS, and on Linux
+without bubblewrap, the process group ends; a descendant that leaves the group with `setsid` or
+`setpgrp` is not reached, and on macOS it stays under the same Seatbelt profile. A caller that
+publishes results or deletes its work directory must not rely on the directory being quiescent on
+macOS or unconfined Linux: a process that left the group may still write to the `write` directories
+after `Ok`.
+
+The helper has no temporary directory of its own: `TMPDIR` is not in the
+environment allowlist and no isolated directory is created, so a confined helper
+that writes to its default temporary location is refused. A caller that needs
+one sets `TMPDIR` in `spec.env` to a directory inside `write`.
+
 ## Rule check
 
 - §1 and ADR 002 D1–D3: process facts and process preparation remain owned by HostPlatform.
@@ -168,6 +223,29 @@ boundary.
 `spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe`,
 `unchanged_shell_preferences_reuse_detection_and_edits_recover`, and
 `sandbox_backend_reports_the_bubblewrap_preparation_uses`.
+`a_confined_helper_reads_its_grants_and_writes_only_its_directory` runs the same
+probe unconfined and confined with the switch off, and covers the reads, the
+writes next to the read file and in the system temporary and home directories,
+and a refused loopback connection from the bash on the host (a host without bash
+prints that it skips that probe); `the_isolation_switch_does_not_change_a_confined_helper`
+keeps the helper's network denial with the switch on and Network allowed;
+`a_confined_helper_timeout_kills_its_grandchild`,
+`a_confined_helper_stdout_cap_kills_the_tree`, `a_confined_helper_stderr_cap_kills_the_tree`
+and `a_confined_helper_cancel_kills_the_tree` check that each limit removes the
+helper's tree; `a_confined_helper_leaves_no_process_after_it_exits` that a
+helper which exits on its own leaves nothing either;
+`a_confined_helper_returns_when_its_root_exits_with_a_descendant_on_its_pipes` that a descendant
+holding both pipes cannot turn a completed helper into a timeout, and
+`a_confined_helper_returns_when_an_escaped_descendant_holds_its_pipes` that a descendant which
+left the process group is returned past and is then the caller's to kill (skipped when perl is
+absent);
+`a_confined_helper_gets_the_allowlist_plus_its_own_environment` that only the
+allowlist and the helper's own entries reach it, with its `TMPDIR` honored; and
+`a_confined_helper_refuses_relative_and_missing_paths` the path refusals.
+`a_host_without_bubblewrap_runs_the_confined_helper_unconfined` covers the
+Linux fallback.
+[host_platform_windows_flow.rs](../../../../crates/dim-agent-capabilities/tests/host_platform_windows_flow.rs):
+`a_helper_without_a_backend_reports_no_confinement_and_keeps_every_limit`.
 The unit test `bubblewrap_binds_file_roots_after_the_directories_that_contain_them` in
 [isolation.rs](../../../../crates/dim-agent-capabilities/src/host_platform/isolation.rs) checks
 that file roots are bound after the directories that contain them;
