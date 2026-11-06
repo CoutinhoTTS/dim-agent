@@ -439,7 +439,7 @@ fn run_terminal(
         }
         let due = last_frame.is_none_or(|at| now.duration_since(at) >= FRAME_INTERVAL)
             && !terminal.writing();
-        if dirty && due {
+        if dirty && due && resize.is_none() {
             let size = terminal.size();
             let frame = app.frame(size);
             let bytes = match &mut full {
@@ -462,7 +462,7 @@ fn run_terminal(
                 dirty = true;
             }
         }
-        let wait = match (dirty, last_frame) {
+        let wait = match (dirty && resize.is_none(), last_frame) {
             (true, Some(at)) if !terminal.writing() => {
                 FRAME_INTERVAL.saturating_sub(now.duration_since(at))
             }
