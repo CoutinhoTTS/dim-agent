@@ -15,7 +15,8 @@ use crate::task::{
 };
 use crate::{Evaluation, catalog_category, is_understand};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
+use dim_agent_capabilities::file_storage::EntryKind;
 use dim_agent_capabilities::host::{
     ModalityConnection, ModalityConnectionHost, ModalityTarget, ModelSelectionHost,
     SelectableModelsHost,
@@ -59,6 +60,11 @@ pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 /// The name this build records for its single process adapter; the per-task
 /// lookup (#861) will record the resolved adapter's name instead.
 pub const ADAPTER_NAME: &str = "modalityAdapter";
+/// Terminal tasks older than this many days are deleted (A.4, A2).
+const RETENTION_DAYS: i64 = 30;
+/// At most this many terminal tasks are kept; older ones are deleted (A.4,
+/// A2).
+const MAX_TERMINAL_TASKS: usize = 200;
 
 /// The clock a generation reads: the wall clock, or a test's.
 pub trait Clock: Send + Sync + 'static {
@@ -402,6 +408,12 @@ impl Shared {
             next.updated_at = self.now_text();
             match task::write(&self.files, next, Expect::NonTerminal(base)).await {
                 Ok(Write::Written(record)) => {
+                    // Retention runs after every terminal write, before the
+                    // terminal state becomes visible to `wait`/`status`
+                    // (A.4).
+                    if record.state.is_terminal() {
+                        self.retain(Some(&record)).await;
+                    }
                     self.observe(slot, record.clone());
                     return Write::Written(record);
                 }
@@ -1063,6 +1075,40 @@ impl ResolvedInput {
     }
 }
 
+/// The last component of a listed task directory name.
+fn entry_task_id(name: &str) -> Option<String> {
+    name.rsplit('/')
+        .next()
+        .filter(|leaf| !leaf.is_empty())
+        .map(str::to_owned)
+}
+
+/// When a terminal record was finished, for retention (A.4).
+fn record_time(record: &TaskRecord) -> Option<DateTime<Utc>> {
+    let text = record.finished_at.as_deref().unwrap_or(&record.updated_at);
+    DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
+}
+
+/// The terminal tasks retention deletes (A.4, A2): everything older than 30
+/// days and everything beyond the newest 200, oldest first.
+fn retention_expired(
+    mut terminal: Vec<(String, DateTime<Utc>)>,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    terminal.sort_by_key(|(_, time)| *time);
+    let over = terminal.len().saturating_sub(MAX_TERMINAL_TASKS);
+    terminal
+        .into_iter()
+        .enumerate()
+        .filter(|(index, (_, time))| {
+            *index < over || now.signed_duration_since(*time) > ChronoDuration::days(RETENTION_DAYS)
+        })
+        .map(|(_, (task_id, _))| task_id)
+        .collect()
+}
+
 /// The media type prefixes an operation accepts (decision 2); an empty list
 /// refuses files.
 fn allowed_media_types(category: &str, operation: &str) -> &'static [&'static str] {
@@ -1138,6 +1184,224 @@ impl Shared {
                 shared.start_ready().await;
             }
         });
+    }
+
+    /// Startup on every `apply` (A.6): rebuild the slots and the client
+    /// index from the records, apply retention, settle what this generation
+    /// cannot continue, and observe the running tasks a stored handle can
+    /// still resume. A `queued` task never starts after a restart (A11).
+    pub(crate) async fn recover(self: &Arc<Self>) {
+        let _ = self.files.directory(task::TASKS_DIR).await;
+        let entries = match self.files.list(task::TASKS_DIR).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(%error, "task records could not be listed");
+                return;
+            }
+        };
+        let mut records = Vec::new();
+        for entry in entries {
+            if entry.kind != EntryKind::Directory {
+                continue;
+            }
+            let Some(task_id) = entry_task_id(&entry.name) else {
+                continue;
+            };
+            match task::load(&self.files, &task_id).await {
+                Ok(Some(record)) if record.task_id == task_id => records.push(record),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, task = %task_id, "task record could not be read")
+                }
+            }
+        }
+        // Retention first, so the records it deletes get no slot (A.4).
+        let expired: BTreeSet<String> = retention_expired(
+            records
+                .iter()
+                .filter(|record| record.state.is_terminal())
+                .filter_map(|record| Some((record.task_id.clone(), record_time(record)?)))
+                .collect(),
+            self.now(),
+        )
+        .into_iter()
+        .collect();
+        for task_id in &expired {
+            let _ = task::remove_task(&self.files, task_id).await;
+        }
+        records.retain(|record| !expired.contains(&record.task_id));
+        // Slots are ordered by creation, so `list` stays newest first.
+        records.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.task_id.cmp(&right.task_id))
+        });
+        let mut slots = Vec::new();
+        for (index, record) in records.into_iter().enumerate() {
+            let record = self.startup_settle(record).await;
+            slots.push(Slot::new(index as u64 + 1, record));
+        }
+        let mut observe = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            for slot in &slots {
+                let record = slot.record.lock().unwrap().clone();
+                if let Some(client_id) = &record.client_task_id {
+                    state
+                        .client_index
+                        .insert(client_id.clone(), record.task_id.clone());
+                }
+                if record.state == TaskState::Running {
+                    observe.push(slot.clone());
+                }
+                state.slots.insert(record.task_id.clone(), slot.clone());
+            }
+            state.sequence = slots.len() as u64;
+        }
+        for slot in observe {
+            let shared = self.clone();
+            self.tasks.spawn(async move {
+                shared.observe_resumed(slot).await;
+            });
+        }
+    }
+
+    /// The startup rule for one record (A.6): `queued` and host `running`
+    /// tasks are interrupted; a provider task with a handle its adapter
+    /// still serves stays `running` for observation; anything else is
+    /// interrupted as not having survived recovery.
+    async fn startup_settle(&self, record: TaskRecord) -> TaskRecord {
+        if record.state.is_terminal() {
+            return record;
+        }
+        if record.state == TaskState::Running {
+            if let Executor::Provider { provider, .. } = &record.executor
+                && record.remote_handle.is_some()
+                && self.adapter_serves(provider, &record.category, &record.operation)
+            {
+                return record;
+            }
+            return self
+                .write_interrupted(record, Some("did not survive recovery"))
+                .await;
+        }
+        self.write_interrupted(record, None).await
+    }
+
+    /// Whether the process adapter is available and serves the operation.
+    fn adapter_serves(&self, provider: &ModelId, category: &str, operation: &str) -> bool {
+        let Some(adapter) = self.ctx.get::<ModalityAdapterService>() else {
+            return false;
+        };
+        adapter.0.available()
+            && adapter
+                .0
+                .operations(provider)
+                .iter()
+                .any(|served| served.category == category && served.operation == operation)
+    }
+
+    /// Writes `interrupted` over a record loaded at startup.
+    async fn write_interrupted(&self, record: TaskRecord, message: Option<&str>) -> TaskRecord {
+        let finished = self.now_text();
+        let mut next = record.clone();
+        next.state = TaskState::Interrupted;
+        next.finished_at = Some(finished.clone());
+        next.updated_at = finished;
+        if let Some(message) = message {
+            next.error = Some(TaskError {
+                code: "interrupted".into(),
+                message: message.into(),
+            });
+        }
+        let expected = record.revision;
+        match task::write(&self.files, next, Expect::Revision(expected)).await {
+            Ok(Write::Written(record)) => record,
+            Ok(Write::Discarded(Some(current))) => current,
+            _ => {
+                let mut fallback = record;
+                fallback.state = TaskState::Interrupted;
+                fallback
+            }
+        }
+    }
+
+    /// Continues watching a task this generation did not start (A12): waits
+    /// on the recorded handle, never submits again.
+    async fn observe_resumed(self: &Arc<Self>, slot: Arc<Slot>) {
+        let record = self.record(&slot);
+        if record.state != TaskState::Running || slot.cancel_requested() {
+            return;
+        }
+        let handle = record.remote_handle.clone();
+        self.wait_and_settle(&slot, record, handle).await;
+    }
+
+    /// The unload rule (A.6): stop the scheduler and the local work, wait for
+    /// it, then write `interrupted` for every task without a handle. A task
+    /// with a handle stays `running` for the next generation's startup.
+    pub(crate) async fn shutdown(self: &Arc<Self>) {
+        self.stop.cancel();
+        let slots: Vec<Arc<Slot>> = self.state.lock().unwrap().slots.values().cloned().collect();
+        for slot in &slots {
+            slot.cancel_requested.store(true, Ordering::SeqCst);
+            slot.cancel.cancel();
+        }
+        self.tasks.close();
+        self.tasks.wait().await;
+        for slot in slots {
+            let record = self.record(&slot);
+            if record.state.is_terminal() || record.remote_handle.is_some() {
+                continue;
+            }
+            let finished = self.now_text();
+            let _ = self
+                .finish(&slot, record.revision, move |record| {
+                    record.state = TaskState::Interrupted;
+                    record.finished_at = Some(finished.clone());
+                })
+                .await;
+        }
+    }
+
+    /// Deletes terminal tasks older than 30 days or beyond the newest 200,
+    /// oldest first, with their files (A.4, A2). `extra` is the terminal
+    /// record this write just produced; it participates in the count before
+    /// it becomes visible through its slot.
+    async fn retain(&self, extra: Option<&TaskRecord>) {
+        let mut terminal: Vec<(String, DateTime<Utc>)> = {
+            let state = self.state.lock().unwrap();
+            state
+                .slots
+                .values()
+                .filter_map(|slot| {
+                    let record = slot.record.lock().unwrap();
+                    if !record.state.is_terminal() {
+                        return None;
+                    }
+                    Some((record.task_id.clone(), record_time(&record)?))
+                })
+                .collect()
+        };
+        if let Some(record) = extra
+            && record.state.is_terminal()
+            && let Some(time) = record_time(record)
+        {
+            terminal.push((record.task_id.clone(), time));
+        }
+        let keep = extra.map(|record| record.task_id.as_str());
+        for task_id in retention_expired(terminal, self.now()) {
+            if keep == Some(task_id.as_str()) {
+                continue;
+            }
+            let _ = task::remove_task(&self.files, &task_id).await;
+            let mut state = self.state.lock().unwrap();
+            if let Some(slot) = state.slots.remove(&task_id)
+                && let Some(client_id) = &slot.record.lock().unwrap().client_task_id
+            {
+                state.client_index.remove(client_id);
+            }
+        }
     }
 
     /// Picks queued tasks in submission order while a category has a free
@@ -1299,11 +1563,37 @@ impl Shared {
         if slot.cancel_requested() {
             return;
         }
+        self.wait_and_settle(&slot, record, handle).await;
+    }
+
+    /// Waits for an already submitted task and settles its one outcome. Used
+    /// by a normal run and, after a restart, by observation: a task with a
+    /// stored handle is only ever waited for, never submitted again (A6).
+    async fn wait_and_settle(
+        self: &Arc<Self>,
+        slot: &Arc<Slot>,
+        record: TaskRecord,
+        handle: Option<String>,
+    ) {
+        let Some(adapter) = self.ctx.get::<ModalityAdapterService>() else {
+            if !slot.cancel_requested() {
+                self.fail(slot, "unavailable", "No adapter in this build")
+                    .await;
+            }
+            return;
+        };
+        if !adapter.0.available() {
+            if !slot.cancel_requested() {
+                self.fail(slot, "unavailable", "The adapter is unavailable")
+                    .await;
+            }
+            return;
+        }
         let connection = match self.connection(&record, &slot.cancel).await {
             Ok(connection) => connection,
             Err(error) => {
                 if !slot.cancel_requested() {
-                    self.fail(&slot, "provider_error", error).await;
+                    self.fail(slot, "provider_error", error).await;
                 }
                 return;
             }
@@ -1321,12 +1611,12 @@ impl Shared {
             return;
         }
         match output {
-            Ok(output) => self.settle_output(&slot, output).await,
+            Ok(output) => self.settle_output(slot, output).await,
             Err(error) => {
                 if slot.cancel_requested() {
                     return;
                 }
-                self.fail(&slot, error.code.as_str(), error.message).await;
+                self.fail(slot, error.code.as_str(), error.message).await;
             }
         }
     }
@@ -1380,12 +1670,6 @@ impl Shared {
         let mut written: Vec<String> = Vec::new();
         let mut files: Vec<ResultFile> = Vec::new();
         for file in &output.files {
-            // Another terminal write may win while these stream; stop and
-            // remove what this outcome wrote (§4).
-            if self.record(slot).state.is_terminal() {
-                self.discard_results(&record.task_id, &written).await;
-                return;
-            }
             if !valid_file_name(&file.name) || !names.insert(file.name.clone()) {
                 self.discard_results(&record.task_id, &written).await;
                 self.fail(

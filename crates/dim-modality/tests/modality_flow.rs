@@ -7,8 +7,8 @@ use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::{CatalogCapabilities, ModelId};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use dim_modality::{
-    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Job, JobFile,
-    ModalityAdapter, ModalityAdapterService, ProgressSink, RemoteCancel, Submitted,
+    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Clock, Job,
+    JobFile, ModalityAdapter, ModalityAdapterService, ProgressSink, RemoteCancel, Submitted,
 };
 use futures_util::{SinkExt, StreamExt};
 use rutis::Disposer;
@@ -138,6 +138,7 @@ impl Client {
 async fn launch_with(
     tools: Arc<dyn ToolDriver>,
     mut config: ServerConfig,
+    clock: Option<Arc<dyn Clock>>,
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> RunningServer {
     config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
@@ -150,7 +151,10 @@ async fn launch_with(
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     dim_app_server::collaboration::install(&mut builder);
-    dim_modality::install(&mut builder);
+    match clock {
+        Some(clock) => dim_modality::install_with_clock(&mut builder, clock),
+        None => dim_modality::install(&mut builder),
+    }
     extra(&mut builder);
     serve(builder, config).await.unwrap()
 }
@@ -562,7 +566,26 @@ async fn start_in(home: std::path::PathBuf, fixture: Option<Arc<FixtureAdapter>>
         target_home: Some(home.join("native")),
         ..Default::default()
     };
-    launch_with(Arc::new(MockTools), config, |builder| {
+    launch_with(Arc::new(MockTools), config, None, |builder| {
+        if let Some(fixture) = fixture.clone() {
+            builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
+        }
+    })
+    .await
+}
+
+/// [`start_in`] with the clock a generation reads, for retention.
+async fn start_in_with_clock(
+    home: std::path::PathBuf,
+    fixture: Option<Arc<FixtureAdapter>>,
+    clock: Arc<dyn Clock>,
+) -> RunningServer {
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("native")),
+        ..Default::default()
+    };
+    launch_with(Arc::new(MockTools), config, Some(clock), |builder| {
         if let Some(fixture) = fixture.clone() {
             builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
         }
@@ -1495,6 +1518,7 @@ async fn effective_resolves_over_declared_options_and_stays_null_for_an_unavaila
 // ---------------------------------------------------------------------------
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{DateTime, SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 
 fn sha256(bytes: &[u8]) -> String {
@@ -2000,7 +2024,25 @@ async fn a_cancel_racing_completion_yields_one_terminal_state() {
     // Let the completion start streaming its 400 files, then cancel while it
     // is writing them: the cancel's terminal write wins.
     gate.cancel();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
+    let count_results = |dir: &std::path::Path| {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while count_results(&result_dir) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the completion never started streaming"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let cancelled = client
         .rpc("modality.task.cancel", json!({"task_id": task_id}))
         .await;
@@ -2012,17 +2054,9 @@ async fn a_cancel_racing_completion_yields_one_terminal_state() {
         "the losing completion wrote no result: {record}"
     );
     assert_eq!(record["remote_cancel"], "cancelled");
-    let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let leftovers = std::fs::read_dir(&result_dir)
-            .map(|entries| {
-                entries
-                    .filter_map(|entry| entry.ok())
-                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-                    .count()
-            })
-            .unwrap_or(0);
+        let leftovers = count_results(&result_dir);
         if leftovers == 0 {
             break;
         }
@@ -2482,6 +2516,268 @@ async fn a_task_leaves_every_session_untouched() {
     assert!(
         !events.contains("modality") && !events.contains(task["task_id"].as_str().unwrap()),
         "Modality writes no Timeline event: {after}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Startup, unload and retention (A.6, A.4).
+// ---------------------------------------------------------------------------
+
+/// A clock a test sets; retention reads it at `apply` and on every terminal
+/// write.
+struct FixedClock(Mutex<DateTime<Utc>>);
+impl FixedClock {
+    fn new(now: DateTime<Utc>) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(now)))
+    }
+}
+impl Clock for FixedClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap()
+    }
+}
+
+fn task_dir(home: &std::path::Path, task_id: &str) -> std::path::PathBuf {
+    home.join("modality/tasks").join(task_id)
+}
+
+fn write_task_record(home: &std::path::Path, record: &Value) {
+    let dir = task_dir(home, record["task_id"].as_str().unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let envelope = json!({"version": 1, "text": record.to_string()});
+    std::fs::write(dir.join("task.json"), envelope.to_string()).unwrap();
+}
+
+fn read_task_record(home: &std::path::Path, task_id: &str) -> Value {
+    let bytes = std::fs::read(task_dir(home, task_id).join("task.json")).unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(envelope["version"], 1);
+    serde_json::from_str(envelope["text"].as_str().unwrap()).unwrap()
+}
+
+fn seed_record(task_id: &str, state: &str, time: &str) -> Value {
+    json!({
+        "version": 1,
+        "task_id": task_id,
+        "client_task_id": null,
+        "revision": 2,
+        "category": "image",
+        "operation": "generate",
+        "executor": {"kind": "provider",
+            "provider": {"providerId": PROVIDER, "modelId": "alpha"},
+            "adapter": "modalityAdapter"},
+        "params": {"prompt": "seed"},
+        "state": state,
+        "remote_handle": null,
+        "progress": null,
+        "result": null,
+        "error": null,
+        "remote_cancel": null,
+        "created_at": time,
+        "updated_at": time,
+        "finished_at": if state == "queued" || state == "running" { Value::Null } else { json!(time) },
+    })
+}
+
+async fn wait_until_waits(fixture: &FixtureAdapter, wanted: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.waits() < wanted {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was not asked to wait {wanted} times"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_observes_a_running_task_it_never_submits_again() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-restart").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "r"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    wait_handle(&mut client, &task_id).await;
+    wait_until_waits(&fixture, 1).await;
+    server.shutdown();
+    server.join().await.unwrap();
+    assert_eq!(fixture.submits(), 1);
+    // A running task with a handle survives the unload (A.6).
+    let stored = read_task_record(&home, &task_id);
+    assert_eq!(stored["state"], "running", "{stored}");
+    assert_eq!(stored["remote_handle"], format!("handle-{task_id}"));
+
+    // The next generation waits on the stored handle and never submits.
+    let waits_before = fixture.waits();
+    let server = start_in(home.clone(), Some(fixture.clone())).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    wait_until_waits(&fixture, waits_before + 1).await;
+    assert_eq!(fixture.submits(), 1, "observation never submits again");
+    assert_eq!(
+        state_of(&task_status(&mut client, &task_id).await),
+        "running"
+    );
+
+    gate.cancel();
+    let finished = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&finished), "succeeded", "{finished}");
+    assert_eq!(
+        finished["result"]["files"][0]["sha256"],
+        sha256(b"fixture result")
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_interrupts_queued_and_unresumable_tasks() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        handles: Handles::None,
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-restart-settle").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "x"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    wait_until_waits(&fixture, 1).await;
+    server.shutdown();
+    server.join().await.unwrap();
+    // The unload interrupted the task that had no handle.
+    let stored = read_task_record(&home, &task_id);
+    assert_eq!(stored["state"], "interrupted", "{stored}");
+    assert!(stored["remote_handle"].is_null());
+
+    // Rewrite what a crash would have left: `running` without a handle and a
+    // `queued` task that never started. Startup settles both.
+    let running = seed_record(&task_id, "running", "2026-11-06T00:00:00Z");
+    write_task_record(&home, &running);
+    let queued_id = "mt_crashed_queued";
+    let queued = seed_record(queued_id, "queued", "2026-11-06T00:00:01Z");
+    write_task_record(&home, &queued);
+
+    let server = start_in(home.clone(), Some(fixture.clone())).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let running = task_status(&mut client, &task_id).await;
+    assert_eq!(state_of(&running), "interrupted", "{running}");
+    assert_eq!(running["error"]["message"], "did not survive recovery");
+    let queued = task_status(&mut client, queued_id).await;
+    assert_eq!(state_of(&queued), "interrupted", "{queued}");
+    assert!(queued["error"].is_null(), "{queued}");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_deletes_terminal_tasks_past_thirty_days() {
+    let now = DateTime::parse_from_rfc3339("2026-11-06T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let recent = now - chrono::Duration::days(10);
+    let old = now - chrono::Duration::days(31);
+    let format = |time: DateTime<Utc>| time.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let home = home("dm-retention-age");
+    let recent_id = "mt_recent";
+    let old_id = "mt_old";
+    write_task_record(&home, &seed_record(recent_id, "succeeded", &format(recent)));
+    write_task_record(&home, &seed_record(old_id, "succeeded", &format(old)));
+    for id in [old_id, recent_id] {
+        let result = task_dir(&home, id).join("result");
+        std::fs::create_dir_all(&result).unwrap();
+        std::fs::write(result.join("out.bin"), b"kept or deleted").unwrap();
+    }
+
+    let server = start_in_with_clock(home.clone(), None, FixedClock::new(now)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        state_of(&task_status(&mut client, recent_id).await),
+        "succeeded"
+    );
+    let gone = client
+        .rpc("modality.task.status", json!({"task_id": old_id}))
+        .await;
+    assert_eq!(app_error(&gone), "not_found");
+    assert!(
+        !task_dir(&home, old_id).exists(),
+        "retention deletes the task with its files"
+    );
+    assert!(task_dir(&home, recent_id).join("result/out.bin").exists());
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_keeps_the_newest_two_hundred_terminal_tasks() {
+    let now = DateTime::parse_from_rfc3339("2026-11-06T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let home = home("dm-retention-count");
+    let mut ids = Vec::new();
+    for index in 0..200 {
+        let id = format!("mt_seed_{index:03}");
+        let time = (now - chrono::Duration::minutes(index + 1))
+            .to_rfc3339_opts(SecondsFormat::Nanos, true);
+        write_task_record(&home, &seed_record(&id, "succeeded", &time));
+        ids.push(id);
+    }
+    // The oldest seeded task carries a result file that retention removes.
+    let oldest = ids.last().unwrap().clone();
+    let result = task_dir(&home, &oldest).join("result");
+    std::fs::create_dir_all(&result).unwrap();
+    std::fs::write(result.join("out.bin"), b"oldest").unwrap();
+
+    let fixture = Arc::new(FixtureAdapter::default());
+    let server =
+        start_in_with_clock(home.clone(), Some(fixture.clone()), FixedClock::new(now)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    assert_eq!(
+        state_of(&task_status(&mut client, &oldest).await),
+        "succeeded"
+    );
+
+    // The 201st terminal task pushes the oldest out (A.4).
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "n"}}),
+    )
+    .await;
+    let finished = wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
+    assert_eq!(state_of(&finished), "succeeded", "{finished}");
+    let gone = client
+        .rpc("modality.task.status", json!({"task_id": oldest}))
+        .await;
+    assert_eq!(app_error(&gone), "not_found");
+    assert!(
+        !task_dir(&home, &oldest).exists(),
+        "retention deletes the task with its files"
+    );
+    assert_eq!(
+        state_of(&task_status(&mut client, &ids[0]).await),
+        "succeeded"
     );
     server.shutdown();
     server.join().await.unwrap();

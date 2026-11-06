@@ -42284,6 +42284,14 @@
     },
     {
       "from": "dim_modality::engine",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path EntryKind::Directory",
+        "use dim_agent_capabilities::file_storage::EntryKind"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path ModalityConnection",
@@ -42376,6 +42384,7 @@
         "path Executor::Provider",
         "path Expect::NonTerminal",
         "path Expect::Queued",
+        "path Expect::Revision",
         "path InputFile",
         "path ResultFile",
         "path TaskError",
@@ -42384,6 +42393,7 @@
         "path TaskState",
         "path TaskState::Cancelled",
         "path TaskState::Failed",
+        "path TaskState::Interrupted",
         "path TaskState::Queued",
         "path TaskState::Running",
         "path TaskState::Succeeded",
@@ -42392,9 +42402,11 @@
         "path Write::Written",
         "path task",
         "path task::FORMAT_VERSION",
+        "path task::TASKS_DIR",
         "path task::create",
         "path task::hex",
         "path task::input_dir_name",
+        "path task::load",
         "path task::remove_result",
         "path task::remove_task",
         "path task::remove_work",

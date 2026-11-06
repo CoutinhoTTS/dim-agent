@@ -415,7 +415,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `remote_cancel` | `"cancelled"`、`"unsupported"`、`"already_finished"` 或 null |
 | `created_at`、`updated_at`、`finished_at` | RFC 3339 |
 
-记录与结果文件使用 `pluginFiles`（扩展）：每插件根目录、UTF-8 与二进制原子替换、锁、格式版本。保留：终态任务在 30 天后或超出 200 个终态任务时连同文件删除，最旧的先删（A2）；非终态任务从不删除。
+记录与结果文件使用 `pluginFiles`（扩展）：每插件根目录、UTF-8 与二进制原子替换、锁、格式版本。保留：每次 `apply` 时以及每次终态写入之后，早于 30 天或超出最新 200 个的终态任务连同文件删除，最旧的先删（A2）；非终态任务从不删除。
 
 记录是 `modality/tasks/<task_id>/task.json`，采用宿主的版本 1 文本信封。每次写入都持有该文件的锁并比较 `revision`：第一个终态写入获胜，较晚的终态结果连同它写出的结果文件一起丢弃。`params` 以 `files` 数组携带输入文件的元数据；内联文件存放在 `input/` 下，调用方的 `node_path` 只记录路径并就地读取。`wait` 把适配器返回的文件从任务的工作目录流式写入 `result/<name>`，同时计算 `bytes` 与 `sha256`，随后删除工作目录。
 
@@ -439,7 +439,8 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | --- | --- |
 | 提交 | 在边界校验；写入 `queued`（revision 1）与输入文件；返回。通过 `ctx.effect`（Cordis 的 effect 机制，[rutis 生命周期](../rutis-usage.md#4-rutis-提供的生命周期)）注册的调度器在有空闲槽位时启动它；调度器与每个运行中的任务都是 effect 工作，插件卸载时由它清理 |
 | 启动 | 写入 `running` 及已解析的执行方；解析该操作的适配器（[#861](https://github.com/arcships/dim/issues/861) 落地后按任务按名解析；在此之前来自单个进程服务）；调用 `submit`；一旦得知即写入 `remote_handle` |
-| 终态 | 在每任务锁下一次写入并比较 `revision`；第一个终态写入胜出；之后的结果被丢弃，其文件被删除 |
+| 终态 | 在每任务锁下一次写入并比较 `revision`；第一个终态写入胜出；之后的结果被丢弃，其文件被删除。保留在写入之后、状态对 `wait`/`status` 可见之前执行 |
+| 保留 | 每次 `apply` 时以及每次终态写入之后：早于 30 天或超出最新 200 个的终态任务连同其文件删除，最旧的先删（A.4，A2） |
 | 取消 | 标记已请求；取消本地令牌（中止 HTTP，或通过 HostPlatform 终止组件的进程树）；有句柄时调用 `cancel_remote`；释放资源；然后写入 `cancelled`（含 `remote_cancel`） |
 | 卸载（自身重载或 Provider 重载） | disposer 取消本地工作，终止 OCR 进程，关闭实时连接，为宿主任务和无句柄的提供方任务写入 `interrupted`；有句柄的任务保持 `running` |
 | 启动（每次 `apply`） | `queued` → `interrupted`（之后从不启动，A11）；`running` 宿主任务 → `interrupted`；有句柄且其适配器可用的 `running` 提供方任务 → 继续 `wait`（仅观察，A12）；否则 `interrupted`“did not survive recovery” |

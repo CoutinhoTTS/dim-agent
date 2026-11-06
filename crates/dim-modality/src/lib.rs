@@ -900,12 +900,13 @@ impl DynPlugin for ModalityPlugin {
             ctx.provide_at(Key::<ModalityTasks>::named("modalityTasks"), tasks)?;
             let cleanup = shared.clone();
             ctx.effect(move || async move {
-                cleanup.stop.cancel();
-                cleanup.tasks.close();
-                cleanup.tasks.wait().await;
+                cleanup.shutdown().await;
                 Ok(())
             })?;
             shared.spawn_scheduler();
+            // Startup on every apply (A.6): settle the records this
+            // generation cannot continue before the methods are visible.
+            shared.recover().await;
             let context = ctx.clone();
             let mut wait = MethodDecl::new("modality.task.wait", false, Interruption::Report);
             wait.progress = true;

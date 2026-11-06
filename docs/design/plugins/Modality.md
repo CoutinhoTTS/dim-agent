@@ -415,7 +415,7 @@ Boundary validation: inline inputs at most 8 MiB in total per submission, larger
 | `remote_cancel` | `"cancelled"`, `"unsupported"`, `"already_finished"` or null |
 | `created_at`, `updated_at`, `finished_at` | RFC 3339 |
 
-Records and result files use `pluginFiles` (extended): per-plugin root, UTF-8 and binary atomic replace, lock, format version. Retention: terminal tasks deleted with their files after 30 days or beyond 200 terminal tasks, oldest first (A2); non-terminal tasks never.
+Records and result files use `pluginFiles` (extended): per-plugin root, UTF-8 and binary atomic replace, lock, format version. Retention: on every `apply` and after every terminal write, terminal tasks older than 30 days or beyond the newest 200 are deleted with their files, oldest first (A2); non-terminal tasks never.
 
 The record is `modality/tasks/<task_id>/task.json` in the host's version 1 text envelope. Every write takes that file's lock and compares `revision`: the first terminal write wins, and a later terminal outcome is discarded together with the result files it wrote. `params` carries the input files as a `files` array of their metadata; an inline file is stored under `input/` and a caller's `node_path` is recorded by its path and read in place. `wait` streams the files an adapter returns from the job's work directory into `result/<name>` while computing `bytes` and `sha256`, and the work directory is removed afterwards.
 
@@ -439,7 +439,8 @@ Invoking an unavailable category prints the same reason as the listing. The firs
 | --- | --- |
 | Submit | Validate at the boundary; write `queued` (revision 1) and input files; return. The scheduler registered with `ctx.effect` (Cordis's effect mechanism, [rutis lifecycle](../rutis-usage.md#4-lifecycle-rutis-provides)) starts it when a slot frees; the scheduler and every running task are effect work, so the plugin's unload cleans them up |
 | Start | Write `running` with the resolved executor; resolve the operation's adapter (by adapter name per task after [#861](https://github.com/arcships/dim/issues/861) lands; from the single process service until then); call `submit`; write `remote_handle` as soon as known |
-| Terminal | One write under the per-task lock comparing `revision`; first terminal write wins; later outcomes discarded and their files removed |
+| Terminal | One write under the per-task lock comparing `revision`; first terminal write wins; later outcomes discarded and their files removed. Retention applies after the write, before the state is visible to `wait`/`status` |
+| Retention | On every `apply` and after every terminal write: terminal tasks older than 30 days or beyond the newest 200, deleted with their files, oldest first (A.4, A2) |
 | Cancel | Mark requested; cancel the local token (aborts HTTP, or terminates the component's process tree through HostPlatform); `cancel_remote` when a handle exists; release resources; then write `cancelled` (with `remote_cancel`) |
 | Unload (own reload or Provider reload) | Disposer cancels local work, terminates OCR processes, closes realtime connections, writes `interrupted` for host tasks and provider tasks without handle; tasks with handle stay `running` |
 | Startup (every `apply`) | `queued` → `interrupted` (never started later, A11); `running` host task → `interrupted`; `running` provider task with handle and its adapter available → continue `wait` (observation only, A12); otherwise `interrupted` "did not survive recovery" |
