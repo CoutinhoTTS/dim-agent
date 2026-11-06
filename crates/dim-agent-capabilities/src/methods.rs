@@ -305,6 +305,10 @@ pub struct CallSite {
     /// call has finished.
     pub direct: Arc<dyn CallerConnection>,
     pub callers: Arc<Callers>,
+    /// The calling connection's close signal, cancelled before the index
+    /// forgets the connection: a call admitted in that window records
+    /// nothing.
+    pub closed: CancellationToken,
 }
 
 /// One row instance's calls on one connection: the connection's direct
@@ -367,7 +371,9 @@ impl Callers {
     /// Records one foreign call of the provider generation `instance`:
     /// `connection` holds its frames until the reply, `direct` writes without
     /// that hold, and `notifications` are the names the serving generation
-    /// declared. The returned registration removes the call from the index.
+    /// declared. A connection that closed before this call reached the index
+    /// gets no entry: the close already removed its entries and will not run
+    /// again. The returned registration removes the call from the index.
     pub fn record(
         self: &Arc<Self>,
         instance: InstanceId,
@@ -375,6 +381,7 @@ impl Callers {
         direct: Arc<dyn CallerConnection>,
         call: &str,
         notifications: &HashSet<String>,
+        closed: &CancellationToken,
     ) -> CallRegistration {
         let connection_id = connection.id().to_owned();
         let mut index = self.0.lock().expect("caller index");
@@ -383,17 +390,19 @@ impl Callers {
             .entry(instance)
             .or_default()
             .extend(notifications.iter().cloned());
-        let entry = index
-            .entries
-            .entry((instance, connection_id.clone()))
-            .or_insert_with(|| ConnectionEntry {
-                connection: direct.clone(),
-                calls: HashMap::new(),
-            });
-        entry.connection = direct;
-        entry
-            .calls
-            .insert(call.to_owned(), Arc::downgrade(connection));
+        if !closed.is_cancelled() {
+            let entry = index
+                .entries
+                .entry((instance, connection_id.clone()))
+                .or_insert_with(|| ConnectionEntry {
+                    connection: direct.clone(),
+                    calls: HashMap::new(),
+                });
+            entry.connection = direct;
+            entry
+                .calls
+                .insert(call.to_owned(), Arc::downgrade(connection));
+        }
         CallRegistration {
             callers: self.clone(),
             instance,
@@ -648,7 +657,7 @@ impl MethodProvider {
     /// under its `callId`, so a notification follows this call's reply until
     /// [`Accepted::registration`] ends it.
     pub fn accept(
-        self: &Arc<Self>,
+        &self,
         method: String,
         params: Value,
         site: Option<CallSite>,
@@ -685,6 +694,7 @@ impl MethodProvider {
                     site.direct,
                     &call,
                     &self.notifications,
+                    &site.closed,
                 ));
             }
             caller
@@ -1194,6 +1204,7 @@ mod tests {
             channel("first", "direct", &writes),
             "call-1",
             &names(),
+            &CancellationToken::new(),
         );
         assert_eq!(callers.count(), 1);
         callers
@@ -1263,6 +1274,7 @@ mod tests {
             channel("second", "direct", &writes),
             "call-2",
             &names(),
+            &CancellationToken::new(),
         );
         assert_eq!(callers.count(), 2);
         callers.close_connection("first");
@@ -1306,5 +1318,38 @@ mod tests {
         );
         first.shutdown().await.unwrap();
         second.shutdown().await.unwrap();
+    }
+
+    /// F6: a call admitted as its connection closes records no entry, so the
+    /// index keeps nothing for a connection that will never see `finish` run
+    /// against it again.
+    #[tokio::test]
+    async fn a_call_recorded_after_its_connection_closed_leaves_no_entry() {
+        let root = Ctx::root().unwrap();
+        let callers = Arc::new(Callers::default());
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let closed = CancellationToken::new();
+        closed.cancel();
+        callers.record(
+            root.instance(),
+            &channel("first", "held", &writes),
+            channel("first", "direct", &writes),
+            "call-1",
+            &names(),
+            &closed,
+        );
+        assert_eq!(callers.count(), 0);
+        assert_eq!(
+            callers.notify(
+                root.instance(),
+                "first",
+                "call-1",
+                "notes.other",
+                Default::default()
+            ),
+            Err(NotifyError::Undeclared)
+        );
+        assert!(writes.lock().unwrap().is_empty());
+        root.shutdown().await.unwrap();
     }
 }

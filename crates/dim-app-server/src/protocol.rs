@@ -833,26 +833,10 @@ pub(crate) fn is_builtin_method(method: &str) -> bool {
     builtin_methods().any(|builtin| builtin == method)
 }
 
-/// The wire name of every [`Notification`] variant, next to the built-ins a
-/// method name may not take: a contributed notification name may not collide
-/// with one, so a provider cannot impersonate a notification its connection
+/// Whether `name` is one of [`Notification`]'s wire names, the built-ins a
+/// contributed notification may not take (methods contract A.1, "Reserved
+/// names"): a provider cannot impersonate a notification its connection
 /// already reads.
-pub(crate) const BUILTIN_NOTIFICATIONS: &[&str] = &[
-    "ui.extensions.changed",
-    "session.mcp.state",
-    "ui.shutdown",
-    "session.event",
-    "session.state",
-    "approval.request",
-    "approval.cancelled",
-    "approval.resolved",
-    "session.closed",
-    "session.model.progress",
-    "session.notice",
-    "management.progress",
-];
-
-/// Whether `name` is one of [`Notification`]'s wire names.
 pub(crate) fn is_builtin_notification(name: &str) -> bool {
     BUILTIN_NOTIFICATIONS.contains(&name)
 }
@@ -1355,41 +1339,55 @@ pub struct ProgressNotice {
     pub method: String,
     pub data: Value,
 }
-#[derive(Debug, Serialize)]
-#[serde(tag = "method", content = "params")]
-pub enum Notification {
-    #[serde(rename = "ui.extensions.changed")]
-    UiExtensionsChanged { revision: u64 },
-    #[serde(rename = "session.mcp.state")]
-    McpState(McpStateResult),
-    #[serde(rename = "ui.shutdown")]
-    UiShutdown(UiShutdownNotice),
-    #[serde(rename = "session.event")]
-    Event(EventNotice),
-    #[serde(rename = "session.state")]
-    State(StateNotice),
-    #[serde(rename = "approval.request")]
-    ApprovalRequest(ApprovalRequest),
-    #[serde(rename = "approval.cancelled")]
-    ApprovalCancelled(ApprovalCancelled),
-    #[serde(rename = "session.closed")]
-    Closed(ClosedNotice),
-    #[serde(rename = "session.event")]
-    TreeEvent(crate::tree_protocol::EventNotice),
-    #[serde(rename = "session.state")]
-    BranchState(crate::tree_protocol::StateNotice),
-    #[serde(rename = "approval.request")]
-    TreeApprovalRequest(crate::tree_protocol::ApprovalRequest),
-    #[serde(rename = "approval.cancelled")]
-    TreeApprovalCancelled(crate::tree_protocol::ApprovalCancelled),
-    #[serde(rename = "approval.resolved")]
-    TreeApprovalResolved(crate::tree_protocol::ApprovalResolved),
-    #[serde(rename = "session.model.progress")]
-    ModelProgress(crate::tree_protocol::ModelProgressNotice),
-    #[serde(rename = "session.notice")]
-    Notice(crate::tree_protocol::ForwardedNotice),
-    #[serde(rename = "management.progress")]
-    Progress(ProgressNotice),
+/// One built-in notification: its variant, payload and wire name in one
+/// entry. The [`Notification`] enum, its [`wire_name`](Notification::wire_name)
+/// match and [`BUILTIN_NOTIFICATIONS`] are all derived from this table, so a
+/// variant cannot be added without naming its wire name, and the name a
+/// provider may not take is the name it serializes under.
+macro_rules! notifications {
+    ($(
+        $(#[$doc:meta])*
+        $variant:ident $( { $($field:ident : $ty:ty),* } )? $( ( $payload:ty ) )? = $wire:literal
+    ),+ $(,)?) => {
+        #[derive(Debug, Serialize)]
+        #[serde(tag = "method", content = "params")]
+        pub enum Notification {
+            $(
+                $(#[$doc])*
+                #[serde(rename = $wire)]
+                $variant $( { $($field : $ty),* } )? $( ( $payload ) )?,
+            )+
+        }
+        /// The wire name of every [`Notification`] variant, in the same order:
+        /// a contributed notification name may not collide with one.
+        pub(crate) const BUILTIN_NOTIFICATIONS: &[&str] = &[$($wire),+];
+        impl Notification {
+            /// This notification's wire name.
+            pub fn wire_name(&self) -> &'static str {
+                match self {
+                    $( Self::$variant { .. } => $wire, )+
+                }
+            }
+        }
+    };
+}
+notifications! {
+    UiExtensionsChanged { revision: u64 } = "ui.extensions.changed",
+    McpState(McpStateResult) = "session.mcp.state",
+    UiShutdown(UiShutdownNotice) = "ui.shutdown",
+    Event(EventNotice) = "session.event",
+    State(StateNotice) = "session.state",
+    ApprovalRequest(ApprovalRequest) = "approval.request",
+    ApprovalCancelled(ApprovalCancelled) = "approval.cancelled",
+    Closed(ClosedNotice) = "session.closed",
+    TreeEvent(crate::tree_protocol::EventNotice) = "session.event",
+    BranchState(crate::tree_protocol::StateNotice) = "session.state",
+    TreeApprovalRequest(crate::tree_protocol::ApprovalRequest) = "approval.request",
+    TreeApprovalCancelled(crate::tree_protocol::ApprovalCancelled) = "approval.cancelled",
+    TreeApprovalResolved(crate::tree_protocol::ApprovalResolved) = "approval.resolved",
+    ModelProgress(crate::tree_protocol::ModelProgressNotice) = "session.model.progress",
+    Notice(crate::tree_protocol::ForwardedNotice) = "session.notice",
+    Progress(ProgressNotice) = "management.progress",
 }
 
 #[derive(Debug, Serialize)]

@@ -764,6 +764,7 @@
       "parent": "dim_agent_capabilities::methods",
       "file": "crates/dim-agent-capabilities/src/methods.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "format"
       ]
@@ -2457,7 +2458,6 @@
         "assert",
         "assert_eq",
         "format",
-        "include_str",
         "json",
         "matches",
         "panic",
@@ -2604,7 +2604,9 @@
       "file": "crates/dim-app-server/src/protocol.rs",
       "unexpandedMacros": [
         "env",
-        "matches"
+        "macro_rules",
+        "matches",
+        "notifications"
       ]
     },
     {
@@ -20805,7 +20807,6 @@
         "path DeleteResult",
         "path ForkResult",
         "path ModelUpdateResult",
-        "path Notification::Progress",
         "path Outbound::message",
         "path Outbound::notice",
         "path Outbound::result",
@@ -20974,8 +20975,7 @@
       "references": [
         "path McpRejection",
         "path McpServerStatus",
-        "path McpStateResult",
-        "path Notification::McpState"
+        "path McpStateResult"
       ]
     },
     {
@@ -21112,19 +21112,6 @@
         "path AttachResult",
         "path ClosedNotice",
         "path EventNotice",
-        "path Notification",
-        "path Notification::ApprovalCancelled",
-        "path Notification::ApprovalRequest",
-        "path Notification::BranchState",
-        "path Notification::Closed",
-        "path Notification::Event",
-        "path Notification::ModelProgress",
-        "path Notification::Notice",
-        "path Notification::State",
-        "path Notification::TreeApprovalCancelled",
-        "path Notification::TreeApprovalRequest",
-        "path Notification::TreeApprovalResolved",
-        "path Notification::TreeEvent",
         "path Outbound::notice",
         "path Outbound::result",
         "path Reply::Attach",
@@ -21342,7 +21329,6 @@
       "from": "dim_app_server::connection::ui_extensions",
       "to": "dim_app_server::protocol",
       "references": [
-        "path Notification::UiExtensionsChanged",
         "path Outbound::notice"
       ]
     },
@@ -23552,13 +23538,6 @@
       ]
     },
     {
-      "from": "dim_app_server::methods::tests",
-      "to": "dim_app_server::protocol",
-      "references": [
-        "path crate::protocol::BUILTIN_NOTIFICATIONS"
-      ]
-    },
-    {
       "from": "dim_app_server::model_catalog",
       "to": "dim_agent_types",
       "references": [
@@ -24297,18 +24276,11 @@
       "from": "dim_app_server::protocol",
       "to": "dim_app_server::tree_protocol",
       "references": [
-        "path crate::tree_protocol::ApprovalCancelled",
-        "path crate::tree_protocol::ApprovalRequest",
-        "path crate::tree_protocol::ApprovalResolved",
         "path crate::tree_protocol::BarrierResult",
         "path crate::tree_protocol::BranchesResult",
         "path crate::tree_protocol::CreateResult",
-        "path crate::tree_protocol::EventNotice",
-        "path crate::tree_protocol::ForwardedNotice",
         "path crate::tree_protocol::HistoryResult",
-        "path crate::tree_protocol::KeysResult",
-        "path crate::tree_protocol::ModelProgressNotice",
-        "path crate::tree_protocol::StateNotice"
+        "path crate::tree_protocol::KeysResult"
       ]
     },
     {
@@ -27674,7 +27646,6 @@
       "from": "dim_app_server::ui_host",
       "to": "dim_app_server::protocol",
       "references": [
-        "path Notification::UiShutdown",
         "path Outbound::notice",
         "path UiAttach",
         "path UiAttached",
@@ -27684,7 +27655,6 @@
         "path UiReplace",
         "path UiShutdownNotice",
         "path UiStatusResult",
-        "use crate::protocol::Notification",
         "use crate::protocol::Outbound",
         "use crate::protocol::UiAttach",
         "use crate::protocol::UiAttached",
@@ -42538,6 +42508,66 @@
       "path": "ClientChannel::Tui"
     },
     {
+      "module": "dim_app_server::connection",
+      "path": "Notification::Progress"
+    },
+    {
+      "module": "dim_app_server::connection::mcp",
+      "path": "Notification::McpState"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::ApprovalCancelled"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::ApprovalRequest"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::BranchState"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::Closed"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::Event"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::ModelProgress"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::Notice"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::State"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::TreeApprovalCancelled"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::TreeApprovalRequest"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::TreeApprovalResolved"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::TreeEvent"
+    },
+    {
+      "module": "dim_app_server::connection::ui_extensions",
+      "path": "Notification::UiExtensionsChanged"
+    },
+    {
       "module": "dim_app_server::managed_oauth",
       "path": "ToString::to_string"
     },
@@ -42955,7 +42985,15 @@
     },
     {
       "module": "dim_app_server::ui_host",
+      "path": "Notification::UiShutdown"
+    },
+    {
+      "module": "dim_app_server::ui_host",
       "path": "char::is_control"
+    },
+    {
+      "module": "dim_app_server::ui_host",
+      "path": "crate::protocol::Notification"
     },
     {
       "module": "dim_app_server::web::content",

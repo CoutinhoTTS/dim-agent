@@ -350,6 +350,7 @@ impl Connection {
                         connection: sink.clone(),
                         direct: sink.direct(),
                         callers: rpc.callers.clone(),
+                        closed: this.closed.clone(),
                     };
                     rpc.commands.clone().spawn(async move {
                         match this
@@ -383,6 +384,7 @@ impl Connection {
                     connection: sink.clone(),
                     direct: sink.direct(),
                     callers: rpc.callers.clone(),
+                    closed: this.closed.clone(),
                 };
                 let accepted = crate::methods::dispatch(
                     &rpc.management,
@@ -2396,7 +2398,11 @@ fn failure(method: &str, connection: &str, error: NotifyError) -> BridgeError {
             NotifyError::Undeclared => format!(
                 "notification {method} is not declared by a namespace the calling row registered"
             ),
-            NotifyError::Gone => format!("connection {connection} is closed"),
+            // The index cannot tell a closed connection from one the row
+            // never received a call from: both leave no entry.
+            NotifyError::Gone => {
+                format!("connection {connection} is closed or was not served by this row")
+            }
             NotifyError::TooLarge => format!("notification {method} exceeds the frame limit"),
         },
         None,
