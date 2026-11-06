@@ -1,6 +1,8 @@
 //! Generic, host-owned file transactions for an explicitly authorized plugin root.
 //! No account formats or provider policy belong at this boundary.
-use dim_agent_capabilities::file_storage::{FileLease, FilePath, FileStorage, FileStorageError};
+use dim_agent_capabilities::file_storage::{
+    EntryKind, FileLease, FilePath, FileReader, FileStorage, FileStorageError,
+};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -10,11 +12,18 @@ use serde_json::json;
 use std::{
     fs::Permissions,
     io,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const FORMAT_VERSION: u32 = 1;
+
+/// The largest file a whole-buffer operation accepts. Bytes cross the plugin
+/// runtime's channel base64-encoded in a 16 MiB frame, which costs four bytes
+/// for every three; 8 MiB leaves the frame envelope and both sides' copies
+/// room, and bounds one allocation. Streaming operations have no such limit.
+pub const MAX_WHOLE_FILE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -277,20 +286,48 @@ pub enum PluginFileError {
     Closed,
     #[error("the file path is outside the authorized root")]
     InvalidPath,
-    #[error("the stored file is not a version 1 text envelope; it is left unchanged")]
+    /// The file cannot be used by this operation and is left unchanged: not a
+    /// version 1 text envelope for a text transaction, or larger than
+    /// [`MAX_WHOLE_FILE_BYTES`] for a byte read.
+    #[error("the stored file cannot be used by this operation; it is left unchanged")]
     InvalidData,
+    /// Another lease holds the file, or one beneath the directory.
+    #[error("the file is locked by another lease")]
+    Locked,
     #[error("file operation failed: {0}")]
     Io(String),
+}
+
+/// One entry of a [`PluginFileTransactions::list`] result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFileEntry {
+    /// The entry's path relative to the authorized root, ready to pass to
+    /// another operation.
+    pub name: String,
+    /// What the entry is, without following links.
+    pub kind: EntryKind,
 }
 
 fn file_error(error: FileStorageError) -> PluginFileError {
     match error {
         FileStorageError::Closed | FileStorageError::Cancelled => PluginFileError::Closed,
         FileStorageError::InvalidPath(_) => PluginFileError::InvalidPath,
+        FileStorageError::Locked => PluginFileError::Locked,
         FileStorageError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData => {
             PluginFileError::InvalidData
         }
         error => PluginFileError::Io(error.to_string()),
+    }
+}
+
+/// The name of `leaf` under `prefix`, as these operations spell relative
+/// names: one `/` between the two, whatever separators the caller wrote.
+fn join_name(prefix: &str, leaf: &str) -> String {
+    let prefix = prefix.trim_end_matches(['/', '\\']);
+    if prefix.is_empty() {
+        leaf.to_owned()
+    } else {
+        format!("{prefix}/{leaf}")
     }
 }
 
@@ -311,6 +348,143 @@ impl PluginFileTransactions {
         name: &str,
         change: impl FnOnce(Option<&str>) -> (Option<String>, R) + Send + 'static,
     ) -> Result<R, PluginFileError> {
+        self.run(name, move |storage, path, stopping| {
+            Box::pin(transact_file(storage, path, stopping, change))
+        })
+        .await
+    }
+
+    /// The bytes of `name`, or `None` when it is absent. A binary file is its
+    /// bytes; a text file returns them whole, envelope included. A file over
+    /// [`MAX_WHOLE_FILE_BYTES`] fails with [`PluginFileError::InvalidData`]
+    /// before it is read; use [`open_read`](Self::open_read) for larger files.
+    pub async fn read_bytes(&self, name: &str) -> Result<Option<Vec<u8>>, PluginFileError> {
+        self.run(name, |storage, path, stopping| {
+            Box::pin(async move {
+                match storage
+                    .read_limited(&path, MAX_WHOLE_FILE_BYTES, &stopping)
+                    .await
+                {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(FileStorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                        Ok(None)
+                    }
+                    Err(error) => Err(file_error(error)),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Opens `name` for streaming reads, or `None` when it is absent. The
+    /// reader pins the file: reads take explicit offsets and return at most
+    /// 64 KiB each, and replacing the name does not change an open reader.
+    pub async fn open_read(&self, name: &str) -> Result<Option<FileReader>, PluginFileError> {
+        self.run(name, |storage, path, stopping| {
+            Box::pin(async move {
+                match storage.open_read(&path, &stopping).await {
+                    Ok(reader) => Ok(Some(reader)),
+                    Err(FileStorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                        Ok(None)
+                    }
+                    Err(error) => Err(file_error(error)),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Replaces `name` with what `source` yields, read to its end under the
+    /// file's lock. The bytes go to a temporary file beside the target, which
+    /// is flushed and renamed over it, so a failure or cancellation leaves the
+    /// old content and no temporary file. No text envelope is involved, and no
+    /// size bound applies.
+    pub async fn write_stream(
+        &self,
+        name: &str,
+        source: impl io::Read + Send + 'static,
+    ) -> Result<(), PluginFileError> {
+        self.run(name, move |storage, path, stopping| {
+            Box::pin(async move {
+                let mut lease = acquire(&storage, &path, &stopping).await?;
+                lease
+                    .replace_from(source, private_permissions(), &stopping)
+                    .await
+                    .map_err(file_error)
+            })
+        })
+        .await
+    }
+
+    /// The entries directly under the directory `prefix`, sorted by name and
+    /// named relative to the authorized root, so each name is ready to pass to
+    /// another operation. One level: a directory entry is listed, not entered.
+    /// `prefix` names a directory, so the root itself is not listed. An entry
+    /// whose name is not valid UTF-8 is omitted, because these operations
+    /// address names as strings; removing the directory removes it.
+    pub async fn list(&self, prefix: &str) -> Result<Vec<PluginFileEntry>, PluginFileError> {
+        let name = prefix.to_owned();
+        let joined = name.clone();
+        self.run(&name, move |storage, path, stopping| {
+            Box::pin(async move {
+                let entries = storage.list(&path, &stopping).await.map_err(file_error)?;
+                Ok(entries
+                    .into_iter()
+                    .filter_map(|entry| {
+                        Some(PluginFileEntry {
+                            name: join_name(&joined, entry.name.to_str()?),
+                            kind: entry.kind,
+                        })
+                    })
+                    .collect())
+            })
+        })
+        .await
+    }
+
+    /// Removes `name`: a file, or a directory and everything beneath it. A
+    /// link is removed itself, never followed. A file a lease holds, and a
+    /// directory with a lease held beneath it, fail with
+    /// [`PluginFileError::Locked`]; an absent entry counts as removed, so a
+    /// retry is safe. Removal is not atomic: an error can leave part of a tree
+    /// removed.
+    pub async fn remove(&self, name: &str) -> Result<(), PluginFileError> {
+        self.run(name, |storage, path, stopping| {
+            Box::pin(async move { storage.remove(&path, &stopping).await.map_err(file_error) })
+        })
+        .await
+    }
+
+    /// Makes `name` an existing directory under the authorized root, creating
+    /// every missing parent with mode 0700, and returns the absolute path it
+    /// names there. It is for handing a work directory to a helper process. A
+    /// link or other non-directory at any existing component fails with
+    /// [`PluginFileError::InvalidPath`]; the returned path names what this call
+    /// created, and a component replaced by a link afterwards is outside its
+    /// control.
+    pub async fn directory(&self, name: &str) -> Result<PathBuf, PluginFileError> {
+        self.run(name, |storage, path, stopping| {
+            Box::pin(async move {
+                storage
+                    .create_directories(&path, &stopping)
+                    .await
+                    .map_err(file_error)
+            })
+        })
+        .await
+    }
+
+    async fn run<R: Send + 'static>(
+        &self,
+        name: &str,
+        action: impl FnOnce(
+            Arc<FileStorage>,
+            FilePath,
+            CancellationToken,
+        ) -> BoxFuture<'static, Result<R, PluginFileError>>
+        + Send
+        + 'static,
+    ) -> Result<R, PluginFileError> {
         let files = self.0.clone();
         let path = files
             .storage
@@ -325,7 +499,7 @@ impl PluginFileTransactions {
         let owner = files.tasks.token();
         let task = files.tasks.spawn(async move {
             let _owner = owner;
-            transact_file(&storage, &path, &stopping, change).await
+            action(storage, path, stopping).await
         });
         drop(admission);
         task.await
@@ -334,22 +508,13 @@ impl PluginFileTransactions {
 }
 
 async fn transact_file<R>(
-    storage: &Arc<FileStorage>,
-    path: &FilePath,
-    stopping: &CancellationToken,
+    storage: Arc<FileStorage>,
+    path: FilePath,
+    stopping: CancellationToken,
     change: impl FnOnce(Option<&str>) -> (Option<String>, R),
 ) -> Result<R, PluginFileError> {
-    let mut lease = loop {
-        match storage.lock(path, stopping).await {
-            Ok(lease) => break lease,
-            Err(FileStorageError::Locked) => tokio::select! {
-                _ = stopping.cancelled() => return Err(PluginFileError::Closed),
-                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
-            },
-            Err(error) => return Err(file_error(error)),
-        }
-    };
-    let current = match lease.read(stopping).await {
+    let mut lease = acquire(&storage, &path, &stopping).await?;
+    let current = match lease.read(&stopping).await {
         Ok(bytes) => match serde_json::from_slice::<StoredFile>(&bytes) {
             Ok(StoredFile {
                 version: FORMAT_VERSION,
@@ -368,11 +533,29 @@ async fn transact_file<R>(
         })
         .expect("text records contain only serializable fields");
         lease
-            .replace(bytes, private_permissions(), stopping)
+            .replace(bytes, private_permissions(), &stopping)
             .await
             .map_err(file_error)?;
     }
     Ok(result)
+}
+
+/// Takes the file's lease, waiting while another holder has it.
+async fn acquire(
+    storage: &Arc<FileStorage>,
+    path: &FilePath,
+    stopping: &CancellationToken,
+) -> Result<FileLease, PluginFileError> {
+    loop {
+        match storage.lock(path, stopping).await {
+            Ok(lease) => return Ok(lease),
+            Err(FileStorageError::Locked) => tokio::select! {
+                _ = stopping.cancelled() => return Err(PluginFileError::Closed),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+            },
+            Err(error) => return Err(file_error(error)),
+        }
+    }
 }
 
 struct Dispatch(Arc<Files>);
