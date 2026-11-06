@@ -243,8 +243,10 @@ and `mcp.set_enabled` refuse them, while `mcp.disconnect` and sign-in work as fo
 Successful configuration mutations return `{}` after persistence, not after connection/tool
 adoption; disabling or removing an entry also waits until its running generations have closed in
 every Session. The catalog also returns `userApplication`, `pluginApplication` and optional `projectApplication`, each with
-`appliedRevision`, `error` and `cleanupError`. Application describes source eligibility
-and instance creation failures; it does not confirm a network connection or tool adoption.
+`appliedRevision`, `error` and `cleanupError`. `appliedRevision` is the source token of the
+applied configuration — `userRevision` or `projectRevision` — so a client comparing it with the
+token it read sees whether that configuration is the one applied. Application describes source
+eligibility and instance creation failures; it does not confirm a network connection or tool adoption.
 An application error leaves persisted intent intact. Cleanup errors remain visible for that
 source during this publisher's lifetime, including after later successful application.
 Read `session.mcp` for runtime state. A conflict requires rereading the source;

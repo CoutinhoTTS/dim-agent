@@ -16,7 +16,7 @@ concurrency:
 jobs:
   preflight:
     if: github.repository == 'arcships/dim' && (github.event_name == 'push' || github.ref == 'refs/heads/main' || (github.ref_type == 'branch' && inputs.tag != ''))
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       preview: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
@@ -254,7 +254,7 @@ jobs:
           overwrite: true
   assemble:
     needs: [preflight, build]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -306,7 +306,7 @@ jobs:
   draft:
     needs: [preflight, assemble]
     if: needs.preflight.outputs.preview == 'false'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write

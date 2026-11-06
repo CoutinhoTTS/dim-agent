@@ -2318,6 +2318,13 @@
       ]
     },
     {
+      "id": "dim_app_server::mcp::import::testing",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::import",
+      "file": "crates/dim-app-server/src/mcp/import.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_app_server::mcp::management",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -22047,6 +22054,14 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::import::testing",
+      "references": [
+        "path import::testing::pause",
+        "use import::testing"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::management",
       "references": [
         "mod management",
@@ -22432,6 +22447,21 @@
     },
     {
       "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::mcp::discovery",
+      "references": [
+        "path discovery::Identity",
+        "use super::discovery"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
+      "to": "dim_app_server::mcp::import::testing",
+      "references": [
+        "mod testing"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::import",
       "to": "dim_app_server::protocol",
       "references": [
         "use crate::protocol::optional_non_null"
@@ -22557,6 +22587,7 @@
       "references": [
         "path StoreId::parse",
         "path discovery::Environment::from_process",
+        "path discovery::Identity",
         "path discovery::Workspace",
         "path discovery::document",
         "path discovery::sources",
@@ -22728,12 +22759,14 @@
         "path McpSource::User",
         "path Result",
         "path daemon_environment",
+        "path source_revision",
         "path sources_in_precedence",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpSource",
         "use super::Result",
         "use super::daemon_environment",
+        "use super::source_revision",
         "use super::sources_in_precedence"
       ]
     },

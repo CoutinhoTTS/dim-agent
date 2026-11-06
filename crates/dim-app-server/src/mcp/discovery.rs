@@ -270,46 +270,39 @@ struct Prepared {
 /// stores. Each distinct file is read once.
 pub(crate) fn sources(environment: &Environment, workspace: Option<&Workspace>) -> Vec<Source> {
     let mut rows = Vec::with_capacity(6);
-    let claude_path = display_path(StoreId::ClaudeUser, environment, workspace);
     let claude = environment
         .claude_file()
         .map(|file| read_claude(&file, workspace, MAX_SOURCE_BYTES));
+    let user_row = identity(StoreId::ClaudeUser, environment, workspace, None);
     rows.push(match &claude {
         Some(Ok(file)) => match claude_user(file) {
-            Ok(prepared) => ready(StoreId::ClaudeUser, claude_path, &prepared),
-            Err(error) => failed(StoreId::ClaudeUser, claude_path, error),
+            Ok(prepared) => ready(user_row, &prepared),
+            Err(error) => failed(user_row, error),
         },
-        Some(Err(error)) => failed(StoreId::ClaudeUser, claude_path, error.clone()),
+        Some(Err(error)) => failed(user_row, error.clone()),
         None => failed(
-            StoreId::ClaudeUser,
-            claude_path,
+            user_row,
             StoreError::unreadable("the home directory is not set"),
         ),
     });
     if let Some(workspace) = workspace {
-        let path = display_path(StoreId::ClaudeLocal, environment, Some(workspace));
         let key = workspace.canonical.to_str().unwrap_or_default().to_owned();
+        let project = |matched: &str| {
+            identity(
+                StoreId::ClaudeLocal,
+                environment,
+                Some(workspace),
+                Some(matched),
+            )
+        };
         rows.push(match &claude {
             Some(Ok(file)) => match claude_local(file, workspace) {
-                Ok((prepared, matched)) => ready(
-                    StoreId::ClaudeLocal,
-                    format!("{path} · projects[{matched:?}]"),
-                    &prepared,
-                ),
-                Err(error) => failed(
-                    StoreId::ClaudeLocal,
-                    format!("{path} · projects[{key:?}]"),
-                    error,
-                ),
+                Ok((prepared, matched)) => ready(project(&matched), &prepared),
+                Err(error) => failed(project(&key), error),
             },
-            Some(Err(error)) => failed(
-                StoreId::ClaudeLocal,
-                format!("{path} · projects[{key:?}]"),
-                error.clone(),
-            ),
+            Some(Err(error)) => failed(project(&key), error.clone()),
             None => failed(
-                StoreId::ClaudeLocal,
-                format!("{path} · projects[{key:?}]"),
+                project(&key),
                 StoreError::unreadable("the home directory is not set"),
             ),
         });
@@ -326,18 +319,24 @@ pub(crate) fn sources(environment: &Environment, workspace: Option<&Workspace>) 
 }
 
 /// Reads one store and converts it to the standard document. `document()` is
-/// the import's input; `sources()` reports the same store's state.
+/// the import's input; `sources()` reports the same store's state. The identity
+/// row comes from that same read, so a preview names its store without reading
+/// any other store.
 pub(crate) fn document(
     store: StoreId,
     environment: &Environment,
     workspace: Option<&Workspace>,
-) -> Result<Document, StoreError> {
-    let prepared = prepare(store, environment, workspace)?;
+) -> Result<(Document, Identity), StoreError> {
+    let (prepared, project) = prepare(store, environment, workspace)?;
+    let identity = identity(store, environment, workspace, project.as_deref());
     let revision = format!("{:x}", Sha256::digest(prepared.text.as_bytes()));
-    Ok(Document {
-        text: prepared.text,
-        revision,
-    })
+    Ok((
+        Document {
+            text: prepared.text,
+            revision,
+        },
+        identity,
+    ))
 }
 
 fn store_source(
@@ -345,50 +344,88 @@ fn store_source(
     environment: &Environment,
     workspace: Option<&Workspace>,
 ) -> Source {
-    let path = display_path(store, environment, workspace);
+    let identity = identity(store, environment, workspace, None);
     match prepare(store, environment, workspace) {
-        Ok(prepared) => ready(store, path, &prepared),
-        Err(error) => failed(store, path, error),
+        Ok((prepared, _)) => ready(identity, &prepared),
+        Err(error) => failed(identity, error),
     }
 }
 
-fn ready(store: StoreId, path: String, prepared: &Prepared) -> Source {
-    Source {
+/// A store's identity: the id, client, scope and display path. Every row of
+/// `mcp.import.sources` and the store an import preview read report it, and
+/// one builder keeps the two from naming the same store differently.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Identity {
+    pub(crate) id: &'static str,
+    pub(crate) client: &'static str,
+    pub(crate) scope: &'static str,
+    pub(crate) path: String,
+}
+
+/// Builds a store's identity row. `project` is the `projects` record the local
+/// Claude store matched, which its display path reports.
+fn identity(
+    store: StoreId,
+    environment: &Environment,
+    workspace: Option<&Workspace>,
+    project: Option<&str>,
+) -> Identity {
+    let path = display_path(store, environment, workspace);
+    let path = match (store, project) {
+        (StoreId::ClaudeLocal, Some(project)) => format!("{path} · projects[{project:?}]"),
+        _ => path,
+    };
+    Identity {
         id: store.id(),
         client: store.client(),
         scope: store.scope(),
         path,
+    }
+}
+
+fn ready(identity: Identity, prepared: &Prepared) -> Source {
+    Source {
+        id: identity.id,
+        client: identity.client,
+        scope: identity.scope,
+        path: identity.path,
         state: State::Ready,
         entries: Some(prepared.entries),
         error: None,
     }
 }
 
-fn failed(store: StoreId, path: String, error: StoreError) -> Source {
+fn failed(identity: Identity, error: StoreError) -> Source {
     let state = error.state;
     let error = matches!(state, State::Unreadable | State::Malformed).then_some(error.message);
     Source {
-        id: store.id(),
-        client: store.client(),
-        scope: store.scope(),
-        path,
+        id: identity.id,
+        client: identity.client,
+        scope: identity.scope,
+        path: identity.path,
         state,
         entries: None,
         error,
     }
 }
 
+/// Converts one store, with the `projects` record it matched when the store is
+/// the local Claude one.
 fn prepare(
     store: StoreId,
     environment: &Environment,
     workspace: Option<&Workspace>,
-) -> Result<Prepared, StoreError> {
+) -> Result<(Prepared, Option<String>), StoreError> {
     match store {
         StoreId::ClaudeUser => {
             let file = environment
                 .claude_file()
                 .ok_or_else(|| StoreError::unreadable("the home directory is not set"))?;
-            claude_user(&read_claude(&file, None, MAX_SOURCE_BYTES)?)
+            Ok((
+                claude_user(&read_claude(&file, None, MAX_SOURCE_BYTES)?)?,
+                None,
+            ))
         }
         StoreId::ClaudeLocal => {
             let workspace =
@@ -397,23 +434,23 @@ fn prepare(
                 .claude_file()
                 .ok_or_else(|| StoreError::unreadable("the home directory is not set"))?;
             let parsed = read_claude(&file, Some(workspace), MAX_SOURCE_BYTES)?;
-            let (prepared, _) = claude_local(&parsed, workspace)?;
-            Ok(prepared)
+            let (prepared, matched) = claude_local(&parsed, workspace)?;
+            Ok((prepared, Some(matched)))
         }
         StoreId::CodexUser | StoreId::CodexProject => {
             let file = store_path(store, environment, workspace)?;
             let text = read_text(&file, MAX_SOURCE_BYTES)?;
-            prepared(codex_entries(&text)?, Map::new())
+            Ok((prepared(codex_entries(&text)?, Map::new())?, None))
         }
         StoreId::OmpUser => {
             let file = environment
                 .omp_file()
                 .ok_or_else(|| StoreError::unreadable("the home directory is not set"))?;
-            omp(&read_json(&file, MAX_SOURCE_BYTES)?)
+            Ok((omp(&read_json(&file, MAX_SOURCE_BYTES)?)?, None))
         }
         StoreId::OmpProject => {
             let file = store_path(store, environment, workspace)?;
-            omp(&read_json(&file, MAX_SOURCE_BYTES)?)
+            Ok((omp(&read_json(&file, MAX_SOURCE_BYTES)?)?, None))
         }
     }
 }
