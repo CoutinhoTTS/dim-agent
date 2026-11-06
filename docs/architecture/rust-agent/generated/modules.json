@@ -299,7 +299,6 @@
       "file": "crates/dim-agent-aimux/src/stream.rs",
       "unexpandedMacros": [
         "async_stream::stream",
-        "format",
         "matches",
         "tracing::debug"
       ]
@@ -326,6 +325,7 @@
         "format",
         "json",
         "panic",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -652,6 +652,17 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/host.rs",
       "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::host::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::host",
+      "file": "crates/dim-agent-capabilities/src/host.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "format"
       ]
     },
@@ -7226,12 +7237,14 @@
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::Failed",
+        "path HostErrorKind",
         "path HostErrorKind::Http",
         "path HostErrorKind::InvalidRequest",
         "path HostErrorKind::Other",
         "path HostErrorKind::Transport",
         "path HostErrorKind::Unsupported",
         "path ModelFailureFacts",
+        "path ModelFailureOrigin",
         "path ModelFailureOrigin::HttpResponse",
         "path ModelFailureOrigin::StreamEvent",
         "path ModelFailureOrigin::Transport",
@@ -7252,6 +7265,34 @@
         "path dim_agent_types::ContentMetadata",
         "path dim_agent_types::ContentMetadata::Bedrock",
         "use dim_agent_types::MessagePart"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::stream",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path FAILURE_CAUSE_CHARS",
+        "path FAILURE_CAUSE_FRAMES",
+        "path FAILURE_REASON_CHARS",
+        "path ModelFailureKind",
+        "path ModelFailureKind::AuthRejected",
+        "path ModelFailureKind::ContentFiltered",
+        "path ModelFailureKind::ContextTooLong",
+        "path ModelFailureKind::InvalidRequest",
+        "path ModelFailureKind::MalformedResponse",
+        "path ModelFailureKind::Network",
+        "path ModelFailureKind::NotFound",
+        "path ModelFailureKind::QuotaExhausted",
+        "path ModelFailureKind::RateLimited",
+        "path ModelFailureKind::ServerError",
+        "path ModelFailureKind::Timeout",
+        "path ModelFailureKind::Unknown",
+        "path one_line",
+        "use dim_agent_types::FAILURE_CAUSE_CHARS",
+        "use dim_agent_types::FAILURE_CAUSE_FRAMES",
+        "use dim_agent_types::FAILURE_REASON_CHARS",
+        "use dim_agent_types::ModelFailureKind",
+        "use dim_agent_types::one_line"
       ]
     },
     {
@@ -7325,7 +7366,8 @@
       "from": "dim_agent_aimux::stream::tests",
       "to": "dim_agent_aimux::stream",
       "references": [
-        "path convert"
+        "path convert",
+        "path error"
       ]
     },
     {
@@ -10443,6 +10485,13 @@
     },
     {
       "from": "dim_agent_capabilities::host",
+      "to": "dim_agent_capabilities::host::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host",
       "to": "dim_agent_runtime::contracts",
       "references": [
         "path PromptSourceTarget",
@@ -10468,8 +10517,12 @@
       "from": "dim_agent_capabilities::host",
       "to": "dim_agent_types::events",
       "references": [
+        "path ModelFailureKind",
         "path ProviderPresentation",
-        "path ReplacementParts"
+        "path ReplacementParts",
+        "path dim_agent_types::FAILURE_REASON_CHARS",
+        "path dim_agent_types::ModelFailureKind::Unknown",
+        "path dim_agent_types::one_line"
       ]
     },
     {
@@ -10533,6 +10586,13 @@
         "path ToolDefinition",
         "path ToolResult",
         "path kind"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModelFailureFacts::unknown"
       ]
     },
     {
@@ -10938,6 +10998,8 @@
         "path HostError::Failed",
         "path HostError::failed",
         "path ModelConnection::Local",
+        "path ModelFailureFacts",
+        "path ModelFailureFacts::unknown",
         "path ModelHost",
         "path ProviderConnectionResolver",
         "path ResolvedModelConnection"
@@ -11082,11 +11144,19 @@
         "path EventKind::TurnStart",
         "path FinishReason",
         "path ModelCallData",
+        "path ModelFailure",
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Cancelled",
         "path ModelOutputOutcome::Completed",
         "path ModelOutputOutcome::Failed",
         "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path model"
       ]
     },
     {
@@ -11134,9 +11204,18 @@
         "path HostError",
         "path HostError::Failed",
         "path ModelFailureFacts",
+        "path ModelFailureFacts::unknown",
         "path ModelHost",
         "path ModelStream",
         "path ResolvedModelConnection"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::recovery",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ModelFailureKind",
+        "use dim_agent_types::ModelFailureKind"
       ]
     },
     {
@@ -11169,6 +11248,7 @@
         "path ModelChunk::ToolStart",
         "path ModelChunk::ToolUse",
         "path ModelChunk::Usage",
+        "path ModelFailureFacts",
         "path ModelStopReason::EndTurn",
         "path ModelStopReason::MaxTokens",
         "path ModelStopReason::StopSequence",
@@ -11241,6 +11321,7 @@
         "path FinishReason::ToolUse",
         "path ModelCallData",
         "path ModelContentData",
+        "path ModelFailureKind::OutputLimit",
         "path ModelUsageData",
         "path ProviderPresentation",
         "path TextData",

@@ -648,6 +648,57 @@ pub fn one_line(value: &str, max_chars: usize) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// Why a model request failed, as data on its terminal fact. Clients word
+/// their own line from `kind`; `reason` and `cause` carry the detail.
+/// Never stores the request URL, headers, request values, the response body
+/// or a credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelFailure {
+    pub kind: ModelFailureKind,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub status: Option<u16>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub provider_code: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub request_id: Option<String>,
+    /// One specific sentence, one line: the provider's message, or the
+    /// innermost transport cause.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub reason: Option<String>,
+    /// The cause chain, outermost first; each frame is one line.
+    #[serde(default)]
+    pub cause: Vec<String>,
+    /// How many attempts the request took; at least 1.
+    pub attempts: u8,
+    /// The total backoff slept.
+    pub waited_ms: u64,
+    /// The provider asked to wait longer than the budget left, so the
+    /// request stopped.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub retry_after_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelOutputOutcome {
@@ -668,6 +719,12 @@ pub enum ModelOutputOutcome {
             deserialize_with = "crate::optional_non_null"
         )]
         presentation: Option<ProviderPresentation>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::optional_non_null"
+        )]
+        failure: Option<Box<ModelFailure>>,
     },
     Cancelled {
         reason: String,

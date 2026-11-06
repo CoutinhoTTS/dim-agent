@@ -2634,6 +2634,7 @@ fn an_interrupted_output_is_told_with_exactly_its_committed_text() {
             error: "aborted".into(),
             budget: None,
             presentation: None,
+            failure: None,
         },
     ));
     recorded.push(turn_ends(
