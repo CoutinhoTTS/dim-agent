@@ -58,6 +58,10 @@ pub struct DaemonLink {
     pub options: Options,
     /// Start a daemon when none runs; `daemon stop` only looks for one.
     pub start: bool,
+    /// The interface language to report startup progress in. `apply` is a
+    /// fiber task and may run on another thread, so the language travels as a
+    /// value rather than the interface thread's thread-local.
+    pub locale: crate::locale::Locale,
 }
 
 impl Plugin for DaemonLink {
@@ -68,9 +72,7 @@ impl Plugin for DaemonLink {
     }
 
     async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
-        let mut report =
-            |upgrade: client::StoreUpgrade| eprintln!("{}", crate::store_upgrade_line(&upgrade));
-        let linked = client::connect_inner(&self.options, self.start, &mut report)
+        let linked = client::connect_inner(&self.options, self.start, self.locale)
             .await
             .map_err(ErrorKind::PluginFailed)?;
         let (client, notice) = match linked {

@@ -19,6 +19,68 @@ fn script(home: &Home, name: &str, body: &str) -> PathBuf {
     path
 }
 
+/// A local OpenAI-compatible stream that answers the Session-title request and
+/// then the turn with "ok", and the model config that points the daemon at it.
+fn model_fixture(home: &Home) -> (PathBuf, thread::JoinHandle<()>) {
+    use std::io::{BufRead, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let model = thread::spawn(move || {
+        // The title request, then the turn itself.
+        for _ in 0..2 {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "the model was not requested");
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut stream = std::io::BufReader::new(stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(stream.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = n.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            let frame = |delta, finish| {
+                format!(
+                    "data: {}\n\n",
+                    json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+                )
+            };
+            let data = frame(json!({"content":"ok"}), Value::Null)
+                + &frame(json!({}), json!("stop"))
+                + "data: [DONE]\n\n";
+            write!(
+                stream.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}",
+                data.len()
+            )
+            .unwrap();
+            stream.get_mut().flush().unwrap();
+        }
+    });
+    let config = home.0.join("model.json");
+    fs::write(&config, json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":128}}]}]}).to_string()).unwrap();
+    (config, model)
+}
+
 /// A note written as the daemon writes it: a private temp file renamed over
 /// the target. `pid` is expanded by the shell when it is `$$`.
 fn note_write(note: &std::path::Path, pid: &str, counter: usize) -> String {
@@ -58,6 +120,36 @@ fn a_starting_daemon_is_waited_for_while_it_reports_progress() {
         "the upgrade line is printed once: {stderr}"
     );
     assert!(!note.exists(), "the connected daemon removed the note");
+}
+
+/// The product settings' locale reaches the plugin path: the upgrade line is
+/// printed in zh-CN, never in English.
+#[test]
+fn the_upgrade_line_follows_the_saved_locale() {
+    let home = Home::new();
+    fs::write(home.0.join("config.json"), r#"{"locale":"zh-CN"}"#).unwrap();
+    let note = note_path(&home);
+    let mut body = String::new();
+    for counter in 1..=14 {
+        body.push_str(&note_write(&note, "$$", counter));
+        body.push_str("\nsleep 0.3\n");
+    }
+    body.push_str(&format!(
+        "exec '{}' app-server \"$@\"",
+        env!("CARGO_BIN_EXE_dimcode")
+    ));
+    let server = script(&home, "slow-server", &body);
+    let output = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "3000")
+        .args(["--server", server.to_str().unwrap(), "models", "fixture"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let zh = "正在把本地库从格式 v33 升级到 v34；大库可能需要一段时间。";
+    assert_eq!(stderr.matches(zh).count(), 1, "{stderr}");
+    assert!(!stderr.contains(UPGRADING), "{stderr}");
 }
 
 /// A child that reports nothing and never serves fails at the bound, with the
@@ -209,7 +301,8 @@ fn a_start_lock_waiter_follows_progress_past_its_bound() {
     assert!(!note.exists(), "the started daemon removed the note");
 }
 
-/// JSON mode keeps the upgrade line off stdout.
+/// JSON mode keeps the upgrade line off stdout while a real turn runs
+/// through the same startup path; every stdout line parses as JSON.
 #[test]
 fn the_upgrade_line_stays_off_json_stdout() {
     let home = Home::new();
@@ -224,12 +317,15 @@ fn the_upgrade_line_stays_off_json_stdout() {
         env!("CARGO_BIN_EXE_dimcode")
     ));
     let server = script(&home, "slow-server", &body);
+    let (model, fixture) = model_fixture(&home);
     let output = home
         .command()
         .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "3000")
         .args([
             "--server",
             server.to_str().unwrap(),
+            "--model-config",
+            model.to_str().unwrap(),
             "exec",
             "--json",
             "-p",
@@ -237,11 +333,21 @@ fn the_upgrade_line_stays_off_json_stdout() {
         ])
         .output()
         .unwrap();
+    fixture.join().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.contains("Upgrading the local store"), "{stdout}");
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert!(
+        !lines.is_empty(),
+        "exec --json wrote a JSON stream: {stdout}"
+    );
+    for line in lines {
         serde_json::from_str::<Value>(line).expect("stdout is JSON lines");
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stdout.contains("Upgrading the local store"), "{stdout}");
     assert_eq!(stderr.matches(UPGRADING).count(), 1, "{stderr}");
 }

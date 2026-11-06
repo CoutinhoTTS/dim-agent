@@ -285,6 +285,8 @@ fn read_progress_note(path: &Path) -> Option<ProgressNote> {
 #[derive(Default)]
 struct ProgressWatch {
     counter: u64,
+    /// The upgrade line has been printed.
+    reported: bool,
 }
 
 impl ProgressWatch {
@@ -312,6 +314,13 @@ impl ProgressWatch {
     fn reset(&mut self) {
         self.counter = 0;
     }
+    /// Prints the upgrade line once per watch, in `locale`.
+    fn announce(&mut self, locale: crate::locale::Locale, upgrade: StoreUpgrade) {
+        if !self.reported {
+            self.reported = true;
+            eprintln!("{}", crate::store_upgrade_line(locale, &upgrade));
+        }
+    }
 }
 
 /// Waits for the start lock, polling every 50 ms as the spawn wait does. The
@@ -323,8 +332,7 @@ impl ProgressWatch {
 async fn start_lock(
     native_home: &Path,
     watch: &mut ProgressWatch,
-    reported: &mut bool,
-    report: &mut (dyn FnMut(StoreUpgrade) + Send),
+    locale: crate::locale::Locale,
 ) -> Result<std::fs::File> {
     let file = open_start_lock(native_home)?;
     let note = native_home.join(STARTUP_NOTE);
@@ -336,11 +344,8 @@ async fn start_lock(
             Err(std::fs::TryLockError::WouldBlock) => {}
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }
-        if let Some(upgrade) = watch.observe(&note, None, &mut deadline, timeout)
-            && !*reported
-        {
-            *reported = true;
-            report(upgrade);
+        if let Some(upgrade) = watch.observe(&note, None, &mut deadline, timeout) {
+            watch.announce(locale, upgrade);
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
@@ -496,12 +501,13 @@ async fn daemon_in_use(client: &mut Client) -> bool {
 /// daemon, starts one when `start` and waits for it; else `None`. With
 /// `start`, one client at a time decides under `<native_home>/daemon.start.lock`
 /// whether to reuse the daemon, replace it, or start one. A daemon that
-/// reports a store upgrade while it starts is waited for, and `report` says
-/// so once; both waits are bounded by inactivity, not by total time.
+/// reports a store upgrade while it starts is waited for, and the line is
+/// printed once in `locale`; both waits are bounded by inactivity, not by
+/// total time.
 pub async fn connect_inner(
     options: &Options,
     start: bool,
-    report: &mut (dyn FnMut(StoreUpgrade) + Send),
+    locale: crate::locale::Locale,
 ) -> Result<Option<Link>> {
     let profile = if !start {
         None
@@ -570,9 +576,8 @@ pub async fn connect_inner(
     // normally finds the successor at its own version. `--server` daemons are
     // never started or replaced, so they take no lock.
     let mut watch = ProgressWatch::default();
-    let mut reported = false;
     let _start_lock = if start && server.embedded {
-        Some(start_lock(&native_home, &mut watch, &mut reported, report).await?)
+        Some(start_lock(&native_home, &mut watch, locale).await?)
     } else {
         None
     };
@@ -754,10 +759,8 @@ pub async fn connect_inner(
         }
         if let Some(progress) =
             watch.observe(&startup_note, Some(child.id()), &mut deadline, timeout)
-            && !reported
         {
-            reported = true;
-            report(progress);
+            watch.announce(locale, progress);
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(if server.embedded {
