@@ -72,9 +72,9 @@ named by `failure_sequence`, the request's output facts, the turn's
   forbids opens a handover that the disposer declines, so the prohibition
   covers the continuation.
 - **Budget left.** The failed terminal's `failure` has `attempts` below 8 and
-  `waited_ms` below 300 s. The part reads ModelProvider's [public
+  `waitedMs` below 300 s. The part reads ModelProvider's [public
   limits](../../architecture/rust-agent/plugins/ModelProvider.md#failure-chain)
-  and the failure's own `attempts` and `waited_ms`; it never repeats the
+  and the failure's own `attempts` and `waitedMs`; it never repeats the
   numbers.
 - **No accepted continuation yet.** After this turn's `turn/start`, the turn
   has no `context/prepare` carrying `failure_chain`. The continuation's own

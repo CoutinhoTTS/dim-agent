@@ -42,7 +42,7 @@ Loop 的端口在每个分支上只接受一个处置方，第二次注册失败
 - **可重试的失败。** `failure.kind` 是 `network`、`rate_limited` 或 `server_error`。其他 kind，包括 `unknown`、`malformed_response`、`output_limit`、`context_too_long` 与凭据类，都不在首批覆盖内。
 - **已提交输出。** 失败请求提交过 `step/text`、`step/thinking`、`step/tool-use-start`、`step/tool-use` 或 `step/model-content` 事实。已产生但在结算时被丢弃的输出不是已提交输出。`replay_safe` 是 ModelProvider 调用内的标志，不是事实，因此处置方从已提交的输出事实推导这个条件。
 - **未禁止重试。** `failure.retryForbidden` 未设置。策略禁止重试的失败仍会打开交接，但处置方会拒绝它，因此禁止覆盖续接。
-- **仍有预算。** 失败终态的 `failure` 中 `attempts` 小于 8，`waited_ms` 小于 300 秒。该部分读取 ModelProvider 的[公开上限](../../../architecture/rust-agent/plugins/ModelProvider.md#failure-chain)和失败自身的 `attempts`、`waited_ms`，从不重复这些数字。
+- **仍有预算。** 失败终态的 `failure` 中 `attempts` 小于 8，`waitedMs` 小于 300 秒。该部分读取 ModelProvider 的[公开上限](../../../architecture/rust-agent/plugins/ModelProvider.md#failure-chain)和失败自身的 `attempts`、`waitedMs`，从不重复这些数字。
 - **尚未接受过续接。** 本 turn 的 `turn/start` 之后，没有携带 `failure_chain` 的 `context/prepare`。续接自己的 `context/prepare` 会携带它，因此同一 turn 的第二次失败会拒绝。
 
 工具边界的情形会因两个原因被拒绝：无工具续接请求发出的工具调用以 `failure.kind = unknown` 结算失败，不在覆盖范围内；并且该请求自己的 `context/prepare` 已携带 `failure_chain`，因此本 turn 的一次续接已经用掉。执行器的快照拒绝是第二道防线；按 Loop 的合同，该 turn 以保留已提交文本的方式结束。

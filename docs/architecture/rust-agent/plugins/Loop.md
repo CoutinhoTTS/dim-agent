@@ -39,9 +39,9 @@ not become a second input-adoption path.
 ## A failed model step and its disposer
 
 The Loop owns one port, the disposer of a failed model step. The port is a
-Rust-only operation, like the Permission advice precedent; "any branch part"
-means any Rust branch part. Any Rust branch part may register one disposer
-under a name, as an effect of that part, following the
+Rust-only operation, like the Permission advice precedent. Any Rust branch
+part may register one disposer under a name, as an effect of that part,
+following the
 [Permission advice](Permission.md#tool-advice) precedent: the registration lasts
 while the part runs, unloading withdraws it, a withdrawal while the Loop waits
 counts as no answer, and cancelling drops the pending answer. At most one
