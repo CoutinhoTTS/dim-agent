@@ -27720,14 +27720,13 @@
       "references": [
         "mod network",
         "path Diagnostic",
-        "path NetworkConfig",
+        "path NetworkConfig::new",
         "path WebError",
         "path WebError::new",
         "path domain",
         "path get",
         "path hostname",
         "path parse_url",
-        "path proxy_url",
         "use network::DOWNLOAD_LIMIT",
         "use network::Diagnostic",
         "use network::NetworkConfig",
@@ -27735,8 +27734,7 @@
         "use network::domain",
         "use network::get",
         "use network::hostname",
-        "use network::parse_url",
-        "use network::proxy_url"
+        "use network::parse_url"
       ]
     },
     {
@@ -27772,8 +27770,8 @@
       "to": "dim_app_server::web::network",
       "references": [
         "path NetworkConfig",
-        "path get",
-        "path proxy_url"
+        "path NetworkConfig::new",
+        "path get"
       ]
     },
     {
