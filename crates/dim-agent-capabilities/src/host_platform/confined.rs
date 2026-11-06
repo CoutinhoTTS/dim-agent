@@ -67,6 +67,8 @@ pub enum ConfinedError {
     InvalidPath { path: PathBuf, reason: String },
     /// The helper could not start, or its output could not be read.
     Spawn(io::Error),
+    /// The helper exited, but ending its process tree could not be confirmed.
+    Cleanup(io::Error),
     /// The helper outlived its timeout; its process tree was killed.
     TimedOut,
     /// The helper filled one stream past its limit; its process tree was
@@ -95,6 +97,12 @@ impl std::fmt::Display for ConfinedError {
                 write!(f, "invalid confinement path {}: {reason}", path.display())
             }
             Self::Spawn(error) => write!(f, "the confined helper could not start: {error}"),
+            Self::Cleanup(error) => {
+                write!(
+                    f,
+                    "the confined helper's cleanup could not be confirmed: {error}"
+                )
+            }
             Self::TimedOut => f.write_str("the confined helper exceeded its timeout"),
             Self::OutputLimit { stream } => {
                 write!(f, "the confined helper exceeded its {stream} limit")
@@ -107,7 +115,7 @@ impl std::fmt::Display for ConfinedError {
 impl std::error::Error for ConfinedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Spawn(error) => Some(error),
+            Self::Spawn(error) | Self::Cleanup(error) => Some(error),
             _ => None,
         }
     }
@@ -136,6 +144,18 @@ impl HostPlatform {
     /// pipes still hold until EOF or a fixed drain bound, whichever comes
     /// first; bytes already read are returned with the root's status, so a
     /// descendant holding a pipe cannot turn a completed helper into a timeout.
+    /// `Ok` means the helper's tree was confirmed ended; a failed confirmation
+    /// is `Cleanup`. On Linux with bubblewrap the helper runs in its own PID
+    /// namespace (`--unshare-pid --die-with-parent`), so every descendant ends
+    /// with it, including one that left the process group. On Windows the job
+    /// object holds every descendant, with no breakaway limit, and terminating
+    /// the job ends them all. On macOS, and on Linux without bubblewrap, the
+    /// process group ends; a descendant that leaves the group with `setsid` or
+    /// `setpgrp` is not reached, and on macOS it stays under the same Seatbelt
+    /// profile. A caller that publishes results or deletes its work directory
+    /// must not rely on the directory being quiescent on macOS or unconfined
+    /// Linux: a process that left the group may still write to the `write`
+    /// directories after `Ok`.
     pub async fn spawn_confined(
         &self,
         spec: ConfinedSpec,
@@ -170,6 +190,7 @@ impl HostPlatform {
                 stderr,
                 confined,
             }),
+            Outcome::CleanupFailed(error) => Err(ConfinedError::Cleanup(error)),
             Outcome::OutputLimit { stream } => {
                 Err(killed(&mut tree, ConfinedError::OutputLimit { stream }).await)
             }
@@ -324,6 +345,7 @@ enum Outcome {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
     },
+    CleanupFailed(io::Error),
     OutputLimit {
         stream: ConfinedStream,
     },
@@ -416,8 +438,9 @@ async fn collect(
             }
         }
         if status.is_some() && drain.is_none() {
-            if let Err(failure) = tree.terminate().await {
-                tracing::warn!(%failure, "confined helper termination failed");
+            if let Err(error) = tree.terminate().await {
+                tracing::warn!(%error, "confined helper termination failed");
+                return Outcome::CleanupFailed(error);
             }
             if stdout_open || stderr_open {
                 drain = Some(tokio::time::Instant::now() + DRAIN_GRACE);

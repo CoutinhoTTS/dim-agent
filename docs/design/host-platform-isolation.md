@@ -25,10 +25,25 @@ The helper reads the system baseline that runs a program and the files its calle
 only the caller's directories, has no network, receives the minimal environment plus the caller's
 own entries, and runs in the caller's first write directory. The timeout, either output cap and
 the caller's cancellation kill the helper's process tree with the existing tree-kill. When the
-call returns, the helper's process tree has ended, on success too. Windows and a Linux host
-without bubblewrap run the helper with the same limits and report that it was not confined; the
-caller decides whether that is acceptable. No setting, policy default or user-facing control
-changes for this operation.
+root exits, the call ends its tree and then drains what the pipes still hold until EOF or a fixed
+drain bound, whichever comes first; bytes already read are returned with the root's status, so a
+descendant holding a pipe cannot turn a completed helper into a timeout. `Ok` means the helper's
+tree was confirmed ended; a failed confirmation is `Cleanup`. On Linux with bubblewrap the helper
+runs in its own PID namespace (`--unshare-pid --die-with-parent`), so every descendant ends with
+it, including one that left the process group. On Windows the job object holds every descendant,
+with no breakaway limit, and terminating the job ends them all. On macOS, and on Linux without
+bubblewrap, the process group ends; a descendant that leaves the group with `setsid` or `setpgrp`
+is not reached, and on macOS it stays under the same Seatbelt profile. A caller that publishes
+results or deletes its work directory must not rely on the directory being quiescent on macOS or
+unconfined Linux: a process that left the group may still write to the `write` directories after
+`Ok`. Windows and a Linux host without bubblewrap run the helper with the same limits and report
+that it was not confined; the caller decides whether that is acceptable. No setting, policy
+default or user-facing control changes for this operation.
+
+The Linux guarantee rests on bubblewrap running a minimal PID 1 that exits to clean up the sandbox
+(`--as-pid-1` documents that default) and on `pid_namespaces(7)`: when the namespace's init
+process terminates, the kernel ends the rest of the namespace. The flow tests run on macOS only;
+the Linux and Windows wording is covered by the cross-target checks.
 
 ## Process isolation
 

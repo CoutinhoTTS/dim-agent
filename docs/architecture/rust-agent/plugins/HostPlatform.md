@@ -178,14 +178,18 @@ partial output is returned with an error. `Spawn` reports a helper that could
 not start or whose output could not be read; `ConfinedOutput` carries the exit
 status and both streams only when the helper exited within them.
 
-When the call returns, the helper's process tree has ended, on success too: a
-helper that exits on its own still has its tree closed, because agent commands
-keep background jobs on purpose and a host-owned helper's work ends with its
-call. A failed termination is logged and does not turn a finished helper into an
-error. On Unix, a descendant that leaves the process group before the root
-exits — on macOS `setpgrp(0, 0)` does, and it survives — is not reached by the
-group tree-kill; agent commands have the same limit. Where the helper is
-confined, that descendant stays inside the same confinement.
+When the root exits, the call ends its tree and then drains what the pipes still hold until EOF or
+a fixed drain bound, whichever comes first; bytes already read are returned with the root's status,
+so a descendant holding a pipe cannot turn a completed helper into a timeout. `Ok` means the
+helper's tree was confirmed ended; a failed confirmation is `Cleanup`. On Linux with bubblewrap the
+helper runs in its own PID namespace (`--unshare-pid --die-with-parent`), so every descendant ends
+with it, including one that left the process group. On Windows the job object holds every
+descendant, with no breakaway limit, and terminating the job ends them all. On macOS, and on Linux
+without bubblewrap, the process group ends; a descendant that leaves the group with `setsid` or
+`setpgrp` is not reached, and on macOS it stays under the same Seatbelt profile. A caller that
+publishes results or deletes its work directory must not rely on the directory being quiescent on
+macOS or unconfined Linux: a process that left the group may still write to the `write` directories
+after `Ok`.
 
 The helper has no temporary directory of its own: `TMPDIR` is not in the
 environment allowlist and no isolated directory is created, so a confined helper
@@ -230,6 +234,11 @@ keeps the helper's network denial with the switch on and Network allowed;
 and `a_confined_helper_cancel_kills_the_tree` check that each limit removes the
 helper's tree; `a_confined_helper_leaves_no_process_after_it_exits` that a
 helper which exits on its own leaves nothing either;
+`a_confined_helper_returns_when_its_root_exits_with_a_descendant_on_its_pipes` that a descendant
+holding both pipes cannot turn a completed helper into a timeout, and
+`a_confined_helper_returns_when_an_escaped_descendant_holds_its_pipes` that a descendant which
+left the process group is returned past and is then the caller's to kill (skipped when perl is
+absent);
 `a_confined_helper_gets_the_allowlist_plus_its_own_environment` that only the
 allowlist and the helper's own entries reach it, with its `TMPDIR` honored; and
 `a_confined_helper_refuses_relative_and_missing_paths` the path refusals.
