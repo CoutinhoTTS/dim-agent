@@ -1335,6 +1335,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "dim-modality-aimux"
+version = "0.1.0-alpha.18"
+dependencies = [
+ "aimux-core",
+ "aimux-provider-utils",
+ "aimux-providers",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "dim-agent-aimux",
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "dim-agent-types",
+ "dim-app-server",
+ "dim-modality",
+ "futures-util",
+ "http",
+ "image",
+ "reqwest 0.12.28",
+ "rutis",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "dim-oauth"
 version = "0.1.0-alpha.18"
 dependencies = [

@@ -235,6 +235,35 @@ fn anthropic_base_url(base_url: &str) -> String {
     }
 }
 
+/// The transport a non-conversational call uses: the same client, redirect
+/// policy and connection facts as a chat call to the same model.
+///
+/// One instance per adapter, so every call to one connection shares its
+/// connection pool. [`Self::resolve`] splits a base URL the way a chat call
+/// does: the models append a path to the base, so the base URL's query travels
+/// on the transport instead.
+pub struct MediaTransport {
+    transport: ReqwestFetch,
+}
+impl MediaTransport {
+    pub fn new() -> Self {
+        Self {
+            transport: ReqwestFetch::default(),
+        }
+    }
+    /// The base URL without its query, and the transport carrying that query,
+    /// the connection's proxy and its timeout.
+    pub fn resolve(&self, network: &ModelNetwork, base_url: &str) -> (String, FetchFunction) {
+        let (base, query) = split_query(base_url);
+        (base, fetch(&self.transport, network, query))
+    }
+}
+impl Default for MediaTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The provider headers that keep provider-settings auth out of the way: dim
 /// sends every credential through `options.headers`, so the provider itself
 /// must produce none, not even an empty one.
