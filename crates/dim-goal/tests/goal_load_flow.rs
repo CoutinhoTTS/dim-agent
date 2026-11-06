@@ -1240,3 +1240,365 @@ async fn e2_a_clear_batch_takes_the_cheap_rebuild() {
     );
     env.close().await;
 }
+
+/// R6.1: a deletion whose compensating record never committed. The fold
+/// recomputes to the state before the withdrawn change while the newest
+/// published `goal:state` block still names it. The rebuild restates the
+/// fold's state once, the keyed read a client uses shows it, and a second load
+/// writes nothing.
+#[tokio::test]
+async fn e3_a_rebuild_restates_the_state_a_deletion_left_published() {
+    const KEYS: [&str; 13] = [
+        "branch/start",
+        "session/forked",
+        "branch/create",
+        "branch/create-failed",
+        "branch/ended",
+        "input/message",
+        "input/consumed",
+        "input/deleted",
+        "turn/start",
+        "turn/end",
+        "stop/interrupt",
+        "exec/started",
+        "exec/ended",
+    ];
+    let env = Env::start_refusing().await;
+    let mut seed = env.seed_new("load-reconcile").await;
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: None,
+            create_event: None,
+        }),
+    );
+    let first = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::set("main", "first"), None, false)],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::set_state(
+                    "main",
+                    "first",
+                    &texts::Answer::After(first.sequence),
+                    false,
+                ),
+                Some("goal:state"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    let second = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::edit("main", "second"), None, false)],
+            InputMode::Append,
+        ),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::edit_state(
+                    "main",
+                    "second",
+                    &texts::Answer::After(second.sequence),
+                    false,
+                ),
+                Some("goal:state"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    // The deletion of the second change's trigger. A live branch answers it
+    // with a compensating record; this history stops before that record
+    // commits.
+    let deletion = seed.append(
+        "main",
+        dim_agent_types::EventKind::InputDeleted(dim_agent_types::InputDeletedData {
+            input_id: second.id.clone(),
+        }),
+    );
+    seed.finish().await;
+
+    let before = env.reads().len();
+    let env = env.restore_seeded("load-reconcile").await;
+    env.settled("main").await;
+    let first_state = texts::restated("main", "first", deletion.sequence, false);
+    let keys = env.keys("main").await;
+    assert_eq!(keys.len(), 1, "one live key: {keys:?}");
+    assert_eq!(keys[0].0, "goal:state");
+    assert_eq!(
+        keys[0].1, first_state,
+        "the published block states the recomputed state, not the withdrawn one"
+    );
+    let writes = env.writes("main").await;
+    assert_eq!(
+        writes.len(),
+        5,
+        "exactly one new record over the four seeded inputs: {writes:#?}"
+    );
+    let reads = env.reads();
+    let reads = &reads[before..];
+    let full: Vec<&Read> = reads
+        .iter()
+        .filter(|read| read.kinds.iter().map(String::as_str).eq(KEYS))
+        .collect();
+    assert!(
+        !full.is_empty(),
+        "the deletion sends the rebuild to the full fold: {reads:?}"
+    );
+    let scan = [
+        "input/message",
+        "input/deleted",
+        "branch/start",
+        "session/forked",
+    ]
+    .iter()
+    .map(|kind| (*kind).to_owned())
+    .collect::<Vec<_>>();
+    assert!(
+        reads
+            .iter()
+            .any(|read| read.kinds == scan && read.direction == TimelineQueryDirection::Descending),
+        "the scan classified the deletion's branch: {reads:?}"
+    );
+
+    // It settles once: the published block now agrees with the fold.
+    let env = env.restore().await;
+    assert_eq!(
+        env.writes("main").await.len(),
+        5,
+        "a second load writes nothing"
+    );
+    let keys = env.keys("main").await;
+    assert_eq!(keys[0].1, first_state, "and the state still holds");
+    env.close().await;
+}
+
+/// R7.1: a restatement yields to the record a later decision writes. The
+/// loaded history carries a lost compensation — the newest published
+/// `goal:state` names a change whose trigger was deleted and no record
+/// followed — and a `continue` conclusion the settle pass still owes. The
+/// rebuild restates the recomputed state; the paused end of the background
+/// task then settles the conclusion over the limit, and the pause record it
+/// writes is the one the keyed read serves. The restatement neither claims
+/// the rebuild's cutoff as the newest `after` (which would drop the pause)
+/// nor publishes the pre-pause state over it, and a second load writes
+/// nothing.
+#[tokio::test]
+async fn e3_a_restatement_yields_to_the_record_a_later_decision_writes() {
+    let env = Env::start_refusing().await;
+    // The history already used its one continuation: the settle pass decides
+    // the deferred conclusion as a pause, which is a state record.
+    env.set_limit(1);
+    let mut seed = env.seed_new("load-restate-yields").await;
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: None,
+            create_event: None,
+        }),
+    );
+    let set = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::evaluator_set("main", "ship it"), None, false)],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: set.id.clone(),
+        }),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::set_state("main", "ship it", &texts::Answer::After(set.sequence), true),
+                Some("goal:state"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    let edit = seed.append(
+        "main",
+        message(
+            vec![raw(&texts::edit("main", "second"), None, false)],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: edit.id.clone(),
+        }),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::edit_state("main", "second", &texts::Answer::After(edit.sequence), true),
+                Some("goal:state"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::TurnStart(dim_agent_types::TurnStartData {
+            turn_id: "work".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::ExecStarted(dim_agent_types::ExecStartedData {
+            turn_id: "work".into(),
+            request_id: "request".into(),
+            call_id: "call-1".into(),
+            task_id: "task-1".into(),
+            description: "background work".into(),
+            output_path: "/dev/null".into(),
+        }),
+    );
+    seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::legacy_report("main", "completed", "all tests pass"),
+                Some("goal:status"),
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    let end = seed.append("main", turn_end_with("work", "completed"));
+    // The continuation the completed turn end wrote, already used: the limit
+    // the settle pass reads leaves the deferred conclusion a pause.
+    let continuation = seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::continuation("main", 1, Some(1), 0, end.sequence),
+                None,
+                false,
+            )],
+            InputMode::Queue,
+        ),
+    );
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::InputConsumed(dim_agent_types::InputConsumedData {
+            input_id: continuation.id.clone(),
+        }),
+    );
+    let create = seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchCreate(BranchCreateData {
+            at: BranchCreateAt::Sequence {
+                sequence: end.sequence,
+            },
+            source: BranchSource::Host {
+                operation_id: format!("goal:evaluate:{}", end.sequence),
+            },
+            branch: "eval".into(),
+            prompt: texts::evaluator_prompt("main", end.sequence, "ship it", "all tests pass"),
+        }),
+    );
+    seed.append(
+        "eval",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create.sequence),
+        }),
+    );
+    seed.append(
+        "eval",
+        message(vec![raw("line work", None, false)], InputMode::Queue),
+    );
+    let conclusion = seed.append(
+        "main",
+        message(
+            vec![raw(
+                &texts::conclusion(
+                    "main",
+                    "eval",
+                    end.sequence,
+                    "continue",
+                    "CONTINUE:\n- still missing",
+                ),
+                None,
+                false,
+            )],
+            InputMode::Append,
+        ),
+    );
+    // The second change's trigger is deleted and no record follows: the fold
+    // recomputes to the first goal while the published block still names it.
+    let deletion = seed.append(
+        "main",
+        dim_agent_types::EventKind::InputDeleted(dim_agent_types::InputDeletedData {
+            input_id: edit.id.clone(),
+        }),
+    );
+    seed.finish().await;
+
+    let env = env.restore_seeded("load-restate-yields").await;
+    let before = env.settled("main").await;
+    assert!(
+        before
+            .iter()
+            .any(|block| block.text == texts::restated("main", "ship it", deletion.sequence, true)),
+        "the load restates the recomputed state: {before:#?}"
+    );
+
+    // The background task's cancelled end settles the branch: the deferred
+    // conclusion is decided over the limit and writes its pause record.
+    env.exec_ended("main", "task-1", "cancelled");
+    let pause = env.wait_for("main", r#"reason="limit""#).await;
+    assert_eq!(
+        pause.text,
+        texts::evaluated_pause(
+            "main",
+            "ship it",
+            "limit",
+            "the automatic continuation limit was reached",
+            conclusion.sequence,
+        ),
+        "the restatement yields to the record the later decision writes"
+    );
+    let keys = env.keys("main").await;
+    assert_eq!(keys.len(), 1, "one live key: {keys:?}");
+    assert_eq!(keys[0].0, "goal:state");
+    assert_eq!(
+        keys[0].1, pause.text,
+        "the published block states the conclusion's outcome"
+    );
+    let writes = env.settled("main").await.len();
+
+    // It settles once: the published block now agrees with the fold.
+    let env = env.restore().await;
+    assert_eq!(
+        env.writes("main").await.len(),
+        writes,
+        "a second load writes nothing"
+    );
+    assert_eq!(
+        env.keys("main").await[0].1,
+        pause.text,
+        "and the state still holds"
+    );
+    env.close().await;
+}

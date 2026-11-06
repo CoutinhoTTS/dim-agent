@@ -563,7 +563,13 @@ impl Fold {
             self.pending_conclusions
                 .retain(|evaluation, _| *evaluation > sequence);
         }
-        if let Some(after) = first.as_ref().and_then(|attrs| attrs.get("after")) {
+        // A restatement names the rebuild's cutoff in `after` without
+        // answering the fact at it (R6.1): the cutoff can be a conclusion's
+        // own sequence, whose deferred decision must still be taken.
+        let restated = first
+            .as_ref()
+            .is_some_and(|attrs| attrs.get("restated").map(String::as_str) == Some("true"));
+        if !restated && let Some(after) = first.as_ref().and_then(|attrs| attrs.get("after")) {
             self.decided.insert(after.clone());
             // A continuation or pause for the evaluation answers its
             // conclusion; the deferred one is no longer pending.
@@ -635,6 +641,15 @@ impl Fold {
             }
             if key == Some(STATE_KEY) {
                 self.step_state(&attrs, raw_text, *retire, None);
+            } else if stated {
+                // The old-key retires that ride with a state record are part
+                // of that statement (R1): they end the key, and the state the
+                // record states stands.
+                match key {
+                    Some(OBJECTIVE_KEY) => self.live.objective = !retire,
+                    Some(STATUS_KEY) => self.live.status = !retire,
+                    _ => {}
+                }
             } else {
                 self.step_legacy(key.unwrap_or_default(), &attrs, raw_text, *retire, sequence);
             }
@@ -674,14 +689,23 @@ impl Fold {
             return;
         };
         self.live.state = !retire;
-        self.record_after = self.record_after.max(after);
+        // A restatement only repairs the published block (R6.1); it answers
+        // no fact and yields to any record (R7.1), so it raises no ordering
+        // mark: a record taken after the load at a sequence below the
+        // rebuild's cutoff still states its state.
+        let restated = attrs.get("restated").map(String::as_str) == Some("true");
+        if !restated {
+            self.record_after = self.record_after.max(after);
+        }
         if self.deleted_sequences.contains(&after) {
             return;
         }
         if after < self.last_change || after < self.state_after {
             return;
         }
-        self.state_after = after;
+        if !restated {
+            self.state_after = after;
+        }
         if retire {
             self.objective = None;
             self.state = text::State::None;

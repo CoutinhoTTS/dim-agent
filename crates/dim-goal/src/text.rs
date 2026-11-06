@@ -214,19 +214,25 @@ fn result_sentence(branch: &str, state: &State, judge: Judge) -> String {
 
 /// The fact a state record answers (D3, R5): the change trigger it states,
 /// named by submission id when the record commits in the trigger's atomic
-/// batch, or the sequence of the fact it answers.
+/// batch, or the sequence of the fact it answers. A restatement names the
+/// rebuild's cutoff it recomputed against and answers no fact (R6.1).
 #[derive(Clone, Copy)]
 pub enum Answered<'a> {
     Sequence(u64),
     Trigger(&'a str),
+    Restated(u64),
 }
 
 impl Answered<'_> {
-    /// The record's attribute naming the answered fact.
-    fn attribute(&self) -> (&'static str, String) {
+    /// The record's attributes naming the answered fact, or that it answers
+    /// none and names the cutoff it restated.
+    fn attributes(&self) -> Vec<(&'static str, String)> {
         match self {
-            Self::Sequence(after) => ("after", after.to_string()),
-            Self::Trigger(trigger) => ("trigger", (*trigger).to_owned()),
+            Self::Sequence(after) => vec![("after", after.to_string())],
+            Self::Trigger(trigger) => vec![("trigger", (*trigger).to_owned())],
+            Self::Restated(cutoff) => {
+                vec![("after", cutoff.to_string()), ("restated", "true".into())]
+            }
         }
     }
 }
@@ -263,8 +269,7 @@ pub fn state(
     if judge == Judge::Evaluator {
         attrs.push(("judge", "evaluator".to_owned()));
     }
-    let (name, value) = answered.attribute();
-    attrs.push((name, value));
+    attrs.extend(answered.attributes());
     attrs.push(("branch", branch.to_owned()));
     let mut body = vec![
         "<objective>".to_owned(),
@@ -334,8 +339,7 @@ fn retire_blocks(
     if let Some(reason) = reason {
         attrs.push(("reason", reason.to_owned()));
     }
-    let (name, value) = answered.attribute();
-    attrs.push((name, value));
+    attrs.extend(answered.attributes());
     attrs.push(("branch", branch.to_owned()));
     let mut blocks = vec![
         Block::new(attrs, vec![body.clone()])

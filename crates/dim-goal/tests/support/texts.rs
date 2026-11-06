@@ -114,6 +114,17 @@ pub fn set_state(branch: &str, objective: &str, answer: &Answer, evaluator: bool
     )
 }
 
+/// The state record a rebuild writes when it restates the state it recomputed
+/// (R6.1): it names the rebuild's cutoff in `after` and answers no fact.
+pub fn restated(branch: &str, objective: &str, cutoff: u64, evaluator: bool) -> String {
+    format!(
+        "<dim-goal kind=\"state\" status=\"active\"{} after=\"{cutoff}\" restated=\"true\" branch=\"{branch}\">\n{}\n{}\n</dim-goal>",
+        judge_attr(evaluator),
+        objective_body(branch, objective),
+        active_sentence(branch)
+    )
+}
+
 pub fn set_blocks(branch: &str, objective: &str) -> String {
     set(branch, objective)
 }

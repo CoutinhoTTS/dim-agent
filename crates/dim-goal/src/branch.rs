@@ -331,6 +331,9 @@ struct State {
     /// The `after` values of the state records Goal has written: a second pass
     /// that runs before the fold consumes a write must not state it again.
     written: std::collections::BTreeSet<u64>,
+    /// The `after` values a rebuild's restatement named without answering the
+    /// fact at them (R6.1): the cutoff can be a conclusion's own sequence.
+    restated: std::collections::BTreeSet<u64>,
     /// The highest `after` a state record was composed with. Records are
     /// ordered by `after`, not by their commit order (R4): a record naming an
     /// older state is not composed once a newer one exists.
@@ -576,6 +579,7 @@ impl Owner {
             self.decide_start(start);
         }
         self.answer_change();
+        self.reconcile(through).await?;
         Ok(through)
     }
 
@@ -940,6 +944,14 @@ impl Owner {
     /// write as the compensation for a deleted change trigger: it is written
     /// only when a record naming that trigger, or a later record, was already
     /// written or is being written, decided here under the write lock.
+    /// `restate` marks the write as a rebuild's restatement of the state (R6.1)
+    /// rather than an answer: it names the rebuild's cutoff in `after`, which
+    /// can be a conclusion's or a turn end's own sequence, so it claims no
+    /// fact as answered. A restatement yields to any record (R7.1): it raises
+    /// no ordering mark (`recorded`), it is composed only once every Goal
+    /// write this generation made has been folded, and it is written only
+    /// when no Goal write committed above its cutoff — a later write was
+    /// composed from the rebuilt fold and already replaced the block.
     async fn record(
         self: &Arc<Self>,
         after: u64,
@@ -947,7 +959,26 @@ impl Owner {
         answer: bool,
         withdrawn: Option<u64>,
     ) -> Result<(), AgentError> {
+        self.record_marked(after, state, answer, withdrawn, false)
+            .await
+    }
+
+    async fn record_marked(
+        self: &Arc<Self>,
+        after: u64,
+        state: Option<text::State>,
+        answer: bool,
+        withdrawn: Option<u64>,
+        restate: bool,
+    ) -> Result<(), AgentError> {
         let _write = self.write.lock().await;
+        if restate {
+            // The statement must be the fold as it stands after every Goal
+            // write this generation made (R7.1); a record composed from a
+            // fold that has not stepped them states an older state and would
+            // publish it over the record that already states the newer one.
+            self.await_fold().await?;
+        }
         let (objective, state, judge, live) = {
             let mut lock = self.state.lock().unwrap();
             if answer && lock.fold.pending_change() != Some(after) {
@@ -963,10 +994,18 @@ impl Owner {
             if lock.fold.last_change > after || after < lock.recorded {
                 return Ok(());
             }
-            if !lock.written.insert(after) {
-                return Ok(());
+            if restate {
+                // A write above the cutoff replaced the published block with
+                // a state composed from the rebuilt fold (R7.1).
+                if lock.last_write > after || !lock.restated.insert(after) {
+                    return Ok(());
+                }
+            } else {
+                if !lock.written.insert(after) {
+                    return Ok(());
+                }
+                lock.recorded = after;
             }
-            lock.recorded = after;
             let fold = &lock.fold;
             (
                 fold.objective.clone(),
@@ -975,17 +1014,27 @@ impl Owner {
                 fold.live,
             )
         };
+        let answered = if restate {
+            text::Answered::Restated(after)
+        } else {
+            text::Answered::Sequence(after)
+        };
         let input = text::state(
             &self.branch_id,
             objective.as_deref(),
             state,
             judge,
-            text::Answered::Sequence(after),
+            answered,
             live,
             &self.texts,
         );
         if let Err(error) = self.write(input).await {
-            self.state.lock().unwrap().written.remove(&after);
+            let mut lock = self.state.lock().unwrap();
+            if restate {
+                lock.restated.remove(&after);
+            } else {
+                lock.written.remove(&after);
+            }
             return Err(error);
         }
         Ok(())
@@ -1000,6 +1049,109 @@ impl Owner {
         self.task(format!("state:{last}"), None, move |owner| {
             Box::pin(async move { owner.record(last, None, true, None).await })
         });
+    }
+
+    /// R6.1: the published `goal:state` block and the fold's state agree. A
+    /// rebuild can find the newest published record naming a change the fold
+    /// dropped — a deletion whose compensating record never committed — so it
+    /// writes one record stating the recomputed state. Once that record
+    /// commits, the two agree and a later load writes nothing.
+    async fn reconcile(self: &Arc<Self>, through: u64) -> Result<(), AgentError> {
+        let published = self.published_state(through).await?;
+        let (pending, statement, old_keys_live) = {
+            let lock = self.state.lock().unwrap();
+            (
+                lock.fold.pending_change().is_some(),
+                statement_of_fold(&lock.fold),
+                lock.fold.live.any(),
+            )
+        };
+        // The trigger the answer path owes is stated by that answer itself;
+        // composing the same state twice would write two records.
+        if pending {
+            return Ok(());
+        }
+        let agrees = match &published {
+            // A history written before the state record publishes its state
+            // under the old keys: the keyed read states the same goal and the
+            // fold states it, so the branch owes no record at load.
+            None => statement.retired || old_keys_live,
+            Some((raw, retire)) => published_statement(raw, *retire).as_ref() == Some(&statement),
+        };
+        if agrees {
+            return Ok(());
+        }
+        // A record cannot commit before the branch is published: `TreeCommands`
+        // resolves a branch through the tree's owned contexts, which exist
+        // only once its build returned (`TimelineTree::get`,
+        // crates/dim-agent-capabilities/src/timeline_tree.rs:118). Every
+        // record path writes in a task that waits `phase.activated()` for
+        // exactly this reason, and the guards in `record` still apply there.
+        self.task(format!("reconcile:{through}"), None, move |owner| {
+            Box::pin(async move { owner.record_marked(through, None, false, None, true).await })
+        });
+        Ok(())
+    }
+
+    /// The newest `goal:state` block on the branch's own segment at `through`,
+    /// resolved by the keyed-block rule `session.keys` serves (keyed-blocks
+    /// §2.3; `scan_keys` at
+    /// crates/dim-app-server/src/connection/tree.rs:707): descending inputs, an
+    /// `input/deleted` removes its input, the newest block of the key inside one
+    /// input wins, and a `retire` block ends the key. Returns the raw block text
+    /// and its retire flag, or `None` when no block of the key is above the
+    /// opening.
+    async fn published_state(&self, through: u64) -> Result<Option<(String, bool)>, AgentError> {
+        if through == 0 {
+            // An empty segment publishes no block, and a read cannot start
+            // below the first sequence.
+            return Ok(None);
+        }
+        let mut deleted = HashSet::new();
+        let mut from = Some(through);
+        while let Some(below) = from {
+            let mut query = read_page(TimelineQueryScope::Branch, Some(below), SCAN_PAGE, true);
+            query.kinds = vec![
+                "input/message".into(),
+                "input/deleted".into(),
+                "branch/start".into(),
+                "session/forked".into(),
+            ];
+            query.direction = TimelineQueryDirection::Descending;
+            let reply = self.timeline.query(query).await?;
+            for event in &reply.events {
+                match &event.kind {
+                    EventKind::BranchStart(_) | EventKind::SessionForked(_) => return Ok(None),
+                    EventKind::InputDeleted(data) => {
+                        deleted.insert(data.input_id.clone());
+                    }
+                    EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
+                        for block in data.blocks.iter().rev() {
+                            let InputBlock::Raw {
+                                text: raw,
+                                key: Some(key),
+                                retire,
+                            } = block
+                            else {
+                                continue;
+                            };
+                            if key == text::STATE_KEY {
+                                return Ok(Some((raw.clone(), *retire)));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(last) = reply.events.last().map(|event| event.sequence) else {
+                return Ok(None);
+            };
+            if (reply.events.len() as u64) < SCAN_PAGE || last <= 1 {
+                return Ok(None);
+            }
+            from = Some(last - 1);
+        }
+        Ok(None)
     }
 
     /// States the branch again after the deletion of the change trigger
@@ -1639,6 +1791,80 @@ fn paired_record(record: &AgentEvent, data: &InputMessageData) -> Option<bool> {
         return (attrs.get("trigger").map(String::as_str) == Some(trigger)).then_some(*retire);
     }
     None
+}
+
+/// What a `goal:state` block states, in the fields the record writer composes
+/// from the fold (R6.1).
+#[derive(Clone, Debug, PartialEq)]
+struct Statement {
+    objective: Option<String>,
+    state: text::State,
+    judge: text::Judge,
+    retired: bool,
+}
+
+/// The state the fold computes, normalised as `text::state` writes it: no
+/// objective is a retired record, whatever the fold still holds.
+fn statement_of_fold(fold: &Fold) -> Statement {
+    let objective = fold
+        .objective
+        .clone()
+        .filter(|objective| !objective.is_empty());
+    let Some(objective) = objective else {
+        return Statement {
+            objective: None,
+            state: text::State::None,
+            judge: text::Judge::Model,
+            retired: true,
+        };
+    };
+    Statement {
+        objective: Some(objective),
+        state: fold.state.clone(),
+        judge: fold.judge,
+        retired: false,
+    }
+}
+
+/// What the published block `raw` states, by the readers the record writer's
+/// counterpart uses. A block this version cannot read — an older format with
+/// no `<objective>` element — is no statement at all, which never matches the
+/// fold.
+fn published_statement(raw: &str, retire: bool) -> Option<Statement> {
+    let attrs = text::marker(raw)?;
+    if attrs.get("kind").map(String::as_str) != Some("state") {
+        return None;
+    }
+    if retire {
+        return Some(Statement {
+            objective: None,
+            state: text::State::None,
+            judge: text::Judge::Model,
+            retired: true,
+        });
+    }
+    let (objective, summary) = text::state_parts(raw);
+    let objective = objective.filter(|objective| !objective.is_empty())?;
+    let state = match attrs.get("status").map(String::as_str)? {
+        "active" => text::State::Active,
+        "paused" => text::State::Paused(
+            attrs
+                .get("reason")
+                .filter(|reason| !reason.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "user".to_owned()),
+        ),
+        "completed" => text::State::Completed(summary.unwrap_or_default()),
+        "blocked" => text::State::Blocked(summary.unwrap_or_default()),
+        "none" => text::State::None,
+        _ => return None,
+    };
+    Some(Statement {
+        objective: Some(objective),
+        state,
+        judge: text::Judge::of(&attrs),
+        retired: false,
+    })
 }
 
 /// Whether `data` carries a Goal block, and whether it states a retired state

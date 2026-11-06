@@ -19,7 +19,8 @@ use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BoxFuture, BranchOptions, Dispatcher, Feature,
     LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session, SessionConfig,
     StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryPage, TimelineStore, TimelineTrace,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPage, TimelineQueryScope,
+    TimelineStore, TimelineTrace,
 };
 use dim_agent_types::{
     AgentEvent, BranchSource, DeltaData, EventKind, InputBlock, InputMessageData, InputMode,
@@ -31,7 +32,7 @@ use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
 use serde_json::Value;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::RangeInclusive,
     path::PathBuf,
     sync::{
@@ -452,9 +453,11 @@ pub struct GatedStore {
     read: Mutex<Option<ReadHold>>,
 }
 
-/// One held read: its single kind and the case's ends of the gate.
+/// One held read: its kind selection, the one branch it must not be on, and
+/// the case's ends of the gate.
 struct ReadHold {
-    kind: String,
+    kinds: Vec<String>,
+    not_branch: Option<String>,
     entered: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
 }
@@ -558,10 +561,37 @@ impl GatedStore {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
+        self.hold_read(&[kind])
+    }
+
+    /// Holds the next read whose kind selection is exactly `kinds`, whatever
+    /// its branch or direction: the first end fires once the read starts, and
+    /// sending on the second lets it answer.
+    pub fn hold_read(
+        &self,
+        kinds: &[&str],
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.hold_read_other_than(kinds, None)
+    }
+
+    /// [`Self::hold_read`] for a read on any branch but `branch`: the scan of a
+    /// branch that is still loading, while another branch's reads go through.
+    pub fn hold_read_other_than(
+        &self,
+        kinds: &[&str],
+        branch: Option<&str>,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
         let (entered, written) = tokio::sync::oneshot::channel();
         let (release, held) = tokio::sync::oneshot::channel();
         *self.read.lock().unwrap() = Some(ReadHold {
-            kind: kind.to_owned(),
+            kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
+            not_branch: branch.map(str::to_owned),
             entered,
             release: held,
         });
@@ -742,7 +772,15 @@ impl TimelineStore for GatedStore {
         let held = {
             let mut slot = self.read.lock().unwrap();
             match slot.as_ref() {
-                Some(hold) if query.kinds.len() == 1 && query.kinds[0] == hold.kind => slot.take(),
+                Some(hold)
+                    if query.kinds == hold.kinds
+                        && hold
+                            .not_branch
+                            .as_ref()
+                            .is_none_or(|branch| branch != &key.branch_id) =>
+                {
+                    slot.take()
+                }
                 _ => None,
             }
         };
@@ -964,9 +1002,33 @@ impl Env {
     /// Opens a real child branch of `parent` at its head, with `prompt` and
     /// `source`, as the branch tool or Goal's own creation does.
     pub async fn open_branch(&self, parent: &str, prompt: &str, source: BranchSource) -> String {
+        let id = self
+            .create_branch(parent, prompt, source)
+            .await
+            .id()
+            .to_owned();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !self.probe.has(&id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the branch's parts activate");
+        id
+    }
+
+    /// Opens a real child branch of `parent` and returns it before its parts
+    /// finish loading, so a case can act inside that window: the handle commits
+    /// through the branch's own Timeline.
+    pub async fn create_branch(
+        &self,
+        parent: &str,
+        prompt: &str,
+        source: BranchSource,
+    ) -> dim_agent_runtime::Branch {
         let at = self.timeline(parent).sequence();
         let command = self.probe.commands(parent);
-        let branch = command
+        command
             .branch(
                 parent.to_owned(),
                 at,
@@ -977,16 +1039,7 @@ impl Env {
                 CancellationToken::new(),
             )
             .await
-            .expect("the branch opens");
-        let id = branch.id().to_owned();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            while !self.probe.has(&id) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the branch's parts activate");
-        id
+            .expect("the branch opens")
     }
 
     /// Ends `id` with `source`, as another line or the host does.
@@ -1102,6 +1155,11 @@ impl Env {
         })
         .await
         .expect("main and its parts activate");
+        self.await_goal_methods().await;
+    }
+
+    /// Waits until the `session.goal.*` methods are registered.
+    pub async fn await_goal_methods(&self) {
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let methods = self.session.session_service::<SessionMethods>();
@@ -1199,6 +1257,92 @@ impl Env {
     /// carries.
     pub fn guide(&self, branch: &str) -> String {
         self.probe.guide().compose(branch)
+    }
+
+    /// The branch's live keyed blocks at its head, by the rule `session.keys`
+    /// serves (keyed-blocks §2.3; `scan_keys` at
+    /// crates/dim-app-server/src/connection/tree.rs:707): the newest live block
+    /// of each key on the branch's own segment, ascending by (sequence, block).
+    /// Returns each key with its raw block text.
+    pub async fn keys(&self, branch: &str) -> Vec<(String, String)> {
+        const PAGE: u64 = 256;
+        let timeline = self.timeline(branch);
+        let mut found: HashMap<String, (u64, usize, String)> = HashMap::new();
+        let mut closed: HashSet<String> = HashSet::new();
+        let mut deleted: HashSet<String> = HashSet::new();
+        let mut from = timeline.sequence();
+        while from > 0 {
+            let query = TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: true,
+                from_event: None,
+                from_sequence: Some(from),
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: vec![
+                    "input/message".into(),
+                    "input/deleted".into(),
+                    "branch/start".into(),
+                    "session/forked".into(),
+                ],
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: std::num::NonZeroU64::new(PAGE).expect("a page keeps one event"),
+                offset: 0,
+            };
+            let reply = timeline.query(query).await.expect("the keyed read");
+            let exhausted = (reply.events.len() as u64) < PAGE;
+            let mut done = false;
+            for event in &reply.events {
+                match &event.kind {
+                    EventKind::BranchStart(_) | EventKind::SessionForked(_) => {
+                        done = true;
+                        break;
+                    }
+                    EventKind::InputDeleted(data) => {
+                        deleted.insert(data.input_id.clone());
+                    }
+                    EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
+                        for (index, block) in data.blocks.iter().enumerate().rev() {
+                            let InputBlock::Raw {
+                                text,
+                                key: Some(key),
+                                retire,
+                            } = block
+                            else {
+                                continue;
+                            };
+                            if found.contains_key(key) {
+                                continue;
+                            }
+                            if *retire {
+                                closed.insert(key.clone());
+                                continue;
+                            }
+                            if closed.contains(key) {
+                                continue;
+                            }
+                            found.insert(key.clone(), (event.sequence, index, text.clone()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if done || exhausted {
+                break;
+            }
+            from = reply
+                .events
+                .last()
+                .map_or(0, |event| event.sequence.saturating_sub(1));
+        }
+        let mut entries: Vec<(String, (u64, usize, String))> = found.into_iter().collect();
+        entries.sort_by_key(|(_, (sequence, index, _))| (*sequence, *index));
+        entries
+            .into_iter()
+            .map(|(key, (_, _, text))| (key, text))
+            .collect()
     }
 
     /// The Goal inputs on `branch`, in order.
@@ -1548,12 +1692,18 @@ pub fn turn_end_with(turn_id: &str, status: &str) -> EventKind {
 /// One input message of literal blocks, the way a restored or foreign writer
 /// leaves one.
 pub fn message(blocks: Vec<InputBlock>, mode: InputMode) -> EventKind {
-    EventKind::InputMessage(InputMessageData {
+    EventKind::InputMessage(input_message(blocks, mode))
+}
+
+/// The [`InputMessageData`] behind [`message`], for committing through a
+/// [`dim_agent_runtime::Branch`] handle.
+pub fn input_message(blocks: Vec<InputBlock>, mode: InputMode) -> InputMessageData {
+    InputMessageData {
         submission_id: Some(format!("test:{}", uuid::Uuid::new_v4())),
         user: None,
         blocks,
         mode: Some(mode),
-    })
+    }
 }
 
 /// A raw block with literal text.
