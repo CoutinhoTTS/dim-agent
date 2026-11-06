@@ -28,10 +28,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "See the details." => "查看详情。",
         "Increase the output token limit and retry." => "提高输出 token 上限后重试。",
         "retrying {attempt}/{max} in {seconds} s: {reason}" => {
-            "正在重试 {attempt}/{max}，{seconds} 秒后：{reason}"
+            "{seconds} 秒后第 {attempt}/{max} 次重试：{reason}"
         }
         "Retrying {attempt}/{max} in {seconds} s · {reason} · Esc stops" => {
-            "正在重试 {attempt}/{max}，{seconds} 秒后 · {reason} · Esc 停止"
+            "{seconds} 秒后第 {attempt}/{max} 次重试 · {reason} · Esc 停止"
         }
         "kind: {kind}" => "kind：{kind}",
         "status: {status}" => "状态：{status}",
