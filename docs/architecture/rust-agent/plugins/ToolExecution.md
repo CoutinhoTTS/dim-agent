@@ -48,6 +48,12 @@ a replacement during preparation. A retired handler follows its own stopping
 contract; it is not replaced by a current handler of the same name. Failed
 preparation drops its source references without registering a request.
 
+For a continuation request ([Loop](Loop.md#a-failed-model-step-and-its-disposer)),
+request preparation declares no tools and ToolBinding fixes an empty snapshot
+for that request. The choice belongs to the Loop's request preparation and is
+not a persisted field: the committed `context/prepare` already records the
+declared tools.
+
 ### Rule check
 
 | Rule | Application |
@@ -129,6 +135,15 @@ host invocation. Cleanup closes admission, cancels, joins tracked work and
 aggregates failures. Reload settles unmatched committed batches as errors rather
 than rerunning effects; reload-settled results make Loop fail the turn.
 Cancellation is not rollback of a tool's completed side effect.
+
+A request prepared with no tools never runs a call. A tool call from that
+request is refused at the stream boundary before a call is committed
+([output.rs](../../../../crates/dim-agent-capabilities/src/output.rs)), and the
+request settles failed with `failure.kind = unknown`. The executor's snapshot
+refusal ([tool_binding.rs](../../../../crates/dim-agent-capabilities/src/tool_binding.rs))
+is the second guard: no call from that request is ever dispatched. The Loop
+settles that failed step like any other
+([Loop](Loop.md#a-failed-model-step-and-its-disposer)).
 
 ### Model-facing texts
 
