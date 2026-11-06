@@ -438,7 +438,8 @@ a heading. The model reads the encoded form.
 status sentence, then for a completed or blocked goal the `<result>` or `<blocker>` element with the
 escaped summary; each element's tags sit on their own lines. The record states only what the model
 and clients read; nothing else of Goal's is in it, because the whole block enters the model's
-context.
+context. The record restates the full objective on every change until a compaction, so each change
+adds one record of at most the objective's 4000 characters plus the fixed sentences.
 
 | Record | Body after the policy line |
 | --- | --- |

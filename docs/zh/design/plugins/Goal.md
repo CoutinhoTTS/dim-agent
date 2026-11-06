@@ -403,7 +403,7 @@ C7 的输入是结束回合的 `turn_id`、该回合是否由续跑驱动（两�
 **状态记录**（`kind="state"`，key `goal:state`，Append）。属性按此顺序：`kind`、
 `status`、`reason`（仅暂停：`user`、`interrupted`、`limit`、`turn_failed`、`no_progress`、
 `evaluation_failed`）、仅在选择时带 `judge="evaluator"`、`after`（触发器的序号）、
-`branch`。正文：`<objective>`、转义后的目标文本、`</objective>`、目标策略文本，然后是状态句子；已完成或受阻的目标再跟 `<result>` 或 `<blocker>` 元素及其转义后的 summary，每个元素的标签各占一行。记录只陈述模型与客户端读取的内容；Goal 的其他东西都不在其中，因为整个块进入模型上下文。
+`branch`。正文：`<objective>`、转义后的目标文本、`</objective>`、目标策略文本，然后是状态句子；已完成或受阻的目标再跟 `<result>` 或 `<blocker>` 元素及其转义后的 summary，每个元素的标签各占一行。记录只陈述模型与客户端读取的内容；Goal 的其他东西都不在其中，因为整个块进入模型上下文。每次变更都会重述完整的目标文本，直到一次压缩为止，因此每次变更最多增加一条记录，长度为目标文本上限 4000 字符加上固定句子。
 
 | 记录 | 策略行之后的正文 |
 | --- | --- |
