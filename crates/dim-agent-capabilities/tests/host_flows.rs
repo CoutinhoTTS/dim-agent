@@ -569,6 +569,9 @@ struct RecoveryProbe {
     recovered: Arc<std::sync::atomic::AtomicUsize>,
     rejected: Arc<std::sync::atomic::AtomicUsize>,
     drained: Arc<AtomicBool>,
+    /// Holds the second attempt at the driver so a test can observe the
+    /// progress between attempts.
+    resume: Option<Arc<Notify>>,
 }
 impl RecoveryProbe {
     fn connection(&self) -> ResolvedModelConnection {
@@ -590,17 +593,28 @@ impl RecoveryProbe {
             400..=499 => ModelFailureKind::InvalidRequest,
             _ => ModelFailureKind::Unknown,
         };
+        self.failure_kind(kind, Some(status), retry_after)
+    }
+    fn failure_kind(
+        &self,
+        kind: ModelFailureKind,
+        status: Option<u16>,
+        retry_after: Option<Duration>,
+    ) -> HostError {
         HostError::Failed {
             message: "fixture rejection".into(),
             budget: None,
-            kind: HostErrorKind::Http {
-                status: Some(status),
-                code: None,
+            kind: match status {
+                Some(status) => HostErrorKind::Http {
+                    status: Some(status),
+                    code: None,
+                },
+                None => HostErrorKind::Transport,
             },
             model: Some(Box::new(ModelFailureFacts {
                 kind,
                 reason: Some("fixture rejection".into()),
-                status: Some(status),
+                status,
                 provider_code: None,
                 request_id: Some("fixture-request".into()),
                 cause: Vec::new(),
@@ -696,7 +710,56 @@ impl ModelDriver for RecoveryProbe {
                 "retry inherited failed attempt cancellation"
             );
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            if call > 0 && !matches!(self.mode, 4 | 7 | 8 | 12 | 15..=20 | 23) {
+            if call == 1
+                && let Some(resume) = &self.resume
+            {
+                resume.notified().await;
+            }
+            if call > 0 && !matches!(self.mode, 4 | 7 | 8 | 12 | 15..=20 | 23..=32) {
+                return EchoModel.invoke(request, connection, cancel).await;
+            }
+            let special = match self.mode {
+                24 if call < 7 => Some(self.failure_kind(ModelFailureKind::Network, None, None)),
+                25 => Some(self.failure_kind(ModelFailureKind::ServerError, Some(503), None)),
+                26 => Some(self.failure_kind(ModelFailureKind::MalformedResponse, None, None)),
+                27 if call == 0 => Some(self.failure_kind(ModelFailureKind::Network, None, None)),
+                27 if call < 3 => {
+                    Some(self.failure_kind(ModelFailureKind::MalformedResponse, None, None))
+                }
+                28 => Some(self.failure_kind(
+                    ModelFailureKind::ServerError,
+                    Some(503),
+                    Some(Duration::from_secs(45)),
+                )),
+                29 => Some(self.failure_kind(
+                    ModelFailureKind::ServerError,
+                    Some(503),
+                    Some(Duration::from_secs(400)),
+                )),
+                30 => Some(self.failure_kind(
+                    ModelFailureKind::ServerError,
+                    Some(503),
+                    Some(Duration::from_secs(100)),
+                )),
+                31 => Some(self.failure_kind(
+                    ModelFailureKind::AuthRejected,
+                    Some(401),
+                    Some(Duration::from_secs(30)),
+                )),
+                32 if call == 0 => Some(self.failure_kind(
+                    ModelFailureKind::ServerError,
+                    Some(503),
+                    Some(Duration::from_secs(5)),
+                )),
+                32 if call == 1 => {
+                    Some(self.failure_kind(ModelFailureKind::ServerError, Some(503), None))
+                }
+                _ => None,
+            };
+            if let Some(error) = special {
+                return Err(error);
+            }
+            if matches!(self.mode, 24 | 27) || (self.mode == 32 && call > 1) {
                 return EchoModel.invoke(request, connection, cancel).await;
             }
             let status = match self.mode {
@@ -704,7 +767,7 @@ impl ModelDriver for RecoveryProbe {
                 16 if call < 2 => 503,
                 19 if call == 0 => 503,
                 17 | 23 if call > 0 => 503,
-                5 | 7 | 12 | 13 => 503,
+                5 | 7 | 12 | 13 | 22 => 503,
                 8 if call > 0 => 429,
                 9..=11 | 14 => 529,
                 _ => 401,
@@ -804,6 +867,63 @@ impl Plugin for RecoveryHosts {
         Ok(())
     }
 }
+
+/// A Session whose only model host is a [`RecoveryProbe`] in `mode`.
+async fn recovery_agent(
+    mode: u8,
+    resume: Option<Arc<Notify>>,
+) -> (MinimalHost, dim_agent_runtime::Session, RecoveryProbe) {
+    let probe = RecoveryProbe {
+        mode,
+        calls: Default::default(),
+        recovered: Default::default(),
+        rejected: Default::default(),
+        drained: Default::default(),
+        resume,
+    };
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(
+            dim_agent_capabilities::history::HistoryRenderer::default(),
+        ))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::install_with_process_model(&mut builder);
+    let hosts = probe.clone();
+    builder.plugin(move |_| Ok(Box::new(RecoveryHosts(hosts.clone()))));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    (agent, session, probe)
+}
+
+/// The facts on the Session's failed terminal model output.
+async fn model_failure(session: &dim_agent_runtime::Session) -> ModelFailure {
+    let events = chain_events(session, "main", ..).await.unwrap();
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                outcome:
+                    ModelOutputOutcome::Failed {
+                        failure: Some(failure),
+                        ..
+                    },
+                ..
+            }) => Some(failure.as_ref().clone()),
+            _ => None,
+        })
+        .expect("a failed model output with facts")
+}
 #[tokio::test]
 async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -814,6 +934,7 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                 recovered: Default::default(),
                 rejected: Default::default(),
                 drained: Default::default(),
+                resume: None,
             };
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
@@ -891,22 +1012,21 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
     .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(600), async {
         for (mode, expected_calls, expected_refresh, expected_rejected, completed) in [
-            (7, 3, 0, 0, false),
-            (8, 3, 1, 0, false),
+            (7, 8, 0, 0, false),
+            (8, 8, 1, 0, false),
             (9, 2, 0, 0, true),
             (10, 1, 0, 0, false),
             (11, 1, 0, 0, false),
             (13, 1, 0, 0, false),
             (15, 2, 1, 1, false),
-            (16, 3, 0, 0, false),
+            (16, 4, 1, 1, false),
             (18, 2, 1, 1, false),
             (19, 3, 1, 1, false),
             (20, 2, 1, 0, false),
-            (21, 1, 0, 0, false),
         ] {
             let probe = RecoveryProbe {
                 mode,
@@ -914,6 +1034,7 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 recovered: Default::default(),
                 rejected: Default::default(),
                 drained: Default::default(),
+                resume: None,
             };
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
@@ -988,9 +1109,6 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 } else {
                     assert_eq!(failure.waited_ms, 0, "mode {mode}");
                 }
-                if mode == 21 {
-                    assert_eq!(failure.retry_after_ms, Some(61_000), "mode {mode}");
-                }
                 assert_eq!(error.as_str(), "fixture rejection", "mode {mode}");
                 let turn_error = events.iter().find_map(|event| match &event.kind {
                     EventKind::TurnEnd(TurnEndData {
@@ -1032,6 +1150,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                 recovered: Default::default(),
                 rejected: Default::default(),
                 drained: Default::default(),
+                resume: None,
             };
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
@@ -1227,79 +1346,274 @@ async fn stop_during_native_drain_keeps_an_already_completed_model_result() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn retry_after_uses_one_real_sixty_second_budget() {
-    for mode in [12, 17, 23] {
-        let probe = RecoveryProbe {
-            mode,
-            calls: Default::default(),
-            recovered: Default::default(),
-            rejected: Default::default(),
-            drained: Default::default(),
-        };
-        let mut builder = AgentBuilder::new(AgentConfig::default());
-        builder
-            .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
-            .session_value(Arc::new(
-                dim_agent_capabilities::history::HistoryRenderer::default(),
-            ))
-            .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-            .session_value(Arc::new(ContextModelHost(None)))
-            .session_value(Arc::new(CompactionStrategyHost(None)))
-            .require_feature(
-                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
-                }),
-            );
-        defaults::install_with_process_model(&mut builder);
-        let hosts = probe.clone();
-        builder.plugin(move |_| Ok(Box::new(RecoveryHosts(hosts.clone()))));
-        let agent = MinimalHost::start(&builder).await.unwrap();
-        let session = agent
-            .create_session(SessionConfig::default())
-            .await
-            .unwrap();
-        session
-            .submit("budget contract".into(), InputMode::Queue, "main")
-            .await
-            .unwrap();
-        if mode == 23 {
-            let started = tokio::time::Instant::now();
-            session.idle("main").await.unwrap();
-            assert!(started.elapsed() >= Duration::from_secs(60));
-        } else {
-            while probe.calls.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-            tokio::time::advance(Duration::from_secs(39)).await;
-            tokio::task::yield_now().await;
-            assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
-            assert_eq!(probe.recovered.load(Ordering::SeqCst), 0);
-            tokio::time::advance(Duration::from_secs(1)).await;
-            session.idle("main").await.unwrap();
-        }
-        assert_eq!(
-            probe.calls.load(Ordering::SeqCst),
-            if mode == 23 { 3 } else { 2 }
-        );
-        assert_eq!(
-            probe.recovered.load(Ordering::SeqCst),
-            usize::from(mode != 12)
-        );
-        assert!(
-            chain_events(&session, "main", ..)
-                .await
-                .unwrap()
-                .iter()
-                .any(|event| matches!(
-                    &event.kind,
-                    EventKind::ModelOutputEnd(ModelOutputEndData {
-                        outcome: ModelOutputOutcome::Failed { .. },
-                        ..
-                    })
-                ))
-        );
-        agent.close().await.unwrap();
+async fn retry_after_sets_the_delay_and_the_budget() {
+    // 45 s is the delay as given, above the 30 s backoff cap.
+    let (agent, session, probe) = recovery_agent(28, None).await;
+    session
+        .submit("retry after".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    while probe.calls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
     }
+    tokio::time::advance(Duration::from_secs(44)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    session.stop("main", "done".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    agent.close().await.unwrap();
+
+    // 400 s does not fit the 300 s budget: the first attempt stops at once.
+    let (agent, session, probe) = recovery_agent(29, None).await;
+    session
+        .submit("retry after".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.attempts, 1);
+    assert_eq!(failure.waited_ms, 0);
+    assert_eq!(failure.retry_after_ms, Some(400_000));
+    agent.close().await.unwrap();
+
+    // Three 100 s waits fit in the budget and end exactly at 300 s; the
+    // fourth does not fit and stops.
+    let (agent, session, probe) = recovery_agent(30, None).await;
+    let started = tokio::time::Instant::now();
+    session
+        .submit("retry after".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(300));
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 4);
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.attempts, 4);
+    assert_eq!(failure.waited_ms, 300_000);
+    assert_eq!(failure.retry_after_ms, Some(100_000));
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejected_credential_recovers_without_waiting() {
+    // The rejection carries `Retry-After: 30`; recovery still runs at once,
+    // and the terminal rejection after it leaves the wait at zero.
+    let (agent, session, probe) = recovery_agent(31, None).await;
+    let started = tokio::time::Instant::now();
+    session
+        .submit("credential recovery".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.recovered.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.rejected.load(Ordering::SeqCst), 1);
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.kind, ModelFailureKind::AuthRejected);
+    assert_eq!(failure.attempts, 2);
+    assert_eq!(failure.waited_ms, 0);
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_backoff_counts_every_retry() {
+    // A hinted first retry (5 s) is retry one; the unhinted second one is
+    // retry two and waits 2 s × jitter, not 1 s × jitter.
+    let (agent, session, probe) = recovery_agent(32, None).await;
+    session
+        .submit("mixed hints".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    while probe.calls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    tokio::time::advance(Duration::from_millis(1_599)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    tokio::time::advance(Duration::from_millis(401)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+    session.idle("main").await.unwrap();
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn transient_failures_retry_for_about_ninety_seconds() {
+    // Seven network failures, then a successful attempt: the wait is the
+    // nominal 91 s of backoff with the 0.8-1.0 jitter.
+    let (agent, session, probe) = recovery_agent(24, None).await;
+    let started = tokio::time::Instant::now();
+    session
+        .submit("network outage".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 8);
+    assert!(started.elapsed() >= Duration::from_millis(72_800));
+    assert!(started.elapsed() <= Duration::from_secs(91));
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::ModelOutputEnd(ModelOutputEndData {
+            outcome: ModelOutputOutcome::Completed { .. },
+            ..
+        })
+    )));
+    agent.close().await.unwrap();
+
+    // A server error every time stops at the eighth attempt.
+    let (agent, session, probe) = recovery_agent(25, None).await;
+    session
+        .submit("server outage".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 8);
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.kind, ModelFailureKind::ServerError);
+    assert_eq!(failure.attempts, 8);
+    assert!(
+        (72_800..=91_000).contains(&failure.waited_ms),
+        "{failure:?}"
+    );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn malformed_responses_are_retried_once() {
+    let (agent, session, probe) = recovery_agent(26, None).await;
+    session
+        .submit("malformed".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(failure.attempts, 2);
+    agent.close().await.unwrap();
+
+    // A network failure does not make a second malformed response retryable.
+    let (agent, session, probe) = recovery_agent(27, None).await;
+    session
+        .submit("mixed".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+    let failure = model_failure(&session).await;
+    assert_eq!(failure.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(failure.attempts, 3);
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_running_retry_is_progress_and_clears_when_the_attempt_starts() {
+    let resume = Arc::new(Notify::new());
+    let (agent, session, probe) = recovery_agent(25, Some(resume.clone())).await;
+    session
+        .submit("retry progress".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+    progress
+        .wait_for(|progress| progress.retry.is_some())
+        .await
+        .unwrap();
+    let retry = session
+        .get::<ModelProgress>("main")
+        .unwrap()
+        .unwrap()
+        .retry
+        .expect("a retry while sleeping");
+    assert_eq!((retry.attempt, retry.max_attempts), (2, 8));
+    assert_eq!(retry.kind, ModelFailureKind::ServerError);
+    assert_eq!(retry.reason.as_deref(), Some("fixture rejection"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(retry.retry_at_ms > now, "{retry:?} {now}");
+    tokio::time::advance(Duration::from_secs(1)).await;
+    progress
+        .wait_for(|progress| progress.retry.is_none())
+        .await
+        .unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    resume.notify_one();
+    session.stop("main", "done".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    assert!(
+        session
+            .get::<ModelProgress>("main")
+            .unwrap()
+            .unwrap()
+            .retry
+            .is_none()
+    );
+    agent.close().await.unwrap();
+
+    // A cancelled wait leaves no retry behind.
+    let (agent, session, _) = recovery_agent(25, None).await;
+    session
+        .submit("cancelled retry".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+    progress
+        .wait_for(|progress| progress.retry.is_some())
+        .await
+        .unwrap();
+    session.stop("main", "user stopped".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    assert!(
+        session
+            .get::<ModelProgress>("main")
+            .unwrap()
+            .unwrap()
+            .retry
+            .is_none()
+    );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupt_cancels_a_thirty_second_sleep_promptly() {
+    let (agent, session, probe) = recovery_agent(25, None).await;
+    session
+        .submit("slow retry".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    // Five waits of 1, 2, 4, 8 and 16 s, jittered, end within 31 s; the
+    // sixth attempt then sleeps for the 30 s cap.
+    while probe.calls.load(Ordering::SeqCst) < 6 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    let stopped = tokio::time::Instant::now();
+    session.stop("main", "user stopped".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    assert!(stopped.elapsed() < Duration::from_secs(1));
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::ModelOutputEnd(ModelOutputEndData {
+            outcome: ModelOutputOutcome::Cancelled { .. },
+            ..
+        })
+    )));
+    agent.close().await.unwrap();
 }
 
 /// An append input written while idle starts no turn; the next driving
