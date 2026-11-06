@@ -264,6 +264,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "mcp.remove",
     "mcp.set_enabled",
     "mcp.move",
+    "mcp.import.sources",
     "mcp.import.preview",
     "mcp.import.apply",
     "mcp.disconnect",

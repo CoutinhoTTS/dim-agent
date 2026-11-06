@@ -223,18 +223,35 @@ pub async fn start(
     run(client, options, &request).await
 }
 
-/// `mcp import PATH`: preview a standard `mcpServers` document, and with
-/// `--yes` apply the entries the flags select. The file's text goes to the
-/// owner as it is: the preview's statuses, the apply's refusals and the
-/// document's errors all come from there.
+/// `mcp import PATH`, `mcp import --from ID` or `mcp import --discover`:
+/// preview a standard `mcpServers` document, and with `--yes` apply the
+/// entries the flags select. A path's text goes to the owner as it is; with
+/// `--from`, the owner reads one known store of another local client and its
+/// text never reaches this process. The preview's statuses, the apply's
+/// refusals and the document's errors all come from there.
 pub async fn import(client: &mut Client, options: &Options, import: &McpImport) -> Result<i32> {
     let McpImport {
         path,
+        discover,
+        from,
         yes,
         replace,
         rename,
         only,
     } = import;
+    let cwd = options.workspace().as_str();
+    if *discover {
+        if !client.supports(&["mcp.import.sources"]) {
+            return Err(t("This daemon cannot list other clients' MCP stores.")
+                .to_owned()
+                .into());
+        }
+        let sources = mcp::import_sources(client, cwd)
+            .await
+            .map_err(mcp::import_failure)?;
+        print_import_sources(&sources);
+        return Ok(0);
+    }
     // Refuse a daemon that cannot serve the preview before the file is
     // opened, as `add` does, and one that cannot apply before `--yes` reads.
     if !client.supports(&["mcp.import.preview"])
@@ -244,10 +261,17 @@ pub async fn import(client: &mut Client, options: &Options, import: &McpImport) 
             .to_owned()
             .into());
     }
-    let document = read_text(path)?;
+    let document = path
+        .as_deref()
+        .map(|path| read_text(Path::new(path)))
+        .transpose()?;
+    let input = match (document.as_deref(), from.as_deref()) {
+        (Some(document), None) => mcp::ImportInput::Document(document),
+        (None, Some(id)) => mcp::ImportInput::Store(id),
+        _ => return Err("Use one of PATH, --from ID or --discover".into()),
+    };
     let source = options.mcp_source.as_deref().unwrap_or("user");
-    let cwd = options.workspace().as_str();
-    let preview = mcp::preview_import(client, cwd, source, &document)
+    let preview = mcp::preview_import(client, cwd, source, input)
         .await
         .map_err(mcp::import_failure)?;
     print_import_preview(&preview, source, *yes);
@@ -259,14 +283,41 @@ pub async fn import(client: &mut Client, options: &Options, import: &McpImport) 
         client,
         cwd,
         source,
-        &document,
+        input,
         &preview.revision,
+        preview.source_revision.clone(),
         &resolutions,
     )
     .await
     .map_err(mcp::import_failure)?;
     print_import_applied(&preview, &resolutions, &revision);
     Ok(0)
+}
+
+/// What `--discover` prints: one row per known store, then the columns and the
+/// rule that no value is read out. A store that is not ready shows the owner's
+/// message instead of a count.
+fn print_import_sources(sources: &[mcp::ImportSource]) {
+    let rows = sources
+        .iter()
+        .map(|source| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                safe_line(&source.id),
+                safe_line(&source.client),
+                safe_line(&source.scope),
+                safe_line(&source.path),
+                source.state.as_str(),
+                safe_line(&source.detail()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let notes = vec![
+        t("Columns: ID, client, scope, path, state, entries or error.").to_owned(),
+        t("No value from a store is read out or printed; --from ID previews one inside the daemon.")
+            .to_owned(),
+    ];
+    print_report(rows, notes);
 }
 
 /// The resolutions `--yes` sends: each entry's default by status and the

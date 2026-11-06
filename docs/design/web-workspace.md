@@ -511,16 +511,19 @@ the move blindly because the destination id would answer `mcp_move_conflict`.
 └──────────────────────────────────────────────────────────┘
 ```
 
-Beyond the catalog and entry methods, `mcp.move`, `mcp.import.preview` and
-`mcp.import.apply` are the MCP page's added methods; no secret value is read
-from the owner or stored in the browser.
+Beyond the catalog and entry methods, `mcp.move`, `mcp.import.sources`,
+`mcp.import.preview` and `mcp.import.apply` are the MCP page's added methods; no
+secret value is read from the owner or stored in the browser, and no document
+from another client's store reaches it.
 
 #### MCP import
 
 The MCP page imports a standard `mcpServers` document, the shape other MCP
-clients write, from a local file. The browser reads the file's text and sends it
+clients write, from a local file, or from one known store of another local
+client (Discover, below). For a file the browser reads its text and sends it
 with `mcp.import.preview` for the selected scope — the user source, or the
-workspace's project source when the scope selector names one (`cwd` included).
+workspace's project source when the scope selector names one (`cwd` included);
+a discovered store sends `from` in place of that text.
 The page decodes nothing itself: the owner's preview supplies each entry's id,
 status (`identical`, `changed`, `conflict` or `invalid`), transport, changed
 field names with their JSON kinds, members the decoder keeps unused or drops,
@@ -543,7 +546,9 @@ An `invalid` entry shows no action control, because the owner refuses every
 resolution but Skip for it, and says in its row that it cannot decode and can
 only be skipped. Rename needs a nonempty new id before Apply is enabled.
 
-Apply sends `mcp.import.apply` with the previewed document, its `revision` as
+Apply sends `mcp.import.apply` with the previewed input — the file text as
+`document`, or the store id as `from` together with the preview's
+`sourceRevision` as `expectedSourceRevision` — its `revision` as
 `expectedVersion`, and one resolution per entry. On success the page drops the
 preview, rereads `mcp.catalog` and states that imported and replaced entries
 start disabled: a user entry is written with `enabled: false`, and a project
@@ -555,6 +560,19 @@ again, which re-previews the same document; it never retries the apply. The owne
 message, and the preview stays open for a different selection; after a partial import a new
 preview reports the written ids as conflicts, which a Replace rewrites together with their
 records.
+
+#### MCP discovery
+
+Discover sits beside Import from file…. It calls `mcp.import.sources` with the
+selected scope (`cwd` for a project scope) and lists each known store of another
+local client: its id, client, scope, display path, state and entry count, or the
+owner's message for a store that is `unreadable` or `malformed`. No value, entry
+id or document from a store reaches the page. A `ready` row offers Preview,
+which opens the same import preview with `from` in place of `document`; the
+apply sends that `from` and the preview's `sourceRevision` as
+`expectedSourceRevision`. A row that is not `ready` offers no Preview. The page
+never asks for or holds a store's text, never polls and never watches a store;
+opening Discover again is the refresh, and changing the scope closes it.
 
 #### Diagnostics: the legacy logging controls
 
