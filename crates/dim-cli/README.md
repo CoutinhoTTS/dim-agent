@@ -1538,6 +1538,8 @@ TUI  -> model failed: Model local/model stopped at max_tokens. Increase the outp
 ACP  -> stopReason: max_tokens -> next prompt on the same Session
 ```
 
+A provider failure that carries a `failure` fact prints one line built from its kind, `<meaning>: <reason>. <action>` with `: <reason>` left out when there is none, and no `model failed:` prefix; line mode and `exec` print it once, `exec` with `[failed] ` in front. When the request already showed text, thinking or a tool row, the line starts with "The response above is incomplete." A turn-end error equal to a model failure already shown in the same turn is not printed again; a turn failure that is not a model failure still prints. While a request waits to retry, line mode writes one stderr line per attempt (`retrying 3/8 in 4 s: <meaning>: <reason>`) and the TUI replaces its working line with `Retrying 3/8 in 4 s · <meaning>: <reason> · Esc stops`. An error row's details (kind, status, provider code, request id, `tried N times over M s`, the provider's requested wait and the cause chain) join the `/tools` cycle and click-to-expand, collapsed by default. A retry adds no transcript row and a later success adds none either; the failure line's `tried N times` is the persistent record.
+
 ## Focused checks
 
 The public CLI flow tests exercise the real native binary and NDJSON boundary. Unix PTY checks cover default-deny approval, questions, discarded typeahead, stopping while a frame is fragmented, prompt recovery and hidden callback input:

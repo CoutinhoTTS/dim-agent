@@ -11,16 +11,17 @@ use dim_agent_types::{
     BranchCreateAt, BranchCreateFailedData, BranchSource, CollaborationDelivery,
     CollaborationOutcome, CollaborationTarget, ContentBlock, ContextCompactionResult, ExecStatus,
     InputMode, InsufficientSpacePartName, JsonObject, Message, MessageContent, MessagePart,
-    ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult, TurnOutcome, UserInput,
+    ModelFailure, ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult, TurnOutcome,
+    UserInput,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, CompactionPart, CompactionPartSize, CompactionState, CompactionView, LineCut,
-    LineState, LineView, MemberCard, MemberConversationState, MemberTarget, QueuedInput, RowKind,
-    RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd, ViewRow, ViewSnapshot,
-    WorkflowView,
+    ApprovalView, CompactionPart, CompactionPartSize, CompactionState, CompactionView,
+    FailureDetail, LineCut, LineState, LineView, MemberCard, MemberConversationState, MemberTarget,
+    QueuedInput, RetryView, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd,
+    ViewRow, ViewSnapshot, WorkflowView,
 };
 use crate::wire::{Event, EventContent, Progress, WorkflowRun, WorkflowState};
 
@@ -74,7 +75,11 @@ pub struct Projection {
     background: HashMap<TaskTarget, String>,
     /// The newest turn end: its sequence and how the turn ended.
     ended: Option<(u64, TurnEnd)>,
-    presented_failure: Option<String>,
+    /// The `error` of a model failure already shown this turn: the turn's
+    /// repeat of it prints nothing.
+    shown_failure: Option<String>,
+    /// The retry the running request waits for, while it sleeps.
+    retry: Option<RetryView>,
     /// The call row carrying each delegation's card, by request event id.
     cards: HashMap<String, usize>,
     /// Native Agent names from `agent.list`, by Agent id.
@@ -576,29 +581,34 @@ impl Projection {
                 self.row(index).compaction = Some(compaction_view(&data.outcome));
             }
             EventContent::ModelEnd(data) => {
+                let incomplete = self.showed_output(&data.request_id);
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
+                self.retry = None;
                 if let ModelOutputOutcome::Failed {
                     error,
                     presentation,
+                    failure,
                     budget,
-                    ..
                 } = &data.outcome
-                    && (budget.is_none() || presentation.is_some())
                 {
-                    let message = presentation
-                        .as_ref()
-                        .and_then(|value| value.server_message.as_deref())
-                        .unwrap_or(error);
-                    let action = presentation
-                        .as_ref()
-                        .and_then(|value| value.action.as_deref())
-                        .map(|action| format!(". {action}"))
-                        .unwrap_or_default();
-                    self.push_error(format!("model failed: {message}{action}"));
-                    if presentation.is_some() {
-                        self.presented_failure = Some(error.clone());
+                    let line = match (presentation, failure) {
+                        (Some(presentation), _) => {
+                            Some((presentation_line(presentation, error), None))
+                        }
+                        (None, Some(failure)) => Some((
+                            failure_line(failure, incomplete),
+                            Some(failure_detail(failure)),
+                        )),
+                        (None, None) if budget.is_none() => {
+                            Some((format!("model failed: {error}"), None))
+                        }
+                        (None, None) => None,
+                    };
+                    if let Some((text, detail)) = line {
+                        self.push_error(text, detail);
+                        self.shown_failure = Some(error.clone());
                     }
                 }
             }
@@ -642,11 +652,11 @@ impl Projection {
     }
 
     fn turn_end(&mut self, sequence: u64, outcome: &TurnOutcome) {
-        let presented = self.presented_failure.take();
+        let shown = self.shown_failure.take();
         let end = match outcome {
             TurnOutcome::Failed { error } => {
-                if presented.as_deref() != Some(error.as_str()) {
-                    self.push_error(format!("turn failed: {error}"));
+                if shown.as_deref() != Some(error.as_str()) {
+                    self.push_error(format!("turn failed: {error}"), None);
                 }
                 TurnEnd::Failed
             }
@@ -798,6 +808,7 @@ impl Projection {
             tasks: self.tasks.clone(),
             ended: self.ended,
             goal: self.goal.goal(),
+            retry: self.retry.clone(),
             ..ViewSnapshot::default()
         }
     }
@@ -1092,19 +1103,39 @@ impl Projection {
             cut: None,
             line: None,
             compaction: None,
+            failure: None,
         }));
         self.rows.len() - 1
     }
 
-    fn push_error(&mut self, text: String) {
+    fn push_error(&mut self, text: String, failure: Option<FailureDetail>) {
         let index = self.push(format!("error-{}", self.rows.len()), RowKind::Error, text);
-        self.row(index).tone = Some(RowTone::Danger);
+        let row = self.row(index);
+        row.tone = Some(RowTone::Danger);
+        row.failure = failure;
+    }
+
+    /// Whether the request showed output already: a text, thinking or tool
+    /// row of the same request.
+    fn showed_output(&self, request_id: &str) -> bool {
+        self.assistant_rows.contains_key(request_id)
+            || self.thinking_rows.contains_key(request_id)
+            || self.rows.iter().any(|row| {
+                row.kind == RowKind::ToolCall && row.batch.as_deref() == Some(request_id)
+            })
     }
 
     /// Shows a model request's reasoning that is not written yet. Progress
     /// that the written deltas overtook, or that runs ahead of them, waits
     /// for the next notice.
     pub fn progress(&mut self, progress: &Progress) {
+        self.retry = progress.retry.as_ref().map(|retry| RetryView {
+            attempt: retry.attempt,
+            max_attempts: retry.max_attempts,
+            retry_at_ms: retry.retry_at_ms,
+            kind: retry.kind,
+            reason: retry.reason.clone(),
+        });
         let Some(request_id) = &progress.request_id else {
             return;
         };
@@ -1382,6 +1413,55 @@ fn user_display(blocks: &[ContentBlock]) -> Option<String> {
         display.push_str(&line);
     }
     Some(display)
+}
+
+/// A provider presentation's line, as today: its own words, prefixed.
+fn presentation_line(presentation: &dim_agent_types::ProviderPresentation, error: &str) -> String {
+    let message = presentation.server_message.as_deref().unwrap_or(error);
+    let action = presentation
+        .action
+        .as_deref()
+        .map(|action| format!(". {action}"))
+        .unwrap_or_default();
+    format!("model failed: {message}{action}")
+}
+
+/// The one line a model failure shows, worded from its kind through the
+/// interface language; `incomplete` prefixes it when the request had output.
+pub(crate) fn failure_line(failure: &ModelFailure, incomplete: bool) -> String {
+    let reason = failure
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| reason.strip_suffix('.').unwrap_or(reason));
+    let mut line = String::new();
+    if incomplete {
+        line.push_str(crate::ui::i18n::t("The response above is incomplete."));
+        line.push(' ');
+    }
+    line.push_str(crate::ui::i18n::t(failure.kind.meaning()));
+    if let Some(reason) = reason {
+        line.push_str(": ");
+        line.push_str(reason);
+        line.push('.');
+    }
+    line.push(' ');
+    line.push_str(crate::ui::i18n::t(failure.kind.action()));
+    line
+}
+
+fn failure_detail(failure: &ModelFailure) -> FailureDetail {
+    FailureDetail {
+        kind: failure.kind,
+        status: failure.status,
+        provider_code: failure.provider_code.clone(),
+        request_id: failure.request_id.clone(),
+        attempts: failure.attempts,
+        waited_ms: failure.waited_ms,
+        retry_after_ms: failure.retry_after_ms,
+        cause: failure.cause.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -2330,5 +2410,199 @@ mod tests {
                 insufficient: Vec::new(),
             })
         );
+    }
+
+    fn model_end(sequence: u64, data: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "sequence": sequence,
+            "create_at": sequence * 1000,
+            "type": "step",
+            "name": "model-output-end",
+            "data": data,
+        })
+    }
+
+    fn failure_data(extra: serde_json::Value) -> serde_json::Value {
+        let mut data = serde_json::json!({
+            "turn_id": "t1",
+            "request_id": "r1",
+            "status": "failed",
+            "error": "fixture error",
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            data[key] = value.clone();
+        }
+        data
+    }
+
+    fn failure_fact() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "server_error",
+            "status": 503,
+            "providerCode": "overloaded",
+            "requestId": "req-provider",
+            "reason": "The server is overloaded",
+            "cause": ["upstream 503"],
+            "attempts": 3,
+            "waitedMs": 4200,
+        })
+    }
+
+    #[test]
+    fn a_failure_fact_is_one_line_with_its_details_and_no_prefix() {
+        use dim_agent_types::ModelFailureKind;
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[model_end(
+                1,
+                failure_data(serde_json::json!({"failure": failure_fact()})),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert_eq!(
+            row.text,
+            "The provider reported a server error: The server is overloaded. Try again later or choose another model."
+        );
+        let details = row.failure.as_ref().expect("details");
+        assert_eq!(details.kind, ModelFailureKind::ServerError);
+        assert_eq!(details.status, Some(503));
+        assert_eq!(details.provider_code.as_deref(), Some("overloaded"));
+        assert_eq!(details.request_id.as_deref(), Some("req-provider"));
+        assert_eq!((details.attempts, details.waited_ms), (3, 4200));
+        assert_eq!(details.cause, ["upstream 503"]);
+    }
+
+    #[test]
+    fn a_presentation_still_wins_over_the_failure_line() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[model_end(
+                1,
+                failure_data(serde_json::json!({
+                    "failure": failure_fact(),
+                    "presentation": {
+                        "source": "fixture_provider",
+                        "reason": "unknown_error",
+                        "serverMessage": "provider words",
+                        "action": "Try later.",
+                    },
+                })),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert_eq!(row.text, "model failed: provider words. Try later.");
+        assert!(row.failure.is_none());
+    }
+
+    #[test]
+    fn an_old_event_shows_the_error_with_its_prefix() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[model_end(1, failure_data(serde_json::json!({})))],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert_eq!(row.text, "model failed: fixture error");
+    }
+
+    #[test]
+    fn a_failure_after_output_starts_with_the_incomplete_sentence() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                step(1, "text", "half an answer"),
+                model_end(
+                    2,
+                    failure_data(serde_json::json!({"failure": failure_fact()})),
+                ),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert!(
+            row.text
+                .starts_with("The response above is incomplete. The provider reported"),
+            "{}",
+            row.text
+        );
+    }
+
+    #[test]
+    fn the_turn_repeat_is_dropped_for_a_failure_without_presentation() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                model_end(
+                    1,
+                    failure_data(serde_json::json!({"failure": failure_fact()})),
+                ),
+                serde_json::json!({
+                    "sequence": 2, "create_at": 2000, "type": "turn", "name": "end",
+                    "data": {"turn_id": "t1", "status": "failed", "error": "fixture error"},
+                }),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        let errors: Vec<_> = rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0]
+                .text
+                .starts_with("The provider reported a server error")
+        );
+    }
+
+    #[test]
+    fn a_turn_failure_that_is_not_a_model_failure_still_prints() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "sequence": 1, "create_at": 1000, "type": "turn", "name": "end",
+                "data": {"turn_id": "t1", "status": "failed", "error": "context preparation failed"},
+            })],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert_eq!(row.text, "turn failed: context preparation failed");
+    }
+
+    #[test]
+    fn a_retry_progress_reaches_the_snapshot_and_clears() {
+        let mut projection = Projection::default();
+        let retrying: Progress = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0, "thinking": "", "thinkingOffset": 0,
+            "retry": {
+                "attempt": 3, "maxAttempts": 8, "retryAtMs": 1_700_000_000_000u64,
+                "kind": "server_error", "reason": "The server is overloaded",
+            },
+        }))
+        .unwrap();
+        projection.progress(&retrying);
+        let retry = projection.snapshot().retry.expect("a retry");
+        assert_eq!((retry.attempt, retry.max_attempts), (3, 8));
+        assert_eq!(retry.kind, dim_agent_types::ModelFailureKind::ServerError);
+        assert_eq!(retry.reason.as_deref(), Some("The server is overloaded"));
+        let done: Progress = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0, "thinking": "", "thinkingOffset": 0,
+        }))
+        .unwrap();
+        projection.progress(&done);
+        assert!(projection.snapshot().retry.is_none());
     }
 }

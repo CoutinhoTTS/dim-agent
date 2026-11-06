@@ -30,7 +30,15 @@ pub struct Display {
     tools: HashMap<String, String>,
     finished: HashSet<String>,
     completed_tools: HashSet<String>,
-    presented_failure: Option<String>,
+    /// Requests that already showed output, for the incomplete prefix.
+    showed: HashSet<String>,
+    /// The `error` of a model failure already shown this turn: the turn's
+    /// repeat of it prints nothing.
+    shown_failure: Option<String>,
+    /// Whether retry waits are reported; exec keeps them quiet.
+    pub retries: bool,
+    /// The last attempt a retry line reported, by request id.
+    retry_seen: HashMap<String, u8>,
 }
 impl Display {
     pub fn new(interactive: bool, json: bool) -> Self {
@@ -49,7 +57,10 @@ impl Display {
             tools: HashMap::new(),
             finished: HashSet::new(),
             completed_tools: HashSet::new(),
-            presented_failure: None,
+            showed: HashSet::new(),
+            shown_failure: None,
+            retries: true,
+            retry_seen: HashMap::new(),
         }
     }
     pub fn record(&mut self, message: &str) -> Result<()> {
@@ -94,10 +105,31 @@ impl Display {
         let Some(request) = progress.request_id else {
             return Ok(());
         };
+        if self.retries {
+            match &progress.retry {
+                Some(retry) if self.retry_seen.get(&request) != Some(&retry.attempt) => {
+                    self.retry_seen.insert(request.clone(), retry.attempt);
+                    let line = crate::ui::i18n::tf(
+                        "retrying {attempt}/{max} in {seconds} s: {reason}",
+                        &[
+                            ("attempt", &retry.attempt.to_string()),
+                            ("max", &retry.max_attempts.to_string()),
+                            ("seconds", &retry_seconds(retry.retry_at_ms)),
+                            ("reason", &retry_reason(retry.kind, retry.reason.as_deref())),
+                        ],
+                    );
+                    self.record(&line)?;
+                }
+                Some(_) => {}
+                None => {
+                    self.retry_seen.remove(&request);
+                }
+            }
+        }
         if self.finished.contains(&request) {
             return Ok(());
         }
-        let position = self.requests.entry(request).or_default();
+        let position = self.requests.entry(request.clone()).or_default();
         if progress.text_offset > position.printed {
             return Ok(());
         }
@@ -107,6 +139,7 @@ impl Display {
             return Ok(());
         }
         position.printed = progress.text_offset + count;
+        self.showed.insert(request.clone());
         self.text(
             &progress
                 .text
@@ -140,6 +173,7 @@ impl Display {
                 }
             }
             EventContent::Text(data) => {
+                self.showed.insert(data.request_id.clone());
                 let position = self.requests.entry(data.request_id).or_default();
                 let count = data.delta.chars().count() as u64;
                 let skip = position
@@ -153,6 +187,7 @@ impl Display {
             EventContent::ToolUse(data) => {
                 self.tools
                     .insert(data.call.id.clone(), data.call.name.clone());
+                self.showed.insert(data.request_id.clone());
                 self.record(&format!("[tool] {}", data.call.name))?;
             }
             EventContent::ToolCompleted(data) => {
@@ -164,17 +199,20 @@ impl Display {
                 }
             }
             EventContent::ModelEnd(data) => {
-                self.finished.insert(data.request_id);
+                self.finished.insert(data.request_id.clone());
+                let incomplete = self.showed.remove(&data.request_id);
+                self.retry_seen.remove(&data.request_id);
                 self.finish_text()?;
                 if let ModelOutputOutcome::Failed {
                     error,
                     presentation,
+                    failure,
                     ..
                 } = data.outcome
                 {
                     self.failed = true;
-                    if let Some(presentation) = presentation {
-                        self.record(&format!(
+                    let line = match (presentation, failure) {
+                        (Some(presentation), _) => Some(format!(
                             "[failed] {}: {}{}",
                             presentation.source,
                             presentation
@@ -185,14 +223,22 @@ impl Display {
                                 .action
                                 .map(|action| format!(". {action}"))
                                 .unwrap_or_default(),
-                        ))?;
-                        self.presented_failure = Some(error);
+                        )),
+                        (None, Some(failure)) => Some(format!(
+                            "[failed] {}",
+                            crate::projection::failure_line(&failure, incomplete)
+                        )),
+                        (None, None) => None,
+                    };
+                    if let Some(line) = line {
+                        self.record(&line)?;
+                        self.shown_failure = Some(error);
                     }
                 }
             }
             EventContent::TurnEnd(data) => {
                 self.finish_text()?;
-                let presented = self.presented_failure.take();
+                let presented = self.shown_failure.take();
                 match data.outcome {
                     TurnOutcome::Failed { error } => {
                         self.failed = true;
@@ -224,5 +270,26 @@ impl Display {
                 "done"
             }
         ))
+    }
+}
+
+/// The seconds a retry waits from now, never below zero.
+fn retry_seconds(retry_at_ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64);
+    retry_at_ms.saturating_sub(now).div_ceil(1000).to_string()
+}
+
+/// `<meaning>: <reason>` worded from the kind, or the meaning alone.
+fn retry_reason(kind: ModelFailureKind, reason: Option<&str>) -> String {
+    let meaning = crate::ui::i18n::t(kind.meaning());
+    match reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| reason.strip_suffix('.').unwrap_or(reason))
+    {
+        Some(reason) => format!("{meaning}: {reason}"),
+        None => meaning.to_owned(),
     }
 }

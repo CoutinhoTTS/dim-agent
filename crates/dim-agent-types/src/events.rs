@@ -595,6 +595,25 @@ impl ModelFailureKind {
         }
     }
 
+    /// The kind's wire name, snake_case.
+    #[must_use]
+    pub const fn keyword(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::RateLimited => "rate_limited",
+            Self::ServerError => "server_error",
+            Self::MalformedResponse => "malformed_response",
+            Self::AuthRejected => "auth_rejected",
+            Self::QuotaExhausted => "quota_exhausted",
+            Self::NotFound => "not_found",
+            Self::ContextTooLong => "context_too_long",
+            Self::ContentFiltered => "content_filtered",
+            Self::InvalidRequest => "invalid_request",
+            Self::OutputLimit => "output_limit",
+            Self::Unknown => "unknown",
+        }
+    }
+
     /// `<meaning>: <reason>. <action>`, or `<meaning>. <action>` without a
     /// reason. `reason` is one sanitized sentence.
     #[must_use]
