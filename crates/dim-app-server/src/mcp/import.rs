@@ -14,7 +14,7 @@ use super::config::{
     self, ENTRY_MEMBERS, McpEntryError, McpSecretEntry, McpServerSettings, McpSettings,
     OAUTH_MEMBERS, RemoteTransport,
 };
-use super::{McpError, Result};
+use super::{McpError, Result, discovery};
 use crate::protocol::optional_non_null;
 use crate::settings::SettingsError;
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,11 @@ pub(crate) struct ImportPreview {
     /// client-supplied `document`, which the apply carries itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    /// The known store a `from` preview read, named as `mcp.import.sources`
+    /// names it; absent for a client-supplied `document`. The request's own
+    /// target is `source`, so the store it read is `store`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<discovery::Identity>,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,6 +216,7 @@ pub(crate) fn preview(
             .collect(),
         unknown_top_level: document.extra.keys().cloned().collect(),
         source_revision: None,
+        store: None,
     }
 }
 
@@ -554,4 +560,49 @@ fn unsupported(document: &McpSettings, id: &str) -> Vec<ImportUnsupported> {
         .into_iter()
         .map(|(field, effect)| ImportUnsupported { field, effect })
         .collect()
+}
+
+/// Deterministic holds for tests that must act between an import's two
+/// writes. The pattern follows `auth::testing`: a test registers a hold, the
+/// owner pauses at the point named below until the hold is dropped.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    type Hold = (String, oneshot::Sender<()>, oneshot::Receiver<()>);
+    static HOLDS: Mutex<Vec<Hold>> = Mutex::new(Vec::new());
+
+    /// Holds the next project import into `workspace` after its source write
+    /// commits and before its withheld records, until this is dropped.
+    pub struct HeldImport {
+        /// Resolves once the held import reached the pause.
+        pub arrived: oneshot::Receiver<()>,
+        _release: oneshot::Sender<()>,
+    }
+
+    pub fn hold_import(workspace: &str) -> HeldImport {
+        let (arrive, arrived) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        HOLDS
+            .lock()
+            .unwrap()
+            .push((workspace.to_owned(), arrive, released));
+        HeldImport {
+            arrived,
+            _release: release,
+        }
+    }
+
+    pub(crate) async fn pause(workspace: &str) {
+        let hold = {
+            let mut holds = HOLDS.lock().unwrap();
+            let index = holds.iter().position(|(held, ..)| held == workspace);
+            index.map(|index| holds.swap_remove(index))
+        };
+        if let Some((_, arrive, released)) = hold {
+            let _ = arrive.send(());
+            let _ = released.await;
+        }
+    }
 }

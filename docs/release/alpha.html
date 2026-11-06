@@ -84,7 +84,7 @@
     <tr><th>版本号</th><th>npm dist-tag</th><th>安装 / 升级</th><th>当前用途</th></tr>
     <tr><td><code>X.Y.Z</code></td><td><code>latest</code></td><td><code>npm i -g dimcode</code></td><td>TS 版正式</td></tr>
     <tr><td><code>X.Y.Z-beta.N</code></td><td><code>beta</code></td><td><code>npm i -g dimcode@beta</code></td><td>TS 版 beta</td></tr>
-    <tr><td><code>X.Y.Z-alpha.N</code></td><td><code>alpha</code></td><td><code>npm i -g dimcode-alpha@alpha</code>，命令 <code>dima</code></td><td>Rust 版</td></tr>
+    <tr><td><code>X.Y.Z-alpha.N</code></td><td>CI 入口：<code>latest</code> / <code>alpha</code></td><td><code>npm i -g dimcode-alpha</code> 或 <code>npm i -g dimcode-alpha@alpha</code>，命令 <code>dima</code></td><td>Rust nightly，仍是预发布版本</td></tr>
   </table>
   </div>
   <p><code>scripts/publish-npm.mjs</code> 按版本号自动选 dist-tag 和外壳包：alpha 发 <code>dimcode-alpha</code>，只带 <code>dima</code> 命令；其他预发布标识（例如 <code>rc</code>）直接拒绝。平台包 <code>dimcode-&lt;平台&gt;</code> 和 <code>dimcode-web</code> 两边共用，外壳包锁定精确版本。alpha 构建默认使用独立的数据目录 <code>~/.dimcode-alpha</code>，不读写 <code>dim</code> 的 <code>~/.dimcode</code>。</p>
@@ -103,13 +103,14 @@
   <p>只有想去掉上面那条「alpha 必须低于 beta」的限制时，才需要在 TS 仓库改 <code>packages/cli/src/core/upgrade/update-version.ts</code>，让预发布轨道只选同一标识的版本，然后发一版 beta。这个改动只对升级到新 beta 的用户生效，没升级的老版本仍按旧逻辑选。</p>
 
   <h2>GitHub 托管 runner 构建和发布</h2>
-  <p>手动从 <code>main</code> 准备下一个 GitHub alpha。若该提交已有 alpha tag，或等于 npm 上一个 alpha 的源提交，工作流就跳过。否则它自动取号，由 GitHub 托管 runner 按目标系统和架构构建六个平台，并在 Ubuntu 构建 Web，把原始压缩包、清单和校验和上传到 prerelease 草稿。</p>
+  <p>手动从 <code>main</code> 准备下一个 GitHub alpha。预检读取入口两标签，并校验 Web、六平台 tarball 的完整性、源提交、账号构建以及入口的精确依赖；只有 Git tag 或 Web 源提交匹配不够。若选定的 main SHA 已有完整 nightly，普通构建请求会停止并提示，不会直接宣称跳过成功。否则它自动取号，由 GitHub 托管 runner 按目标系统和架构构建六个平台，并在 Ubuntu 构建 Web，把原始压缩包、清单和校验和上传到 prerelease 草稿。</p>
   <pre><code>gh workflow run release.yml --ref main</code></pre>
-  <p>检查附件并在 GitHub 发布 prerelease，然后用它的真实 tag 运行 npm 工作流。GitHub 托管 runner 通过 OIDC 发布 Release 附件。验收任务安装 <code>dima</code>、核对旧包标签，并确认八个包在阿里 npm 镜像上可用。见<a href="README.md#alpha-npm-publication">发布配置与重试说明</a>。</p>
+  <p>若已授权标签修复、镜像同步和安装验收，可加 <code>-f repair_nightly=true</code>：完整 nightly 会复用而不重建，通过验收后才报告无需构建。新构建仍须检查附件并在 GitHub 发布 prerelease，然后用它的真实 tag 运行 npm 工作流。GitHub 托管 runner 通过 OIDC 发布 Release 附件，验证完整性和来源后让入口 <code>latest</code> / <code>alpha</code> 同指新 nightly；平台包和 Web 仍只更新 <code>alpha</code>。不会发布 <code>dimcode</code> 或改动其任何标签。验收使用全新 prefix/cache 分别安装默认入口和 <code>@alpha</code>，在官方源及同步后的阿里镜像上核对包版本和 <code>dima --version</code>；镜像滞后也算失败。见<a href="README.md#alpha-npm-publication">发布配置与重试说明</a>。</p>
   <pre><code>gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N -f publish=true</code></pre>
+  <p>纯标签恢复可用 <code>npm-publish.yml --ref main -f source_commit=FULL_MAIN_SHA -f publish=true</code>，只接受本次 dispatch 的 main SHA 且要求已有完整 nightly；不支持任意旧祖先提交。旧版本有已发布 GitHub Release 时仍可用 <code>release_tag</code> 重试，但不得回退标签；没有 Release 的旧 nightly 需要新 main 构建。入口 trusted publisher 要单独允许 <code>npm dist-tag</code>；从 <code>release.yml</code> 复用恢复流程还需以该调用工作流配置第二个 tag-only trusted publisher。首次运行前确认权限和 <code>NPM_ALPHA_PUBLISH_ENABLED=true</code>。</p>
 
   <h2>本机替代方案：一条命令 build + 发布</h2>
-  <p>和 TS 版的 <code>bun publish:bin</code> 一样，在本机 Mac 上一次完成编译、打包和发布：</p>
+  <p>和 TS 版的 <code>bun publish:bin</code> 一样，在本机 Mac 上一次完成编译、打包和发布。这条替代路线仅发布 <code>alpha</code>，不对齐入口 <code>latest</code>、不同步镜像，也不提供 CI 的双入口验收；需要双标签 nightly 时使用上面的 CI 路线：</p>
 <pre><code>npm login --registry https://registry.npmjs.org   # 第一次
 node scripts/publish-alpha.mjs                       # 自动取下一个 alpha
 node scripts/publish-alpha.mjs 0.1.0-alpha.3         # 指定版本
