@@ -42,8 +42,7 @@ default or user-facing control changes for this operation.
 
 The Linux guarantee rests on bubblewrap running a minimal PID 1 that exits to clean up the sandbox
 (`--as-pid-1` documents that default) and on `pid_namespaces(7)`: when the namespace's init
-process terminates, the kernel ends the rest of the namespace. The flow tests run on macOS only;
-the Linux and Windows wording is covered by the cross-target checks.
+process terminates, the kernel ends the rest of the namespace.
 
 ## Process isolation
 
