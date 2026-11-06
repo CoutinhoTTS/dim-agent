@@ -577,10 +577,18 @@ async fn held_notifications_do_not_take_the_replys_room() {
     let b = client
         .send("channel.hold", json!({"count": 512, "tag": "b"}))
         .await;
-    // Both calls hold their frames before either reply is written.
+    // Both calls hold their frames before either reply is written. The waiter
+    // is enabled before the count is read, so a hold that lands between the
+    // read and the await cannot be missed: `notify_waiters` stores no permit.
     tokio::time::timeout(Duration::from_secs(10), async {
-        while state.holding.load(Ordering::SeqCst) < 2 {
-            state.holding_changed.notified().await;
+        loop {
+            let notified = state.holding_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if state.holding.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            notified.await;
         }
     })
     .await
