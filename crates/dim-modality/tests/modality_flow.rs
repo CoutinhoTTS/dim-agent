@@ -178,6 +178,8 @@ enum Handles {
 struct Behavior {
     handles: Handles,
     submit_error: Option<AdapterError>,
+    /// When set, `submit` blocks until it fires, then returns its handle.
+    submit_gate: Option<CancellationToken>,
     wait_error: Option<AdapterError>,
     /// name, media type, bytes written into the work directory.
     files: Vec<(String, String, Vec<u8>)>,
@@ -200,6 +202,7 @@ impl Default for Behavior {
         Self {
             handles: Handles::PerTask,
             submit_error: None,
+            submit_gate: None,
             wait_error: None,
             files: vec![(
                 "out.bin".into(),
@@ -370,7 +373,11 @@ impl ModalityAdapter for FixtureAdapter {
             None => self.order.lock().unwrap().push(task_id.clone()),
         }
         self.jobs.lock().unwrap().insert(task_id, job);
+        let submit_gate = behavior.submit_gate.clone();
         Box::pin(async move {
+            if let Some(gate) = submit_gate {
+                gate.cancelled().await;
+            }
             Ok(Submitted {
                 remote_handle: handle,
             })
@@ -2913,6 +2920,104 @@ async fn two_unhandled_tasks_receive_their_own_results() {
     let mut wanted = vec![first_id, second_id];
     wanted.sort();
     assert_eq!(received, wanted, "every wait received its own task id");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_during_submit_reaches_the_accepted_job() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let submit_gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        submit_gate: Some(submit_gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-cancel-submit").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "s"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.submits() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was never asked to submit"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Cancel while `submit` is blocked, then let it return its handle.
+    let cancel_id = client
+        .send("modality.task.cancel", json!({"task_id": task_id}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    submit_gate.cancel();
+    let cancelled = client.response(cancel_id).await;
+    assert_ok(&cancelled);
+    assert_eq!(fixture.remote_cancels(), 1, "the executor was asked once");
+    let record = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&record), "cancelled", "{record}");
+    assert_eq!(record["remote_handle"], format!("handle-{task_id}"));
+    assert_eq!(record["remote_cancel"], "cancelled", "{record}");
+    assert_eq!(fixture.submits(), 1);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unload_during_submit_keeps_a_handle_for_the_next_generation() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let submit_gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        submit_gate: Some(submit_gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-unload-submit").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "u"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.submits() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was never asked to submit"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The plugin unloads while `submit` is blocked; the adapter returns its
+    // handle within the grace.
+    let release = {
+        let submit_gate = submit_gate.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            submit_gate.cancel();
+        })
+    };
+    server.shutdown();
+    server.join().await.unwrap();
+    release.await.unwrap();
+    let stored = read_task_record(&home, &task_id);
+    assert_eq!(stored["state"], "running", "{stored}");
+    assert_eq!(stored["remote_handle"], format!("handle-{task_id}"));
+    assert_eq!(fixture.submits(), 1);
+
+    // The next generation observes it without submitting again.
+    let server = start_in(home.clone(), Some(fixture.clone())).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let finished = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&finished), "succeeded", "{finished}");
+    assert_eq!(fixture.submits(), 1, "the observation never submits again");
+    assert!(fixture.wait_ids().contains(&task_id));
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

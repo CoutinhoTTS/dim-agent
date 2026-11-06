@@ -57,6 +57,12 @@ pub const MAX_RESULT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_WAIT_MS: u64 = 600_000;
 /// Progress is written to the record at most once per second (A10).
 pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a drive keeps waiting for `submit` after a cancel, and how long a
+/// cancel waits for the submit phase to end. It stays below rutis's unload
+/// bound (`RUTIS_SHUTDOWN_TIMEOUT`, 10 s by default, rutis 0.19.3
+/// `fiber.rs:1193`), leaving room for the cancel's own write and the rest of
+/// an unload; past it a stuck adapter holds up neither.
+pub const SUBMIT_CANCEL_GRACE: Duration = Duration::from_secs(3);
 /// The name this build records for its single process adapter; the per-task
 /// lookup (#861) will record the resolved adapter's name instead.
 pub const ADAPTER_NAME: &str = "modalityAdapter";
@@ -520,6 +526,10 @@ struct Slot {
     /// The local abort of this task's running work.
     cancel: CancellationToken,
     cancel_requested: AtomicBool,
+    /// The submit phase: `false` from just after `running` until the handle
+    /// is written (or `submit` ended without one), so a cancel can wait for
+    /// the handle an accepted job produces (A.6).
+    submit_ended: watch::Sender<bool>,
 }
 
 impl Slot {
@@ -535,11 +545,18 @@ impl Slot {
             progress_written: Mutex::new(None),
             cancel: CancellationToken::new(),
             cancel_requested: AtomicBool::new(false),
+            submit_ended: watch::channel(true).0,
         })
     }
 
     fn cancel_requested(&self) -> bool {
         self.cancel_requested.load(Ordering::SeqCst)
+    }
+    fn begin_submit(&self) {
+        self.submit_ended.send_replace(false);
+    }
+    fn end_submit(&self) {
+        self.submit_ended.send_replace(true);
     }
 }
 
@@ -943,7 +960,6 @@ impl ModalityTasks {
         params: TaskCancel,
         cancel: &CancellationToken,
     ) -> Result<TaskReply, RpcError> {
-        let _ = cancel;
         let slot = self
             .shared
             .slot(&params.task_id)
@@ -954,10 +970,20 @@ impl ModalityTasks {
         }
         slot.cancel_requested.store(true, Ordering::SeqCst);
         slot.cancel.cancel();
-        // The drive records a handle before it waits. Reading the record
-        // again after the request catches a handle written meanwhile, so a
-        // cancel that lands just after the submission still asks the
-        // executor (§A.6).
+        // A cancel waits for the submit phase to end (A.6): a job the
+        // executor accepted yields its handle first, so the terminal write
+        // records the executor's answer. The wait is bounded by the same
+        // grace the drive uses, and by this call's token and the
+        // generation's stop.
+        let mut ended = slot.submit_ended.subscribe();
+        if !*ended.borrow_and_update() {
+            tokio::select! {
+                _ = ended.changed() => {}
+                _ = tokio::time::sleep(SUBMIT_CANCEL_GRACE) => {}
+                _ = cancel.cancelled() => {}
+                _ = self.shared.stop.cancelled() => {}
+            }
+        }
         let record = self.shared.record(&slot);
         if record.state.is_terminal() {
             return Ok(TaskReply { task: record });
@@ -967,7 +993,12 @@ impl ModalityTasks {
             && let Ok(connection) = self.shared.connection(&record, cancel).await
             && let Some(adapter) = self.shared.ctx.get::<ModalityAdapterService>()
         {
-            remote = adapter.0.cancel_remote(handle, connection).await.ok();
+            // A hung provider must not keep the client or an unload waiting.
+            remote = tokio::select! {
+                answer = adapter.0.cancel_remote(handle, connection) => answer.ok(),
+                _ = cancel.cancelled() => None,
+                _ = self.shared.stop.cancelled() => None,
+            };
         }
         self.shared
             .settled_cancelled(&slot, record.revision, remote)
@@ -1462,47 +1493,80 @@ impl Shared {
             Write::Written(record) => record,
             Write::Discarded(_) => return,
         };
+        // The submit phase opens before the cancel check: a cancel that
+        // arrives now waits for it to end and then sees the handle a job the
+        // executor accepted produced (A.6).
+        slot.begin_submit();
+        if slot.cancel_requested() {
+            slot.end_submit();
+            return;
+        }
+        let submitted = self.submit_phase(&slot, &record).await;
+        slot.end_submit();
+        let Some(handle) = submitted else {
+            return;
+        };
         // A cancel request stops the drive; `modality.task.cancel` owns the
         // terminal `cancelled` write, because only it can ask the executor
         // for the remote answer the record keeps.
         if slot.cancel_requested() {
             return;
         }
+        self.wait_and_settle(&slot, record, handle).await;
+    }
+
+    /// One submit phase (A.6): the adapter checks, the connection, `submit`
+    /// and the handle write. It returns the handle to wait on, or `None`
+    /// when the task must not continue and a cancel owns its terminal write.
+    /// After a cancel the phase keeps waiting for `submit` up to
+    /// [`SUBMIT_CANCEL_GRACE`], so a job the executor accepted still yields
+    /// its handle.
+    async fn submit_phase(
+        self: &Arc<Self>,
+        slot: &Arc<Slot>,
+        record: &TaskRecord,
+    ) -> Option<Option<String>> {
         let Some(adapter) = self.ctx.get::<ModalityAdapterService>() else {
             if !slot.cancel_requested() {
-                self.fail(&slot, "unavailable", "No adapter in this build")
+                self.fail(slot, "unavailable", "No adapter in this build")
                     .await;
             }
-            return;
+            return None;
         };
         if !adapter.0.available() {
             if !slot.cancel_requested() {
-                self.fail(&slot, "unavailable", "The adapter is unavailable")
+                self.fail(slot, "unavailable", "The adapter is unavailable")
                     .await;
             }
-            return;
+            return None;
         }
         let Executor::Provider { provider, .. } = &record.executor else {
-            self.fail(&slot, "unavailable", "A host task has no executor")
-                .await;
-            return;
+            if !slot.cancel_requested() {
+                self.fail(slot, "unavailable", "A host task has no executor")
+                    .await;
+            }
+            return None;
         };
         if !adapter.0.operations(provider).iter().any(|served| {
             served.category == record.category && served.operation == record.operation
         }) {
-            self.fail(
-                &slot,
-                "unavailable",
-                "No available adapter serves the configured model",
-            )
-            .await;
-            return;
+            if !slot.cancel_requested() {
+                self.fail(
+                    slot,
+                    "unavailable",
+                    "No available adapter serves the configured model",
+                )
+                .await;
+            }
+            return None;
         }
-        let files = match self.job_files(&record).await {
+        let files = match self.job_files(record).await {
             Ok(files) => files,
             Err(error) => {
-                self.fail(&slot, "storage_error", error).await;
-                return;
+                if !slot.cancel_requested() {
+                    self.fail(slot, "storage_error", error).await;
+                }
+                return None;
             }
         };
         let work_dir = match self
@@ -1512,8 +1576,10 @@ impl Shared {
         {
             Ok(path) => path,
             Err(error) => {
-                self.fail(&slot, "storage_error", error.to_string()).await;
-                return;
+                if !slot.cancel_requested() {
+                    self.fail(slot, "storage_error", error.to_string()).await;
+                }
+                return None;
             }
         };
         let job = Job {
@@ -1525,45 +1591,54 @@ impl Shared {
             files,
             work_dir,
         };
-        // Submit. A missing or refused connection before the task starts
-        // fails it `unavailable` with the provider's reason (decision 5).
-        let connection = match self.connection(&record, &slot.cancel).await {
+        // A missing or refused connection before the task starts fails it
+        // `unavailable` with the provider's reason (decision 5).
+        let connection = match self.connection(record, &slot.cancel).await {
             Ok(connection) => connection,
             Err(error) => {
-                self.fail(&slot, "unavailable", error).await;
-                return;
-            }
-        };
-        let submitted = tokio::select! {
-            submitted = adapter.0.submit(job, connection, slot.cancel.child_token()) => submitted,
-            _ = slot.cancel.cancelled() => return,
-        };
-        let handle = match submitted {
-            Ok(submitted) => submitted.remote_handle,
-            Err(error) => {
                 if !slot.cancel_requested() {
-                    self.fail(&slot, error.code.as_str(), error.message).await;
+                    self.fail(slot, "unavailable", error).await;
                 }
-                return;
+                return None;
             }
+        };
+        // From here the adapter may already hold the job; a cancel must not
+        // drop `submit`, because the handle it returns is the only way to
+        // reach that job.
+        let mut submit = Box::pin(adapter.0.submit(job, connection, slot.cancel.child_token()));
+        let mut submitted = None;
+        tokio::select! {
+            result = &mut submit => submitted = Some(result),
+            _ = slot.cancel.cancelled() => {
+                tokio::select! {
+                    result = &mut submit => submitted = Some(result),
+                    _ = tokio::time::sleep(SUBMIT_CANCEL_GRACE) => {}
+                }
+            }
+        }
+        let handle = match submitted {
+            Some(Ok(submitted)) => submitted.remote_handle,
+            Some(Err(error)) => {
+                if !slot.cancel_requested() {
+                    self.fail(slot, error.code.as_str(), error.message).await;
+                }
+                return None;
+            }
+            None => return None,
         };
         if let Some(handle) = &handle {
             // The handle is written before any running progress (A.4), even
-            // when a cancel arrived meanwhile: the cancel method can then ask
-            // the executor about this task.
+            // after a cancel: the cancel asks the executor about it.
             if let Write::Discarded(_) = self
-                .put(&slot, ExpectKind::NonTerminal, |record| {
+                .put(slot, ExpectKind::NonTerminal, |record| {
                     record.remote_handle = Some(handle.clone());
                 })
                 .await
             {
-                return;
+                return None;
             }
         }
-        if slot.cancel_requested() {
-            return;
-        }
-        self.wait_and_settle(&slot, record, handle).await;
+        Some(handle)
     }
 
     /// Waits for an already submitted task and settles its one outcome. Used
