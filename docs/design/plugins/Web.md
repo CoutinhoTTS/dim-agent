@@ -334,12 +334,12 @@ The title is independently limited to 500 Unicode scalar values in both result f
 | Rule | Content |
 | --- | --- |
 | Resolution | With `proxyDns: false` (default), Web resolves the hostname, validates every resolved address and tries only validated addresses in DNS order until connected or the shared connect deadline expires (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
-| Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these; hostnames `localhost` and `*.localhost` |
+| Blocked by default | For hostnames resolved by Web (`proxyDns: false`) and literal IPs in either mode, Web blocks loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these |
 | Literal IPs | Allowed only when public by the same rules or covered by `allowPrivateHosts`, including with `proxyDns: true`; a literal IP never delegates resolution |
 | Ports | Any port on a public address (A12) |
 | Exceptions | `allowPrivateHosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
 | Proxy | With `proxyDns: false`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`. With `proxyDns: true`, a hostname URL instead uses `CONNECT <hostname>:<port>` without local target DNS resolution. A literal IP still undergoes the address check and uses an IP target. Both modes share the existing connect deadline and cancellation; a refused tunnel fails with `connect_failed` (A15), without direct fallback |
-| Proxy DNS trust | `proxyDns` requires an explicit `proxy` and is disabled by default. Enabling it trusts that proxy to resolve hostnames and enforce the resolved-address access policy: Web cannot inspect or pin those addresses, so a hostname may reach private or metadata addresses if the proxy permits them. Web still rejects `localhost` and `*.localhost` unless explicitly allowed by hostname. CIDR exceptions apply only to addresses Web checks, not to addresses hidden behind proxy resolution |
+| Proxy DNS trust | `proxyDns` requires an explicit `proxy` and is disabled by default. When enabled, the proxy alone resolves hostname targets and enforces policy on the resulting addresses. A hostname may reach private or metadata addresses if the proxy permits them. Web still rejects `localhost` and `*.localhost` in either mode unless explicitly allowed by hostname. CIDR exceptions apply only to addresses Web checks |
 
 Fake-IP DNS answers remain subject to the default address policy: reserved ranges are not automatically trusted. With `proxyDns: true`, Web avoids the local target DNS answer entirely, so Fake-IP ranges need no special cases or per-site exceptions. Without this opt-in, use real-address DNS answers or an explicit trusted-host exception in `allowPrivateHosts`. Neither a search endpoint nor `proxy` alone enables proxy DNS.
 
@@ -396,7 +396,7 @@ Every error is an error `ToolResult` (`isError: true`) with content `web_fetch f
 | Code | Meaning |
 | --- | --- |
 | `invalid_input` | Parameter violates Appendix A |
-| `blocked_address` | Host or a redirect hop resolves to a blocked address; the message names the rule only |
+| `blocked_address` | Web rejects the target of a request or redirect hop under A.4. The message names the rule only |
 | `dns_failed`, `connect_failed`, `tls_failed` | Network errors; `connect_failed` includes an unparsable proxy, `proxyDns: true` without a proxy, or a proxy refusing the `CONNECT` |
 | `timeout` | Connect or whole-call limit reached |
 | `http_status` | Non-2xx final status |
@@ -424,7 +424,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 9. Restart settlement repeats no request.
 10. Non-interactive Session declares both tools.
 11. Diagnostics and results never contain the API key.
-12. Enabling proxy DNS through `settings.update` makes the next uncached fetch and direct search-adapter request use `CONNECT <hostname>:<port>` without reload or local target DNS, even when that name has a Fake-IP answer or cannot resolve locally. The URL host remains the HTTP `Host` and HTTPS certificate/SNI identity. Disabling it restores local validation. Literal private, benchmark and IPv4-mapped IPs, plus localhost names, remain blocked without an applicable exception; proxy refusal and cancellation settle without a direct retry. These tests use a disposable home and a fixture proxy, never system DNS or proxy configuration.
+12. Enabling proxy DNS through `settings.update` makes the next uncached fetch and direct search-adapter request use `CONNECT <hostname>:<port>` without reload or local target DNS, even when that name has a Fake-IP answer or cannot resolve locally. The URL host remains the HTTP `Host` and HTTPS certificate/SNI identity. With no `allowPrivateHosts` exception, fetch a hostname that the fixture proxy resolves to a loopback test server. The proxy receives `CONNECT <hostname>:<port>` and Web returns the test server's response. Disabling proxy DNS restores local validation. Literal private, benchmark and IPv4-mapped IPs, plus localhost names, remain blocked without an applicable exception; proxy refusal and cancellation settle without a direct retry. These tests use a disposable home and a fixture proxy, never system DNS or proxy configuration.
 
 ## Appendix E. Assumptions
 
@@ -444,14 +444,14 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | A12 | Any port on public addresses | Judgment | Restrict to 80/443 |
 | A13 | Built-in adapter list is an implementation choice | Overview names no service | A service is fixed by the overview |
 | A14 | No framing text around fetched content | Judgment | Model-visible framing to define |
-| A15 | A configured proxy supports HTTP `CONNECT` to the target form selected by A.4, for both `http` and `https` | Address pinning by default; explicit proxy trust with `proxyDns` | A proxy that refuses that target form cannot be used |
+| A15 | A configured proxy supports HTTP `CONNECT` to the target form selected by A.4, for both `http` and `https` | Maintainer decision for the default IP-pinning guarantee. Hostname `CONNECT` with `proxyDns` is proposed in [#1161](https://github.com/arcships/dim/issues/1161) | A proxy that refuses that target form cannot be used |
 | A16 | Initial source is user file `web.json`, read at user scope; no implicit project merge | Maintainer decision | Define project source/merge semantics before using existing projectFile |
 
 ## Appendix F. Implementation boundaries
 
 | Question | Current boundary |
 | --- | --- |
-| Initial scope | Web is the built-in process row `web` and its Session part. Product installation of optional packages remains PluginManager work. |
+| Initial scope | Tool parameters, the default network policy, the content policy, A1–A14, A15's default IP-pinning guarantee and A16 are maintainer-confirmed. Web is the built-in process row `web` and its Session part. Product installation of optional packages remains PluginManager work. |
 | Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 | HTML to text | A scanner, not a browser. A `<` followed later by `>` starts a tag, including a bare `<` in prose. Script, style and navigation are removed by regular expressions before that scan. |
 | Content encoding | `gzip`, `deflate` and `identity` are decoded. `br` and any other encoding fail as `connect_failed`. An incomplete gzip, zlib-wrapped deflate or raw deflate stream fails with `connect_failed`, unless the download limit was already reached, in which case the capped body is returned with `download_limited`. Raw deflate is the fallback for servers that omit the zlib wrapper. |
