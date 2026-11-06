@@ -29,6 +29,7 @@ fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
     dim_session_title::install(builder);
     dim_agent_scheduler::install(builder);
     dim_goal::install(builder);
+    dim_modality::install(builder);
 }
 
 fn main() {

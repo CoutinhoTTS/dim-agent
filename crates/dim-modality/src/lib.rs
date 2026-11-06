@@ -10,17 +10,21 @@
 //! defaults cannot be set. `image.understand` is selection only: its consumer
 //! is the Session image-understanding path, which does not read the default yet
 //! (§9.4). Task methods and provider connections are not part of this slice.
-use crate::{
-    methods::ManagementMethods,
-    protocol::Empty,
-    settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
-};
+//!
+//! The plugin lives in this crate, which depends on the App Server for the
+//! Settings service and management methods; a host installs it with
+//! [`install`].
 use dim_agent_capabilities::{
     host::{HostError, HostErrorKind, ModelSelectionHost, SelectableModelsHost},
     methods::{Interruption, MethodDecl, RpcError, params, reply},
 };
-use dim_agent_runtime::Names;
+use dim_agent_runtime::{AgentBuilder, Names};
 use dim_agent_types::{ModelCapabilitySnapshot, ModelId};
+use dim_app_server::{
+    methods::ManagementMethods,
+    protocol::Empty,
+    settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
+};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -196,7 +200,7 @@ pub struct ModalitySettings {
 impl BusinessDocument for ModalitySettings {
     const NAMESPACE: &'static str = "modality";
     const USER_FILE: &'static str = "modality.json";
-    fn validate(&self) -> crate::settings::Result<()> {
+    fn validate(&self) -> dim_app_server::settings::Result<()> {
         for (key, model) in &self.defaults {
             if !valid_key(key) {
                 return Err(SettingsError::Invalid("invalid modality default key"));
@@ -695,4 +699,16 @@ impl DynPlugin for ModalityPlugin {
             Ok(Effect::Done)
         })
     }
+}
+
+/// Installs Modality as an optional process plugin: the `modality` Settings
+/// source and the `modality.*` management namespace. The host must register
+/// the names of the services it reads (settings, managementMethods and
+/// Provider's selection and selectable-model reads), as the App Server's
+/// assembly does; when one of them has no provider, the host still starts
+/// and opens Sessions, and only `modality.*` is unavailable.
+pub fn install(builder: &mut AgentBuilder) {
+    dim_agent_runtime::names::register::<ModalityAdapterService>(builder.catalog_mut(), None);
+    builder
+        .optional_plugin(|names| Ok(Box::new(ModalityPlugin::new(names)?) as Box<dyn DynPlugin>));
 }

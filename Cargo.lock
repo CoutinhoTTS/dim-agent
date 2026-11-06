@@ -1161,6 +1161,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "dim-modality",
  "encoding_rs",
  "flate2",
  "foldhash 0.2.0",
@@ -1310,6 +1311,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dim-modality"
+version = "0.1.0-alpha.18"
+dependencies = [
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "dim-agent-types",
+ "dim-app-server",
+ "futures-util",
+ "rutis",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "dim-oauth"
 version = "0.1.0-alpha.18"
 dependencies = [
@@ -1371,6 +1390,7 @@ dependencies = [
  "dim-app-server",
  "dim-cli",
  "dim-goal",
+ "dim-modality",
  "dim-oauth",
  "dim-session-title",
  "image",
@@ -5592,6 +5612,7 @@ dependencies = [
  "dim-app-server",
  "dim-client",
  "dim-goal",
+ "dim-modality",
  "dim-session-title",
  "futures-util",
  "rusqlite",

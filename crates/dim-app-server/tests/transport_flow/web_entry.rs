@@ -328,6 +328,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     );
     dim_app_server::permission_rules::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
+    dim_modality::install(&mut builder);
     builder.plugin(|names| Ok(Box::new(ScheduleMethods(names.key()?)) as Box<dyn DynPlugin>));
     let server = serve(
         builder,

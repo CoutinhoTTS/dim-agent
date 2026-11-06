@@ -1,12 +1,154 @@
 //! Modality image slice through the management methods: the owner's snapshot,
 //! resolution order and CAS, with a fixture adapter in the process.
-use super::*;
+#![cfg(unix)]
+use dim_agent_capabilities::{adapters::MockTools, defaults, host::ToolDriver};
+use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::{CatalogCapabilities, ModelId};
-use dim_app_server::modality::{AdapterOperation, ModalityAdapter, ModalityAdapterService};
-use rutis::Ctx;
+use dim_app_server::{RunningServer, ServerConfig, serve};
+use dim_modality::{AdapterOperation, ModalityAdapter, ModalityAdapterService};
+use futures_util::{SinkExt, StreamExt};
+use rutis::{Ctx, Plugin};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpStream, UnixStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+
+enum Transport {
+    Unix(BufReader<UnixStream>),
+    Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+}
+struct Client {
+    transport: Transport,
+    id: u64,
+    notices: Vec<Value>,
+}
+impl Client {
+    async fn new_version(server: &RunningServer, ws: bool, version: u32) -> Self {
+        let transport = if ws {
+            Transport::Ws(Box::new(
+                tokio_tungstenite::connect_async_with_config(
+                    format!("ws://{}/ws", server.websocket_address.unwrap()),
+                    Some(
+                        tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                            .max_frame_size(Some(128 * 1024 * 1024))
+                            .max_message_size(Some(128 * 1024 * 1024)),
+                    ),
+                    false,
+                )
+                .await
+                .unwrap()
+                .0,
+            ))
+        } else {
+            Transport::Unix(BufReader::new(
+                UnixStream::connect(server.unix_path.as_ref().unwrap())
+                    .await
+                    .unwrap(),
+            ))
+        };
+        let mut this = Self {
+            transport,
+            id: 0,
+            notices: vec![],
+        };
+        let result = this
+            .rpc(
+                "hello",
+                json!({"protocolVersion":version,"clientKind":"other"}),
+            )
+            .await;
+        assert_eq!(result["result"]["protocolVersion"], version);
+        if version == 3 {
+            assert!(result["result"]["features"].is_array());
+        }
+        this
+    }
+    async fn send(&mut self, method: &str, params: Value) -> u64 {
+        self.id += 1;
+        let value = json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params});
+        self.raw(value).await;
+        self.id
+    }
+    async fn raw(&mut self, value: Value) {
+        let text = value.to_string();
+        match &mut self.transport {
+            Transport::Unix(stream) => {
+                stream.get_mut().write_all(text.as_bytes()).await.unwrap();
+                stream.get_mut().write_all(b"\n").await.unwrap();
+            }
+            Transport::Ws(stream) => stream.send(Message::Text(text.into())).await.unwrap(),
+        }
+    }
+    async fn read(&mut self, expected: &str) -> Value {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            match &mut self.transport {
+                Transport::Unix(stream) => {
+                    let mut line = String::new();
+                    assert_ne!(
+                        stream.read_line(&mut line).await.unwrap(),
+                        0,
+                        "connection unexpectedly closed"
+                    );
+                    serde_json::from_str(&line).unwrap()
+                }
+                Transport::Ws(stream) => loop {
+                    match stream.next().await.unwrap().unwrap() {
+                        Message::Text(text) => break serde_json::from_str(&text).unwrap(),
+                        Message::Ping(_) | Message::Pong(_) => {}
+                        other => panic!("unexpected websocket: {other:?}"),
+                    }
+                },
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("deadline waiting for {expected}: {error}"))
+    }
+    async fn response(&mut self, id: u64) -> Value {
+        if let Some(index) = self.notices.iter().position(|v| v["id"] == id) {
+            return self.notices.remove(index);
+        }
+        loop {
+            let value = self.read(&format!("response {id}")).await;
+            if value["id"] == id {
+                return value;
+            }
+            self.notices.push(value);
+        }
+    }
+    async fn rpc(&mut self, method: &str, params: Value) -> Value {
+        let id = self.send(method, params).await;
+        self.response(id).await
+    }
+}
+
+/// A product profile with Modality installed, as the product's installer does.
+async fn launch_with(
+    tools: Arc<dyn ToolDriver>,
+    mut config: ServerConfig,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> RunningServer {
+    config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
+        "dim-modality-test-{}/server.sock",
+        uuid::Uuid::new_v4()
+    )));
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
+    dim_app_server::collaboration::install(&mut builder);
+    dim_modality::install(&mut builder);
+    extra(&mut builder);
+    serve(builder, config).await.unwrap()
+}
+fn assert_ok(value: &Value) {
+    assert!(value.get("error").is_none(), "{value}");
+}
 
 /// The first slice's only adapter: it serves the image operations a test
 /// declares per model id, and nothing else.
@@ -147,7 +289,6 @@ async fn start_in(home: std::path::PathBuf, fixture: Option<Arc<FixtureAdapter>>
         }
     })
     .await
-    .0
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

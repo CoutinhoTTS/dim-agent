@@ -139,8 +139,6 @@ mod agent_models;
 mod foreign_rows;
 #[path = "transport_flow/guide_entries.rs"]
 mod guide_entries;
-#[path = "transport_flow/modality.rs"]
-mod modality;
 #[path = "transport_flow/plugin_manager.rs"]
 mod plugin_manager;
 #[path = "transport_flow/process_typescript.rs"]
@@ -392,6 +390,11 @@ async fn launch_inner(
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     install_collaboration(&mut builder);
+    // A product profile serves Modality through its installer, as the product
+    // does; the other profiles do not load it.
+    if config.product_home.is_some() {
+        dim_modality::install(&mut builder);
+    }
     extra(&mut builder);
     serve(builder, config).await
 }
