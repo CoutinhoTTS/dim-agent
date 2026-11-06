@@ -1358,6 +1358,7 @@ pub fn message(blocks: Vec<InputBlock>, mode: InputMode) -> EventKind {
         user: None,
         blocks,
         mode: Some(mode),
+        handover: None,
     })
 }
 
