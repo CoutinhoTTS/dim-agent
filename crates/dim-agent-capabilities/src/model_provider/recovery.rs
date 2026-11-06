@@ -220,42 +220,34 @@ impl RecoveryState {
             if self.phase == CredentialRecoveryPhase::Recovered {
                 return FailureAction::Stop;
             }
-        } else {
-            let Some(facts) = facts else {
-                return FailureAction::Stop;
-            };
-            if !retryable(facts.kind) {
-                return FailureAction::Stop;
-            }
-            if facts.kind == ModelFailureKind::MalformedResponse {
-                if self.malformed >= MALFORMED_RETRIES {
-                    return FailureAction::Stop;
-                }
-                self.malformed += 1;
-            }
+            // Recovery never sleeps: a rejected credential is refreshed once
+            // at once, whatever `Retry-After` the rejection carried.
+            return FailureAction::RecoverCredentials(Duration::ZERO);
         }
-        let hint = facts.and_then(|facts| facts.retry_after);
-        let delay = hint.unwrap_or_else(|| {
-            if recovering {
-                Duration::ZERO
-            } else {
-                backoff(self.backoffs.saturating_add(1), jitter)
+        let Some(facts) = facts else {
+            return FailureAction::Stop;
+        };
+        if !retryable(facts.kind) {
+            return FailureAction::Stop;
+        }
+        if facts.kind == ModelFailureKind::MalformedResponse {
+            if self.malformed >= MALFORMED_RETRIES {
+                return FailureAction::Stop;
             }
-        });
+            self.malformed += 1;
+        }
+        let hint = facts.retry_after;
+        let delay = hint.unwrap_or_else(|| backoff(self.backoffs.saturating_add(1), jitter));
         if delay > WAIT_BUDGET.saturating_sub(self.waited) {
             if hint.is_some() {
                 self.retry_after_stop = hint;
             }
             return FailureAction::Stop;
         }
-        if recovering {
-            FailureAction::RecoverCredentials(delay)
-        } else {
-            if hint.is_none() {
-                self.backoffs = self.backoffs.saturating_add(1);
-            }
-            FailureAction::Retry(delay)
+        if hint.is_none() {
+            self.backoffs = self.backoffs.saturating_add(1);
         }
+        FailureAction::Retry(delay)
     }
 }
 
