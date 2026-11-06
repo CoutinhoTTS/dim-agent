@@ -712,7 +712,6 @@ impl Connection {
                 .get(id)
                 .map(|a| a.delivery.clone())
         });
-        let include_closed = matches!(&call, Call::Summaries(params) if params.include_closed);
         Some(match call {
             Call::Hello(_) => Err(RpcError::invalid("hello has already completed")),
             Call::Ping => Ok(Reply::Ping(PingResult {
@@ -766,7 +765,7 @@ impl Connection {
                     .expect("catalog reads have cancellation");
                 match rpc
                     .index
-                    .session_catalog(params, None, self.protocol_version(), false, cancel)
+                    .session_catalog(params, None, self.protocol_version(), cancel)
                     .await
                 {
                     Ok(mut page) => {
@@ -785,7 +784,10 @@ impl Connection {
                     Err(error) => Err(RpcError::from(error)),
                 }
             }
-            Call::Summaries(Summaries { agent_id, .. }) => {
+            Call::Summaries(Summaries {
+                agent_id,
+                include_closed,
+            }) => {
                 if let Some(agent_id) = agent_id.as_deref()
                     && let Some(reason) = rpc.index.unavailable_agent(agent_id)
                 {
@@ -802,11 +804,11 @@ impl Connection {
                                 Catalog {
                                     with_internal: true,
                                     with_acp_sessions: true,
+                                    include_closed,
                                     ..Catalog::default()
                                 },
                                 agent_id,
                                 self.protocol_version(),
-                                include_closed,
                                 cancel,
                             )
                             .await
