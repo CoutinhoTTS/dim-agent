@@ -695,6 +695,16 @@ pub fn truncate_preview(text: &str) -> String {
     tail_bytes(&joined, OUTPUT_PREVIEW_MAX_BYTES).to_owned()
 }
 
+/// exec's preview bounds — the sanitized tail within 2,000 lines and 50 KiB —
+/// and whether they left anything out: bytes outside the captured `preview`
+/// buffer, or a sanitized tail the rule cut. ShellInput's command record and a
+/// background task's final result both read this one rule.
+pub fn bounded_preview(preview: &str, decoded: usize) -> (String, bool) {
+    let text = truncate_preview(preview);
+    let truncated = decoded > preview.len() || text.len() < sanitize(preview).len();
+    (text, truncated)
+}
+
 /// Merged canonical output of one command, inline until it outgrows the
 /// budget, then in the output file (TS `ExecOutputCapture`).
 struct Capture {
@@ -879,6 +889,8 @@ struct Settled {
     output_bytes: u64,
     truncated: bool,
     preview: String,
+    /// The preview bounds left output out of `preview`.
+    preview_truncated: bool,
     inline: String,
     failure: Option<String>,
 }
@@ -945,11 +957,16 @@ impl ExecProcess {
         {
             capture.failure = Some(error.to_string());
         }
+        let (preview, preview_truncated) = bounded_preview(
+            &capture.preview,
+            usize::try_from(capture.output_bytes).unwrap_or(usize::MAX),
+        );
         Settled {
             output_path: capture.output_path(),
             output_bytes: capture.output_bytes,
             truncated: capture.truncated,
-            preview: truncate_preview(&capture.preview),
+            preview,
+            preview_truncated,
             inline: capture.inline.clone(),
             failure: capture.failure.clone(),
         }
@@ -1049,6 +1066,8 @@ impl ExecProcess {
             "taskId": task_id,
             "outputBytes": settled.output_bytes,
             "outputTruncated": settled.truncated,
+            "preview": settled.preview.clone(),
+            "previewTruncated": settled.preview_truncated,
             "timedOut": name == "timed_out",
             "summary": summary,
         }));
@@ -1621,6 +1640,7 @@ fn termination_failure_keeps_captured_output() {
             output_bytes: 37,
             truncated: false,
             preview: "partial stdout before termination".into(),
+            preview_truncated: false,
             inline: "partial stdout before termination".into(),
             failure: None,
         };

@@ -1172,12 +1172,61 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
     assert!(notice.contains("[Preview truncated at 16 KiB.]"));
     assert!(notice.len() < 16 * 1024 + 1024);
     assert!(text(&end.result).contains(&format!("Output saved to: {}", data.output_path)));
+    let structured = end
+        .result
+        .structured_content
+        .as_ref()
+        .expect("a finished result");
+    let preview = structured["preview"].as_str().expect("the final preview");
+    assert!(preview.ends_with("tail-marker\n"), "{preview:?}");
+    assert_eq!(structured["previewTruncated"], true);
+    let shown = text(&end.result)
+        .split_once("\nPreview:\n")
+        .expect("the result shows its preview")
+        .1;
+    assert_eq!(preview, shown, "the field and the content show one preview");
     let full = std::fs::read_to_string(&data.output_path).unwrap();
     assert_eq!(full.len(), 200_000 + "tail-marker\n".len());
     until(&session, "woken turn", |events| {
         count(events, "turn/end") == 2
     })
     .await;
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// A short command's final `preview` is its whole output, untruncated; a
+/// command that printed nothing carries an empty preview.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_background_result_carries_its_whole_short_preview_or_an_empty_one() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command": "printf 'short output\\n'", "runInBackground": true}),
+            )],
+        )
+        .await;
+    let events = until(&session, "short end", |events| ended(events).len() == 1).await;
+    let (_, end) = &ended(&events)[0];
+    let structured = end.result.structured_content.as_ref().unwrap();
+    assert_eq!(structured["preview"], "short output\n");
+    assert_eq!(structured["previewTruncated"], false);
+
+    harness
+        .run(
+            &session,
+            &[("exec", json!({"command": "true", "runInBackground": true}))],
+        )
+        .await;
+    let events = until(&session, "empty end", |events| ended(events).len() == 2).await;
+    let (_, end) = &ended(&events)[1];
+    let structured = end.result.structured_content.as_ref().unwrap();
+    assert_eq!(structured["preview"], "");
+    assert_eq!(structured["previewTruncated"], false);
     session.close().await.unwrap();
     harness.shutdown().await;
 }
@@ -1605,6 +1654,11 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
         "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: {}.",
         orphan_path.display()
     )));
+    let recovered = orphan.result.structured_content.as_ref().unwrap();
+    assert!(
+        !recovered.contains_key("preview") && !recovered.contains_key("previewTruncated"),
+        "a recovered end has no final output to preview"
+    );
     // A rebuilt task pages the file its own `exec/started` registered. Its
     // recovery terminal has no `outputTruncated` flag, so truncation comes
     // from the file's size there: this file is small.
