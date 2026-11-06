@@ -260,7 +260,7 @@ The wrapper resolves the installed platform optional dependency and forwards arg
 
 ## Alpha npm publication
 
-The registered `.github/workflows/npm-publish.yml` accepts only published alpha GitHub Releases and runs only from `main`. Its default is read-only verification on `ubuntu-24.04`. The GitHub-hosted `ubuntu-latest` publication job is scheduled only when both the `publish` input and repository variable `NPM_ALPHA_PUBLISH_ENABLED` are `true`. Leave the variable unset or `false` during setup. Only the npm publication job receives OIDC write permission.
+The registered `.github/workflows/npm-publish.yml` accepts only published alpha GitHub Releases and runs only from `main`. Its default is read-only verification on GitHub-hosted Ubuntu. The GitHub-hosted `ubuntu-latest` publication job is scheduled only when both the `publish` input and repository variable `NPM_ALPHA_PUBLISH_ENABLED` are `true`. Leave the variable unset or `false` during setup. Only the npm publication job receives OIDC write permission.
 
 ```text
 alpha tag -> GitHub-hosted builds -> draft GitHub Release -> maintainer publishes prerelease
