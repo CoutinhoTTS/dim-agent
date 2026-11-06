@@ -190,6 +190,105 @@ mod tests {
         set(previous);
     }
 
+    /// The locale's own table, without the English fallback `t` applies.
+    fn table(locale: Locale, english: &str) -> Option<&'static str> {
+        let lookup: fn(&str) -> Option<&'static str> = match locale {
+            Locale::En => return None,
+            Locale::ZhCn => zh_cn::lookup,
+            Locale::Ja => ja::lookup,
+            Locale::Ko => ko::lookup,
+            Locale::ZhHant => zh_hant::lookup,
+            Locale::Id => id::lookup,
+            Locale::De => de::lookup,
+            Locale::Fr => fr::lookup,
+            Locale::Es => es::lookup,
+            Locale::PtBr => pt_br::lookup,
+            Locale::PtPt => pt_pt::lookup,
+        };
+        lookup(english)
+    }
+
+    #[test]
+    fn every_locale_translates_the_model_failure_strings() {
+        let previous = active();
+        for (locale, code, _) in LOCALES {
+            if locale == Locale::En {
+                continue;
+            }
+            for kind in dim_agent_types::ModelFailureKind::ALL {
+                for english in [kind.meaning(), kind.action()] {
+                    let translated = table(locale, english);
+                    assert!(translated.is_some(), "{code} lacks {english:?}");
+                    assert_ne!(translated.unwrap(), english, "{code} copies {english:?}");
+                }
+            }
+            for key in [
+                "The response above is incomplete.",
+                "retrying {attempt}/{max} in {seconds} s: {reason}",
+                "Retrying {attempt}/{max} in {seconds} s · {reason} · Esc stops",
+                "kind: {kind}",
+                "status: {status}",
+                "provider code: {code}",
+                "request id: {id}",
+                "tried {count} times over {seconds} s",
+                "Tried {count} times over {seconds} s.",
+                "the provider asked to wait {seconds} s",
+                "Waiting for the provider · {reason} · Esc stops",
+                "cause:",
+            ] {
+                assert!(table(locale, key).is_some(), "{code} lacks {key:?}");
+            }
+            set(locale);
+            let placeholders: [(&str, &[(&str, &str)]); 10] = [
+                ("kind: {kind}", &[("kind", "fixture-kind")]),
+                ("status: {status}", &[("status", "503")]),
+                ("provider code: {code}", &[("code", "fixture-code")]),
+                ("request id: {id}", &[("id", "fixture-request")]),
+                (
+                    "tried {count} times over {seconds} s",
+                    &[("count", "3"), ("seconds", "4.2")],
+                ),
+                (
+                    "the provider asked to wait {seconds} s",
+                    &[("seconds", "60")],
+                ),
+                (
+                    "retrying {attempt}/{max} in {seconds} s: {reason}",
+                    &[
+                        ("attempt", "3"),
+                        ("max", "8"),
+                        ("seconds", "4"),
+                        ("reason", "fixture-reason"),
+                    ],
+                ),
+                (
+                    "Retrying {attempt}/{max} in {seconds} s · {reason} · Esc stops",
+                    &[
+                        ("attempt", "3"),
+                        ("max", "8"),
+                        ("seconds", "4"),
+                        ("reason", "fixture-reason"),
+                    ],
+                ),
+                (
+                    "Tried {count} times over {seconds} s.",
+                    &[("count", "3"), ("seconds", "4")],
+                ),
+                (
+                    "Waiting for the provider · {reason} · Esc stops",
+                    &[("reason", "fixture-reason")],
+                ),
+            ];
+            for (key, args) in placeholders {
+                let text = tf(key, args);
+                for (_, value) in args {
+                    assert!(text.contains(value), "{code} drops {value} from {key:?}");
+                }
+            }
+        }
+        set(previous);
+    }
+
     #[test]
     fn environment_values_map_as_the_ts_build_does() {
         let of = Locale::from_env_value;
