@@ -26653,6 +26653,7 @@
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin",
         "use sqlite::Vacuumed",
+        "use sqlite::set_upgrade_report_delay",
         "use sqlite::vacuum_store"
       ]
     },
@@ -27160,6 +27161,13 @@
       "references": [
         "path SessionStore",
         "use super::SessionStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::opening_advanced"
       ]
     },
     {
@@ -28302,6 +28310,7 @@
         "mod client",
         "path client",
         "path client::DaemonNotice",
+        "path client::StoreUpgrade",
         "path client::connect_inner",
         "path client::shutdown",
         "path client::stop",
@@ -31178,6 +31187,7 @@
       "to": "dim_cli::client",
       "references": [
         "path client",
+        "path client::StoreUpgrade",
         "path client::connect_inner",
         "path client::web_hint",
         "path crate::client::DaemonNotice",
@@ -34326,7 +34336,8 @@
       "to": "dim_cli",
       "references": [
         "path crate::DAEMON_BUSY",
-        "path crate::DAEMON_BUSY_COUNTS"
+        "path crate::DAEMON_BUSY_COUNTS",
+        "path crate::DAEMON_UPGRADING"
       ]
     },
     {
