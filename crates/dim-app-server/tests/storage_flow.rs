@@ -3416,6 +3416,90 @@ async fn restore_validation_checks_references_and_reads_check_bodies() {
     db.close().await.unwrap();
 }
 
+/// [#713] The reference check runs once per batch of 64 physical rows: a
+/// Session larger than one batch validates while every reference resolves,
+/// and a row removed from a later batch still fails the pass.
+#[tokio::test]
+async fn restore_validation_checks_references_across_batches() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("batches", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut records = Vec::new();
+    for index in 0..200u64 {
+        let mut request = ModelRequest::new(
+            "mock",
+            "test",
+            vec![Message::text(Role::User, format!("m {index}"))],
+        );
+        request.system = Some(Arc::new(SystemPrompt::Text(format!("system {index}"))));
+        let request = Arc::new(request);
+        let (turn, id) = (format!("turn-{index}"), format!("request-{index}"));
+        records.push(record(
+            index * 2 + 1,
+            EventKind::ContextPrepare(ContextPrepareData {
+                turn_id: turn.clone(),
+                request_id: id.clone(),
+                through: 0,
+                request: request.clone(),
+                configuration: None,
+                prompt: None,
+                recovery: None,
+            }),
+        ));
+        records.push(record(
+            index * 2 + 2,
+            EventKind::ModelCall(ModelCallData {
+                turn_id: turn,
+                request_id: id,
+                request,
+                configuration: None,
+                prompt: None,
+            }),
+        ));
+    }
+    append(&store, key("batches", "main"), records)
+        .await
+        .unwrap();
+    // 400 physical rows: more than six batches of 64. Every reference
+    // resolves, so the pass succeeds.
+    let checking = SqliteTimelineStore::new(db.clone());
+    checking.branches("batches").await.unwrap();
+    checking.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let last: String = connection
+        .query_row(
+            "SELECT hash FROM timeline_content WHERE session_id = 'batches' \
+             AND kind = 'system' AND body LIKE '%system 199%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM timeline_content WHERE session_id = 'batches' AND hash = ?1",
+                [&last],
+            )
+            .unwrap(),
+        1
+    );
+    // The reference is in the last batch; the pass still checks it.
+    let checking = SqliteTimelineStore::new(db.clone());
+    assert!(matches!(
+        checking.branches("batches").await,
+        Err(AgentError::Storage(message))
+            if message == format!("missing request content {last}")
+    ));
+    checking.close().await.unwrap();
+    drop(connection);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// [#601] A restore reuses a validation pass while the stored branch directory
 /// is unchanged, and validates again once a branch head changes.
 #[tokio::test]

@@ -3168,8 +3168,8 @@ fn check_references(
     let names = serde_json::to_string(references).map_err(error)?;
     let mut query = connection
         .prepare_cached(
-            "SELECT c.hash FROM timeline_content c JOIN json_each(?2) AS r \
-             ON r.value = c.hash WHERE c.session_id = ?1",
+            "SELECT hash FROM timeline_content WHERE session_id = ?1 \
+             AND hash IN (SELECT value FROM json_each(?2))",
         )
         .map_err(error)?;
     let found: BTreeSet<String> = query
