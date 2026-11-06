@@ -18,6 +18,11 @@
 //! The plugin lives in this crate, which depends on the App Server for the
 //! Settings service and management methods; a host installs it with
 //! [`install`].
+mod adapter;
+pub use adapter::{
+    AdapterError, AdapterErrorCode, AdapterFuture, AdapterOperation, AdapterOutput,
+    AdapterProgress, Job, JobFile, ModalityAdapter, ProgressSink, RemoteCancel, Submitted,
+};
 use dim_agent_capabilities::{
     host::{HostError, HostErrorKind, ModelSelectionHost, SelectableModelsHost},
     methods::{Interruption, MethodCall, MethodDecl, RpcError, params, reply},
@@ -35,22 +40,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-
-/// One operation a Modality adapter serves for a model.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AdapterOperation {
-    pub category: String,
-    pub operation: String,
-}
-
-/// A process-scoped `modalityAdapter` (Modality A.2). The first slice needs
-/// only availability and the operations a model is served for; submit, wait and
-/// cancellation belong to the task slice.
-pub trait ModalityAdapter: Send + Sync + 'static {
-    fn available(&self) -> bool;
-    fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
-}
 
 /// The adapter service Modality reads per call. A missing service is an
 /// unavailable operation, never a failed load.

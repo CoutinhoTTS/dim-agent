@@ -534,23 +534,41 @@ Flow tests through `modality.*` methods with a fake adapter plugin (controllable
 
 ## Appendix G. Rust binding
 
-A Rust adapter plugin may implement the generated binding instead of handling the named service directly; the neutral form in A.2 is normative.
+A Rust adapter plugin may implement the generated binding instead of handling the named service directly; the neutral form in A.2 is normative. The types below live in `dim-modality`; the connection is the one Provider's non-conversational resolution returns per call, passed to the adapter and never stored, logged or returned.
 
 ```rust
 /// Binding for service `modalityAdapter` (process, key adapter name).
-pub trait ModalityAdapter: Send + Sync + 'static {
-    fn available(&self) -> Availability;
-    fn connection_kinds(&self) -> Vec<String>;
-    fn operations(&self, model: &ModelRef) -> Vec<OperationSpec>;
-    fn submit(&self, job: Job, conn: ResolvedConnection, cancel: CancellationToken)
-        -> HostFuture<'_, Result<Submitted, AdapterError>>;
-    fn wait(&self, handle: Option<&str>, conn: ResolvedConnection, progress: ProgressSink,
-        cancel: CancellationToken) -> HostFuture<'_, Result<AdapterOutput, AdapterError>>;
-    fn cancel_remote(&self, handle: &str, conn: ResolvedConnection) -> HostFuture<'_, RemoteCancel>;
-    fn realtime(&self, conn: ResolvedConnection, params: JsonObject, cancel: CancellationToken)
-        -> HostFuture<'_, Option<RealtimeChannel>>;   // maps realtimeOpen/Send/Close
+pub type AdapterFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AdapterError>> + Send + 'a>>;
+pub struct AdapterOperation { pub category: String, pub operation: String, pub params_schema: Value }
+pub struct JobFile { pub name: String, pub media_type: String, pub path: PathBuf }
+pub struct Job {
+    pub task_id: String,
+    pub category: String,
+    pub operation: String,
+    pub model: ModelId,
+    pub params: Value,
+    pub files: Vec<JobFile>,
+    pub work_dir: PathBuf,
 }
+pub struct Submitted { pub remote_handle: Option<String> }
+pub struct AdapterOutput { pub files: Vec<JobFile>, pub data: Option<Value> }
+pub struct AdapterError { pub code: AdapterErrorCode, pub message: String }
+pub enum AdapterErrorCode { InvalidInput, Unavailable, ProviderError }
 pub enum RemoteCancel { Cancelled, Unsupported, AlreadyFinished }
+pub struct AdapterProgress { pub fraction: Option<f64>, pub message: Option<String> }
+pub struct ProgressSink(Arc<dyn Fn(AdapterProgress) + Send + Sync>);
+
+pub trait ModalityAdapter: Send + Sync + 'static {
+    fn available(&self) -> bool;
+    fn connection_kinds(&self) -> Vec<String>;
+    fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
+    fn submit(&self, job: Job, connection: ModalityConnection, cancel: CancellationToken)
+        -> AdapterFuture<'_, Submitted>;
+    fn wait(&self, handle: Option<&str>, connection: ModalityConnection, progress: ProgressSink,
+        cancel: CancellationToken) -> AdapterFuture<'_, AdapterOutput>;
+    fn cancel_remote(&self, handle: &str, connection: ModalityConnection)
+        -> AdapterFuture<'_, RemoteCancel>;
+}
 ```
 
-Registration in Rust provides `ModalityAdapter` at `TypeKey::named("modalityAdapter")` with the adapter name as instance key. How the adapter is registered and found follows the per-task lookup [#40](https://github.com/arcships/dim/issues/40) decided and [#861](https://github.com/arcships/dim/issues/861) tracks; this appendix binds only the operations. Modality's own `managementMethods` and `modalityTasks` use the bindings of the [methods](../contracts/session-boundary.md) contract and the handles above.
+The realtime operations of A.2 map to the realtime methods and bind with them. Registration in Rust provides `ModalityAdapter` at `TypeKey::named("modalityAdapter")` with the adapter name as instance key. How the adapter is registered and found follows the per-task lookup [#40](https://github.com/arcships/dim/issues/40) decided and [#861](https://github.com/arcships/dim/issues/861) tracks; this appendix binds only the operations. Modality's own `managementMethods` and `modalityTasks` use the bindings of the [methods](../contracts/session-boundary.md) contract and the handles above.

@@ -190,6 +190,9 @@ impl ModalityAdapter for FixtureAdapter {
     fn available(&self) -> bool {
         self.available.load(Ordering::SeqCst)
     }
+    fn connection_kinds(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation> {
         let served = self.served.lock().unwrap();
         let operations: BTreeSet<String> = match served.as_ref() {
@@ -204,8 +207,33 @@ impl ModalityAdapter for FixtureAdapter {
             .map(|operation| AdapterOperation {
                 category: "image".into(),
                 operation,
+                params_schema: json!({}),
             })
             .collect()
+    }
+    fn submit(
+        &self,
+        _job: dim_modality::Job,
+        _connection: dim_agent_capabilities::host::ModalityConnection,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> dim_modality::AdapterFuture<'_, dim_modality::Submitted> {
+        Box::pin(async { Ok(dim_modality::Submitted::default()) })
+    }
+    fn wait(
+        &self,
+        _handle: Option<&str>,
+        _connection: dim_agent_capabilities::host::ModalityConnection,
+        _progress: dim_modality::ProgressSink,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> dim_modality::AdapterFuture<'_, dim_modality::AdapterOutput> {
+        Box::pin(async { Ok(dim_modality::AdapterOutput::default()) })
+    }
+    fn cancel_remote(
+        &self,
+        _handle: &str,
+        _connection: dim_agent_capabilities::host::ModalityConnection,
+    ) -> dim_modality::AdapterFuture<'_, dim_modality::RemoteCancel> {
+        Box::pin(async { Ok(dim_modality::RemoteCancel::Unsupported) })
     }
 }
 

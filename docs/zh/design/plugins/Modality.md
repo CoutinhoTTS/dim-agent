@@ -534,23 +534,41 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 
 ## 附录 G. Rust 绑定
 
-Rust 适配器插件可以实现生成的绑定，而不直接处理命名服务；A.2 中的中立形式是规范性的。
+Rust 适配器插件可以实现生成的绑定，而不直接处理命名服务；A.2 中的中立形式是规范性的。以下类型位于 `dim-modality`；连接是 Provider 的非对话式解析每次调用返回的那个，传给适配器后不存储、不记录、不返回。
 
 ```rust
 /// Binding for service `modalityAdapter` (process, key adapter name).
-pub trait ModalityAdapter: Send + Sync + 'static {
-    fn available(&self) -> Availability;
-    fn connection_kinds(&self) -> Vec<String>;
-    fn operations(&self, model: &ModelRef) -> Vec<OperationSpec>;
-    fn submit(&self, job: Job, conn: ResolvedConnection, cancel: CancellationToken)
-        -> HostFuture<'_, Result<Submitted, AdapterError>>;
-    fn wait(&self, handle: Option<&str>, conn: ResolvedConnection, progress: ProgressSink,
-        cancel: CancellationToken) -> HostFuture<'_, Result<AdapterOutput, AdapterError>>;
-    fn cancel_remote(&self, handle: &str, conn: ResolvedConnection) -> HostFuture<'_, RemoteCancel>;
-    fn realtime(&self, conn: ResolvedConnection, params: JsonObject, cancel: CancellationToken)
-        -> HostFuture<'_, Option<RealtimeChannel>>;   // maps realtimeOpen/Send/Close
+pub type AdapterFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AdapterError>> + Send + 'a>>;
+pub struct AdapterOperation { pub category: String, pub operation: String, pub params_schema: Value }
+pub struct JobFile { pub name: String, pub media_type: String, pub path: PathBuf }
+pub struct Job {
+    pub task_id: String,
+    pub category: String,
+    pub operation: String,
+    pub model: ModelId,
+    pub params: Value,
+    pub files: Vec<JobFile>,
+    pub work_dir: PathBuf,
 }
+pub struct Submitted { pub remote_handle: Option<String> }
+pub struct AdapterOutput { pub files: Vec<JobFile>, pub data: Option<Value> }
+pub struct AdapterError { pub code: AdapterErrorCode, pub message: String }
+pub enum AdapterErrorCode { InvalidInput, Unavailable, ProviderError }
 pub enum RemoteCancel { Cancelled, Unsupported, AlreadyFinished }
+pub struct AdapterProgress { pub fraction: Option<f64>, pub message: Option<String> }
+pub struct ProgressSink(Arc<dyn Fn(AdapterProgress) + Send + Sync>);
+
+pub trait ModalityAdapter: Send + Sync + 'static {
+    fn available(&self) -> bool;
+    fn connection_kinds(&self) -> Vec<String>;
+    fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
+    fn submit(&self, job: Job, connection: ModalityConnection, cancel: CancellationToken)
+        -> AdapterFuture<'_, Submitted>;
+    fn wait(&self, handle: Option<&str>, connection: ModalityConnection, progress: ProgressSink,
+        cancel: CancellationToken) -> AdapterFuture<'_, AdapterOutput>;
+    fn cancel_remote(&self, handle: &str, connection: ModalityConnection)
+        -> AdapterFuture<'_, RemoteCancel>;
+}
 ```
 
-在 Rust 中注册以 `TypeKey::named("modalityAdapter")` 提供 `ModalityAdapter`，以适配器名作为实例 key。适配器如何注册与发现，遵循 [#40](https://github.com/arcships/dim/issues/40) 决定并由 [#861](https://github.com/arcships/dim/issues/861) 跟踪的按任务查找；本附录只绑定各操作。Modality 自身的 `managementMethods` 与 `modalityTasks` 使用[方法](../contracts/session-boundary.md)契约的绑定，以及上面的句柄。
+A.2 中的实时操作映射到实时方法，随它们一起绑定。在 Rust 中注册以 `TypeKey::named("modalityAdapter")` 提供 `ModalityAdapter`，以适配器名作为实例 key。适配器如何注册与发现，遵循 [#40](https://github.com/arcships/dim/issues/40) 决定并由 [#861](https://github.com/arcships/dim/issues/861) 跟踪的按任务查找；本附录只绑定各操作。Modality 自身的 `managementMethods` 与 `modalityTasks` 使用[方法](../contracts/session-boundary.md)契约的绑定，以及上面的句柄。
