@@ -38,8 +38,10 @@ not become a second input-adoption path.
 
 ## A failed model step and its disposer
 
-The Loop owns one port, the disposer of a failed model step. Any branch part may
-register one disposer under a name, as an effect of that part, following the
+The Loop owns one port, the disposer of a failed model step. The port is a
+Rust-only operation, like the Permission advice precedent. Any Rust branch
+part may register one disposer under a name, as an effect of that part,
+following the
 [Permission advice](Permission.md#tool-advice) precedent: the registration lasts
 while the part runs, unloading withdraws it, a withdrawal while the Loop waits
 counts as no answer, and cancelling drops the pending answer. At most one
@@ -47,8 +49,11 @@ disposer is registered on a branch, and a second registration fails. The port
 has one operation, `dispose(handover, cancel)`: `handover` is `{turn_id,
 request_id, failure_sequence}`, where `failure_sequence` is the sequence of the
 failed `step/model-output-end`; the answer is `continue {input_id}` or
-`finish`. The port names no plugin and no provider category, and the Loop never
-interprets the failure.
+`finish`. The disposer answers promptly and observes `cancel`: it reads
+committed facts, writes at most one handover input, and does no other waiting.
+One that blocks keeps the handover open until stop, steer or branch close, each
+of which always ends it. The port names no plugin and no provider category, and
+the Loop never interprets the failure.
 
 ### Opening a handover
 
@@ -80,11 +85,12 @@ The task waits for the first of four outcomes:
 The task never ends the turn itself, so stop and steer are ordered against the
 decision by Timeline sequence.
 
-`step/disposition {turn_id, request_id, failure_sequence, decision:
-continue|finish, input_id?}` is a new core kind in the `step` domain. The
-Loop's disposition task is its only writer, and the Loop consumes it in
-sequence. It records the answer the Loop received and is the fact later
-decisions read.
+`step/disposition {turn_id, request_id, failure_sequence}` is a new core kind in
+the `step` domain. Its `decision` is `continue {input_id}` with `input_id`
+required, or `finish` without one; a record of any other shape fails to decode.
+The Loop's disposition task is its only writer, and its only reader is the
+Loop's in-sequence consumption: it orders the disposer's answer against stop
+and steer, which is why it is a Timeline fact (§4.9).
 
 ### Consuming `step/disposition`
 
@@ -117,8 +123,15 @@ the stream boundary and by the executor (ToolExecution).
   existing steer contract.
 - **Append.** Append inputs wait for the next request.
 - **Queue.** Queue inputs are held to turn end.
-- **Manual compaction.** A `context/compact` waits for the next boundary; an
-  open handover is not a boundary.
+- **Manual compaction.** An open handover is not a step boundary, and starting
+  the continuation is not one. A `context/compact` consumed while a handover is
+  open waits for the next boundary after the continuation request ends, which
+  for a text-only continuation is the turn's end; on `finish` it runs once the
+  turn has ended, as with no turn. A compaction before the continuation could
+  summarize away the committed partial output the continuation must continue
+  from. The `ContextCompact` handler starts a step
+  only when the turn has no request, no handover is open and no continuation
+  batch is being written; the continuation batch order is unchanged.
 - **Reload.** The rebuild fails the open turn
   ([agent_loop.rs](../../../../crates/dim-agent-capabilities/src/agent_loop.rs)),
   and a late `step/disposition` is stale.

@@ -67,7 +67,9 @@ budget left. The bridge
 ([stream.rs](../../../../crates/dim-agent-aimux/src/stream.rs)) decides the kind
 from the origin, the status, the normalized codes and the `AiMuxError` variant,
 never from message text. A host with no provider boundary gets `unknown` and the
-message it already carried. `failure` is absent on events written before it
+message it already carried. A tool start whose name is not in `request.tools`
+fails the request before a call is committed; it is a host failure, so its
+`failure.kind` is `unknown`. `failure` is absent on events written before it
 existed and on failures that are not a provider call's: the agent loop's
 unsettled call on a reload and a context preparation failure. `error` is the
 default English line
@@ -84,18 +86,24 @@ failed request it continues, the attempts that request spent and the backoff it
 slept. ModelProvider seeds the new request's retry state with those values, so
 the continuation's first call is the chain's next attempt and the chain keeps
 one budget of 8 calls and 300 s of sleep. When no attempt or wait budget
-remains, the request settles failed without a call. The continuation's terminal
-`failure` reports the chain totals, so `Tried N times over M s` covers the whole
-chain. A request without `failure_chain` gets a fresh budget; a normal request
-after a tool step is never part of a chain. A chain-carrying request reports
-the chain's committed totals whenever it settles failed without invocation
-facts, including a reload, because the attempts it made outside the invocation
-are not facts.
+remains, the request settles failed without a call. A request without
+`failure_chain` gets a fresh budget; a normal request after a tool step is never
+part of a chain.
+
+A chain-carrying request's terminal `failure` reports the chain totals, so
+`Tried N times over M s` covers the whole chain. That holds for a provider
+failure, for the stream's refusal of an undeclared tool start settled through
+`invoke`'s `map_err`, for a failure before or outside the invocation, and on a
+reload. A continuation whose `context/prepare` fails never reaches ModelProvider:
+its `step/model-output-end` carries no `failure`, and the turn ends Failed. Only
+the attempt count and the wait budget are shared: the backoff curve and the one
+`malformed_response` retry are request-local and restart in the continuation.
 
 The 8 calls and 300 s are ModelProvider's documented public limits: a disposer
-reads them and declines a spent chain without reading ModelProvider's state. A
-production failure policy that forbids a retry adds a forbidden bit to
-`ModelFailure` in the same format decision as `failure_chain`.
+reads them and declines a spent chain without reading ModelProvider's state.
+ModelProvider sets `failure.retryForbidden` when its failure policy forbids
+retrying the failure that ended the request; it is written only when true, and
+a continuation declines it.
 
 ## Tests
 
