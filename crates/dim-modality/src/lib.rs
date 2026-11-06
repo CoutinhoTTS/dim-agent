@@ -12,13 +12,18 @@
 //! Settings key when the model is one of its options; options of an operation
 //! no adapter serves are the models Provider declares for that operation id.
 //! `image.understand` is selection only: its consumer is the Session
-//! image-understanding path, which does not read the default yet (§9.4). Task
-//! methods and provider connections are not part of this slice.
+//! image-understanding path, which does not read the default yet (§9.4).
+//!
+//! The task layer (`modality.task.submit/status/list/wait/cancel/result` and
+//! the `modalityTasks` process service) stores its records and files in
+//! `pluginFiles`, runs at most four tasks per category, and settles every
+//! terminal state once under the record's lock.
 //!
 //! The plugin lives in this crate, which depends on the App Server for the
 //! Settings service and management methods; a host installs it with
 //! [`install`].
 mod adapter;
+mod engine;
 pub mod task;
 pub use adapter::{
     AdapterError, AdapterErrorCode, AdapterFuture, AdapterOperation, AdapterOutput,
@@ -36,11 +41,18 @@ use dim_app_server::{
     protocol::Empty,
     settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
 };
+pub use engine::{
+    Clock, DEFAULT_LIST_LIMIT, MAX_INLINE_BYTES, MAX_LIST_LIMIT, MAX_RESULT_BYTES,
+    MAX_RUNNING_PER_CATEGORY, MAX_SUBMISSION_BYTES, MAX_WAIT_MS, ModalityTasks, PROGRESS_INTERVAL,
+    SystemClock, TaskCancel, TaskInput, TaskList, TaskListReply, TaskReply, TaskResultQuery,
+    TaskResultReply, TaskStatus, TaskSubmit, TaskWait,
+};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+pub use task::{TaskRecord, TaskState};
 use tokio_util::sync::CancellationToken;
 
 /// The adapter service Modality reads per call. A missing service is an
@@ -49,7 +61,7 @@ pub struct ModalityAdapterService(pub Arc<dyn ModalityAdapter>);
 
 /// One catalog operation of Modality A.1: its id and the Settings key that
 /// holds its default, if it has one.
-struct OperationRow {
+pub(crate) struct OperationRow {
     operation: &'static str,
     key: Option<&'static str>,
 }
@@ -63,7 +75,7 @@ impl OperationRow {
 /// One A.1 category. `category_key` says its operations share one Settings
 /// key and `configure` may omit the operation; image and speech key each
 /// operation separately, and OCR has no default key at all.
-struct CatalogCategory {
+pub(crate) struct CatalogCategory {
     name: &'static str,
     category_key: bool,
     rows: &'static [OperationRow],
@@ -72,7 +84,7 @@ struct CatalogCategory {
 /// Every category and operation of Modality A.1, in its order. `image` and
 /// `speech` key each operation; the other categories share one key; OCR has
 /// none (A.1, A3).
-const CATALOG: [CatalogCategory; 9] = [
+pub(crate) const CATALOG: [CatalogCategory; 9] = [
     CatalogCategory {
         name: "image",
         category_key: false,
@@ -177,13 +189,13 @@ const CATALOG: [CatalogCategory; 9] = [
     },
 ];
 
-fn catalog_category(name: &str) -> Option<&'static CatalogCategory> {
+pub(crate) fn catalog_category(name: &str) -> Option<&'static CatalogCategory> {
     CATALOG.iter().find(|category| category.name == name)
 }
 
 /// `image.understand` is selection only: its options are selectable vision
 /// models, never the adapter (Modality §9.4).
-fn is_understand(category: &str, operation: &str) -> bool {
+pub(crate) fn is_understand(category: &str, operation: &str) -> bool {
     category == "image" && operation == "understand"
 }
 
@@ -344,7 +356,7 @@ fn explicit_model<'de, D: Deserializer<'de>>(
 
 /// One read of what Provider would serve, the collected adapter and the
 /// persisted defaults; snapshots before and after a write share it.
-struct Evaluation {
+pub(crate) struct Evaluation {
     defaults: BTreeMap<String, ModelId>,
     selectable: Vec<ModelCapabilitySnapshot>,
     /// The models Provider would select for a non-conversational use, with
@@ -404,12 +416,31 @@ impl Evaluation {
         })
     }
     /// Whether either Provider read names this model.
-    fn known(&self, model: &ModelId) -> bool {
+    pub(crate) fn known(&self, model: &ModelId) -> bool {
         self.selectable(&model.provider_id, &model.model_id)
             .is_some()
             || self
                 .declared_for(&model.provider_id, &model.model_id)
                 .is_some()
+    }
+    /// The adapter's declaration of one operation for `model`: its parameter
+    /// schema, read per submission (A.2, decision 3). `None` when no
+    /// available adapter serves the operation for that model.
+    pub(crate) fn operation_spec(
+        &self,
+        model: &ModelId,
+        category: &str,
+        operation: &str,
+    ) -> Option<AdapterOperation> {
+        let adapter = self.adapter.as_ref()?;
+        if !adapter.0.available() {
+            return None;
+        }
+        adapter
+            .0
+            .operations(model)
+            .into_iter()
+            .find(|spec| spec.category == category && spec.operation == operation)
     }
     fn option(model: &ModelId) -> OptionSnapshot {
         OptionSnapshot {
@@ -483,7 +514,7 @@ impl Evaluation {
     /// the client configured it: `name` is the operation id, or the category
     /// when the write is category-wide. A persisted default and a refused
     /// `configure` share this, so both speak one vocabulary (Modality §9.1).
-    fn unavailable_reason(
+    pub(crate) fn unavailable_reason(
         &self,
         model: &ModelId,
         category: &str,
@@ -517,7 +548,7 @@ impl Evaluation {
             )
         }
     }
-    fn operation(&self, category: &str, row: &OperationRow) -> OperationSnapshot {
+    pub(crate) fn operation(&self, category: &str, row: &OperationRow) -> OperationSnapshot {
         let options = self.options(category, row);
         let served = options.iter().any(|option| option.available);
         let (available, reasons) = if is_understand(category, row.operation) {
@@ -675,7 +706,7 @@ fn host_error(error: HostError) -> RpcError {
     }
 }
 
-async fn evaluate(
+pub(crate) async fn evaluate(
     settings: &SettingsService,
     selectable: &SelectableModelsHost,
     selection: &ModelSelectionHost,
@@ -729,7 +760,7 @@ struct Configure {
     model: Option<Option<ModelId>>,
 }
 
-fn unknown_operation(detail: impl Into<String>) -> RpcError {
+pub(crate) fn unknown_operation(detail: impl Into<String>) -> RpcError {
     RpcError::app(-32000, "modality_unknown_operation", detail)
 }
 fn invalid_selection(detail: impl Into<String>) -> RpcError {
@@ -819,15 +850,17 @@ pub struct ModalityPlugin {
     selection: Key<ModelSelectionHost>,
     selectable: Key<SelectableModelsHost>,
     files: Key<PluginFileTransactions>,
+    clock: Arc<dyn Clock>,
 }
 impl ModalityPlugin {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>, clock: Arc<dyn Clock>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
             methods: names.key()?,
             selection: names.key()?,
             selectable: names.key()?,
             files: names.key()?,
+            clock,
         })
     }
 }
@@ -850,17 +883,46 @@ impl DynPlugin for ModalityPlugin {
             let methods = ctx.require_at(&self.methods)?;
             let selection = ctx.require_at(&self.selection)?;
             let selectable = ctx.require_at(&self.selectable)?;
-            let _files = ctx.require_at(&self.files)?;
+            let files = ctx.require_at(&self.files)?;
             settings.register::<ModalitySettings>(ctx)?;
+            // The task layer: one state for the methods, the scheduler and
+            // `modalityTasks` (A.3, A.6).
+            let shared = Arc::new(engine::Shared::new(
+                files,
+                settings.clone(),
+                selection.clone(),
+                selectable.clone(),
+                ctx.clone(),
+                self.clock.clone(),
+            ));
+            let tasks = Arc::new(ModalityTasks::new(shared.clone()));
+            let task_handle = tasks.clone();
+            ctx.provide_at(Key::<ModalityTasks>::named("modalityTasks"), tasks)?;
+            let cleanup = shared.clone();
+            ctx.effect(move || async move {
+                cleanup.stop.cancel();
+                cleanup.tasks.close();
+                cleanup.tasks.wait().await;
+                Ok(())
+            })?;
+            shared.spawn_scheduler();
             let context = ctx.clone();
+            let mut wait = MethodDecl::new("modality.task.wait", false, Interruption::Report);
+            wait.progress = true;
             methods.register(
                 ctx,
                 "modality",
                 vec![
                     MethodDecl::new("modality.capabilities", false, Interruption::Report),
                     MethodDecl::new("modality.configure", true, Interruption::Report),
+                    MethodDecl::new("modality.task.submit", true, Interruption::Drain),
+                    MethodDecl::new("modality.task.status", false, Interruption::Report),
+                    MethodDecl::new("modality.task.list", false, Interruption::Report),
+                    wait,
+                    MethodDecl::new("modality.task.cancel", true, Interruption::Report),
+                    MethodDecl::new("modality.task.result", false, Interruption::Report),
                 ],
-                Arc::new(move |call, stopping, _| {
+                Arc::new(move |call, stopping, progress| {
                     let MethodCall {
                         method,
                         params: value,
@@ -870,6 +932,7 @@ impl DynPlugin for ModalityPlugin {
                     let selection = selection.clone();
                     let selectable = selectable.clone();
                     let context = context.clone();
+                    let tasks = task_handle.clone();
                     Box::pin(async move {
                         match method.as_str() {
                             "modality.capabilities" => {
@@ -956,6 +1019,30 @@ impl DynPlugin for ModalityPlugin {
                                 evaluation.defaults = updated.document.defaults;
                                 reply(evaluation.snapshot(&updated.revision))
                             }
+                            "modality.task.submit" => {
+                                let request: TaskSubmit = params(value)?;
+                                reply(tasks.submit(request, &stopping).await?)
+                            }
+                            "modality.task.status" => {
+                                let request: TaskStatus = params(value)?;
+                                reply(tasks.status(request).await?)
+                            }
+                            "modality.task.list" => {
+                                let request: TaskList = params(value)?;
+                                reply(tasks.list(request).await?)
+                            }
+                            "modality.task.wait" => {
+                                let request: TaskWait = params(value)?;
+                                reply(tasks.wait(request, &stopping, Some(&progress)).await?)
+                            }
+                            "modality.task.cancel" => {
+                                let request: TaskCancel = params(value)?;
+                                reply(tasks.cancel(request, &stopping).await?)
+                            }
+                            "modality.task.result" => {
+                                let request: TaskResultQuery = params(value)?;
+                                reply(tasks.result(request, &stopping).await?)
+                            }
                             _ => unreachable!("registered modality management method"),
                         }
                     })
@@ -967,13 +1054,21 @@ impl DynPlugin for ModalityPlugin {
 }
 
 /// Installs Modality as an optional process plugin: the `modality` Settings
-/// source and the `modality.*` management namespace. The host must register
-/// the names of the services it reads (settings, managementMethods and
-/// Provider's selection and selectable-model reads), as the App Server's
-/// assembly does; when one of them has no provider, the host still starts
-/// and opens Sessions, and only `modality.*` is unavailable.
+/// source, the `modality.*` management namespace and the `modalityTasks`
+/// process service. The host must register the names of the services it reads
+/// (settings, managementMethods, pluginFiles and Provider's selection and
+/// selectable-model reads), as the App Server's assembly does; when one of
+/// them has no provider, the host still starts and opens Sessions, and only
+/// `modality.*` is unavailable.
 pub fn install(builder: &mut AgentBuilder) {
+    install_with_clock(builder, Arc::new(SystemClock));
+}
+
+/// [`install`] with the clock a generation reads; a test injects a clock to
+/// control retention.
+pub fn install_with_clock(builder: &mut AgentBuilder, clock: Arc<dyn Clock>) {
     dim_agent_runtime::names::register::<ModalityAdapterService>(builder.catalog_mut(), None);
-    builder
-        .optional_plugin(|names| Ok(Box::new(ModalityPlugin::new(names)?) as Box<dyn DynPlugin>));
+    builder.optional_plugin(move |names| {
+        Ok(Box::new(ModalityPlugin::new(names, clock.clone())?) as Box<dyn DynPlugin>)
+    });
 }

@@ -6009,6 +6009,46 @@
       ]
     },
     {
+      "id": "dim_modality::adapter",
+      "crate": "dim_modality",
+      "parent": "dim_modality",
+      "file": "crates/dim-modality/src/adapter.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_modality::engine",
+      "crate": "dim_modality",
+      "parent": "dim_modality",
+      "file": "crates/dim-modality/src/engine.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::select",
+        "tracing::warn"
+      ]
+    },
+    {
+      "id": "dim_modality::task",
+      "crate": "dim_modality",
+      "parent": "dim_modality",
+      "file": "crates/dim-modality/src/task.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "write"
+      ]
+    },
+    {
+      "id": "dim_modality::task::tests",
+      "crate": "dim_modality",
+      "parent": "dim_modality::task",
+      "file": "crates/dim-modality/src/task.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_session_title",
       "crate": "dim_session_title",
       "parent": null,
@@ -42054,7 +42094,9 @@
       "from": "dim_modality",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path Interruption::Report",
         "path MethodCall",
+        "path MethodDecl::new",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::interrupted",
@@ -42123,6 +42165,14 @@
     },
     {
       "from": "dim_modality",
+      "to": "dim_app_server::plugin_files",
+      "references": [
+        "path PluginFileTransactions",
+        "use dim_app_server::plugin_files::PluginFileTransactions"
+      ]
+    },
+    {
+      "from": "dim_modality",
       "to": "dim_app_server::protocol",
       "references": [
         "path Empty",
@@ -42144,6 +42194,272 @@
         "use dim_app_server::settings::BusinessDocument",
         "use dim_app_server::settings::SettingsError",
         "use dim_app_server::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_modality",
+      "to": "dim_modality::adapter",
+      "references": [
+        "mod adapter",
+        "path AdapterOperation",
+        "path ModalityAdapter",
+        "path adapter",
+        "use adapter::AdapterError",
+        "use adapter::AdapterErrorCode",
+        "use adapter::AdapterFuture",
+        "use adapter::AdapterOperation",
+        "use adapter::AdapterOutput",
+        "use adapter::AdapterProgress",
+        "use adapter::Job",
+        "use adapter::JobFile",
+        "use adapter::ModalityAdapter",
+        "use adapter::ProgressSink",
+        "use adapter::RemoteCancel",
+        "use adapter::Submitted"
+      ]
+    },
+    {
+      "from": "dim_modality",
+      "to": "dim_modality::engine",
+      "references": [
+        "mod engine",
+        "path Clock",
+        "path ModalityTasks",
+        "path ModalityTasks::new",
+        "path SystemClock",
+        "path TaskCancel",
+        "path TaskList",
+        "path TaskResultQuery",
+        "path TaskStatus",
+        "path TaskSubmit",
+        "path TaskWait",
+        "path engine::Shared::new",
+        "use engine::Clock",
+        "use engine::DEFAULT_LIST_LIMIT",
+        "use engine::MAX_INLINE_BYTES",
+        "use engine::MAX_LIST_LIMIT",
+        "use engine::MAX_RESULT_BYTES",
+        "use engine::MAX_RUNNING_PER_CATEGORY",
+        "use engine::MAX_SUBMISSION_BYTES",
+        "use engine::MAX_WAIT_MS",
+        "use engine::ModalityTasks",
+        "use engine::PROGRESS_INTERVAL",
+        "use engine::SystemClock",
+        "use engine::TaskCancel",
+        "use engine::TaskInput",
+        "use engine::TaskList",
+        "use engine::TaskListReply",
+        "use engine::TaskReply",
+        "use engine::TaskResultQuery",
+        "use engine::TaskResultReply",
+        "use engine::TaskStatus",
+        "use engine::TaskSubmit",
+        "use engine::TaskWait"
+      ]
+    },
+    {
+      "from": "dim_modality",
+      "to": "dim_modality::task",
+      "references": [
+        "mod task",
+        "use task::TaskRecord",
+        "use task::TaskState"
+      ]
+    },
+    {
+      "from": "dim_modality::adapter",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModalityConnection",
+        "use dim_agent_capabilities::host::ModalityConnection"
+      ]
+    },
+    {
+      "from": "dim_modality::adapter",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModalityConnection",
+        "path ModalityConnectionHost",
+        "path ModalityTarget",
+        "path ModelSelectionHost",
+        "path SelectableModelsHost",
+        "use dim_agent_capabilities::host::ModalityConnection",
+        "use dim_agent_capabilities::host::ModalityConnectionHost",
+        "use dim_agent_capabilities::host::ModalityTarget",
+        "use dim_agent_capabilities::host::ModelSelectionHost",
+        "use dim_agent_capabilities::host::SelectableModelsHost"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Progress",
+        "path RpcError",
+        "path RpcError::app",
+        "use dim_agent_capabilities::methods::Progress",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_app_server::plugin_files",
+      "references": [
+        "path PluginFileTransactions",
+        "use dim_app_server::plugin_files::PluginFileTransactions"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use dim_app_server::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_modality",
+      "references": [
+        "path Evaluation",
+        "path ModalityAdapterService",
+        "path catalog_category",
+        "path crate::OperationRow",
+        "path crate::evaluate",
+        "path crate::unknown_operation",
+        "path is_understand",
+        "use crate::Evaluation",
+        "use crate::ModalityAdapterService",
+        "use crate::catalog_category",
+        "use crate::is_understand"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_modality::adapter",
+      "references": [
+        "path AdapterOutput",
+        "path AdapterProgress",
+        "path Job",
+        "path JobFile",
+        "path ProgressSink::new",
+        "path RemoteCancel",
+        "use crate::adapter::AdapterOutput",
+        "use crate::adapter::AdapterProgress",
+        "use crate::adapter::Job",
+        "use crate::adapter::JobFile",
+        "use crate::adapter::ProgressSink",
+        "use crate::adapter::RemoteCancel"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_modality::task",
+      "references": [
+        "path Executor::Host",
+        "path Executor::Provider",
+        "path Expect::NonTerminal",
+        "path Expect::Queued",
+        "path InputFile",
+        "path ResultFile",
+        "path TaskError",
+        "path TaskRecord",
+        "path TaskResult",
+        "path TaskState",
+        "path TaskState::Cancelled",
+        "path TaskState::Failed",
+        "path TaskState::Queued",
+        "path TaskState::Running",
+        "path TaskState::Succeeded",
+        "path Write",
+        "path Write::Discarded",
+        "path Write::Written",
+        "path task",
+        "path task::FORMAT_VERSION",
+        "path task::create",
+        "path task::hex",
+        "path task::input_dir_name",
+        "path task::remove_result",
+        "path task::remove_task",
+        "path task::remove_work",
+        "path task::result_dir_name",
+        "path task::result_name",
+        "path task::sha256",
+        "path task::task_dir",
+        "path task::work_name",
+        "path task::write",
+        "path task::write_input",
+        "path task::write_result",
+        "use crate::task",
+        "use crate::task::Executor",
+        "use crate::task::Expect",
+        "use crate::task::InputFile",
+        "use crate::task::ResultFile",
+        "use crate::task::TaskError",
+        "use crate::task::TaskRecord",
+        "use crate::task::TaskResult",
+        "use crate::task::TaskState",
+        "use crate::task::Write"
+      ]
+    },
+    {
+      "from": "dim_modality::task",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_modality::task",
+      "to": "dim_app_server::plugin_files",
+      "references": [
+        "path PluginFileError",
+        "path PluginFileTransactions",
+        "use dim_app_server::plugin_files::PluginFileError",
+        "use dim_app_server::plugin_files::PluginFileTransactions"
+      ]
+    },
+    {
+      "from": "dim_modality::task",
+      "to": "dim_modality::adapter",
+      "references": [
+        "path AdapterProgress",
+        "use crate::adapter::AdapterProgress"
+      ]
+    },
+    {
+      "from": "dim_modality::task",
+      "to": "dim_modality::task::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_modality::task::tests",
+      "to": "dim_modality::task",
+      "references": [
+        "path Digest::default",
+        "path TaskState::Cancelled",
+        "path TaskState::Failed",
+        "path TaskState::Interrupted",
+        "path TaskState::Succeeded"
       ]
     },
     {
