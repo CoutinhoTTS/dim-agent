@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 /// The largest inline input total; a larger submission names its files by
 /// `node_path` instead (A.3).
-const MAX_INLINE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_INLINE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The input A.1 declares before the files.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -313,7 +313,7 @@ fn total_bytes(files: &[(String, &Path)]) -> Result<u64> {
 
 /// The name the submission gives `path`: its last component, which is what
 /// an adapter sees among the job's files.
-fn file_name(path: &Path) -> Result<String> {
+pub(crate) fn file_name(path: &Path) -> Result<String> {
     path.file_name()
         .and_then(|name| name.to_str())
         .map(str::to_owned)
@@ -321,7 +321,7 @@ fn file_name(path: &Path) -> Result<String> {
 }
 
 /// One input file, inline or by `node_path` (A.3).
-fn input(name: String, path: &Path, inline: bool) -> Result<Value> {
+pub(crate) fn input(name: String, path: &Path, inline: bool) -> Result<Value> {
     let media_type = media_type(path)?;
     if inline {
         let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;

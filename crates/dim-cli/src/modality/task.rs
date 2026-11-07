@@ -166,9 +166,16 @@ pub(crate) async fn finish(
     }
     Ok(match state.as_str() {
         "succeeded" => match out {
-            Some(out) => match write_results(modality, &task, &id, out, output).await? {
+            Some(out) => match write_results(modality, &task, &id, out).await? {
                 Written::Stopped => return stopped_transfer(output, &id),
-                Written::Files(_) => 0,
+                Written::Files(paths) => {
+                    if !output.json {
+                        for path in paths {
+                            line(output.out, &path.display().to_string())?;
+                        }
+                    }
+                    0
+                }
             },
             None => {
                 if !output.json {
@@ -213,13 +220,19 @@ fn nonempty<'a>(code: &'a str, message: &'a str) -> String {
     }
 }
 
-
 /// What writing a result set did.
 pub(crate) enum Written {
     /// Every file was placed; these are the paths, in the record's order.
     Files(Vec<PathBuf>),
     /// The first Ctrl+C stopped the transfer: the temporary is gone and no
     /// target was touched.
+    Stopped,
+}
+
+/// What reading a result file into memory did.
+pub(crate) enum Read {
+    Bytes(Vec<u8>),
+    /// The first Ctrl+C stopped the read.
     Stopped,
 }
 
@@ -237,64 +250,14 @@ pub(crate) fn stopped_transfer(output: &mut Output<'_>, id: &str) -> Result<i32>
     Ok(130)
 }
 
-/// Whether `name` is exactly one normal path component.
-fn one_component(name: &str) -> bool {
-    let mut components = Path::new(name).components();
-    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
-}
-
-/// The refusal a target that exists, or appeared while a transfer ran, gets.
-fn refused(names: &[&str], id: &str) -> crate::Error {
-    format!(
-        "{} already exists; nothing was written. Fetch the results into another directory: \
-         dimcode modality task wait {id} --out <dir>",
-        names.join(", ")
-    )
-    .into()
-}
-
-/// The temporary a transfer writes. Dropping it before the file is placed
-/// removes it, so a stopped or failed transfer leaves nothing behind; after
-/// the file is placed the same drop removes only the second link.
-struct Partial(PathBuf);
-
-impl Drop for Partial {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// Places the transferred file under its target name without replacing
-/// anything. A hard link fails with `AlreadyExists` where `rename` would
-/// replace the file, so a target that appeared while the transfer ran is
-/// refused. A file system without hard links answers another error, and only
-/// there is the target re-checked and the file renamed, which is a window no
-/// wider than that check.
-fn place(partial: &Path, path: &Path, name: &str, id: &str) -> Result<()> {
-    match std::fs::hard_link(partial, path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(refused(&[name], id))
-        }
-        Err(_) => {
-            if path.symlink_metadata().is_ok() {
-                return Err(refused(&[name], id));
-            }
-            std::fs::rename(partial, path)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-            Ok(())
-        }
-    }
-}
 /// Writes every result file under `out`; the first Ctrl+C stops the whole
 /// set. No target is replaced, and a file already placed stays when a later
 /// one stops the command.
-async fn write_results(
+pub(crate) async fn write_results(
     modality: &mut Modality<'_>,
     task: &Value,
     id: &str,
     out: &Path,
-    output: &mut Output<'_>,
 ) -> Result<Written> {
     let files: Vec<String> = task["result"]["files"]
         .as_array()
@@ -322,12 +285,15 @@ async fn write_results(
             result = transfer => result?,
             _ = tokio::signal::ctrl_c() => return Ok(Written::Stopped),
         }
-        if !output.json {
-            line(output.out, &path.display().to_string())?;
-        }
         written.push(path);
     }
     Ok(Written::Files(written))
+}
+
+/// Whether `name` is exactly one normal path component.
+fn one_component(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 /// Refuses to write any of `names` when one of them exists: a second run in
@@ -344,6 +310,27 @@ fn check_targets(out: &Path, names: &[String], id: &str) -> Result<()> {
         return Ok(());
     }
     Err(refused(&existing, id))
+}
+
+/// The refusal a target that exists, or appeared while a transfer ran, gets.
+fn refused(names: &[&str], id: &str) -> crate::Error {
+    format!(
+        "{} already exists; nothing was written. Fetch the results into another directory: \
+         dimcode modality task wait {id} --out <dir>",
+        names.join(", ")
+    )
+    .into()
+}
+
+/// The temporary a transfer writes. Dropping it before the file is placed
+/// removes it, so a stopped or failed transfer leaves nothing behind; after
+/// the file is placed the same drop removes only the second link.
+struct Partial(PathBuf);
+
+impl Drop for Partial {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Reads one result file in chunks into a temporary sibling and places it
@@ -387,6 +374,29 @@ async fn transfer(
     place(&partial.0, path, name, task_id)
 }
 
+/// Places the transferred file under its target name without replacing
+/// anything. A hard link fails with `AlreadyExists` where `rename` would
+/// replace the file, so a target that appeared while the transfer ran is
+/// refused. A file system without hard links answers another error, and only
+/// there is the target re-checked and the file renamed, which is a window no
+/// wider than that check.
+fn place(partial: &Path, path: &Path, name: &str, id: &str) -> Result<()> {
+    match std::fs::hard_link(partial, path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(refused(&[name], id))
+        }
+        Err(_) => {
+            if path.symlink_metadata().is_ok() {
+                return Err(refused(&[name], id));
+            }
+            std::fs::rename(partial, path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            Ok(())
+        }
+    }
+}
+
 /// The sibling a transfer writes before it renames it into place.
 fn partial_path(path: &Path) -> PathBuf {
     let name = path
@@ -406,4 +416,45 @@ fn line(writer: &mut dyn Write, text: &str) -> Result<()> {
     writeln!(writer, "{text}")?;
     writer.flush()?;
     Ok(())
+}
+
+/// Reads one whole result file into memory, which the first Ctrl+C stops;
+/// only for a file already known to be small (A.3).
+pub(crate) async fn read_result(
+    modality: &mut Modality<'_>,
+    task_id: &str,
+    name: &str,
+) -> Result<Read> {
+    let reading = async {
+        let mut bytes = Vec::new();
+        let mut offset = 0;
+        loop {
+            let chunk = modality
+                .call(
+                    "modality.task.result",
+                    json!({
+                        "task_id": task_id,
+                        "name": name,
+                        "offset": offset,
+                        "length": CHUNK_BYTES,
+                    }),
+                )
+                .await?;
+            let data = STANDARD
+                .decode(chunk["data_base64"].as_str().unwrap_or_default())
+                .map_err(|_| format!("{name}: the daemon sent invalid base64"))?;
+            if data.is_empty() && chunk["eof"].as_bool() != Some(true) {
+                return Err(format!("{name}: the daemon returned no data before the end").into());
+            }
+            bytes.extend_from_slice(&data);
+            offset += data.len() as u64;
+            if chunk["eof"].as_bool() == Some(true) {
+                return Ok::<Vec<u8>, crate::Error>(bytes);
+            }
+        }
+    };
+    tokio::select! {
+        bytes = reading => Ok(Read::Bytes(bytes?)),
+        _ = tokio::signal::ctrl_c() => Ok(Read::Stopped),
+    }
 }

@@ -5,6 +5,8 @@
 use super::{Command, run};
 use crate::args::{Action, Options};
 use crate::client::Client;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use dim_client::{ConnectionConfig, Server};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write as _};
@@ -539,10 +541,29 @@ fn the_command_lines_parse_to_their_commands() {
         Some(Command::TaskCancel { task_id }) => assert_eq!(task_id, "task-3"),
         _ => panic!("task cancel did not parse"),
     }
-    assert!(
-        Options::parse(raw(home.path(), &["modality", "task", "list", "--limit", "5"]).into_iter())
-            .is_ok()
-    );
+    match command(&["ocr", "scan.png", "--output-mode", "layout"]) {
+        Some(Command::Ocr { file }) => assert_eq!(file, PathBuf::from("scan.png")),
+        _ => panic!("ocr did not parse"),
+    }
+    for args in [
+        vec!["ocr", "scan.png", "--no-wait"],
+        vec!["ocr", "scan.png", "--out", "/tmp"],
+        vec!["modality", "task", "list", "--limit", "5"],
+    ] {
+        assert!(
+            Options::parse(raw(home.path(), &args).into_iter()).is_ok(),
+            "{args:?}"
+        );
+    }
+    for args in [
+        vec!["ocr", "scan.png", "--output-mode", "html"],
+        vec!["modality", "task", "list", "--output-mode", "text"],
+    ] {
+        assert!(
+            Options::parse(raw(home.path(), &args).into_iter()).is_err(),
+            "{args:?}"
+        );
+    }
     assert!(
         Options::parse(raw(home.path(), &["modality", "task", "list", "--limit", "x"]).into_iter())
             .is_err()
@@ -1051,6 +1072,266 @@ async fn task_cancel_reports_the_state_it_found() {
     let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 0);
     assert_eq!(stdout, "succeeded task-7 (unchanged).\n");
+    script.join();
+}
+
+/// A succeeded OCR task whose `text.txt` holds `text_bytes` bytes.
+fn ocr_succeeded(task_id: &str, text_bytes: u64, layout: bool) -> Value {
+    let mut record = record(task_id, "succeeded");
+    record["task"]["category"] = json!("ocr");
+    record["task"]["operation"] = json!("recognize");
+    record["task"]["executor"] = json!({
+        "kind": "host",
+        "node": null,
+        "target": {"providerId": "local", "modelId": "apple-vision"},
+    });
+    let mut files = json!([
+        {"name": "text.txt", "media_type": "text/plain", "bytes": text_bytes, "sha256": "00"},
+        {"name": "result.json", "media_type": "application/json", "bytes": 64, "sha256": "01"},
+    ]);
+    if layout {
+        files.as_array_mut().unwrap().push(json!({
+            "name": "page-0001.png", "media_type": "image/png", "bytes": 8, "sha256": "02",
+        }));
+    }
+    record["task"]["result"] = json!({"files": files, "data": {"pages": [{"page": 1}]}});
+    record
+}
+
+/// `dimcode ocr` submits one `ocr.recognize`, prints a short text inline and
+/// writes nothing at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ocr_prints_a_short_text_inline_and_writes_nothing() {
+    let text = "hello from ocr\n";
+    let mut script = Script::start(move |wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        assert_eq!(submit["method"], "modality.task.submit");
+        assert_eq!(submit["params"]["category"], "ocr");
+        assert_eq!(submit["params"]["operation"], "recognize");
+        assert_eq!(submit["params"]["params"], json!({}));
+        assert_eq!(submit["params"]["files"][0]["name"], "scan.png");
+        assert_eq!(submit["params"]["files"][0]["media_type"], "image/png");
+        wire.reply(&submit, record("task-1", "queued"));
+        let wait = wire.frame();
+        assert_eq!(wait["method"], "modality.task.wait");
+        wire.reply(&wait, ocr_succeeded("task-1", text.len() as u64, false));
+        let result = wire.frame();
+        assert_eq!(result["params"]["name"], "text.txt");
+        wire.reply(
+            &result,
+            json!({"data_base64": STANDARD.encode(text), "eof": true}),
+        );
+        // Nothing else is fetched: `result.json` would be, had anything been
+        // written.
+        assert!(
+            wire.next_frame().is_none(),
+            "the result set must not be written"
+        );
+    });
+    let mut client = script.client().await;
+    let file = input(script.home(), "scan.png", b"image-bytes");
+    let options = parse(script.home(), &["ocr", file.to_str().unwrap()]);
+    let (code, stdout, stderr) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(stdout, text);
+    assert_eq!(stderr, "");
+    drop(client);
+    script.join();
+}
+
+/// A text above 64 KiB is written, and the command prints a 2,000-character
+/// preview and the file that holds the rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ocr_writes_a_long_text_and_prints_its_preview() {
+    let text = "a".repeat(70_000);
+    let answering = text.clone();
+    let mut script = Script::start(move |wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-2", "queued"));
+        let wait = wire.frame();
+        wire.reply(
+            &wait,
+            ocr_succeeded("task-2", answering.len() as u64, false),
+        );
+        let result = wire.frame();
+        assert_eq!(result["params"]["name"], "text.txt");
+        wire.reply(
+            &result,
+            json!({"data_base64": STANDARD.encode(answering), "eof": true}),
+        );
+        let result = wire.frame();
+        assert_eq!(result["params"]["name"], "result.json");
+        wire.reply(
+            &result,
+            json!({"data_base64": STANDARD.encode("{}"), "eof": true}),
+        );
+    });
+    let mut client = script.client().await;
+    let file = input(script.home(), "scan.png", b"image-bytes");
+    let out = tempfile::tempdir().unwrap();
+    let options = parse(
+        script.home(),
+        &[
+            "ocr",
+            file.to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        format!(
+            "{}\nFull text: {}\n",
+            "a".repeat(2000),
+            out.path().join("text.txt").display()
+        )
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("text.txt")).unwrap(),
+        text.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("result.json")).unwrap(),
+        b"{}"
+    );
+    script.join();
+}
+
+/// A text within 64 KiB but above 30,000 UTF-16 units does not fit either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ocr_writes_a_text_above_the_unit_limit() {
+    let text = "a".repeat(40_000);
+    let answering = text.clone();
+    let mut script = Script::start(move |wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-3", "queued"));
+        let wait = wire.frame();
+        wire.reply(
+            &wait,
+            ocr_succeeded("task-3", answering.len() as u64, false),
+        );
+        let result = wire.frame();
+        assert_eq!(result["params"]["name"], "text.txt");
+        wire.reply(
+            &result,
+            json!({"data_base64": STANDARD.encode(answering), "eof": true}),
+        );
+        let result = wire.frame();
+        wire.reply(
+            &result,
+            json!({"data_base64": STANDARD.encode("{}"), "eof": true}),
+        );
+    });
+    let mut client = script.client().await;
+    let file = input(script.home(), "scan.png", b"image-bytes");
+    let out = tempfile::tempdir().unwrap();
+    let options = parse(
+        script.home(),
+        &[
+            "ocr",
+            file.to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        format!(
+            "{}\nFull text: {}\n",
+            "a".repeat(2000),
+            out.path().join("text.txt").display()
+        )
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("text.txt")).unwrap().len(),
+        40_000
+    );
+    script.join();
+}
+
+/// `--output-mode layout` asks for the page images and prints every written
+/// path; `--json` prints the record instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ocr_layout_writes_the_pages_and_json_prints_the_record() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        assert_eq!(submit["params"]["params"], json!({"outputMode": "layout"}));
+        wire.reply(&submit, record("task-4", "queued"));
+        let wait = wire.frame();
+        wire.reply(&wait, ocr_succeeded("task-4", 6, true));
+        for (name, data) in [
+            ("text.txt", "hello\n"),
+            ("result.json", "{}"),
+            ("page-0001.png", "png-data"),
+        ] {
+            let result = wire.frame();
+            assert_eq!(result["params"]["name"], name);
+            wire.reply(
+                &result,
+                json!({"data_base64": STANDARD.encode(data), "eof": true}),
+            );
+        }
+    });
+    let mut client = script.client().await;
+    let file = input(script.home(), "scan.png", b"image-bytes");
+    let out = tempfile::tempdir().unwrap();
+    let options = parse(
+        script.home(),
+        &[
+            "ocr",
+            file.to_str().unwrap(),
+            "--output-mode",
+            "layout",
+            "--out",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        format!(
+            "{}\n{}\n{}\n",
+            out.path().join("text.txt").display(),
+            out.path().join("result.json").display(),
+            out.path().join("page-0001.png").display()
+        )
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("page-0001.png")).unwrap(),
+        b"png-data"
+    );
+    script.join();
+
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-5", "queued"));
+        let wait = wire.frame();
+        wire.reply(&wait, ocr_succeeded("task-5", 6, false));
+        let result = wire.frame();
+        wire.reply(
+            &result,
+            json!({"data_base64": STANDARD.encode("hello\n"), "eof": true}),
+        );
+    });
+    let mut client = script.client().await;
+    let file = input(script.home(), "scan.png", b"image-bytes");
+    let options = parse(script.home(), &["ocr", file.to_str().unwrap(), "--json"]);
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout).unwrap(),
+        ocr_succeeded("task-5", 6, false)
+    );
     script.join();
 }
 

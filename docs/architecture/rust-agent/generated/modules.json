@@ -3796,6 +3796,18 @@
       ]
     },
     {
+      "id": "dim_cli::modality::ocr",
+      "crate": "dim_cli",
+      "parent": "dim_cli::modality",
+      "file": "crates/dim-cli/src/modality/ocr.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "write",
+        "writeln"
+      ]
+    },
+    {
       "id": "dim_cli::modality::task",
       "crate": "dim_cli",
       "parent": "dim_cli::modality",
@@ -29008,10 +29020,10 @@
       "to": "dim_cli::modality",
       "references": [
         "path crate::modality::Command",
+        "path crate::modality::Command::Ocr",
         "path crate::modality::Command::SetDefault",
         "path crate::modality::Command::Submit",
-        "path crate::modality::Command::TaskList",
-        "path crate::modality::Command::TaskWait"
+        "path crate::modality::Command::TaskList"
       ]
     },
     {
@@ -31065,6 +31077,13 @@
     },
     {
       "from": "dim_cli::modality",
+      "to": "dim_cli::modality::ocr",
+      "references": [
+        "mod ocr"
+      ]
+    },
+    {
+      "from": "dim_cli::modality",
       "to": "dim_cli::modality::task",
       "references": [
         "mod task",
@@ -31119,6 +31138,7 @@
       "references": [
         "path Command",
         "path Command::List",
+        "path Command::Ocr",
         "path Command::SetDefault",
         "path Command::Submit",
         "path Command::TaskCancel",
@@ -31146,6 +31166,14 @@
       "references": [
         "path media::run",
         "use super::media"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::command",
+      "to": "dim_cli::modality::ocr",
+      "references": [
+        "path ocr::run",
+        "use super::ocr"
       ]
     },
     {
@@ -31252,6 +31280,68 @@
       ]
     },
     {
+      "from": "dim_cli::modality::ocr",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::ocr",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::ocr",
+      "to": "dim_cli::modality",
+      "references": [
+        "path Modality",
+        "path Modality::open",
+        "use super::Modality"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::ocr",
+      "to": "dim_cli::modality::media",
+      "references": [
+        "path file_name",
+        "use super::media::MAX_INLINE_BYTES",
+        "use super::media::file_name",
+        "use super::media::input"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::ocr",
+      "to": "dim_cli::modality::task",
+      "references": [
+        "path Output",
+        "path task",
+        "path task::Read::Bytes",
+        "path task::Read::Stopped",
+        "path task::Written::Files",
+        "path task::Written::Stopped",
+        "path task::finish",
+        "path task::read_result",
+        "path task::stopped_transfer",
+        "path task::wait",
+        "path task::write_results",
+        "use super::task",
+        "use super::task::Output"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::ocr",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
       "from": "dim_cli::modality::task",
       "to": "dim_cli",
       "references": [
@@ -31317,6 +31407,7 @@
       "from": "dim_cli::modality::tests",
       "to": "dim_cli::modality",
       "references": [
+        "path Command::Ocr",
         "path Command::SetDefault",
         "path Command::TaskCancel",
         "path Command::TaskStatus",

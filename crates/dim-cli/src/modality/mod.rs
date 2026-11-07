@@ -13,6 +13,7 @@
 
 pub(crate) mod command;
 pub(crate) mod media;
+pub(crate) mod ocr;
 pub(crate) mod task;
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ use crate::client::{Client, RpcError, app_error};
 use crate::sanitize::safe_line;
 use crate::{Result, args::Options};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 /// The management namespace's read; a daemon without it serves no Modality
 /// (Modality A.3).
@@ -51,6 +53,8 @@ pub(crate) enum Command {
     TaskWait { task_id: String },
     /// `task cancel ID`.
     TaskCancel { task_id: String },
+    /// `ocr FILE [--output-mode text|layout] [--out DIR]`.
+    Ocr { file: PathBuf },
 }
 
 /// The `modality` method client.

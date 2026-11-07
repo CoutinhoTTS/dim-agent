@@ -131,6 +131,10 @@ Commands:\n\
                                    Submit a task and write its results to\n\
                                    --out (the current directory by default);\n\
                                    --no-wait prints the task id only\n\
+  ocr FILE [--output-mode text|layout] [--out DIR]\n\
+                                   Recognize the text of an image or PDF;\n\
+                                   a short text prints inline and writes\n\
+                                   nothing, a longer one is written\n\
                                    --param KEY=VALUE passes one adapter\n\
                                    parameter: JSON when it parses as JSON,\n\
                                    a string otherwise, so a string that\n\
@@ -467,6 +471,8 @@ pub struct ModalityFlags {
     pub limit: Option<u64>,
     /// `task list --after ID`: the page after this task.
     pub after: Option<String>,
+    /// `ocr --output-mode text|layout`: what `ocr.recognize` returns.
+    pub output_mode: Option<String>,
 }
 
 #[derive(Clone)]
@@ -639,12 +645,35 @@ impl Options {
                     }
                 },
                 "--out" => {
-                    let Action::Modality(crate::modality::Command::TaskWait { .. }) =
-                        &options.action
-                    else {
-                        return Err("--out requires a submission or modality task wait".into());
+                    let Action::Modality(command) = &options.action else {
+                        return Err("--out requires a submission, modality task wait or ocr".into());
                     };
+                    if !matches!(
+                        command,
+                        crate::modality::Command::TaskWait { .. }
+                            | crate::modality::Command::Ocr { .. }
+                    ) {
+                        return Err("--out requires a submission, modality task wait or ocr".into());
+                    }
                     options.modality.out = Some(PathBuf::from(value(&mut args)?));
+                }
+                "--no-wait" => {
+                    let Action::Modality(crate::modality::Command::Ocr { .. }) = &options.action
+                    else {
+                        return Err("--no-wait requires a submission or ocr".into());
+                    };
+                    options.modality.no_wait = true;
+                }
+                "--output-mode" => {
+                    let Action::Modality(crate::modality::Command::Ocr { .. }) = &options.action
+                    else {
+                        return Err("--output-mode requires ocr".into());
+                    };
+                    let mode = value(&mut args)?;
+                    if mode != "text" && mode != "layout" {
+                        return Err(format!("--output-mode is text or layout, not {mode}").into());
+                    }
+                    options.modality.output_mode = Some(mode);
                 }
                 "--state" => {
                     let Action::Modality(crate::modality::Command::TaskList) = &options.action
@@ -943,6 +972,11 @@ impl Options {
                         &mut options.modality,
                     )?;
                     options.action = Action::Modality(crate::modality::Command::Submit(submit));
+                }
+                "ocr" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Modality(crate::modality::Command::Ocr {
+                        file: PathBuf::from(value(&mut args)?),
+                    });
                 }
                 "migration" if matches!(options.action, Action::Chat) => {
                     options.action = crate::migration_command::parse(&mut args)?;

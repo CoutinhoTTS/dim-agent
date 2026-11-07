@@ -3,7 +3,9 @@
 //! `motion` (Modality A.5).
 
 use super::task::{self, Output};
-use super::{Command, Modality, media, model_reference, operation_key, refusal, row_of, table};
+use super::{
+    Command, Modality, media, model_reference, ocr, operation_key, refusal, row_of, table,
+};
 use crate::client::{Client, app_error};
 use crate::sanitize::safe_line;
 use crate::{Result, args::Options};
@@ -27,6 +29,7 @@ pub(crate) async fn run(
         Command::TaskStatus { task_id } => task_status(client, options, task_id, output).await,
         Command::TaskWait { task_id } => task_wait(client, options, task_id, output).await,
         Command::TaskCancel { task_id } => task_cancel(client, options, task_id, output).await,
+        Command::Ocr { file } => ocr::run(client, file, options, output).await,
     }
 }
 
