@@ -42,6 +42,8 @@ mod permission;
 mod prompt_suggestion;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/realtime.rs"]
+mod realtime;
 #[path = "cli_flow/scheduled.rs"]
 mod scheduled;
 #[path = "cli_flow/server.rs"]
