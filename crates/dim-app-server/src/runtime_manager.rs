@@ -14,6 +14,7 @@ use rutis::Ctx;
 use rutis::Disposer;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -24,6 +25,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 const PINS: &str = include_str!("../../../runtime/runtimes.json");
@@ -563,6 +565,27 @@ enum State {
     Installed,
 }
 
+/// One open `runtime.watch` call. Its handler owns the items; the map only
+/// ends the call when a later watch on the same connection takes over.
+struct Watch {
+    connection: String,
+    takeover: CancellationToken,
+}
+
+/// One `runtime.watch` item: its sequence number and what changed.
+fn watch_item(seq: u64, mut data: Map<String, Value>) -> Value {
+    data.insert("seq".into(), seq.into());
+    Value::Object(data)
+}
+
+/// The item naming a runtime: the client re-reads its `runtime.list` entry.
+fn runtime_item(name: &'static str) -> Map<String, Value> {
+    let mut data = Map::new();
+    data.insert("kind".into(), Value::from("runtime"));
+    data.insert("name".into(), Value::from(name));
+    data
+}
+
 /// The process service of RuntimeManager: what other process parts (and the
 /// `runtime` methods) call.
 pub struct RuntimeService {
@@ -582,10 +605,46 @@ pub struct RuntimeService {
     ctx: Ctx,
     stop: CancellationToken,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// One name per committed change of a runtime or of its connection row:
+    /// `runtime.watch` reads it (design §10).
+    changes: broadcast::Sender<&'static str>,
+    /// The open `runtime.watch` calls of this generation, one per connection.
+    watchers: Mutex<HashMap<String, Arc<Watch>>>,
 }
 impl RuntimeService {
     fn index(kind: Kind) -> usize {
         kind as usize
+    }
+    /// Announces one runtime's committed change to the connections watching.
+    fn changed(&self, name: &'static str) {
+        let _ = self.changes.send(name);
+    }
+    /// Registers this connection's watch, ending the one it replaces: one
+    /// watch per connection.
+    fn register(&self, connection: &str) -> Arc<Watch> {
+        let watch = Arc::new(Watch {
+            connection: connection.to_owned(),
+            takeover: CancellationToken::new(),
+        });
+        let previous = self
+            .watchers
+            .lock()
+            .unwrap()
+            .insert(connection.to_owned(), watch.clone());
+        if let Some(previous) = previous {
+            previous.takeover.cancel();
+        }
+        watch
+    }
+    /// Removes this call's watch, unless a later one replaced it.
+    fn forget(&self, watch: &Arc<Watch>) {
+        let mut watchers = self.watchers.lock().unwrap();
+        if watchers
+            .get(&watch.connection)
+            .is_some_and(|current| Arc::ptr_eq(current, watch))
+        {
+            watchers.remove(&watch.connection);
+        }
     }
     /// Every runtime's status.
     pub fn list(&self) -> Vec<RuntimeEntry> {
@@ -677,20 +736,47 @@ impl RuntimeService {
 
     /// Provides `kind`'s launch command; a tool that launches no runtime has
     /// none, so an acquisition leaves it installed.
-    fn provide(&self, kind: Kind) -> State {
+    fn provide(self: &Arc<Self>, kind: Kind) -> State {
         if !kind.launches_runtime() {
             return State::Installed;
         }
         let runtime = self.local.lock().unwrap()[Self::index(kind)]
             .clone()
             .expect("a launching kind has a launch command");
+        // Subscribed before the row starts: its first state is then a change.
+        let status = runtime.launch.status().subscribe();
         match self
             .ctx
             .provide_at(runtime.command.clone(), runtime.launch.clone())
         {
-            Ok(provided) => State::Provided(Some(provided)),
+            Ok(provided) => {
+                self.forward_status(kind, status);
+                State::Provided(Some(provided))
+            }
             Err(error) => State::Failed(error.to_string()),
         }
+    }
+
+    /// Forwards every state the row writes to the change signal. The cell
+    /// belongs to the command, so it serves every generation that command
+    /// starts; the task ends with this generation.
+    fn forward_status(self: &Arc<Self>, kind: Kind, mut status: watch::Receiver<RuntimeState>) {
+        let service = self.clone();
+        let stop = self.stop.clone();
+        let forwarded = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    changed = status.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        service.changed(kind.name());
+                    }
+                }
+            }
+        });
+        self.tasks.lock().unwrap().push(forwarded);
     }
 
     /// Turns `kind` on and applies the configuration in effect. It reads
@@ -765,6 +851,7 @@ impl RuntimeService {
         if matches!(step, Step::Busy) {
             return Ok(());
         }
+        self.changed(kind.name());
         let service = self.clone();
         match step {
             Step::Busy | Step::Keep => Ok(()),
@@ -775,6 +862,7 @@ impl RuntimeService {
                         .await
                         .unwrap_or_else(|| State::Acquiring);
                     service.states.lock().unwrap()[index] = state;
+                    service.changed(kind.name());
                 });
                 self.tasks.lock().unwrap().push(task);
                 Ok(())
@@ -795,6 +883,7 @@ impl RuntimeService {
                         service.provide(kind)
                     };
                     service.states.lock().unwrap()[index] = state;
+                    service.changed(kind.name());
                 });
                 self.tasks.lock().unwrap().push(task);
                 Ok(())
@@ -849,6 +938,7 @@ impl RuntimeService {
         std::fs::write(&partial, bytes)
             .and_then(|()| std::fs::rename(&partial, &path))
             .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.changed(kind.name());
         self.install(kind)
     }
 
@@ -1570,6 +1660,8 @@ impl DynPlugin for RuntimeManagerPlugin {
                 ctx: ctx.clone(),
                 stop: CancellationToken::new(),
                 tasks: Mutex::new(Vec::new()),
+                changes: broadcast::channel(64).0,
+                watchers: Mutex::new(HashMap::new()),
             });
             let owned = service.clone();
             ctx.effect(move || async move {
@@ -1589,17 +1681,57 @@ impl DynPlugin for RuntimeManagerPlugin {
                     MethodDecl::new("runtime.list", false, Interruption::Report),
                     MethodDecl::new("runtime.install", true, Interruption::Report),
                     MethodDecl::new("runtime.configure", true, Interruption::Report),
+                    MethodDecl {
+                        progress: true,
+                        ..MethodDecl::new("runtime.watch", false, Interruption::Report)
+                    },
                 ],
-                Arc::new(move |call, _stopping, _| {
+                Arc::new(move |call, stopping, progress| {
                     let MethodCall {
                         method,
                         params: value,
-                        ..
+                        origin,
                     } = call;
                     let service = handler.clone();
                     Box::pin(async move {
                         match method.as_str() {
                             "runtime.list" => reply(service.list()),
+                            "runtime.watch" => {
+                                let Some(caller) = origin.caller else {
+                                    return reply(Value::Object(Map::new()));
+                                };
+                                let mut changes = service.changes.subscribe();
+                                let watch = service.register(caller.id());
+                                let mut watching = Map::new();
+                                watching.insert("kind".into(), Value::from("watching"));
+                                progress.send(watch_item(0, watching));
+                                let closed = caller.closed();
+                                tokio::pin!(closed);
+                                let mut seq = 1u64;
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        _ = watch.takeover.cancelled() => break,
+                                        _ = stopping.cancelled() => break,
+                                        _ = &mut closed => break,
+                                        change = changes.recv() => match change {
+                                            Ok(name) => {
+                                                progress.send(watch_item(seq, runtime_item(name)));
+                                                seq += 1;
+                                            }
+                                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                                for kind in Kind::ALL {
+                                                    progress.send(watch_item(seq, runtime_item(kind.name())));
+                                                    seq += 1;
+                                                }
+                                            }
+                                            Err(broadcast::error::RecvError::Closed) => break,
+                                        },
+                                    }
+                                }
+                                service.forget(&watch);
+                                reply(Value::Object(Map::new()))
+                            }
                             "runtime.install" => {
                                 #[derive(Deserialize)]
                                 struct Install {
