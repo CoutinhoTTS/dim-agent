@@ -226,3 +226,7 @@ RuntimeManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | 通用能力 | PluginManager 维护 `<home>/plugins/.python/<包名>` 链接，Python 行命名为 `py:<包名>.<入口>`（§4）；客户端的 install、enable 或 update 打开 Python 插件而 Python 关闭时调用 `RuntimeService::install("python")`，同样的调用适用于这些客户端调用中的 Node 插件，以及 PluginManager 对可选插件的后台重新获取；启动、所有者打开时的 reconcile、reload 与出厂状态的名字从不触发它。PluginManager 每次获取调用一次 `RuntimeService::installPackages(dir, cancel)`（§5）：该调用在 Node 关闭时打开 Node 并等待其获取，然后把插件的锁定 npm 依赖安装到暂存目录，之后才把目录改名到位；失败时 PluginManager 删除该目录。 |
 | 对序列、批次、中断、reload 的影响 | 对 Timeline 没有影响。 |
 | 所有者与 issue | PluginManager，[#3](https://github.com/arcships/dim/issues/3)。 |
+
+## 附录 A. 验收（M1）
+
+1. `scripts/release.test.mjs` 把一个 fixture 可选插件与一个默认插件并排暂存：可选插件的 `package.json` 与 `package-lock.json` 指名一个依赖，暂存的 `plugins/<name>/` 只有它的文件、没有 `node_modules`，从不为它运行 `npm ci`，而默认插件仍然运行自己的 `npm ci`。流程用 `PATH` 上的桩 `npm` 证明这一点：桩把它运行所在的目录追加到日志，并在那里创建 `node_modules`（`scripts/release.test.mjs:54-64`，脚本在 `:59`）；流程断言日志只出现默认插件的暂存目录、从不出现可选插件的目录——与现有 `npm ci: none` 流程在 `:122-123` 的观察方式相同。

@@ -50,6 +50,7 @@ runtime/plugins/light-ocr/
 - `package-lock.json` 用 npm `integrity` 锁定每个包，包括 facade 自身的锁定——runtime `0.1.9`、模型 `light-ocr-model-ppocrv6-small` `0.3.4` 与各平台包——因为 facade 把它们声明为自己的依赖。决定运行什么的是 lock，而不是版本范围，正如 `runtime/package-lock.json` 对运行时包的作用。
 - 升级 light-ocr 是一次 Dim 改动：本插件中的新 lock，像任何依赖变更一样评审。新发行带有新的 `version`：下次启动时已安装副本在后台重新获取，只有新副本就绪后才切换记录，旧副本在此之前继续服务（[PluginManager §3.1](PluginManager.md#31-启动)）。同一条路径通过 `plugin.update` 修复失败的重新获取；`@arcships/rutis` 与运行时不再匹配的插件也以同样方式被替换。
 - 随发行的目录不带 `node_modules`，也没有构建产物：`scripts/stage-plugins.mjs` 复制它但不运行 `npm ci`（[RuntimeManager §6](RuntimeManager.md#6-发布)）。安装时不运行任何包的 lifecycle 脚本，因为安装使用 `--ignore-scripts`。
+- 发行包既不携带 Node，也不携带任何引擎包：只有客户端的 `plugin.install`、`plugin.enable` 或 `plugin.update`——或已安装副本的后台重新获取——打开插件时，才经 RuntimeManager 获取 Node（[PluginManager §2.5](PluginManager.md#25-运行时)、[RuntimeManager §3.2](RuntimeManager.md#32-获取)）；引擎包只经 `npm ci` 进入用户的副本（[RuntimeManager §6](RuntimeManager.md#6-发布)）。从不安装该插件的用户不会为它下载任何东西。
 
 ## 3. 行与 `ocrHelper`
 
@@ -228,3 +229,4 @@ lock 以 `integrity` 锁定 facade、它的 runtime、模型与平台包，以�
 6. macOS 上 `confined: true`；Windows 与没有 `bubblewrap` 的 Linux 上 `confined: false`。
 7. 新发行的副本在下次启动时把已安装插件后台重新获取到新的 `<version>+<suffix>` 目录：只有新副本就绪后才切换记录与 `dir`，旧副本继续服务并留在磁盘上直到下次启动的清理，目标无需再 `enable` 一次即可继续工作；失败的重新获取保留旧副本，并在 `plugin.list` 中显示，直到 `plugin.update` 修复。
 8. 仓库中没有任何测试会下载、安装或加载真实引擎；fixture 引擎与桩 `ocrHelper` 提供方覆盖 Modality 的流程。
+9. 在暂存的发行包中，`plugins/light-ocr/` 恰好只有五个随发行文件——`dim-plugin.json`、`index.ts`、`helper.cjs`、`package.json`、`package-lock.json`——没有 `node_modules`，且发行包中不含 Node 安装。
