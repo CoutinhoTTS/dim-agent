@@ -64,19 +64,40 @@ pub(crate) struct HostTargetSpec {
     pub provider_id: &'static str,
     pub model_id: &'static str,
 }
-/// The host targets this build runs, beside the catalog they serve.
-pub(crate) const HOST_TARGETS: &[HostTargetSpec] = &[HostTargetSpec {
+/// The build's own OCR target.
+pub(crate) const APPLE_VISION_TARGET: HostTargetSpec = HostTargetSpec {
     category: "ocr",
     operation: "recognize",
     provider_id: dim_ocr::APPLE_VISION_PROVIDER,
     model_id: dim_ocr::APPLE_VISION_MODEL,
-}];
+};
+/// The OCR target a plugin supplies through `ocrHelper` (A.2.1).
+pub(crate) const PLUGIN_OCR_TARGET: HostTargetSpec = HostTargetSpec {
+    category: "ocr",
+    operation: "recognize",
+    provider_id: dim_ocr::PLUGIN_PROVIDER,
+    model_id: dim_ocr::PLUGIN_MODEL,
+};
+/// The host targets this build runs, beside the catalog they serve.
+pub(crate) const HOST_TARGETS: &[HostTargetSpec] = &[APPLE_VISION_TARGET, PLUGIN_OCR_TARGET];
 
-/// The host target an operation runs, if this build runs it itself.
-pub(crate) fn host_target(category: &str, operation: &str) -> Option<&'static HostTargetSpec> {
+/// The host targets an operation runs, if this build runs it itself.
+pub(crate) fn host_target(category: &str, operation: &str) -> Option<&'static [HostTargetSpec]> {
     HOST_TARGETS
         .iter()
-        .find(|target| target.category == category && target.operation == operation)
+        .any(|target| target.category == category && target.operation == operation)
+        .then_some(HOST_TARGETS)
+}
+
+/// The host target `model` names for this operation, if any.
+pub(crate) fn host_target_for(
+    category: &str,
+    operation: &str,
+    model: &ModelId,
+) -> Option<&'static HostTargetSpec> {
+    host_target(category, operation)?
+        .iter()
+        .find(|target| target.provider_id == model.provider_id && target.model_id == model.model_id)
 }
 
 /// The adapter service Modality reads per call. A missing service is an
@@ -394,11 +415,63 @@ pub(crate) struct Evaluation {
     /// The helper this build starts for its host targets; the product's
     /// installer passes its own executable.
     ocr_helper: Option<PathBuf>,
+    /// The plugin-supplied target as this call read it (A.2.1).
+    pp_ocr: PluginTargetState,
+}
+
+/// The plugin-supplied OCR target as one call reads it: absent (no service,
+/// a failed or null `describe`), present with another contract, or ready.
+pub(crate) enum PluginTargetState {
+    Absent,
+    Outdated,
+    Ready(dim_ocr::HelperDescription),
+}
+impl PluginTargetState {
+    /// Why the target cannot run, or `None` when it is ready.
+    fn reason(&self) -> Option<Reason> {
+        match self {
+            Self::Absent => Some(reason("runtime", "The PP-OCR plugin is not running")),
+            Self::Outdated => Some(reason("runtime", "The PP-OCR plugin needs an update")),
+            Self::Ready(_) => None,
+        }
+    }
+}
+
+/// Reads `ocrHelper.describe` once for this call (A.2.1). A missing service,
+/// a failed call, a reply that is not the description shape, or a description
+/// naming another target is absent; another contract is outdated.
+pub(crate) async fn plugin_target_state(ctx: &Ctx) -> PluginTargetState {
+    use rutis_bridge::session::{HostDispatch, Value as ServiceValue, host_key, settle};
+    let Some(service) = ctx.get_at::<dyn HostDispatch>(&host_key("ocrHelper")) else {
+        return PluginTargetState::Absent;
+    };
+    let Ok(reply) = service.invoke("describe", ServiceValue::List(Vec::new())) else {
+        return PluginTargetState::Absent;
+    };
+    let Ok(value) = settle(reply).await else {
+        return PluginTargetState::Absent;
+    };
+    let Ok(json) = value.json() else {
+        return PluginTargetState::Absent;
+    };
+    if json.is_null() {
+        return PluginTargetState::Absent;
+    }
+    match serde_json::from_value::<dim_ocr::HelperDescription>(json) {
+        Ok(description) if description.names_plugin_target() => {
+            if description.contract == dim_ocr::HELPER_CONTRACT {
+                PluginTargetState::Ready(description)
+            } else {
+                PluginTargetState::Outdated
+            }
+        }
+        _ => PluginTargetState::Absent,
+    }
 }
 impl Evaluation {
-    /// Why a host target cannot run here, or `None` when it can (decision 4):
-    /// `platform` for a host without Apple Vision, `build` for a build that
-    /// starts no helper or holds no host platform.
+    /// Why the build's own host target cannot run here, or `None` when it can
+    /// (decision 4): `platform` for a host without Apple Vision, `build` for a
+    /// build that starts no helper or holds no host platform.
     pub(crate) fn host_reason(&self) -> Option<Reason> {
         if !dim_ocr::apple_vision_available() {
             return Some(reason(
@@ -413,6 +486,55 @@ impl Evaluation {
             return Some(reason("build", "The host platform is unavailable"));
         }
         None
+    }
+    /// Why the plugin-supplied target cannot run, or `None` when it is ready.
+    pub(crate) fn plugin_reason(&self) -> Option<Reason> {
+        self.pp_ocr.reason()
+    }
+    /// Why `model` cannot run as one of this build's host targets; `None`
+    /// when it is not a host target or is ready.
+    pub(crate) fn host_target_reason(&self, model: &ModelId) -> Option<Reason> {
+        if model.provider_id == dim_ocr::APPLE_VISION_PROVIDER
+            && model.model_id == dim_ocr::APPLE_VISION_MODEL
+        {
+            return self.host_reason();
+        }
+        if model.provider_id == dim_ocr::PLUGIN_PROVIDER && model.model_id == dim_ocr::PLUGIN_MODEL
+        {
+            return self.plugin_reason();
+        }
+        None
+    }
+    /// The options one host operation offers: the build's own target when it
+    /// can run here, and the plugin-supplied target when it is ready or
+    /// present with another contract (then listed unavailable with its
+    /// reason); an absent plugin target is not listed (A.2.1, decision 4).
+    fn host_options(&self) -> Vec<OptionSnapshot> {
+        let mut options = Vec::new();
+        if self.host_reason().is_none() {
+            options.push(OptionSnapshot {
+                provider_id: dim_ocr::APPLE_VISION_PROVIDER.into(),
+                model_id: dim_ocr::APPLE_VISION_MODEL.into(),
+                available: true,
+                reason: None,
+            });
+        }
+        match &self.pp_ocr {
+            PluginTargetState::Ready(_) => options.push(OptionSnapshot {
+                provider_id: dim_ocr::PLUGIN_PROVIDER.into(),
+                model_id: dim_ocr::PLUGIN_MODEL.into(),
+                available: true,
+                reason: None,
+            }),
+            PluginTargetState::Outdated => options.push(OptionSnapshot {
+                provider_id: dim_ocr::PLUGIN_PROVIDER.into(),
+                model_id: dim_ocr::PLUGIN_MODEL.into(),
+                available: false,
+                reason: self.plugin_reason(),
+            }),
+            PluginTargetState::Absent => {}
+        }
+        options
     }
 
     fn adapter_available(&self) -> bool {
@@ -508,20 +630,11 @@ impl Evaluation {
     /// rejects is still offered when the adapter serves it. The persisted
     /// default follows when it is no longer an option.
     fn options(&self, category: &str, row: &OperationRow) -> Vec<OptionSnapshot> {
-        let mut options: Vec<OptionSnapshot> = if let Some(target) =
-            host_target(category, row.operation)
-        {
+        let mut options: Vec<OptionSnapshot> = if host_target(category, row.operation).is_some() {
             // A host target this platform or build cannot run is absent, never
-            // an unavailable option (decision 4).
-            match self.host_reason() {
-                Some(_) => Vec::new(),
-                None => vec![OptionSnapshot {
-                    provider_id: target.provider_id.into(),
-                    model_id: target.model_id.into(),
-                    available: true,
-                    reason: None,
-                }],
-            }
+            // an unavailable option; a plugin target another contract supplies
+            // is listed with its reason (A.2.1, decision 4).
+            self.host_options()
         } else if is_understand(category, row.operation) {
             self.selectable
                 .iter()
@@ -596,18 +709,18 @@ impl Evaluation {
                 ),
             };
         }
-        if let Some(target) = host_target(category, operation) {
-            if model.provider_id != target.provider_id || model.model_id != target.model_id {
+        if host_target(category, operation).is_some() {
+            if host_target_for(category, operation, model).is_none() {
                 return reason(
                     "configuration",
                     format!("The model does not declare {name}"),
                 );
             }
-            // The configured model is the host target itself: the operation's
-            // own reason is the answer when it cannot run here. An available
-            // target is never refused, so when there is no reason the shared
+            // The configured model is a host target itself: that target's own
+            // reason is the answer when it cannot run here. An available target
+            // is never refused, so when there is no reason the shared
             // vocabulary below answers for an unavailable model.
-            if let Some(reason) = self.host_reason() {
+            if let Some(reason) = self.host_target_reason(model) {
                 return reason;
             }
         }
@@ -651,9 +764,17 @@ impl Evaluation {
                 true => (true, vec![]),
             }
         } else if host_target(category, row.operation).is_some() {
-            match self.host_reason() {
-                Some(reason) => (false, vec![reason]),
-                None => (true, vec![]),
+            if served {
+                (true, vec![])
+            } else {
+                let mut reasons = Vec::new();
+                if let Some(reason) = self.host_reason() {
+                    reasons.push(reason);
+                }
+                if let Some(reason) = self.plugin_reason() {
+                    reasons.push(reason);
+                }
+                (false, reasons)
             }
         } else if category == "image" {
             let detail = if self.has_adapter() {
@@ -832,6 +953,7 @@ pub(crate) async fn evaluate(
                 .get::<dim_agent_capabilities::host_platform::HostPlatform>()
                 .is_some(),
             ocr_helper: ocr_helper.map(|path| path.to_owned()),
+            pp_ocr: plugin_target_state(ctx).await,
         },
     ))
 }

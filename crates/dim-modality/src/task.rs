@@ -96,6 +96,10 @@ pub enum Executor {
     Host {
         node: Option<String>,
         target: HostTarget,
+        /// Whether the helper ran under confinement: `true` or `false` once
+        /// it started, absent while the task has not run (A.4, A14).
+        #[serde(default)]
+        confined: Option<bool>,
     },
 }
 

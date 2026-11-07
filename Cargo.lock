@@ -1334,6 +1334,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "rutis",
+ "rutis-bridge",
  "serde",
  "serde_json",
  "sha2",
