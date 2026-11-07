@@ -33,6 +33,7 @@ pub mod settings;
 pub mod settings_methods;
 mod skills_management;
 pub mod storage;
+mod storage_methods;
 mod transport;
 mod tree_protocol;
 pub mod ui_extensions;
@@ -693,6 +694,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             builder.catalog(),
             move |_| Ok(Box::new(storage::SqliteStoragePlugin::new(path.clone()))),
         )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(storage_methods::StorageMethodsPlugin::new(names)?))
+        })?);
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),

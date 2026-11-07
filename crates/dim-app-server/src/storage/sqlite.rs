@@ -2,6 +2,7 @@ use dim_agent_runtime::{AgentError, Result, panic_message};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
+use serde::Serialize;
 use std::{
     fs::File,
     io::Write,
@@ -987,9 +988,30 @@ impl SqliteStorage {
         }
     }
     fn wal_bytes(&self) -> u64 {
-        let mut path = self.path.as_os_str().to_os_string();
-        path.push("-wal");
-        std::fs::metadata(path).map_or(0, |meta| meta.len())
+        file_bytes(&wal_path(&self.path))
+    }
+
+    /// The bytes of the store's own files, and the space an offline `VACUUM`
+    /// returns: the free pages of the database as it was last committed.
+    pub(crate) async fn storage_report(self: &Arc<Self>) -> Result<StorageReport> {
+        let (page_size, free_pages) = self
+            .run_read(|connection| {
+                let page_size: i64 = connection
+                    .query_row("PRAGMA page_size", [], |row| row.get(0))
+                    .map_err(storage)?;
+                let free_pages: i64 = connection
+                    .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+                    .map_err(storage)?;
+                Ok((page_size, free_pages))
+            })
+            .await?;
+        Ok(StorageReport {
+            database_bytes: file_bytes(&self.path),
+            wal_bytes: self.wal_bytes(),
+            reclaimable_bytes: u64::try_from(page_size)
+                .unwrap_or(0)
+                .saturating_mul(u64::try_from(free_pages).unwrap_or(0)),
+        })
     }
 
     pub async fn close(self: &Arc<Self>) -> Result<()> {
@@ -1072,6 +1094,16 @@ pub struct Vacuumed {
     pub after: u64,
 }
 
+/// What `storage.report` answers (`native-storage-format.md`): the store's own
+/// files and the space an offline `VACUUM` returns.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageReport {
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
+    pub reclaimable_bytes: u64,
+}
+
 /// Reclaims free pages in an existing store by rewriting it with `VACUUM`
 /// (#600). It takes the same lease as `open`, so a running daemon makes it
 /// fail, and it requires the current format's exact schema: it never creates
@@ -1134,14 +1166,18 @@ pub fn vacuum_store(path: PathBuf) -> Result<Vacuumed> {
     })
 }
 
-fn store_bytes(path: &Path) -> u64 {
+fn wal_path(path: &Path) -> PathBuf {
     let mut wal = path.as_os_str().to_os_string();
     wal.push("-wal");
-    [path, Path::new(&wal)]
-        .into_iter()
-        .filter_map(|path| std::fs::metadata(path).ok())
-        .map(|meta| meta.len())
-        .sum()
+    PathBuf::from(wal)
+}
+
+fn file_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |meta| meta.len())
+}
+
+fn store_bytes(path: &Path) -> u64 {
+    file_bytes(path) + file_bytes(&wal_path(path))
 }
 
 pub struct SqliteStoragePlugin {
