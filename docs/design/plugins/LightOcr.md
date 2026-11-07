@@ -129,7 +129,7 @@ Enabling Core ML later requires two things: a measured confined run of the Core 
 
 - One helper process per task, started when the task starts and killed on cancel, on timeout, on Modality's unload and on process exit. No OCR state survives a task; a restart interrupts a running task as any host task (Modality §A.6).
 - Concurrency is Modality's: at most 4 running OCR tasks per category. Each is one process with its own engine, so two helpers share nothing but the CPU.
-- The row has no work in flight: a reload, an update, a re-acquisition or an uninstall of the plugin affects only later calls. A task keeps the description it read at its start, and PluginManager deletes no installed copy while the process runs ([PluginManager §7](PluginManager.md#7-security)), so the directory that description names exists until the process exits. If that copy is nevertheless unreadable when the helper starts — for example, a user deleted it by hand — the helper fails at load, the task settles `local_runtime_failed` as an unexpected helper exit, and its work directory is removed.
+- The row has no work in flight: a reload, an update, a re-acquisition or an uninstall of the plugin affects only later calls. A task keeps the description it read at its start, and PluginManager deletes no installed copy while the process runs ([PluginManager §7](PluginManager.md#7-security)), so the directory that description names exists until the process exits. If that copy is nevertheless unreadable when the helper starts — for example, a user deleted it by hand — the spawn refuses the vanished path, the task settles `executor_error`, and its work directory is removed.
 - Uninstalling the plugin therefore affects later calls, not tasks already admitted: its copy is left in place, and the next start's cleanup deletes it ([PluginManager §3.1](PluginManager.md#31-startup)). That costs disk — for light-ocr, a replaced copy is about 124 MB, held until the next start.
 
 ## 7. Security
@@ -180,7 +180,7 @@ HostPlatform's `spawn_confined` with `Confinement` already exists; this plugin a
 - **Input.** One regular file, at most 100 MiB, PNG, JPEG or PDF by its first bytes. The declared media type is never used.
 - **Directories.** The helper creates nothing outside `--artifacts`; Modality creates that directory inside the task's work directory.
 - **Artifacts.** `result.json` (always), `text.txt` (always), `page-NNNN.png` (layout mode, one per rendered PDF page, `NNNN` zero-padded to four digits). Every name is one component.
-- **Exit.** 0 with `{"ok": true, "pageCount": N}`; 2 with `{"ok": false, "error": {"code", "message"}}`; any other code is a failure, and Modality reports `local_runtime_failed`.
+- **Exit.** 0 with `{"ok": true, "pageCount": N}`; 2 with `{"ok": false, "error": {"code", "message"}}`; any other code is a failure, and Modality reports the task's `executor_error`.
 - **Limits.** 500 pages, 25,000,000 pixels per page, 100 MiB input, 1 GiB of artifacts per task.
 - **No state.** One process, one task, no cache and no lock file. The engine is closed before exit.
 

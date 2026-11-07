@@ -129,7 +129,7 @@ CPU 路径已在 `HostPlatform::spawn_confined` 于 macOS arm64 构建的配置�
 
 - 每个任务一个 helper 进程，任务开始时启动，取消、超时、Modality 卸载与进程退出时杀死。任务之间没有 OCR 状态；重启像任何宿主任务一样中断运行中的任务（Modality §A.6）。
 - 并发由 Modality 决定：每个类别至多 4 个运行中的 OCR 任务。每个都是带自己引擎的进程，因此两个 helper 除了 CPU 之外不共享任何东西。
-- 行没有在途工作：重载、更新、重新获取或卸载插件都只影响之后的调用。任务保留它开始时读到的描述，而 PluginManager 在进程运行期间不删除任何已安装副本（[PluginManager §7](PluginManager.md#7-安全)），因此描述所指名的目录会存在到进程退出。若该副本在 helper 启动时仍然不可读——例如用户手工删除了它——helper 在加载时失败，任务按意外的 helper 退出结算为 `local_runtime_failed`，其工作目录被删除。
+- 行没有在途工作：重载、更新、重新获取或卸载插件都只影响之后的调用。任务保留它开始时读到的描述，而 PluginManager 在进程运行期间不删除任何已安装副本（[PluginManager §7](PluginManager.md#7-安全)），因此描述所指名的目录会存在到进程退出。若该副本在 helper 启动时仍然不可读——例如用户手工删除了它——spawn 会拒绝该已消失的路径，任务结算为 `executor_error`，其工作目录被删除。
 - 因此卸载插件影响的是之后的调用，而不是已接纳的任务：它的副本留在原处，由下次启动的清理删除（[PluginManager §3.1](PluginManager.md#31-启动)）。代价是磁盘——对 light-ocr 而言，一个被替换的副本约 124 MB，保留到下次启动。
 
 ## 7. 安全
@@ -180,7 +180,7 @@ HostPlatform 的 `spawn_confined` 与 `Confinement` 已存在；本插件对它�
 - **输入。** 一个普通文件，至多 100 MiB，按前几个字节判断为 PNG、JPEG 或 PDF。声明的媒体类型从不使用。
 - **目录。** helper 不在 `--artifacts` 之外创建任何东西；Modality 在任务工作目录内创建该目录。
 - **产物。** `result.json`（总是）、`text.txt`（总是）、`page-NNNN.png`（`layout` 模式，每个渲染的 PDF 页面一个，`NNNN` 补零到四位）。每个名字都是单个组件。
-- **退出。** 0 并打印 `{"ok": true, "pageCount": N}`；2 并打印 `{"ok": false, "error": {"code", "message"}}`；其他任何 code 都是失败，Modality 报告 `local_runtime_failed`。
+- **退出。** 0 并打印 `{"ok": true, "pageCount": N}`；2 并打印 `{"ok": false, "error": {"code", "message"}}`；其他任何 code 都是失败，Modality 报告任务的 `executor_error`。
 - **上限。** 500 页、每页 25,000,000 像素、输入 100 MiB、每任务 1 GiB 产物。
 - **无状态。** 一个进程、一个任务，没有缓存，没有锁文件。退出前关闭引擎。
 
