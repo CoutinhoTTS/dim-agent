@@ -111,7 +111,7 @@ Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginMana
   "python": { "source": "download", "version": "3.12.15+20261003", "sha256": "…", "packages": "python-packages-…" } }
 ```
 
-只由 RuntimeManager 在运行时和它的包装好之后写。`version` 对 `download` 是固定的版本；对 `system` 是解释器的版本，每次启动都检查，`runtime.list` 报告的也是它。`sha256` 是压缩包校验时用的官方 SHA-256。某一项的 source、version、packages 与固定版本和配置算出的一致、且对应目录存在，就是已安装：下次启动直接用，不再下载。`auto: false` 的运行时有记录，表示用户装过它。别的都不存；运行时是否在运行是它的连接的 `RuntimeStatus`。
+只由 RuntimeManager 在运行时和它的包装好之后写。`version` 对 `download` 是固定的版本；对 `system` 是解释器的版本，每次启动都检查，`runtime.list` 报告的也是它。`sha256` 是压缩包校验时用的官方 SHA-256。某一项的 source、version、packages 与固定版本和配置算出的一致、且对应目录存在，就是已安装：下次启动直接用，不再下载。`auto: false` 的运行时有记录，表示用户装过它。记录也是 `runtime.list` 的 `path` 反映的东西：记录的该项在正在生效的 plan 下是已安装时，运行时才报告它的解释器路径。别的都不存；运行时是否在运行是它的连接的 `RuntimeStatus`。
 
 ## 3. 流程
 
@@ -163,7 +163,7 @@ rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.imp
 | 启动命令 | `nodeRuntime`、`pythonRuntime`：连接行 `session-node` 和 `py` 注入的只在 Rust 里的进程服务；运行时获取后提供。 |
 | `RuntimeStatus` | 每个连接行在以行名命名的只在 Rust 里的进程键上维护：`starting`、`ready`，或带原因的 `down`。RuntimeManager 读取它。 |
 | `RuntimeService`（Rust 进程服务） | `list() -> [RuntimeEntry]`；`install(name)`：开启运行时并开始获取；正在获取或正在运行时什么都不做；获取失败后再获取一次；连接 `down` 后重新提供启动命令。用可选依赖读取，所以 RuntimeManager reload 不会让调用方 reload。 |
-| `runtime.list`（管理方法） | `[{name, source, auto, version, status, reason?}]`；`auto` 是正在生效的配置，客户端因此不必自己存一份；`status` 是 `off`、`acquiring`、`failed`，或提供启动命令后连接的 `RuntimeStatus`：`starting`（连接行还没启动时也是）、`ready`，或带原因的 `down`。 |
+| `runtime.list`（管理方法） | `[{name, source, auto, version, path?, status, reason?}]`；`auto` 是正在生效的配置，客户端因此不必自己存一份；`path` 是该运行时所用解释器的绝对路径，只在 §2.4 的记录按正在生效的 plan 判定为已安装时出现——与跳过下载是同一条判断——路径不是合法 UTF-8 时省略，并由 `reason` 说明；`status` 是 `off`、`acquiring`、`failed`，或提供启动命令后连接的 `RuntimeStatus`：`starting`（连接行还没启动时也是）、`ready`，或带原因的 `down`。 |
 | `runtime.install {name}`（管理方法，有修改） | `RuntimeService::install`：重读配置，`source` 变化时通过重启连接行应用（§3.3），并立即回复当前状态；配置无法读取时该调用以 `runtime_configuration` 错误返回。 |
 | `runtime.configure {name, source?, auto?}`（管理方法，有修改） | 原子地写 `<home>/runtimes/config.json`，按运行时、按字段覆盖预置（§2.2），随后按 `runtime.install` 的方式应用；写不出或读不出时该调用以 `runtime_configuration` 错误返回。该运行时正在获取时拒绝，因为获取过程中它的 plan 不能变（§3.1）。 |
 | 客户端 | 两种终端模式下的 `/runtime`（面板，以及打字的 `/runtime install|source|auto`），以及 `dimcode runtime list`、`install <node|python>` 和 `config NAME [--source …] [--auto …]`（[CLI 命令](../../../zh/design/cli-commands.md#插件运行时)）。 |

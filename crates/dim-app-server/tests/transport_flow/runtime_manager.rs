@@ -3,7 +3,10 @@
 //! keep the interpreters off the network; the pinned packages are installed
 //! for real (`npm ci`, `pip install --require-hashes`).
 use super::*;
-use dim_app_server::{runtime_manager::Runtimes, session_typescript::SessionTypeScriptConfig};
+use dim_app_server::{
+    runtime_manager::{Kind, Runtimes},
+    session_typescript::SessionTypeScriptConfig,
+};
 use std::path::{Path, PathBuf};
 
 /// The `runtime.list` entry of `runtime` once its status is `status`.
@@ -32,6 +35,203 @@ async fn appears(path: &Path) {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// The unpacked archive directory holding `interpreter` (RuntimeManager
+/// §2.3): `bin/<name>` inside it, or the executable beside it on Windows.
+fn archive_directory(interpreter: &Path) -> PathBuf {
+    let directory = interpreter.parent().expect("the interpreter's directory");
+    if cfg!(windows) {
+        directory.to_owned()
+    } else {
+        directory
+            .parent()
+            .expect("the archive directory")
+            .to_owned()
+    }
+}
+
+/// The first `program` on this process's `PATH`: the interpreter a `system`
+/// source resolves to (§2.2).
+fn on_path(program: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").expect("a PATH"))
+        .map(|directory| directory.join(program))
+        .find(|path| path.is_file())
+        .expect("the program is on PATH")
+}
+
+/// `runtime.list` reports an interpreter only while the record marks the
+/// runtime installed under the plan in effect (§2.4, §5), the same test that
+/// skips a download. Nothing is acquired here: the record and the directories
+/// it names are written by the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runtime_list_reports_a_path_only_while_its_record_matches_the_plan() {
+    let home = PathBuf::from("/tmp").join(format!("drm-path-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = home.join("default-plugins.json");
+    std::fs::write(
+        &defaults,
+        r#"{"runtimes": {"node": {"source": "download", "auto": false},
+                         "python": {"source": "download", "auto": false}}}"#,
+    )
+    .unwrap();
+    let runtimes = Arc::new(
+        Runtimes::load(
+            &home,
+            &dim_app_server::plugin_manager::Defaults::read(&defaults)
+                .unwrap()
+                .runtimes,
+            None,
+        )
+        .unwrap(),
+    );
+    let node = runtimes.plan(Kind::Node).clone();
+    std::fs::create_dir_all(&node.packages).unwrap();
+    std::fs::create_dir_all(archive_directory(&node.interpreter)).unwrap();
+    let packages = node.packages.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        home.join("runtimes/runtimes.json"),
+        json!({"node": {"source": "download", "version": &node.version, "packages": packages}})
+            .to_string(),
+    )
+    .unwrap();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_ok(&listed);
+    assert_eq!(
+        listed["result"][0]["path"],
+        node.interpreter.to_str().unwrap(),
+        "the installed runtime reports the interpreter it runs with: {listed}"
+    );
+    assert!(
+        listed["result"][1]["path"].is_null(),
+        "a runtime nothing resolved reports no path: {listed}"
+    );
+
+    std::fs::write(
+        home.join("runtimes/runtimes.json"),
+        json!({"node": {"source": "system", "version": node.version, "packages": packages}})
+            .to_string(),
+    )
+    .unwrap();
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_ok(&listed);
+    assert_eq!(listed["result"][0]["version"], node.version, "{listed}");
+    assert!(
+        listed["result"][0]["path"].is_null(),
+        "a record that is not this plan's reports no path: {listed}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A relative search-path entry (§5): `which` resolves it against the daemon's
+/// working directory, so `runtime.list` reports the absolute interpreter path
+/// that a process started from another working directory can launch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
+    let home = std::env::temp_dir().join(format!("drm-relative-{}", uuid::Uuid::new_v4()));
+    let fixture = home.join("system-node");
+    let bin = fixture.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let node = bin.join("node");
+    std::fs::write(
+        &node,
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo v22.19.0\nexit 0\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(fixture.join("lib/node_modules/npm/bin")).unwrap();
+    std::fs::write(fixture.join("lib/node_modules/npm/bin/npm-cli.js"), "").unwrap();
+
+    // The interpreter's directory as a relative entry, built from the current
+    // directory so no flow has to change it: one `..` per component of the
+    // current directory reaches the root, then the directory's path follows.
+    let cwd = std::env::current_dir().unwrap();
+    let absolute = bin.canonicalize().unwrap();
+    let ups = cwd
+        .components()
+        .filter(|component| matches!(component, std::path::Component::Normal(_)))
+        .count();
+    let relative = PathBuf::from("../".repeat(ups)).join(absolute.strip_prefix("/").unwrap());
+    assert!(
+        !relative.is_absolute(),
+        "the entry is relative: {relative:?}"
+    );
+
+    let defaults = home.join("default-plugins.json");
+    std::fs::write(
+        &defaults,
+        r#"{"runtimes": {"node": {"source": "system", "auto": false},
+                         "python": {"source": "download", "auto": false}}}"#,
+    )
+    .unwrap();
+    let runtimes = Arc::new(
+        Runtimes::load(
+            &home,
+            &dim_app_server::plugin_manager::Defaults::read(&defaults)
+                .unwrap()
+                .runtimes,
+            Some(relative.into_os_string()),
+        )
+        .unwrap(),
+    );
+    std::fs::create_dir_all(&runtimes.plan(Kind::Node).packages).unwrap();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let install = client.rpc("runtime.install", json!({"name": "node"})).await;
+    assert_ok(&install);
+
+    let entry = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let list = client.rpc("runtime.list", json!({})).await;
+            assert_ok(&list);
+            if list["result"][0]["path"].is_string() {
+                return list["result"][0].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("runtime.list reported no path");
+
+    let path = entry["path"].as_str().unwrap();
+    assert!(
+        Path::new(path).is_absolute(),
+        "the reported interpreter path is absolute: {entry}"
+    );
+    assert_eq!(
+        Path::new(path).canonicalize().unwrap(),
+        node.canonicalize().unwrap(),
+        "the reported path names the fixture: {entry}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -83,6 +283,7 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -101,8 +302,17 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
     assert_ok(&list);
     assert_eq!(list["result"][0]["name"], "node");
     assert_eq!(list["result"][1]["status"], "off", "{list}");
+    assert!(
+        list["result"][1]["path"].is_null(),
+        "a runtime that is off resolved nothing: {list}"
+    );
     assert!(!python_marker.exists());
-    status(&mut client, 0, "ready").await;
+    let ready = status(&mut client, 0, "ready").await;
+    assert_eq!(
+        ready["path"],
+        on_path("node").to_str().unwrap(),
+        "the entry names the checked interpreter: {ready}"
+    );
 
     let pid = std::fs::read_to_string(&node_marker).unwrap();
     std::fs::remove_file(&node_marker).unwrap();
@@ -159,6 +369,7 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -211,6 +422,7 @@ async fn node_runtime_manager_reads_the_configuration_when_it_applies_it() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -337,6 +549,7 @@ async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -362,6 +575,10 @@ async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
         )
         .await;
     assert_ok(&switched);
+    assert!(
+        switched["result"]["path"].is_null(),
+        "the record of the source it left reports no path: {switched}"
+    );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     let after = loop {
         let seen = std::fs::read_to_string(&marker).unwrap_or_default();
@@ -378,6 +595,14 @@ async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
     let ready = status(&mut client, 0, "ready").await;
     assert_eq!(ready["source"], "download", "{ready}");
     assert_eq!(ready["version"], "24.21.0", "{ready}");
+    let path = Path::new(ready["path"].as_str().expect("the resolved interpreter"));
+    assert!(path.is_absolute(), "{ready}");
+    assert_eq!(path.file_name().unwrap(), "node", "{ready}");
+    assert!(
+        path.starts_with(home.join("runtimes"))
+            && path.to_string_lossy().contains("node-v24.21.0-"),
+        "the acquired archive's interpreter: {ready}"
+    );
     let listed = client.rpc("runtime.list", json!({})).await;
     assert_eq!(
         listed["result"][1], python,
