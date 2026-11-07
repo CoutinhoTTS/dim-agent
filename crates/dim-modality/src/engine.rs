@@ -418,6 +418,7 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         files: Arc<PluginFileTransactions>,
         settings: Arc<SettingsService>,
