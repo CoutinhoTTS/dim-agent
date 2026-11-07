@@ -7,10 +7,10 @@ use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::{CatalogCapabilities, ModelId};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use dim_modality::{
-    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Clock,
-    InstallOptions, Job, JobFile, ModalityAdapter, ModalityAdapterService, PreflightHook,
-    ProgressSink, RealtimeConnection, RealtimeEnd, RealtimeEvent, RealtimeFrame, RealtimeLimits,
-    RealtimeOpened, RealtimeTransport, RemoteCancel, Submitted,
+    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, ArtifactHook,
+    Clock, InstallOptions, Job, JobFile, ModalityAdapter, ModalityAdapterService, ProgressSink,
+    RealtimeConnection, RealtimeEnd, RealtimeEvent, RealtimeFrame, RealtimeLimits, RealtimeOpened,
+    RealtimeTransport, RemoteCancel, Submitted,
 };
 use futures_util::{SinkExt, StreamExt};
 use rutis::Disposer;
@@ -4114,10 +4114,10 @@ async fn start_with_helper(home: std::path::PathBuf, helper: std::path::PathBuf)
     .await
 }
 
-async fn start_with_helper_and_preflight(
+async fn start_with_helper_and_hook(
     home: std::path::PathBuf,
     helper: std::path::PathBuf,
-    preflight: Arc<dyn PreflightHook>,
+    hook: Arc<dyn ArtifactHook>,
 ) -> RunningServer {
     let config = ServerConfig {
         product_home: Some(home.clone()),
@@ -4129,7 +4129,7 @@ async fn start_with_helper_and_preflight(
         config,
         Some(InstallOptions {
             ocr_helper: Some(helper),
-            preflight,
+            artifact: hook,
             ..Default::default()
         }),
         |_| {},
@@ -4343,8 +4343,15 @@ async fn helper_artifacts_that_are_not_regular_files_are_refused_without_blockin
             assert!(!text.contains("stolen"), "{name}: {text}");
         }
         let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
+        // Artifacts published before the refused one are discarded; the
+        // storage's own dot-directories are infrastructure, not results.
         let leftovers = std::fs::read_dir(&result_dir)
-            .map(|entries| entries.count())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                    .count()
+            })
             .unwrap_or(0);
         assert_eq!(leftovers, 0, "{name}: {leftovers} result files");
         if name == "fifo.png" {
@@ -4378,37 +4385,48 @@ async fn an_oversized_helper_result_is_refused_before_it_is_read() {
     );
     assert!(done["result"].is_null(), "no result is written");
     let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
+    // The small artifacts copied before the oversized page are discarded with
+    // it; the storage's own dot-directories are infrastructure, not results.
     let leftovers = std::fs::read_dir(&result_dir)
-        .map(|entries| entries.count())
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                .count()
+        })
         .unwrap_or(0);
     assert_eq!(leftovers, 0);
 }
 
-/// The preflight hook of the flow below: it records the sizes the host path
-/// counted, then replaces `result.json` and `page-0001.png` with different
-/// bytes under the same names. A copy by name would publish those; a copy from
-/// the counted readers publishes the recorded sizes.
-struct ReplaceAfterPreflight {
+/// The count hook of the flow below: after a work file is opened and counted,
+/// it records the size the count saw and, for `result.json` and
+/// `page-0001.png`, replaces that file under the same name. A copy from a
+/// second open would publish the replacement; a copy from the counted reader
+/// publishes the recorded size.
+struct ReplaceAfterCount {
     counted: Mutex<BTreeMap<String, u64>>,
 }
 
-impl PreflightHook for ReplaceAfterPreflight {
-    fn after_preflight(&self, work: &std::path::Path) {
-        let mut counted = self.counted.lock().unwrap();
-        for name in ["result.json", "text.txt", "page-0001.png"] {
-            if let Ok(metadata) = std::fs::metadata(work.join(name)) {
-                counted.insert(name.to_owned(), metadata.len());
-            }
-        }
+impl ArtifactHook for ReplaceAfterCount {
+    fn after_count(&self, work: &std::path::Path, name: &str) {
+        let Ok(metadata) = std::fs::metadata(work.join(name)) else {
+            return;
+        };
+        self.counted
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), metadata.len());
         let replacement = work.join("replacement.bin");
-        std::fs::write(
-            &replacement,
-            b"{\"text\":\"CHANGED\",\"pageCount\":1,\"pages\":[{\"page\":1,\"text\":\"CHANGED\",\"width\":10,\"height\":10,\"regions\":[]}]}",
-        )
-        .unwrap();
-        std::fs::rename(&replacement, work.join("result.json")).unwrap();
-        std::fs::write(&replacement, vec![b'X'; 100]).unwrap();
-        std::fs::rename(&replacement, work.join("page-0001.png")).unwrap();
+        match name {
+            "result.json" => std::fs::write(
+                &replacement,
+                b"{\"text\":\"CHANGED\",\"pageCount\":1,\"pages\":[{\"page\":1,\"text\":\"CHANGED\",\"width\":10,\"height\":10,\"regions\":[]}]}",
+            )
+            .unwrap(),
+            "page-0001.png" => std::fs::write(&replacement, vec![b'X'; 100]).unwrap(),
+            _ => return,
+        }
+        std::fs::rename(&replacement, work.join(name)).unwrap();
     }
 }
 
@@ -4416,10 +4434,10 @@ impl PreflightHook for ReplaceAfterPreflight {
 async fn the_host_path_publishes_the_bytes_the_cap_counted() {
     let home = home("dm-ocr");
     let helper = fake_helper(&home);
-    let hook = Arc::new(ReplaceAfterPreflight {
+    let hook = Arc::new(ReplaceAfterCount {
         counted: Mutex::new(BTreeMap::new()),
     });
-    let server = start_with_helper_and_preflight(home, helper, hook.clone()).await;
+    let server = start_with_helper_and_hook(home, helper, hook.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let task = submit_task(&mut client, ocr_submit("scan.png", "layout")).await;
     let task_id = task["task_id"].as_str().unwrap().to_owned();
@@ -4428,7 +4446,7 @@ async fn the_host_path_publishes_the_bytes_the_cap_counted() {
     let counted = hook.counted.lock().unwrap().clone();
     assert_eq!(counted["page-0001.png"], 3, "{counted:?}");
     assert_eq!(counted["text.txt"], 12, "{counted:?}");
-    // Every published file has the size the preflight counted, and the total
+    // Every published file has the size its count saw, and the total
     // is the counted total: the replacements were never copied.
     let files = done["result"]["files"].as_array().unwrap();
     let mut total = 0;
