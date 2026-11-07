@@ -2112,6 +2112,7 @@
       "parent": "dim_app_server::collaboration",
       "file": "crates/dim-app-server/src/collaboration.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -20510,6 +20511,7 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path RpcError",
+        "path RpcError::from",
         "path RpcError::invalid",
         "path RpcError::service",
         "path dim_agent_capabilities::methods::SessionMethods",
@@ -21035,6 +21037,14 @@
     },
     {
       "from": "dim_app_server::collaboration::tests",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::Closed",
+        "path AgentError::Storage"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::tests",
       "to": "dim_agent_types::events",
       "references": [
         "path CollaborationOutcome::Cancelled"
@@ -21045,7 +21055,8 @@
       "to": "dim_app_server::collaboration",
       "references": [
         "path INTERRUPTED",
-        "path NOT_STARTED"
+        "path NOT_STARTED",
+        "path cancel_rpc"
       ]
     },
     {

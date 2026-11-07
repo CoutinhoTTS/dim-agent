@@ -1218,7 +1218,7 @@ impl CollaborationSession {
         };
         self.carry_out_cancel(branch_id, &session, &input, done, stopping)
             .await
-            .map_err(|_| refusal_rpc(Refusal::MemberClosed))?;
+            .map_err(cancel_rpc)?;
         Ok(json!({"status": "cancelled"}))
     }
     async fn list(&self) -> ToolResult {
@@ -2834,6 +2834,17 @@ fn explain(error: Refusal) -> &'static str {
     }
 }
 
+/// The Rpc error a failed cancel answers: a closed member keeps the
+/// `member_closed` refusal, and any other failure — a storage fault, a
+/// reloading capability, a failed publication — is the Session's own runtime
+/// error, as every Session method reports one.
+fn cancel_rpc(error: AgentError) -> RpcError {
+    match error {
+        AgentError::Closed(_) => refusal_rpc(Refusal::MemberClosed),
+        error => RpcError::from(error),
+    }
+}
+
 /// The Rpc error a Collaboration refusal answers: its wire code and the text
 /// the tool gives the same refusal.
 fn refusal_rpc(error: Refusal) -> RpcError {
@@ -3406,5 +3417,19 @@ mod tests {
             reason: INTERRUPTED.into(),
         };
         assert_eq!(client_cancel(true, interrupted.clone()), interrupted);
+    }
+
+    /// A failed cancel names `member_closed` only when the member is closed;
+    /// every other failure is the Session's runtime error.
+    #[test]
+    fn a_cancel_reports_a_runtime_failure_apart_from_a_closed_member() {
+        let closed = cancel_rpc(AgentError::Closed("member".into()));
+        assert_eq!(
+            closed.data.as_ref().map(|data| data.app_error.as_str()),
+            Some("member_closed")
+        );
+        let failed = cancel_rpc(AgentError::Storage("disk is full".into()));
+        assert_eq!(failed.code, -32603);
+        assert!(failed.data.is_none(), "{failed:?}");
     }
 }
