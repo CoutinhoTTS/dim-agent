@@ -23,6 +23,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 const PINS: &str = include_str!("../../../runtime/runtimes.json");
@@ -555,10 +556,17 @@ pub struct RuntimeService {
     ctx: Ctx,
     stop: CancellationToken,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// One name per committed change of a runtime or of its connection row:
+    /// `runtime.watch` reads it (design §5).
+    changes: broadcast::Sender<&'static str>,
 }
 impl RuntimeService {
     fn index(kind: Kind) -> usize {
         kind as usize
+    }
+    /// Announces one runtime's committed change to the connections watching.
+    fn changed(&self, name: &'static str) {
+        let _ = self.changes.send(name);
     }
     /// Every runtime's status.
     pub fn list(&self) -> Vec<RuntimeEntry> {
@@ -650,20 +658,47 @@ impl RuntimeService {
 
     /// Provides `kind`'s launch command; a tool that launches no runtime has
     /// none, so an acquisition leaves it installed.
-    fn provide(&self, kind: Kind) -> State {
+    fn provide(self: &Arc<Self>, kind: Kind) -> State {
         if !kind.launches_runtime() {
             return State::Installed;
         }
         let runtime = self.local.lock().unwrap()[Self::index(kind)]
             .clone()
             .expect("a launching kind has a launch command");
+        // Subscribed before the row starts: its first state is then a change.
+        let status = runtime.launch.status().subscribe();
         match self
             .ctx
             .provide_at(runtime.command.clone(), runtime.launch.clone())
         {
-            Ok(provided) => State::Provided(Some(provided)),
+            Ok(provided) => {
+                self.forward_status(kind, status);
+                State::Provided(Some(provided))
+            }
             Err(error) => State::Failed(error.to_string()),
         }
+    }
+
+    /// Forwards every state the row writes to the change signal. The cell
+    /// belongs to the command, so it serves every generation that command
+    /// starts; the task ends with this generation.
+    fn forward_status(self: &Arc<Self>, kind: Kind, mut status: watch::Receiver<RuntimeState>) {
+        let service = self.clone();
+        let stop = self.stop.clone();
+        let forwarded = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    changed = status.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        service.changed(kind.name());
+                    }
+                }
+            }
+        });
+        self.tasks.lock().unwrap().push(forwarded);
     }
 
     /// Turns `kind` on and applies the configuration in effect. It reads
@@ -1543,6 +1578,7 @@ impl DynPlugin for RuntimeManagerPlugin {
                 ctx: ctx.clone(),
                 stop: CancellationToken::new(),
                 tasks: Mutex::new(Vec::new()),
+                changes: broadcast::channel(64).0,
             });
             let owned = service.clone();
             ctx.effect(move || async move {
