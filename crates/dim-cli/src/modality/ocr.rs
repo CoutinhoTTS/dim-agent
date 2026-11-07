@@ -164,7 +164,7 @@ fn inline_text_written(path: &Path) -> Result<Option<String>> {
 }
 
 /// The text when it is within both inline limits (A.5).
-fn fitting(bytes: &[u8]) -> Option<String> {
+pub(super) fn fitting(bytes: &[u8]) -> Option<String> {
     if bytes.len() as u64 > INLINE_BYTES {
         return None;
     }

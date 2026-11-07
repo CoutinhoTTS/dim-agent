@@ -19,6 +19,9 @@ pub(crate) mod task;
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(test, unix))]
+mod tests_scripted;
+
 use crate::client::{Client, RpcError, app_error};
 use crate::sanitize::safe_line;
 use crate::{Result, args::Options};

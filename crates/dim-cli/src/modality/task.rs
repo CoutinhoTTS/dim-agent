@@ -291,7 +291,7 @@ pub(crate) async fn write_results(
 }
 
 /// Whether `name` is exactly one normal path component.
-fn one_component(name: &str) -> bool {
+pub(super) fn one_component(name: &str) -> bool {
     let mut components = Path::new(name).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
