@@ -1181,7 +1181,6 @@ async fn watch_until(
 /// never greets, so its connection row goes down without a real runtime.
 struct FixtureNode {
     directory: PathBuf,
-    path: Option<std::ffi::OsString>,
 }
 
 impl FixtureNode {
@@ -1197,25 +1196,17 @@ impl FixtureNode {
         let npm = directory.join("lib/node_modules/npm/bin");
         std::fs::create_dir_all(&npm).unwrap();
         std::fs::write(npm.join("npm-cli.js"), "").unwrap();
-        let path = std::env::var_os("PATH");
-        let mut paths = vec![bin];
-        paths.extend(path.iter().flat_map(std::env::split_paths));
-        // SAFETY: every test that changes PATH holds PATH_LOCK until it
-        // restores it, so no other test reads a half-prefixed PATH.
-        unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
-        Self { directory, path }
+        Self { directory }
+    }
+
+    /// The search path that resolves the fixture as the system Node.
+    fn search_path(&self) -> std::ffi::OsString {
+        self.directory.join("bin").into_os_string()
     }
 }
 
 impl Drop for FixtureNode {
     fn drop(&mut self) {
-        // SAFETY: as above: PATH_LOCK is held for the whole lifetime.
-        unsafe {
-            match &self.path {
-                Some(path) => std::env::set_var("PATH", path),
-                None => std::env::remove_var("PATH"),
-            }
-        }
         let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
@@ -1243,7 +1234,6 @@ impl rutis::host::DynPlugin for Probe {
 /// that opened it; the client's re-read shows the installed tool (§10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_watch_streams_a_tool_install_to_the_watching_connection_only() {
-    let _path = PATH_LOCK.lock().await;
     let fixture = FixtureUv::new("0.13.7");
     let home = std::env::temp_dir().join(format!("drm-watch-uv-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -1253,7 +1243,7 @@ async fn a_watch_streams_a_tool_install_to_the_watching_connection_only() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1308,7 +1298,6 @@ async fn a_watch_streams_a_tool_install_to_the_watching_connection_only() {
 /// `failed` with the reason (§10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_watch_streams_a_failed_acquisition() {
-    let _path = PATH_LOCK.lock().await;
     let fixture = FixtureUv::with_fallback("0.13.7", Some("0.10.9"));
     let home = std::env::temp_dir().join(format!("drm-watch-failed-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -1318,7 +1307,7 @@ async fn a_watch_streams_a_failed_acquisition() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1352,7 +1341,6 @@ async fn a_watch_streams_a_failed_acquisition() {
 /// configuration in effect (§10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_watch_streams_a_configuration_change() {
-    let _path = PATH_LOCK.lock().await;
     let _fixture = FixtureUv::new("0.13.7");
     let home = std::env::temp_dir().join(format!("drm-watch-config-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -1362,7 +1350,7 @@ async fn a_watch_streams_a_configuration_change() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1397,7 +1385,6 @@ async fn a_watch_streams_a_configuration_change() {
 /// surviving call receives one item per change (§10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_second_watch_takes_over_the_first() {
-    let _path = PATH_LOCK.lock().await;
     let _fixture = FixtureUv::new("0.13.7");
     let home = std::env::temp_dir().join(format!("drm-watch-twice-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -1407,7 +1394,7 @@ async fn a_second_watch_takes_over_the_first() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1454,7 +1441,6 @@ async fn a_second_watch_takes_over_the_first() {
 /// watcher still receives its items (§10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_watcher_fails_nothing_for_another_watcher() {
-    let _path = PATH_LOCK.lock().await;
     let fixture = FixtureUv::new("0.13.7");
     let home = std::env::temp_dir().join(format!("drm-watch-closed-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -1464,7 +1450,7 @@ async fn a_closed_watcher_fails_nothing_for_another_watcher() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1515,7 +1501,6 @@ async fn a_closed_watcher_fails_nothing_for_another_watcher() {
 /// the new generation receives the next change (§10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reload_answers_the_open_call_operation_interrupted() {
-    let _path = PATH_LOCK.lock().await;
     let fixture = FixtureUv::new("0.13.7");
     let home = std::env::temp_dir().join(format!("drm-watch-reload-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -1525,7 +1510,7 @@ async fn a_reload_answers_the_open_call_operation_interrupted() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
     let probe = Arc::new(std::sync::Mutex::new(None));
     let (server, _) = launch_with(
         Arc::new(MockTools),
@@ -1608,7 +1593,6 @@ async fn a_reload_answers_the_open_call_operation_interrupted() {
 /// shows `down` with its reason (§10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_watch_streams_a_row_going_down() {
-    let _path = PATH_LOCK.lock().await;
     let node = FixtureNode::new();
     let home = std::env::temp_dir().join(format!("drm-watch-down-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -1618,7 +1602,7 @@ async fn a_watch_streams_a_row_going_down() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "download", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(node.search_path()));
     assert_eq!(
         runtimes.plan(Kind::Node).interpreter,
         node.directory.join("bin/node"),
