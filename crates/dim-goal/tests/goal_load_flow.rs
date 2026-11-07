@@ -444,6 +444,7 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
             )),
             configuration: None,
             prompt: None,
+            failure_chain: None,
         }),
     );
     seed.append(
@@ -1200,12 +1201,14 @@ async fn e2_a_clear_batch_takes_the_cheap_rebuild() {
             true,
         )],
         mode: Some(InputMode::Append),
+        handover: None,
     });
     let trigger = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
         submission_id: Some("test:clear".into()),
         user: None,
         blocks: vec![raw(&texts::clear("main"), None, false)],
         mode: Some(InputMode::Append),
+        handover: None,
     });
     seed.append_batch("main", vec![record, trigger]);
     seed.finish().await;

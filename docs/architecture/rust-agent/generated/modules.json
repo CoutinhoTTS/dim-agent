@@ -1275,6 +1275,15 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools::file_reads",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::workspace_tools::files",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools",
@@ -1364,7 +1373,9 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools",
       "file": "crates/dim-agent-capabilities/src/workspace_tools/mentions.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "json"
+      ]
     },
     {
       "id": "dim_agent_questions",
@@ -3042,6 +3053,16 @@
       ]
     },
     {
+      "id": "dim_app_server::storage_methods",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/storage_methods.rs",
+      "unexpandedMacros": [
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::transport",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -3206,6 +3227,16 @@
       "unexpandedMacros": [
         "format",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_app_server::workspace_files",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/workspace_files.rs",
+      "unexpandedMacros": [
+        "json",
+        "vec"
       ]
     },
     {
@@ -5473,7 +5504,23 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::terminal",
       "file": "crates/dim-cli/src/ui/terminal/windows.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "debug_assert"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::terminal::windows::windows_flow",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::terminal::windows",
+      "file": "crates/dim-cli/src/ui/terminal/windows.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "concat",
+        "format",
+        "panic",
+        "vec"
+      ]
     },
     {
       "id": "dim_cli::ui::text",
@@ -8221,6 +8268,13 @@
       "to": "dim_agent_capabilities::workspace_tools::file_reads",
       "references": [
         "path workspace_tools::file_reads::FileReads"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::workspace_tools::mentions",
+      "references": [
+        "path workspace_tools::mentions::MentionIndex"
       ]
     },
     {
@@ -11412,8 +11466,10 @@
         "mod recovery",
         "path recovery::invoke",
         "use recovery::Consume",
+        "use recovery::MAX_ATTEMPTS",
         "use recovery::RetryObserver",
         "use recovery::RetryWaiting",
+        "use recovery::WAIT_BUDGET",
         "use recovery::invoke"
       ]
     },
@@ -11597,6 +11653,7 @@
         "path CredentialRejection::Unrelated",
         "path HostError",
         "path HostError::Failed",
+        "path HostError::failed",
         "path ModelFailureFacts",
         "path ModelFailureFacts::unknown",
         "path ModelHost",
@@ -11608,9 +11665,11 @@
       "from": "dim_agent_capabilities::model_provider::recovery",
       "to": "dim_agent_types::events",
       "references": [
+        "path FailureChain",
         "path ModelFailureKind",
         "path ModelFailureKind::MalformedResponse",
         "path ModelFailureKind::Unknown",
+        "use dim_agent_types::FailureChain",
         "use dim_agent_types::ModelFailureKind"
       ]
     },
@@ -14827,9 +14886,9 @@
       "references": [
         "mod mentions",
         "path mentions",
-        "path mentions::DEFAULT_LIMIT",
-        "path mentions::MAX_LIMIT",
-        "path mentions::MentionIndex::default"
+        "path mentions::MentionIndex",
+        "path mentions::MentionIndex::default",
+        "path mentions::parse_limit"
       ]
     },
     {
@@ -14881,7 +14940,11 @@
       "from": "dim_agent_capabilities::workspace_tools",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path dim_agent_runtime::Feature::new"
+        "path PartRegistry",
+        "path PartScope::Branch",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
       ]
     },
     {
@@ -15175,6 +15238,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::file_reads",
+      "to": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path Timeline",
@@ -15211,6 +15281,73 @@
         "path EventKind::ContextCompaction",
         "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_capabilities::workspace_tools::file_reads",
+      "references": [
+        "path COMPACTION_PAGE",
+        "path FileReads::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig::default",
+        "use dim_agent_runtime::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "path Timeline::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_runtime::memory_timeline_store",
+      "references": [
+        "path MemoryTimelineStore::default",
+        "use dim_agent_runtime::MemoryTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineKey",
+        "use dim_agent_runtime::TimelineKey",
+        "use dim_agent_runtime::TimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ContextCompactionData",
+        "path ContextCompactionResult::Cancelled",
+        "path ContextCompactionResult::Completed",
+        "path EventKind",
+        "path EventKind::ContextCompaction",
+        "use dim_agent_types::ContextCompactionData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path CompactionDiagnosticsRecord",
+        "path CompactionReason::Auto",
+        "path CompactionStrategyRecord",
+        "path CompactionTrigger::Threshold",
+        "use dim_agent_types::CompactionDiagnosticsRecord",
+        "use dim_agent_types::CompactionReason",
+        "use dim_agent_types::CompactionStrategyRecord",
+        "use dim_agent_types::CompactionTrigger"
       ]
     },
     {
@@ -18938,6 +19075,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::storage_methods",
+      "references": [
+        "mod storage_methods",
+        "path storage_methods::StorageMethodsPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::transport",
       "references": [
         "mod transport",
@@ -19000,6 +19145,14 @@
       "to": "dim_app_server::web_entry",
       "references": [
         "mod web_entry"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::workspace_files",
+      "references": [
+        "mod workspace_files",
+        "path workspace_files::WorkspaceFilesPlugin::new"
       ]
     },
     {
@@ -27737,6 +27890,54 @@
       ]
     },
     {
+      "from": "dim_app_server::storage_methods",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path MethodCall",
+        "path RpcError::service",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage_methods",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage_methods",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage_methods",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage_methods",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path SqliteStorage",
+        "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
       "from": "dim_app_server::transport",
       "to": "dim_agent_capabilities::environment_clients",
       "references": [
@@ -28510,6 +28711,49 @@
       "references": [
         "path Site",
         "path error"
+      ]
+    },
+    {
+      "from": "dim_app_server::workspace_files",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path MethodCall",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::workspace_files",
+      "to": "dim_agent_capabilities::workspace_tools::mentions",
+      "references": [
+        "path MentionIndex",
+        "path mentions::parse_limit",
+        "use dim_agent_capabilities::workspace_tools::mentions",
+        "use dim_agent_capabilities::workspace_tools::mentions::MentionIndex"
+      ]
+    },
+    {
+      "from": "dim_app_server::workspace_files",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::workspace_files",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
       ]
     },
     {
@@ -38868,6 +39112,29 @@
       ]
     },
     {
+      "from": "dim_cli::ui::terminal::windows",
+      "to": "dim_cli::ui::terminal::windows::windows_flow",
+      "references": [
+        "mod windows_flow"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::terminal::windows::windows_flow",
+      "to": "dim_cli::ui::terminal::windows",
+      "references": [
+        "path ReadOutcome::Closed",
+        "path ReadOutcome::Data",
+        "path ReadOutcome::Timeout",
+        "path STDIN",
+        "path STDOUT",
+        "path disable_raw_mode",
+        "path enable_raw_mode",
+        "path read_timeout",
+        "path write_all",
+        "path write_until"
+      ]
+    },
+    {
       "from": "dim_cli::ui::text",
       "to": "dim_cli::ui::text::tests",
       "references": [
@@ -43588,7 +43855,9 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path EntryKind::Directory",
-        "use dim_agent_capabilities::file_storage::EntryKind"
+        "path FileReader",
+        "use dim_agent_capabilities::file_storage::EntryKind",
+        "use dim_agent_capabilities::file_storage::FileReader"
       ]
     },
     {
@@ -43781,6 +44050,7 @@
         "path dim_ocr::HelperErrorCode::LocalRuntimeFailed",
         "path dim_ocr::HelperErrorCode::LocalRuntimeUnavailable",
         "path dim_ocr::HelperErrorCode::ResourceLimitExceeded",
+        "path dim_ocr::MAX_ARTIFACT_BYTES",
         "path dim_ocr::OutputMode",
         "path dim_ocr::PAGE_IMAGE_PREFIX",
         "path dim_ocr::RESULT_FILE",
@@ -45324,6 +45594,14 @@
     {
       "module": "dim_cli::ui::terminal::input",
       "path": "char::from_u32"
+    },
+    {
+      "module": "dim_cli::ui::terminal::windows",
+      "path": "char::REPLACEMENT_CHARACTER"
+    },
+    {
+      "module": "dim_cli::ui::terminal::windows",
+      "path": "char::decode_utf16"
     },
     {
       "module": "dim_cli::ui::theme::ansi",

@@ -1211,6 +1211,8 @@ dimcode --scrollback default    # save the default mode and exit
 
 The default is saved as `tuiMode` in `<home>/config.json`.
 
+On Windows the terminal UI exchanges its text with the console as UTF-16 through the wide-character console functions (`WriteConsoleW` and `ReadConsoleW`), so it neither reads nor changes the console's code pages. Those pages belong to the console and are shared with every process attached to it: a console left on a legacy OEM page such as CP437 or CP850 shows the frame and delivers typed characters unchanged, and closing the CLI leaves the console as it was found. The Windows job runs a ConPTY flow that paints a frame and types into a console running CP437.
+
 ## Background task inventory
 
 `/tasks` (alias `/background`) shows commands and delegated member work in the
@@ -1668,6 +1670,6 @@ DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs" \
   -- --ignored
 ```
 
-The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows CI runs native clipboard and ConPTY editing flows; compiling another target is not a substitute for them. The named-pipe bridge still requires its separate native acceptance.
+The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows CI runs native clipboard, ConPTY editing and legacy code-page console flows; compiling another target is not a substitute for them. The named-pipe bridge still requires its separate native acceptance.
 
 Unix socket paths have an operating-system length limit, including the canonical home path. On macOS, `/var` resolves to `/private/var`, which adds bytes. Use a short isolated home such as `/tmp/dim-dev` for development/tests if the daemon reports `path must be shorter than SUN_LEN`; the CLI preserves that failure in `rust/daemon.log`.

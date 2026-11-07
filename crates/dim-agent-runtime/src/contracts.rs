@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::watch;
 
-/// Inputs admitted and not yet consumed by Loop.
+/// Inputs admitted and not yet consumed by Loop, except one addressed to a
+/// handover: that one is held for its turn and never counted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InputSnapshot {
+    /// Inputs held by the queue, released or not, that Loop has not consumed
+    /// yet. An input addressed to a handover is never counted.
     pub queued: usize,
 }
 /// Output of the running model request not yet written to the Timeline.
