@@ -1729,6 +1729,16 @@
       ]
     },
     {
+      "id": "dim_agent_scheduler::watch",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/watch.rs",
+      "unexpandedMacros": [
+        "json",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_agent_types",
       "crate": "dim_agent_types",
       "parent": null,
@@ -17110,6 +17120,13 @@
       ]
     },
     {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::watch",
+      "references": [
+        "mod watch"
+      ]
+    },
+    {
       "from": "dim_agent_scheduler::binding_flow",
       "to": "dim_agent_scheduler::support",
       "references": [
@@ -17275,14 +17292,18 @@
       "references": [
         "path Handler",
         "path MethodCall",
+        "path MethodCaller",
+        "path Progress",
         "path RpcError",
         "path RpcError::service",
         "path RpcError::unknown_method",
         "path params",
+        "use dim_agent_capabilities::methods::Caller",
         "use dim_agent_capabilities::methods::Handler",
         "use dim_agent_capabilities::methods::Interruption",
         "use dim_agent_capabilities::methods::MethodCall",
         "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::Progress",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params"
       ]
@@ -17291,8 +17312,12 @@
       "from": "dim_agent_scheduler::methods",
       "to": "dim_agent_capabilities::settings",
       "references": [
+        "path SettingsChanged",
         "path SettingsScope::User",
-        "use dim_agent_capabilities::settings::SettingsScope"
+        "path settings_changes",
+        "use dim_agent_capabilities::settings::SettingsChanged",
+        "use dim_agent_capabilities::settings::SettingsScope",
+        "use dim_agent_capabilities::settings::settings_changes"
       ]
     },
     {
@@ -17342,6 +17367,7 @@
         "path Origin::User",
         "path Schedule",
         "path ScheduleDocument",
+        "path ScheduleDocument::NAMESPACE",
         "path canonical_instant",
         "use crate::document::DEFAULT_MAX_RUN_MINUTES",
         "use crate::document::Job",
@@ -17397,6 +17423,14 @@
     },
     {
       "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler::watch",
+      "references": [
+        "path crate::watch::Watchers",
+        "path crate::watch::Watchers::default"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
       "to": "dim_agent_types::permission",
       "references": [
         "path PermissionPolicy",
@@ -17445,6 +17479,7 @@
         "path SettingsError::Invalid",
         "path SettingsService",
         "path dim_app_server::settings::SettingsSnapshot",
+        "use dim_app_server::settings::BusinessDocument",
         "use dim_app_server::settings::SettingsError",
         "use dim_app_server::settings::SettingsService"
       ]
@@ -17782,6 +17817,24 @@
       "to": "dim_app_server::plugin_files",
       "references": [
         "path dim_app_server::plugin_files::PluginFileTransactions"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::watch",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Caller",
+        "path Progress",
+        "use dim_agent_capabilities::methods::Caller",
+        "use dim_agent_capabilities::methods::Progress"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::watch",
+      "to": "dim_agent_scheduler::runs",
+      "references": [
+        "path Run",
+        "use crate::runs::Run"
       ]
     },
     {
