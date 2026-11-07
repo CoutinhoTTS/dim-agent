@@ -276,6 +276,16 @@ pub struct DeltaData {
 pub type ThinkingData = DeltaData;
 pub type TextData = DeltaData;
 
+/// The failed request a continuation continues: the attempts it spent and
+/// the backoff it slept, so the chain keeps one retry budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailureChain {
+    pub from_request_id: String,
+    pub attempts: u8,
+    pub waited_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextPrepareData {
@@ -302,6 +312,12 @@ pub struct ContextPrepareData {
         deserialize_with = "crate::optional_non_null"
     )]
     pub recovery: Option<ProviderOutputBudgetFacts>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub failure_chain: Option<FailureChain>,
 }
 
 /// A client asks the Loop to compact its branch; the Loop serves it as a
@@ -514,6 +530,12 @@ pub struct ModelCallData {
         deserialize_with = "crate::optional_non_null"
     )]
     pub prompt: Option<PromptReference>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub failure_chain: Option<FailureChain>,
 }
 
 /// A tool call the model has started to emit; its arguments are not yet complete (ADR agent-029).
@@ -733,6 +755,9 @@ pub struct ModelFailure {
         deserialize_with = "crate::optional_non_null"
     )]
     pub retry_after_ms: Option<u64>,
+    /// The failure policy forbids retrying this failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_forbidden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

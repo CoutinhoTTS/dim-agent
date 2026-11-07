@@ -710,6 +710,7 @@ async fn parse_output(
                             attempts: 1,
                             waited: Duration::ZERO,
                             retry_after_stop: None,
+                            retry_forbidden: false,
                         })),
                         presentation: Some(Box::new(ProviderPresentation {
                             source: request.provider_id.clone(),

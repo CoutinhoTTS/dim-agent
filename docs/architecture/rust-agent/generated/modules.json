@@ -11237,8 +11237,10 @@
         "mod recovery",
         "path recovery::invoke",
         "use recovery::Consume",
+        "use recovery::MAX_ATTEMPTS",
         "use recovery::RetryObserver",
         "use recovery::RetryWaiting",
+        "use recovery::WAIT_BUDGET",
         "use recovery::invoke"
       ]
     },
@@ -11422,6 +11424,7 @@
         "path CredentialRejection::Unrelated",
         "path HostError",
         "path HostError::Failed",
+        "path HostError::failed",
         "path ModelFailureFacts",
         "path ModelFailureFacts::unknown",
         "path ModelHost",
@@ -11433,9 +11436,11 @@
       "from": "dim_agent_capabilities::model_provider::recovery",
       "to": "dim_agent_types::events",
       "references": [
+        "path FailureChain",
         "path ModelFailureKind",
         "path ModelFailureKind::MalformedResponse",
         "path ModelFailureKind::Unknown",
+        "use dim_agent_types::FailureChain",
         "use dim_agent_types::ModelFailureKind"
       ]
     },
