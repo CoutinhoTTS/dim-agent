@@ -107,6 +107,14 @@ Commands:\n\
                                    or from stdin for -\n\
   workflow start NAME [PATH]       Start a definition with parameters from PATH\n\
   workflow history NAME            List a definition's recent runs\n\
+  modality                         List every Modality category and\n\
+                                   operation with its availability, its\n\
+                                   reasons and its default and effective\n\
+                                   model; --json prints the snapshot\n\
+  modality set-default <category>[.<operation>] <provider>/<model>\n\
+                                   Set one operation's default model\n\
+  modality set-default <category>[.<operation>] --clear\n\
+                                   Clear it, restoring automatic resolution\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
@@ -233,6 +241,10 @@ Exit codes: 0 success, 1 configuration/transport error, a delete that removed\n\
             failure, 3 interactive approval or answer required, 130\n\
             interrupted.\n";
 
+/// What `dimcode modality` names.
+const USAGE_MODALITY: &str = "Use modality, modality set-default \
+<category>[.<operation>] <provider>/<model> | --clear";
+
 /// What `dimcode session` names besides `export`.
 const USAGE_SESSION: &str =
     "Use session export, session rename, session delete or session cleanup; see --help";
@@ -354,6 +366,8 @@ pub enum Action {
         method: String,
         params: serde_json::Value,
     },
+    /// `modality ...`: one Modality command (Modality A.5).
+    Modality(crate::modality::Command),
     /// `runtime list`: the plugin runtimes and their state.
     RuntimeList,
     /// `runtime install NAME`: turn a plugin runtime on and acquire it.
@@ -568,12 +582,17 @@ impl Options {
                         return Err("Supply the database path only once".into());
                     }
                 }
-                "--clear" => {
-                    let Action::SessionRename { clear, .. } = &mut options.action else {
-                        return Err("--clear requires session rename".into());
-                    };
-                    *clear = true;
-                }
+                "--clear" => match &mut options.action {
+                    Action::SessionRename { clear, .. } => *clear = true,
+                    Action::Modality(crate::modality::Command::SetDefault { clear, .. }) => {
+                        *clear = true;
+                    }
+                    _ => {
+                        return Err(
+                            "--clear requires session rename or modality set-default".into()
+                        );
+                    }
+                },
                 "--older-than" => {
                     let value = parse_age(&value(&mut args)?)?;
                     let Action::SessionCleanup { older_than, .. } = &mut options.action else {
@@ -789,6 +808,31 @@ impl Options {
                 "plugin" if matches!(options.action, Action::Chat) => {
                     let (method, params) = crate::plugin_command::parse(&mut args)?;
                     options.action = Action::Plugin { method, params };
+                }
+                "modality" if matches!(options.action, Action::Chat) => {
+                    use crate::modality::Command;
+                    let verb = match args.peek().map(String::as_str) {
+                        Some(next) if !next.starts_with("--") => Some(value(&mut args)?),
+                        _ => None,
+                    };
+                    options.action = Action::Modality(match verb.as_deref() {
+                        None => Command::List,
+                        Some("set-default") => {
+                            let operation = value(&mut args)?;
+                            // The model is the next word unless the default is
+                            // being cleared by the flag the loop reads.
+                            let model = match args.peek().map(String::as_str) {
+                                Some(next) if !next.starts_with("--") => Some(value(&mut args)?),
+                                _ => None,
+                            };
+                            Command::SetDefault {
+                                operation,
+                                model,
+                                clear: false,
+                            }
+                        }
+                        Some(_) => return Err(USAGE_MODALITY.into()),
+                    });
                 }
                 "migration" if matches!(options.action, Action::Chat) => {
                     options.action = crate::migration_command::parse(&mut args)?;
@@ -1354,8 +1398,13 @@ impl Options {
         {
             return Err("Commands cannot be combined with chat options".into());
         }
-        if options.json && !matches!(options.action, Action::Exec | Action::Migration(_)) {
-            return Err("--json requires exec or migration".into());
+        if options.json
+            && !matches!(
+                options.action,
+                Action::Exec | Action::Migration(_) | Action::Modality(_)
+            )
+        {
+            return Err("--json requires exec, migration or a modality command".into());
         }
         let images_for_tui = matches!(options.action, Action::Tui) && options.prompt.is_some();
         if !options.images.is_empty() && !matches!(options.action, Action::Exec) && !images_for_tui
@@ -1712,7 +1761,8 @@ impl Options {
             | Action::ManagementSet { area, .. }
             | Action::ManagementAdd { area, .. }
             | Action::ManagementStart { area, .. } => area.names_workspace(),
-            Action::Migration(_)
+            Action::Modality(_)
+            | Action::Migration(_)
             | Action::Acp { .. }
             | Action::Export { .. }
             | Action::SessionRename { .. }

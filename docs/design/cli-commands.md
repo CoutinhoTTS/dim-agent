@@ -1351,6 +1351,8 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
+| `dimcode modality [--json]` | Table of every Modality category and operation over `modality.capabilities` ([Modality](plugins/Modality.md#a5-cli)): availability, the owner's reasons as `dimension: detail` lines, the default and the effective model; `--json` prints the reply unchanged. A daemon that does not advertise the method says it serves no Modality and exits 1. |
+| `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | Write one operation default over `modality.configure` with the revision read immediately before, retried once after a `modality_conflict`; `--clear` sends `model: null`; prints the operation's row, or the reply under `--json`. |
 | `dimcode skills list` | List the Skills of the workspace over `skills.catalog`: each entry's name, source, state, file and description, then the catalog's issues. |
 | `dimcode skills enable\|disable ID` | Enable or disable one Skill over `skills.set_enabled`, then report the catalog again. |
 | `dimcode skills reload` | Rescan the user and project roots over `skills.refresh` and report what it found, through the [Skills management surface](#management-surfaces). |
@@ -1428,8 +1430,8 @@ available. Existing piped stdin and `--resume` calls retain their behavior, and
 sends the first message
 ([starting with a first message](#starting-with-a-first-message)).
 `exec resume` also accepts the same existing global options. Supplying the Session twice or the prompt twice is an
-argument error. `--json` serves `exec` and `migration`, and `tui` requires a
-terminal. Help/version and argument errors do not start the daemon.
+argument error. `--json` serves `exec`, `migration` and the Modality commands (`modality`,
+the category commands and `ocr`), and `tui` requires a terminal. Help/version and argument errors do not start the daemon.
 
 ### Starting with a first message
 

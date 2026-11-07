@@ -434,9 +434,8 @@ The record is `modality/tasks/<task_id>/task.json` in the host's version 1 text 
 
 | Command | Behavior |
 | --- | --- |
-| `dimcode modality` | Table of all categories and operations; unavailable ones marked with their reason; default models |
-| `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | `modality.configure` |
-| `dimcode modality settings [<key> [<value>]]` | Reads or writes the `modality` settings document (operation defaults, limits) through Settings' typed operations on that business source (Settings supplement); not a `modality.*` method |
+| `dimcode modality [--json]` | Table of every category and operation: availability, the reasons as `dimension: detail` lines, the default and the effective model; `--json` prints the `modality.capabilities` reply unchanged. A daemon that does not advertise the method says it serves no Modality |
+| `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | `modality.configure` with the revision read immediately before; a `modality_conflict` is reread and retried once; prints the operation's row, or the reply under `--json` |
 | `dimcode modality task list\|status\|wait\|cancel` | Task methods; `wait --out <path>` retrieves results |
 | `dimcode image generate\|edit\|enhance`, `video`, `speech synthesize\|transcribe`, `music`, `audio`, `asset`, `motion` | Submit; inputs up to 8 MiB are sent inline and larger ones by `node_path`; by default waits and writes results to `--out` or the current directory; `--no-wait` prints the id; `--json` prints the record |
 | `dimcode ocr <file> [--out PATH] [--json] [--no-wait]` | Submit `ocr.recognize`; prints text |

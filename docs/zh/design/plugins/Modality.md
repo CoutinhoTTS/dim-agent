@@ -434,9 +434,8 @@ helper 的调用形式是 `dimcode ocr-helper --input <path> --artifacts <dir> -
 
 | 命令 | 行为 |
 | --- | --- |
-| `dimcode modality` | 全部类别与操作的表格；不可用项标注其原因；默认模型 |
-| `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | `modality.configure` |
-| `dimcode modality settings [<key> [<value>]]` | 经 Settings 对该业务来源的类型化操作读取或写入 `modality` 设置文档（操作默认值、上限）（Settings 补充）；不是 `modality.*` 方法 |
+| `dimcode modality [--json]` | 全部类别与操作的表格：可用性、以 `dimension: detail` 行给出的原因、默认模型与实际生效模型；`--json` 原样打印 `modality.capabilities` 的应答。未提供该方法的守护进程回答说它不提供 Modality |
+| `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | 以紧接读取的 revision 调用 `modality.configure`；遇到 `modality_conflict` 时重新读取并重试一次；打印该操作的行，`--json` 时打印应答 |
 | `dimcode modality task list\|status\|wait\|cancel` | 任务方法；`wait --out <path>` 取回结果 |
 | `dimcode image generate\|edit\|enhance`、`video`、`speech synthesize\|transcribe`、`music`、`audio`、`asset`、`motion` | 提交；8 MiB 以内的输入内联发送，更大的用 `node_path`；默认等待并将结果写到 `--out` 或当前目录；`--no-wait` 打印 id；`--json` 打印记录 |
 | `dimcode ocr <file> [--out PATH] [--json] [--no-wait]` | 提交 `ocr.recognize`；打印文本 |

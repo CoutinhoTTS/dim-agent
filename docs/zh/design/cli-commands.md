@@ -877,6 +877,8 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode mcp login\|logout\|enable\|disable ID [--source SOURCE]` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
 | `/mcp` | 打开会话所在工作区的 MCP 面板（[管理界面](#管理界面)）：每个服务器一个条目，按 `user`、`project`、`plugin` 分组，带 toggle、edit、add、remove、test 与 inspect 种类。 |
 | `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。凡是按 ID 指名一个已存条目的命令（`login`、`logout`、`disconnect`、`enable`、`disable`）都接受可选的 `--source SOURCE`，与 `dimcode mcp` 相同；多个 source 列出同一 id 时必须指定。 |
+| `dimcode modality [--json]` | 经 `modality.capabilities` 列出每个 Modality 类别与操作的表格（[Modality](plugins/Modality.md#a5-cli)）：可用性、owner 的 `dimension: detail` 原因行、默认与生效模型；`--json` 原样打印回复。守护进程不公布该方法时提示它不提供 Modality 并以 1 退出。 |
+| `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | 经 `modality.configure` 写入一个操作默认值：revision 取紧邻写入前读到的，`modality_conflict` 后重读并重试一次；`--clear` 发送 `model: null`；打印该操作的行，`--json` 下打印回复。 |
 
 | `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
 | `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |
@@ -906,7 +908,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 login/account/logout、models、MCP 和 daemon 命令仍然可用。管道 stdin 与
 `--resume` 调用行为不变，`--prompt` 在 `exec` 与裸 chat 上仍是一次性提示词；`tui -p`
 发送首条消息（[带首条消息启动](#带首条消息启动)）。`exec resume` 也接受同样的全局选项。
-重复给出 Session 或提示词是参数错误。`--json` 是 `exec` 的选项，`tui` 需要终端。
+重复给出 Session 或提示词是参数错误。`--json` 适用于 `exec`、`migration` 以及 Modality 命令（`modality`、类别命令和 `ocr`），`tui` 需要终端。
 help/version 与参数错误不会启动守护进程。
 
 ### 带首条消息启动

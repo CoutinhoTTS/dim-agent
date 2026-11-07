@@ -541,6 +541,25 @@ entry to still exist.
 
 See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-requirements-raised-to-mechanism-owners).
 
+## Modality
+
+`dimcode modality` prints one row per operation of the daemon's Modality, read over
+`modality.capabilities`: category, operation, whether it is available, its default model, the model
+that would be used, and the owner's reasons as `dimension: detail` entries. The table renders the
+owner's snapshot and never guesses: a category or operation this build does not implement still has
+a row, with its reason. `--json` prints the reply unchanged. A daemon that does not advertise
+`modality.capabilities` — one older than Modality, or one whose Modality is reloading — answers
+every `dimcode modality` command with `This daemon serves no Modality.` and exit code 1, and the
+command calls nothing else.
+
+`dimcode modality set-default <category>[.<operation>] <provider>/<model>` writes one default over
+`modality.configure`, carrying the revision read immediately before the write. A category alone
+writes the category-keyed default, which is what every category except `image` and `speech` uses;
+those two name the operation. `--clear` sends `model: null` and restores automatic resolution. A
+`modality_conflict` means another client saved between the read and the write, so the revision is
+read again and the write retried once; a second conflict fails with the owner's message. The
+command prints the operation's row from the reply, or the reply under `--json`.
+
 ## Permission presets and approvals
 
 The App Server decides each tool call; the CLI selects settings and never decides a call itself.
