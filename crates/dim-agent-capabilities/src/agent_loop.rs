@@ -739,6 +739,7 @@ impl AgentLoop {
                     }),
                     prompt,
                     recovery: None,
+                    failure_chain: None,
                 })
             }).catch_unwind();
             let result = tokio::select! {

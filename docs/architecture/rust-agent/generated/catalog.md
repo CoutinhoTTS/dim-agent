@@ -33,6 +33,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `managementMethods` | process | ManagementMethods | Rust-only | — |
 | `mcpAuth` | process | Mcp | Rust-only | — |
 | `mcpService` | process | Mcp | Rust-only | — |
+| `mentionIndex` | process | WorkspaceToolsOwner | Rust-only | — |
 | `modalityConnectionHost` | process | Provider | Rust-only | — |
 | `modelHost` | process | Aimux | Rust-only | — |
 | `modelSelectionHost` | process | Provider | Rust-only | — |
