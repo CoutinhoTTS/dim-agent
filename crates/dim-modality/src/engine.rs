@@ -101,6 +101,20 @@ impl Clock for SystemClock {
     }
 }
 
+/// A hook a generation calls after the host path has opened and counted its
+/// artifacts and before any of them is copied: the product's does nothing,
+/// and a test injects one to change a work file in the window the size cap
+/// must cover. It is the same seam shape as [`Clock`].
+pub trait PreflightHook: Send + Sync + 'static {
+    fn after_preflight(&self, work: &Path);
+}
+/// The product's hook: it does nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoPreflightHook;
+impl PreflightHook for NoPreflightHook {
+    fn after_preflight(&self, _work: &Path) {}
+}
+
 fn rfc3339(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
@@ -427,9 +441,12 @@ pub(crate) struct Shared {
     pub(crate) state: Mutex<State>,
     /// The executable host targets run (`ocr-helper`), from the installer.
     pub(crate) ocr_helper: Option<PathBuf>,
+    /// The seam a test uses between the host path's size check and its copy.
+    pub(crate) preflight: Arc<dyn PreflightHook>,
 }
 
 impl Shared {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         files: Arc<PluginFileTransactions>,
         settings: Arc<SettingsService>,
@@ -438,6 +455,7 @@ impl Shared {
         ctx: Ctx,
         clock: Arc<dyn Clock>,
         ocr_helper: Option<PathBuf>,
+        preflight: Arc<dyn PreflightHook>,
     ) -> Self {
         Self {
             files,
@@ -451,6 +469,7 @@ impl Shared {
             wake: Notify::new(),
             state: Mutex::new(State::default()),
             ocr_helper,
+            preflight,
         }
     }
 
@@ -2195,7 +2214,9 @@ impl Shared {
     /// walk never follows a link and accepts only a regular file, so a FIFO
     /// left at an artifact name cannot block the read and a link cannot point
     /// it outside the work directory. The opened lengths are checked against
-    /// [`dim_ocr::MAX_ARTIFACT_BYTES`] before any byte is read.
+    /// [`dim_ocr::MAX_ARTIFACT_BYTES`] before any byte is read, and those same
+    /// readers are what `settle_files` publishes, so the bytes counted are the
+    /// bytes copied even when a late writer changes the names afterwards.
     async fn publish_host(self: &Arc<Self>, slot: &Arc<Slot>, work: &Path) {
         let record = self.record(slot);
         let work_name = task::work_name(&record.task_id);
@@ -2275,50 +2296,30 @@ impl Shared {
             .await;
             return;
         }
-        let parsed = tokio::task::spawn_blocking(move || {
-            dim_ocr::read_pages(ReaderSource::new(result_reader), MAX_DATA_TEXT_BYTES)
-        })
-        .await;
-        let Ok(Ok(pages)) = parsed else {
-            self.fail(
-                slot,
-                "executor_error",
-                "The OCR helper wrote no readable result",
-            )
-            .await;
-            return;
-        };
+        self.preflight.after_preflight(work);
+        // The readers the cap counted are the ones copied into `result/`:
+        // a write or a replacement under the same name after this point
+        // changes neither what is published nor its size.
         let mut files = vec![
-            JobFile {
+            OutputFile {
                 name: dim_ocr::RESULT_FILE.to_owned(),
                 media_type: "application/json".to_owned(),
-                path: work.join(dim_ocr::RESULT_FILE),
+                source: OutputSource::Reader(result_reader),
             },
-            JobFile {
+            OutputFile {
                 name: dim_ocr::TEXT_FILE.to_owned(),
                 media_type: "text/plain".to_owned(),
-                path: work.join(dim_ocr::TEXT_FILE),
+                source: OutputSource::Reader(text_reader),
             },
         ];
-        for name in images {
-            files.push(JobFile {
-                name: name.clone(),
+        for (name, reader) in images.into_iter().zip(image_readers) {
+            files.push(OutputFile {
+                name,
                 media_type: "image/png".to_owned(),
-                path: work.join(name),
+                source: OutputSource::Reader(reader),
             });
         }
-        drop(image_readers);
-        let mut data = json!({ "pages": pages.pages });
-        if pages.text_truncated {
-            // The record carries no more page text than MAX_DATA_TEXT_BYTES;
-            // the client reads text.txt for the rest.
-            data["textTruncated"] = json!(true);
-        }
-        let output = AdapterOutput {
-            files,
-            data: Some(data),
-        };
-        self.settle_output(slot, output).await;
+        self.settle_files(slot, files, OutputData::ResultJson).await;
     }
 
     /// Opens one file of the task's work directory through the plugin files
@@ -2335,10 +2336,34 @@ impl Shared {
             .map_err(|error| error.to_string())
     }
 
-    /// Streams the adapter's output files into `result/` and writes the
+    /// Streams an adapter's output files into `result/` and writes the
     /// terminal `succeeded` record (decision 7). A file outside the work
     /// directory fails the task with `provider_error` and writes no result.
     async fn settle_output(self: &Arc<Self>, slot: &Arc<Slot>, output: AdapterOutput) {
+        let files = output
+            .files
+            .into_iter()
+            .map(|file| OutputFile {
+                name: file.name,
+                media_type: file.media_type,
+                source: OutputSource::Path(file.path),
+            })
+            .collect();
+        self.settle_files(slot, files, OutputData::Given(output.data))
+            .await;
+    }
+
+    /// The one publication routine both paths use: copies each file into
+    /// `result/` from its source and writes the terminal `succeeded` record.
+    /// A path source is opened through the plugin files storage here; a reader
+    /// source is the host path's counted reader and is never reopened, so the
+    /// bytes published are exactly the bytes the cap counted.
+    async fn settle_files(
+        self: &Arc<Self>,
+        slot: &Arc<Slot>,
+        files: Vec<OutputFile>,
+        data: OutputData,
+    ) {
         let record = self.record(slot);
         if record.state.is_terminal() {
             return;
@@ -2370,8 +2395,8 @@ impl Shared {
         }
         let mut names = BTreeSet::new();
         let mut written: Vec<String> = Vec::new();
-        let mut files: Vec<ResultFile> = Vec::new();
-        for file in &output.files {
+        let mut results: Vec<ResultFile> = Vec::new();
+        for file in files {
             if !valid_file_name(&file.name) || !names.insert(file.name.clone()) {
                 self.discard_results(&record.task_id, &written).await;
                 self.fail(
@@ -2382,32 +2407,37 @@ impl Shared {
                 .await;
                 return;
             }
-            let Some(relative) = work_relative_name(&work, &file.path) else {
-                self.discard_results(&record.task_id, &written).await;
-                self.fail(
-                    slot,
-                    "provider_error",
-                    "The adapter returned a file outside its work directory",
-                )
-                .await;
-                return;
-            };
-            let source = match self.open_work_file(&work_name, &relative).await {
-                Ok(Some(source)) => source,
-                Ok(None) => {
-                    self.discard_results(&record.task_id, &written).await;
-                    self.fail(
-                        slot,
-                        "provider_error",
-                        "The adapter returned a file outside its work directory",
-                    )
-                    .await;
-                    return;
-                }
-                Err(error) => {
-                    self.discard_results(&record.task_id, &written).await;
-                    self.fail(slot, "provider_error", error).await;
-                    return;
+            let source = match file.source {
+                OutputSource::Reader(reader) => reader,
+                OutputSource::Path(path) => {
+                    let Some(relative) = work_relative_name(&work, &path) else {
+                        self.discard_results(&record.task_id, &written).await;
+                        self.fail(
+                            slot,
+                            "provider_error",
+                            "The adapter returned a file outside its work directory",
+                        )
+                        .await;
+                        return;
+                    };
+                    match self.open_work_file(&work_name, &relative).await {
+                        Ok(Some(source)) => source,
+                        Ok(None) => {
+                            self.discard_results(&record.task_id, &written).await;
+                            self.fail(
+                                slot,
+                                "provider_error",
+                                "The adapter returned a file outside its work directory",
+                            )
+                            .await;
+                            return;
+                        }
+                        Err(error) => {
+                            self.discard_results(&record.task_id, &written).await;
+                            self.fail(slot, "provider_error", error).await;
+                            return;
+                        }
+                    }
                 }
             };
             let (bytes, sha256) = match task::write_result(
@@ -2426,17 +2456,28 @@ impl Shared {
                 }
             };
             written.push(file.name.clone());
-            files.push(ResultFile {
-                name: file.name.clone(),
-                media_type: file.media_type.clone(),
+            results.push(ResultFile {
+                name: file.name,
+                media_type: file.media_type,
                 bytes,
                 sha256,
             });
         }
+        let data = match data {
+            OutputData::Given(data) => data,
+            OutputData::ResultJson => match self.published_result_pages(&record.task_id).await {
+                Ok(data) => Some(data),
+                Err(message) => {
+                    self.discard_results(&record.task_id, &written).await;
+                    self.fail(slot, "executor_error", message).await;
+                    return;
+                }
+            },
+        };
         let _ = task::remove_work(&self.files, &record.task_id).await;
         let result = TaskResult {
-            files,
-            data: output.data,
+            files: results,
+            data,
         };
         let finished = self.now_text();
         match self
@@ -2465,6 +2506,31 @@ impl Shared {
             Write::Written(_) => {}
         }
         self.wake.notify_one();
+    }
+
+    /// The record's `data` from the `result.json` this call just published,
+    /// parsed from the published file with the same text budget, so the record
+    /// describes exactly the bytes it names (decision 8).
+    async fn published_result_pages(&self, task_id: &str) -> Result<Value, String> {
+        let name = task::result_name(task_id, dim_ocr::RESULT_FILE);
+        let reader = self
+            .files
+            .open_read(&name)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "The OCR helper wrote no readable result".to_owned())?;
+        let parsed = tokio::task::spawn_blocking(move || {
+            dim_ocr::read_pages(ReaderSource::new(reader), MAX_DATA_TEXT_BYTES)
+        })
+        .await;
+        let Ok(Ok(pages)) = parsed else {
+            return Err("The OCR helper wrote no readable result".to_owned());
+        };
+        let mut data = json!({ "pages": pages.pages });
+        if pages.text_truncated {
+            data["textTruncated"] = json!(true);
+        }
+        Ok(data)
     }
 
     async fn discard_results(&self, task_id: &str, names: &[String]) {
@@ -2558,6 +2624,30 @@ fn work_relative_name(work: &Path, path: &Path) -> Option<String> {
         name.push_str(part);
     }
     if name.is_empty() { None } else { Some(name) }
+}
+
+/// One file to publish: its name, its media type and where its bytes come
+/// from.
+struct OutputFile {
+    name: String,
+    media_type: String,
+    source: OutputSource,
+}
+
+/// Where an output file's bytes come from: a path an adapter named, opened
+/// through the storage at copy time, or a reader the host path already opened
+/// and counted, which is never reopened.
+enum OutputSource {
+    Path(PathBuf),
+    Reader(FileReader),
+}
+
+/// Where the terminal record's `data` comes from: the adapter's own value, or
+/// the `result.json` the host path just published, parsed after publication
+/// so the record describes the published bytes.
+enum OutputData {
+    Given(Option<Value>),
+    ResultJson,
 }
 
 /// A synchronous [`Read`] over a pinned [`FileReader`]: each read blocks the
