@@ -60,26 +60,6 @@ fn on_path(program: &str) -> PathBuf {
         .expect("the program is on PATH")
 }
 
-/// The process environment's `PATH` is shared by every flow in this binary,
-/// so a flow that changes it holds this while it does.
-static PATH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Puts `PATH` back when its flow ends, pass or panic.
-struct RestorePath(Option<std::ffi::OsString>);
-
-impl Drop for RestorePath {
-    fn drop(&mut self) {
-        // SAFETY: the flow holds PATH_LOCK until after this guard drops, so
-        // no other flow reads or writes PATH meanwhile.
-        unsafe {
-            match self.0.take() {
-                Some(path) => std::env::set_var("PATH", path),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-    }
-}
-
 /// `runtime.list` reports an interpreter only while the record marks the
 /// runtime installed under the plan in effect (§2.4, §5), the same test that
 /// skips a download. Nothing is acquired here: the record and the directories
@@ -101,6 +81,7 @@ async fn runtime_list_reports_a_path_only_while_its_record_matches_the_plan() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -157,13 +138,11 @@ async fn runtime_list_reports_a_path_only_while_its_record_matches_the_plan() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// A relative `PATH` entry (§5): `which` resolves it against the daemon's
+/// A relative search-path entry (§5): `which` resolves it against the daemon's
 /// working directory, so `runtime.list` reports the absolute interpreter path
 /// that a process started from another working directory can launch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
-    let _path = PATH_LOCK.lock().await;
-    let _restore = RestorePath(std::env::var_os("PATH"));
     let home = std::env::temp_dir().join(format!("drm-relative-{}", uuid::Uuid::new_v4()));
     let fixture = home.join("system-node");
     let bin = fixture.join("bin");
@@ -193,13 +172,6 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
         !relative.is_absolute(),
         "the entry is relative: {relative:?}"
     );
-    let previous = std::env::var_os("PATH").unwrap();
-    let joined = std::env::join_paths(
-        std::iter::once(relative.clone()).chain(std::env::split_paths(&previous)),
-    )
-    .unwrap();
-    // SAFETY: the flow holds PATH_LOCK, and RestorePath puts PATH back.
-    unsafe { std::env::set_var("PATH", &joined) };
 
     let defaults = home.join("default-plugins.json");
     std::fs::write(
@@ -214,6 +186,7 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            Some(relative.into_os_string()),
         )
         .unwrap(),
     );
@@ -310,6 +283,7 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -395,6 +369,7 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -447,6 +422,7 @@ async fn node_runtime_manager_reads_the_configuration_when_it_applies_it() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -573,6 +549,7 @@ async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
