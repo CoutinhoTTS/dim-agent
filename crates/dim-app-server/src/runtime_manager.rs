@@ -374,9 +374,18 @@ fn which(program: &str) -> Option<PathBuf> {
     } else {
         program.to_owned()
     };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(&file))
-        .find(|path| path.is_file())
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|directory| {
+        let candidate = directory.join(&file);
+        // An entry may be relative, or empty for the current directory
+        // (§5). Resolve it lexically, so every caller gets the absolute
+        // path the entry names from any working directory.
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            std::path::absolute(&candidate).ok()?
+        };
+        candidate.is_file().then_some(candidate)
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {

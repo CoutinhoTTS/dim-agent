@@ -60,6 +60,22 @@ fn on_path(program: &str) -> PathBuf {
         .expect("the program is on PATH")
 }
 
+/// Puts `PATH` back when its flow ends, pass or panic.
+struct RestorePath(Option<std::ffi::OsString>);
+
+impl Drop for RestorePath {
+    fn drop(&mut self) {
+        // SAFETY: the flow holds PATH_LOCK until after this guard drops, so
+        // no other flow reads or writes PATH meanwhile.
+        unsafe {
+            match self.0.take() {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
+
 /// `runtime.list` reports an interpreter only while the record marks the
 /// runtime installed under the plan in effect (§2.4, §5), the same test that
 /// skips a download. Nothing is acquired here: the record and the directories
@@ -136,6 +152,117 @@ async fn runtime_list_reports_a_path_only_while_its_record_matches_the_plan() {
     assert!(
         listed["result"][0]["path"].is_null(),
         "a record that is not this plan's reports no path: {listed}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A relative `PATH` entry (§5): `which` resolves it against the daemon's
+/// working directory, so `runtime.list` reports the absolute interpreter path
+/// that a process started from another working directory can launch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
+    let _path = PATH_LOCK.lock().await;
+    let _restore = RestorePath(std::env::var_os("PATH"));
+    let home = std::env::temp_dir().join(format!("drm-relative-{}", uuid::Uuid::new_v4()));
+    let fixture = home.join("system-node");
+    let bin = fixture.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let node = bin.join("node");
+    std::fs::write(
+        &node,
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo v22.19.0\nexit 0\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(fixture.join("lib/node_modules/npm/bin")).unwrap();
+    std::fs::write(fixture.join("lib/node_modules/npm/bin/npm-cli.js"), "").unwrap();
+
+    // The interpreter's directory as a relative entry, built from the current
+    // directory so no flow has to change it: one `..` per component of the
+    // current directory reaches the root, then the directory's path follows.
+    let cwd = std::env::current_dir().unwrap();
+    let absolute = bin.canonicalize().unwrap();
+    let ups = cwd
+        .components()
+        .filter(|component| matches!(component, std::path::Component::Normal(_)))
+        .count();
+    let relative = PathBuf::from("../".repeat(ups)).join(absolute.strip_prefix("/").unwrap());
+    assert!(
+        !relative.is_absolute(),
+        "the entry is relative: {relative:?}"
+    );
+    let previous = std::env::var_os("PATH").unwrap();
+    let joined = std::env::join_paths(
+        std::iter::once(relative.clone()).chain(std::env::split_paths(&previous)),
+    )
+    .unwrap();
+    // SAFETY: the flow holds PATH_LOCK, and RestorePath puts PATH back.
+    unsafe { std::env::set_var("PATH", &joined) };
+
+    let defaults = home.join("default-plugins.json");
+    std::fs::write(
+        &defaults,
+        r#"{"runtimes": {"node": {"source": "system", "auto": false},
+                         "python": {"source": "download", "auto": false}}}"#,
+    )
+    .unwrap();
+    let runtimes = Arc::new(
+        Runtimes::load(
+            &home,
+            &dim_app_server::plugin_manager::Defaults::read(&defaults)
+                .unwrap()
+                .runtimes,
+        )
+        .unwrap(),
+    );
+    std::fs::create_dir_all(
+        runtimes
+            .plan(Kind::Node)
+            .packages
+            .as_ref()
+            .expect("Node packages"),
+    )
+    .unwrap();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let install = client.rpc("runtime.install", json!({"name": "node"})).await;
+    assert_ok(&install);
+
+    let entry = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let list = client.rpc("runtime.list", json!({})).await;
+            assert_ok(&list);
+            if list["result"][0]["path"].is_string() {
+                return list["result"][0].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("runtime.list reported no path");
+
+    let path = entry["path"].as_str().unwrap();
+    assert!(
+        Path::new(path).is_absolute(),
+        "the reported interpreter path is absolute: {entry}"
+    );
+    assert_eq!(
+        Path::new(path).canonicalize().unwrap(),
+        node.canonicalize().unwrap(),
+        "the reported path names the fixture: {entry}"
     );
 
     drop(client);
