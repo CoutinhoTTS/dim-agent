@@ -5,10 +5,13 @@
 //! offered; a query that names a path outside it finds nothing.
 
 use ignore::WalkBuilder;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::methods::RpcError;
 
 pub const DEFAULT_LIMIT: usize = 20;
 pub const MAX_LIMIT: usize = 50;
@@ -64,18 +67,55 @@ pub struct Candidate {
 type Walked = HashMap<PathBuf, (Instant, Arc<Vec<Entry>>)>;
 
 /// The walked indexes of the workspace roots, each reused for [`INDEX_TTL`].
-#[derive(Default)]
+/// The WorkspaceTools owner provides one instance at process scope, injected
+/// by every Session part and by `workspace.files.search`, so both entry
+/// points share one walk (WorkspaceTools §1).
 pub struct MentionIndex {
     walked: Mutex<Walked>,
+    ttl: Duration,
+}
+
+impl Default for MentionIndex {
+    fn default() -> Self {
+        Self {
+            walked: Mutex::default(),
+            ttl: INDEX_TTL,
+        }
+    }
 }
 
 impl MentionIndex {
+    /// The index with `ttl` in place of the product's ten seconds, for tests
+    /// that must observe a rewalk without waiting that long. No product path
+    /// sets it.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            walked: Mutex::default(),
+            ttl,
+        }
+    }
+
+    /// The roots the index holds: what the eviction every search performs
+    /// left. Test-only; the product reads no count.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn walked_roots(&self) -> usize {
+        self.walked
+            .lock()
+            .map(|walked| walked.len())
+            .unwrap_or_default()
+    }
+
+    /// `root`'s entries, reused while the walk is younger than the TTL. Every
+    /// call first drops the roots whose walk is past it, so an index that
+    /// lives as long as the process keeps only the roots still being
+    /// searched.
     fn entries(&self, root: &Path) -> Arc<Vec<Entry>> {
-        if let Ok(walked) = self.walked.lock()
-            && let Some((at, entries)) = walked.get(root)
-            && at.elapsed() < INDEX_TTL
-        {
-            return entries.clone();
+        if let Ok(mut walked) = self.walked.lock() {
+            walked.retain(|_, (at, _)| at.elapsed() < self.ttl);
+            if let Some((_, entries)) = walked.get(root) {
+                return entries.clone();
+            }
         }
         let entries = Arc::new(walk(root));
         if let Ok(mut walked) = self.walked.lock() {
@@ -132,6 +172,30 @@ impl MentionIndex {
             })
             .collect()
     }
+}
+
+/// The `limit` rule both file-search entry points share: the default, the
+/// largest answer, and `0` as the caller's error.
+pub fn parse_limit(limit: Option<usize>) -> Result<usize, RpcError> {
+    match limit {
+        Some(0) => Err(RpcError::invalid("limit must be at least 1")),
+        Some(limit) => Ok(limit.clamp(1, MAX_LIMIT)),
+        None => Ok(DEFAULT_LIMIT),
+    }
+}
+
+/// The reply's `candidates` array, the one shape both entry points return.
+pub fn candidates(found: &[Candidate]) -> Vec<Value> {
+    found
+        .iter()
+        .map(|candidate| {
+            json!({
+                "relativePath": candidate.relative_path,
+                "absolutePath": candidate.absolute_path,
+                "dir": candidate.dir,
+            })
+        })
+        .collect()
 }
 
 /// Walks `root` breadth first, honouring ignore files, within the depth,

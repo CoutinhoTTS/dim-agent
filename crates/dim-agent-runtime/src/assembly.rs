@@ -366,6 +366,12 @@ impl AgentBuilder {
         Arc::make_mut(&mut self.assembly.required_parts).insert(name.into());
         self
     }
+    /// Whether the profile requires the registered part `name`
+    /// ([`Self::require_part`]): a composition root adds a row that serves one
+    /// of that part's dependencies only to profiles that install it.
+    pub fn requires_part(&self, name: &str) -> bool {
+        self.assembly.required_parts.contains(name)
+    }
     /// A Rust part of the Session extension `group`: a nested instanced
     /// group created only for Sessions that ask for it, with a value of type
     /// `V` (see [`Agent::create_session_with_extension`]). `make` builds a
