@@ -23,8 +23,6 @@ pub struct HelperDescription {
     pub contract: u32,
     /// The target this description serves.
     pub target: DescriptionTarget,
-    /// English display text for clients.
-    pub label: String,
     /// The program to start, absolute.
     pub executable: PathBuf,
     /// Arguments that precede `--input`, each one argument.

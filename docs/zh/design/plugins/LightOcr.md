@@ -60,16 +60,15 @@ runtime/plugins/light-ocr/
 
 | 方法 | 类型 | 请求 | 回复 |
 | --- | --- | --- | --- |
-| `describe` | 同步 | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, label, executable, args, read}` 或 `null` |
+| `describe` | 异步 | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, executable, args, read}` 或 `null` |
 
 - `contract` 是本插件实现的 helper 契约版本，`1`。仅当它与 Modality 实现的版本相等时 Modality 才提供该目标；仍在运行的旧副本使目标不可用并带“the PP-OCR plugin needs an update”，直到重新获取完成（Modality §A.2.1）。
 - `target` 是 `{providerId: "local", modelId: "pp-ocr"}`，因此 Modality 把该目标列为 `local/pp-ocr`。
-- `label` 是供客户端显示的英文文本：`PP-OCR (local)`。
 - `executable` 是 `process.execPath`：运行该行的 Node 安装。`source: system` 时它是 `PATH` 上的解释器；无论哪种，Modality 都不记录它，每次调用都信任描述。
 - `args` 是 `[<插件目录>/helper.cjs]`，绝对路径。Modality 只追加 `--input`、`--artifacts` 与 `--output-mode`，别无其他。
 - `read` 是经 `fs.realpathSync` 解析的 Node 安装根目录与插件目录——分别对可执行文件与插件目录解析——因此符号链接的 `node`（包管理器的 `bin` 链接）授权的是二进制真正所在的目录。Modality 把任务输入加入这些路径，使 helper 能加载自己的脚本与 `node_modules`、平台包中的 Node addon，以及输入。
 
-行从不自己执行 OCR 来回应请求，也从不检查输入。`describe` 在进程生命周期内返回相同的值；Modality 可以在每个任务上调用它。
+行从不自己执行 OCR 来回应请求，也从不检查输入。`describe` 声明为 `async`，因此发起调用从不阻塞调用方；Modality 限定等待时长，停止应答的行按缺席读取（Modality §A.2.1）。它在进程生命周期内返回相同的值；Modality 可以在每个任务上调用它。
 
 ## 4. helper
 
@@ -216,7 +215,7 @@ lock 以 `integrity` 锁定 facade、它的 runtime、模型与平台包，以�
 没有自动化测试会下载、安装或加载真实引擎。
 
 - **helper 单元测试。** 测试树中的 fixture `node_modules/@arcships/light-ocr` 导出 `createEngine`、`createDocumentEngine`、`getVersion`、`hasPdfSupport` 与 `OcrError`，其结果与失败由测试控制。helper 作为子进程在 fixture 输入上运行，测试断言 argv 解析、产物名字与形状、`text.txt` 内容、多边形转换、上限检查、§4.4 的每个错误映射，以及拒绝时不会在越界后留下部分产物。不获取任何东西；fixture 是仓库中的一个目录。
-- **行与插件测试。** 行连同 fixture 引擎一起加载，断言 `describe` 符合 Modality A.2.1 的形状——`target`、`label`、`executable` = `process.execPath`、`args`、`read`。服务在场、缺席与移除是 Modality 的验收流程，用桩提供方运行（Modality 附录 D 第 9 项）；插件自身的测试只覆盖它发布的描述。
+- **行与插件测试。** 行连同 fixture 引擎一起加载，断言 `describe` 符合 Modality A.2.1 的形状——`target`、`executable` = `process.execPath`、`args`、`read`。服务在场、缺席与移除是 Modality 的验收流程，用桩提供方运行（Modality 附录 D 第 9 项）；插件自身的测试只覆盖它发布的描述。
 - **安装测试。** 用一个声明 `dependencies` 的 fixture 插件，PluginManager 的获取会复制它、从本地 fixture registry 安装其锁定依赖并改名到位；随发行的目录不变（PluginManager 附录 C 第 13 项）。
 - **唯一一次真实运行。** 一次端到端验收，不进 CI，在 macOS arm64 上：从发布的 optional 目录安装插件，从公共 registry 取真实 lock，对一页 PNG 和两页 PDF 以两种输出模式运行 `modality.ocr.recognize`，断言文本、页数、`layout` 模式下的 `page-NNNN.png`、退出码 0、`confined: true`，以及 helper 未在工作目录之外写任何东西。它会安装并在受限进程中加载下载的原生代码，因此由人手动运行，从不作为常规测试套件的一部分。
 - **测试装置。** 任何受限测试或装置都像 `spawn_confined` 一样给 helper 的 stdout 与 stderr 接管道。把它们重定向到授权根之外的文件会让 Node 在初始化时中止（已测量：退出 250，五次全部如此）；必须使用文件的装置把它们放进可写根内。

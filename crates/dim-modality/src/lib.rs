@@ -65,6 +65,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 pub use task::{TaskRecord, TaskState};
 use tokio_util::sync::CancellationToken;
 
@@ -447,7 +448,9 @@ pub(crate) struct Evaluation {
     /// The helper this build starts for its host targets; the product's
     /// installer passes its own executable.
     ocr_helper: Option<PathBuf>,
-    /// The plugin-supplied target as this call read it (A.2.1).
+    /// The plugin-supplied target as this call read it (A.2.1); a call that
+    /// cannot reach the OCR target carries [`PluginTargetState::Absent`]
+    /// without reading it.
     pp_ocr: PluginTargetState,
 }
 
@@ -469,12 +472,23 @@ impl PluginTargetState {
     }
 }
 
+/// How long one call waits for `ocrHelper.describe` (A.2.1): the row already
+/// holds the value, so only a stalled row ever reaches it.
+pub(crate) const PLUGIN_DESCRIBE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Reads `ocrHelper.describe` once for this call (A.2.1). A missing service,
-/// a failed call, or a reply naming another target is absent. The contract is
-/// read first, ignoring the rest of the reply's shape, so a newer contract
-/// reports itself outdated whatever its fields are; only this build's
-/// contract is parsed strictly, and a reply that fails that parse is absent.
-pub(crate) async fn plugin_target_state(ctx: &Ctx) -> PluginTargetState {
+/// a failed call, a cancelled call, a reply that misses
+/// [`PLUGIN_DESCRIBE_TIMEOUT`], or a reply naming another target is absent.
+/// The method is `async`, so the call starts without blocking the calling
+/// thread; giving up on the wait drops the reply, which cancels the call and
+/// discards a late answer. The contract is read first, ignoring the rest of
+/// the reply's shape, so a newer contract reports itself outdated whatever its
+/// fields are; only this build's contract is parsed strictly, and a reply that
+/// fails that parse is absent.
+pub(crate) async fn plugin_target_state(
+    ctx: &Ctx,
+    cancel: &CancellationToken,
+) -> PluginTargetState {
     use rutis_bridge::session::{HostDispatch, Value as ServiceValue, host_key, settle};
     let Some(service) = ctx.get_at::<dyn HostDispatch>(&host_key("ocrHelper")) else {
         return PluginTargetState::Absent;
@@ -482,8 +496,12 @@ pub(crate) async fn plugin_target_state(ctx: &Ctx) -> PluginTargetState {
     let Ok(reply) = service.invoke("describe", ServiceValue::List(Vec::new())) else {
         return PluginTargetState::Absent;
     };
-    let Ok(value) = settle(reply).await else {
-        return PluginTargetState::Absent;
+    let value = tokio::select! {
+        _ = cancel.cancelled() => return PluginTargetState::Absent,
+        reply = tokio::time::timeout(PLUGIN_DESCRIBE_TIMEOUT, settle(reply)) => match reply {
+            Ok(Ok(value)) => value,
+            _ => return PluginTargetState::Absent,
+        },
     };
     let Ok(json) = value.json() else {
         return PluginTargetState::Absent;
@@ -971,6 +989,18 @@ pub(crate) fn host_error(error: HostError) -> RpcError {
     }
 }
 
+/// Whether one call reads the plugin-supplied OCR target (A.2.1): only a call
+/// whose reply or resolution names the OCR category reads `ocrHelper`, so an
+/// image, video or speech request and a realtime session never wait on it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OcrLookup {
+    /// This call cannot reach the OCR target.
+    Skip,
+    /// This call's reply or resolved operation carries the OCR target: read
+    /// `describe` once.
+    Read,
+}
+
 pub(crate) async fn evaluate(
     settings: &SettingsService,
     selectable: &SelectableModelsHost,
@@ -978,6 +1008,7 @@ pub(crate) async fn evaluate(
     ctx: &Ctx,
     ocr_helper: Option<&std::path::Path>,
     cancel: &CancellationToken,
+    ocr: OcrLookup,
 ) -> Result<(String, Evaluation), RpcError> {
     let snapshot = settings
         .read::<ModalitySettings>(SettingsScope::User, cancel)
@@ -1014,7 +1045,10 @@ pub(crate) async fn evaluate(
                 .get::<dim_agent_capabilities::host_platform::HostPlatform>()
                 .is_some(),
             ocr_helper: ocr_helper.map(|path| path.to_owned()),
-            pp_ocr: plugin_target_state(ctx).await,
+            pp_ocr: match ocr {
+                OcrLookup::Skip => PluginTargetState::Absent,
+                OcrLookup::Read => plugin_target_state(ctx, cancel).await,
+            },
         },
     ))
 }
@@ -1235,6 +1269,9 @@ impl DynPlugin for ModalityPlugin {
                                     &context,
                                     ocr_helper.as_deref(),
                                     &stopping,
+                                    // The snapshot carries every category,
+                                    // the OCR one included.
+                                    OcrLookup::Read,
                                 )
                                 .await?;
                                 reply(evaluation.snapshot(&revision))
@@ -1254,6 +1291,9 @@ impl DynPlugin for ModalityPlugin {
                                     &context,
                                     ocr_helper.as_deref(),
                                     &stopping,
+                                    // The reply is the same snapshot: every
+                                    // category, the OCR one included.
+                                    OcrLookup::Read,
                                 )
                                 .await?;
                                 if let Some(model) = model {

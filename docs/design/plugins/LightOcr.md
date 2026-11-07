@@ -60,16 +60,15 @@ Service `ocrHelper`, scope process, no key, provided by the `light-ocr` row's `p
 
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
-| `describe` | sync | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, label, executable, args, read}` or `null` |
+| `describe` | async | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, executable, args, read}` or `null` |
 
 - `contract` is the helper-contract version this plugin implements, `1`. Modality offers the target only when it equals the version Modality implements; an older copy that is still running marks the target unavailable with "the PP-OCR plugin needs an update" until its re-acquisition lands (Modality §A.2.1).
 - `target` is `{providerId: "local", modelId: "pp-ocr"}`, so Modality lists the target as `local/pp-ocr`.
-- `label` is English display text for clients: `PP-OCR (local)`.
 - `executable` is `process.execPath`: the Node installation that runs the row. With `source: system` it is the interpreter on `PATH`; either way Modality records nothing and trusts the description at each call.
 - `args` is `[<plugin directory>/helper.cjs]`, an absolute path. Modality appends `--input`, `--artifacts` and `--output-mode` and nothing else.
 - `read` is the canonical Node installation root and the canonical plugin directory, each derived through `fs.realpathSync` — of the executable and of the plugin directory — so a symlinked `node` (a package manager's `bin` link) grants the directory the binary really lives in. Modality adds the task's input to these paths, so the helper can load its own script and `node_modules`, the Node addon in the platform package, and the input.
 
-The row never answers a request by doing OCR itself and never inspects the input. `describe` returns the same value for the life of the process; Modality may call it on every task.
+The row never answers a request by doing OCR itself and never inspects the input. `describe` is declared `async`, so starting it never blocks the caller; Modality bounds its wait, and a row that stops answering reads as absent (Modality §A.2.1). It returns the same value for the life of the process; Modality may call it on every task.
 
 ## 4. The helper
 
@@ -216,7 +215,7 @@ The lock pins the facade, its runtime, model and platform packages, and `@arcshi
 No automated test downloads, installs or loads the real engine.
 
 - **Helper unit tests.** A fixture `node_modules/@arcships/light-ocr` in the test tree exports `createEngine`, `createDocumentEngine`, `getVersion`, `hasPdfSupport` and `OcrError`, with results and failures the test controls. The helper is run as a child process over fixture inputs, and the tests assert argv parsing, artifact names and shapes, `text.txt` content, the polygon conversion, the limit checks, every error mapping in §4.4, and that a refusal writes no partial artifact past the bound. Nothing is fetched; the fixture is a directory in the repository.
-- **Row and plugin tests.** The row is loaded with the fixture engine and `describe` is asserted against Modality's A.2.1 shape — `target`, `label`, `executable` = `process.execPath`, `args`, `read`. Presence, absence and removal of the service are Modality's acceptance flows, run with a stub provider (Modality Appendix D item 9); the plugin's own tests cover only the description it publishes.
+- **Row and plugin tests.** The row is loaded with the fixture engine and `describe` is asserted against Modality's A.2.1 shape — `target`, `executable` = `process.execPath`, `args`, `read`. Presence, absence and removal of the service are Modality's acceptance flows, run with a stub provider (Modality Appendix D item 9); the plugin's own tests cover only the description it publishes.
 - **Install tests.** With a fixture plugin that declares `dependencies`, PluginManager's acquisition copies it, installs its locked dependencies from a local fixture registry and renames it into place; the shipped directory is unchanged (PluginManager Appendix C item 13).
 - **The one real run.** A single end-to-end acceptance, not in CI, on macOS arm64: install the plugin from the release's optional directory with the real lock from the public registry, run `modality.ocr.recognize` on a one-page PNG and on a two-page PDF in both output modes, and assert the text, the page count, `page-NNNN.png` in layout mode, exit 0, `confined: true`, and that the helper wrote nothing outside its work directory. It installs and loads downloaded native code, so it is run by hand and never as part of a normal test suite.
 - **Harness.** Any confined test or harness starts the helper with pipes for stdout and stderr, as `spawn_confined` does. Redirecting them to files outside the granted roots makes Node abort while it initializes (measured: exit 250, five times out of five); a harness that must use files puts them inside a write root.

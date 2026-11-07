@@ -4626,16 +4626,23 @@ const PP_OCR_MODEL: &str = "pp-ocr";
 
 /// The fixture `ocrHelper` service: its `describe` returns the JSON the test
 /// set, or `null`, and counts the calls so a flow can tell a task read it.
+/// Past the replies it is allowed, it answers with a future that never
+/// completes — a row that stops answering — and counts the reads dropped
+/// without an answer.
 #[derive(Clone, Default)]
 struct OcrHelperFixture {
     description: Arc<Mutex<Option<Value>>>,
     describes: Arc<AtomicUsize>,
+    replies: Arc<AtomicUsize>,
+    dropped: Arc<AtomicUsize>,
 }
 impl OcrHelperFixture {
     fn new(description: Option<Value>) -> Self {
         Self {
             description: Arc::new(Mutex::new(description)),
             describes: Default::default(),
+            replies: Arc::new(AtomicUsize::new(usize::MAX)),
+            dropped: Default::default(),
         }
     }
     fn set(&self, description: Option<Value>) {
@@ -4644,16 +4651,45 @@ impl OcrHelperFixture {
     fn describes(&self) -> usize {
         self.describes.load(Ordering::SeqCst)
     }
+    /// Every `describe` from now on hangs.
+    fn silent(&self) {
+        self.replies.store(0, Ordering::SeqCst);
+    }
+    /// The next `describe` answers; every one after it hangs.
+    fn reply_once_then_silent(&self) {
+        self.replies.store(self.describes() + 1, Ordering::SeqCst);
+    }
+    /// How many hanging replies were given up on (a bound or a cancel).
+    fn dropped(&self) -> usize {
+        self.dropped.load(Ordering::SeqCst)
+    }
+}
+/// Counts a pending `describe` answer dropped without one.
+struct PendingRead(Arc<AtomicUsize>);
+impl Drop for PendingRead {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 impl HostDispatch for OcrHelperFixture {
     fn methods(&self) -> Option<Value> {
-        Some(json!({"describe": "sync"}))
+        Some(json!({"describe": "async"}))
     }
     fn invoke(&self, method: &str, _args: ServiceValue) -> Reply {
         assert_eq!(method, "describe", "the fixture serves one method");
-        self.describes.fetch_add(1, Ordering::SeqCst);
+        let count = self.describes.fetch_add(1, Ordering::SeqCst) + 1;
+        if count > self.replies.load(Ordering::SeqCst) {
+            let dropped = self.dropped.clone();
+            return Ok(ServiceValue::future(async move {
+                let _pending = PendingRead(dropped);
+                std::future::pending::<Reply>().await
+            }));
+        }
         let description = self.description.lock().unwrap().clone();
-        Ok(ServiceValue::Data(description.unwrap_or(Value::Null)))
+        // An `async` method answers with a future (LightOcr §3).
+        Ok(ServiceValue::future(async move {
+            Ok(ServiceValue::Data(description.unwrap_or(Value::Null)))
+        }))
     }
 }
 
@@ -4709,7 +4745,6 @@ fn ocr_description(
     json!({
         "contract": contract,
         "target": {"providerId": OCR_PROVIDER, "modelId": PP_OCR_MODEL},
-        "label": "PP-OCR",
         "executable": executable.to_string_lossy(),
         "args": args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>(),
         "read": read.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
@@ -5298,4 +5333,211 @@ async fn ocr_plugin_helper_cannot_read_outside_its_read_set() {
         result_bytes(&mut client, &task_id, "text.txt", 65536).await,
         b"do-not-read"
     );
+}
+
+/// A product profile with the fixture plugin and the fixture adapter: a flow
+/// that runs an image task beside a stalled OCR service.
+async fn start_with_ocr_targets_and_adapter(
+    home: std::path::PathBuf,
+    helper: Option<std::path::PathBuf>,
+    fixture: OcrHelperFixture,
+    adapter: Arc<FixtureAdapter>,
+) -> RunningServer {
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("native")),
+        ..Default::default()
+    };
+    launch_with(
+        Arc::new(MockTools),
+        config,
+        Some(InstallOptions {
+            ocr_helper: helper,
+            ..Default::default()
+        }),
+        move |builder| {
+            builder.plugin(move |_| Ok(Box::new(OcrHelperPlugin(fixture.clone()))));
+            builder.plugin(move |_| Ok(Box::new(FixturePlugin(adapter.clone()))));
+        },
+    )
+    .await
+}
+
+/// Waits until `count` reaches `wanted`, failing at the deadline.
+async fn wait_for_count(count: impl Fn() -> usize, wanted: usize, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while count() < wanted {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} never reached {wanted}: {}",
+            count()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// `describe` is read only where the OCR target matters: an image task never
+/// calls it, and a snapshot calls it once, whatever the row does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_submit_never_reads_a_silent_ocr_helper() {
+    let home = home("dm-ocr-plugin");
+    let fixture = OcrHelperFixture::new(None);
+    fixture.silent();
+    let helper = fake_helper(&home);
+    let adapter = Arc::new(FixtureAdapter::default());
+    let server =
+        start_with_ocr_targets_and_adapter(home.clone(), Some(helper), fixture.clone(), adapter)
+            .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    // The image task completes while `describe` never answers, and its path
+    // never reaches the service.
+    let submit = json!({
+        "category": "image", "operation": "generate",
+        "params": {"prompt": "a cat"},
+        "files": [inline_file("in.png", "image/png", b"inline image")],
+        "client_task_id": "image-beside-ocr",
+    });
+    let task = tokio::time::timeout(Duration::from_secs(5), submit_task(&mut client, submit))
+        .await
+        .expect("the image submit waited on the OCR helper");
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let done = tokio::time::timeout(Duration::from_secs(5), wait_terminal(&mut client, &task_id))
+        .await
+        .expect("the image task waited on the OCR helper");
+    assert_eq!(state_of(&done), "succeeded", "{done}");
+    assert_eq!(
+        fixture.describes(),
+        0,
+        "an image task never reads ocrHelper"
+    );
+    // The snapshot carries every category, the OCR one included, so it reads
+    // the service once and answers within the bound.
+    let snapshot = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.rpc("modality.capabilities", json!({})),
+    )
+    .await
+    .expect("the snapshot waited on the OCR helper");
+    assert_ok(&snapshot);
+    assert_eq!(
+        fixture.describes(),
+        1,
+        "one read per snapshot, not one per category"
+    );
+    wait_for_count(|| fixture.dropped(), 1, "the unanswered describe").await;
+    let recognize = operation_in(&snapshot, "ocr", "recognize");
+    assert!(
+        !recognize["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["modelId"] == PP_OCR_MODEL),
+        "a silent row lists no plugin target: {recognize}"
+    );
+    assert_eq!(
+        operation_in(&snapshot, "image", "generate")["available"],
+        true,
+        "the image category is unaffected"
+    );
+}
+
+/// A row that never answers reads as absent, bounded: the snapshot lists no
+/// plugin target, Apple Vision is unchanged, and an explicit submit of the
+/// plugin target fails with the one runtime reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_ocr_helper_reads_as_absent() {
+    let home = home("dm-ocr-plugin");
+    let fixture = OcrHelperFixture::new(None);
+    fixture.silent();
+    let helper = fake_helper(&home);
+    let server = start_with_ocr_targets(home.clone(), Some(helper), fixture.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let snapshot = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.rpc("modality.capabilities", json!({})),
+    )
+    .await
+    .expect("the snapshot waited on the OCR helper");
+    assert_ok(&snapshot);
+    assert_eq!(fixture.describes(), 1);
+    wait_for_count(|| fixture.dropped(), 1, "the unanswered describe").await;
+    let recognize = operation_in(&snapshot, "ocr", "recognize");
+    assert!(
+        !recognize["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["modelId"] == PP_OCR_MODEL),
+        "a silent row lists no plugin target: {recognize}"
+    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            recognize["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|option| option["modelId"] == OCR_MODEL && option["available"] == true),
+            "Apple Vision stays available: {recognize}"
+        );
+    } else {
+        assert!(
+            recognize["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason["dimension"] == "platform"),
+            "Apple Vision keeps its platform reason: {recognize}"
+        );
+    }
+    // A submission of the plugin target reads once, gives up at the bound,
+    // and fails unavailable.
+    let refused = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.rpc(
+            "modality.task.submit",
+            plugin_ocr_submit("scan.png", "text"),
+        ),
+    )
+    .await
+    .expect("the submit waited on the OCR helper");
+    assert_eq!(app_error(&refused), "unavailable", "{refused}");
+    assert_eq!(
+        refused["error"]["message"], "The PP-OCR plugin is not running",
+        "{refused}"
+    );
+    assert_eq!(fixture.describes(), 2, "the submit reads once");
+    wait_for_count(|| fixture.dropped(), 2, "the unanswered describe").await;
+}
+
+/// A cancel while the start-time `describe` is pending settles the task
+/// `cancelled`, not `failed` with the absent reason, and the pending read is
+/// dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_during_the_start_time_describe_settles_cancelled() {
+    let home = home("dm-ocr-plugin");
+    let plugin = plugin_copy(&home, "pp-ocr-plugin", "plugin-copy");
+    let fixture = OcrHelperFixture::new(Some(ocr_description(
+        1,
+        std::path::Path::new("/bin/sh"),
+        &[plugin.join("stub.sh")],
+        &[&plugin],
+    )));
+    // The submit's read answers; the task's start-time read hangs.
+    fixture.reply_once_then_silent();
+    let helper = fake_helper(&home);
+    let server = start_with_ocr_targets(home.clone(), Some(helper), fixture.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = submit_task(&mut client, plugin_ocr_submit("scan.png", "text")).await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    wait_for_count(|| fixture.describes(), 2, "the start-time describe").await;
+    let cancelled = client
+        .rpc("modality.task.cancel", json!({"task_id": task_id}))
+        .await;
+    assert_ok(&cancelled);
+    let done = tokio::time::timeout(Duration::from_secs(5), wait_terminal(&mut client, &task_id))
+        .await
+        .expect("the cancel waited on the pending describe");
+    assert_eq!(state_of(&done), "cancelled", "{done}");
+    wait_for_count(|| fixture.dropped(), 1, "the cancelled describe").await;
 }

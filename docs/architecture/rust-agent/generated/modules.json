@@ -6217,6 +6217,7 @@
       "file": "crates/dim-modality/src/lib.rs",
       "unexpandedMacros": [
         "format",
+        "tokio::select",
         "unreachable",
         "vec"
       ]
@@ -43737,6 +43738,8 @@
         "path Evaluation",
         "path ModalityAdapterService",
         "path catalog_category",
+        "path crate::OcrLookup::Read",
+        "path crate::OcrLookup::Skip",
         "path crate::OperationRow",
         "path crate::PluginTargetState::Absent",
         "path crate::PluginTargetState::Outdated",
@@ -43930,6 +43933,7 @@
       "references": [
         "path ModalityAdapterService",
         "path catalog_category",
+        "path crate::OcrLookup::Skip",
         "path crate::OperationRow",
         "path crate::host_error",
         "path evaluate",

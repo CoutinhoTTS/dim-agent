@@ -887,6 +887,13 @@ impl ModalityTasks {
             &shared.ctx,
             shared.ocr_helper.as_deref(),
             cancel,
+            // Only a submit that resolves to a host OCR operation reaches the
+            // plugin-supplied target (A.2.1).
+            if host {
+                crate::OcrLookup::Read
+            } else {
+                crate::OcrLookup::Skip
+            },
         )
         .await?;
         let model = if host {
@@ -2062,7 +2069,9 @@ impl Shared {
             };
             HostHelper::AppleVision(helper)
         } else if plugin_target {
-            match crate::plugin_target_state(&self.ctx).await {
+            // The description the service returns at this task's start; the
+            // task's own cancel interrupts a read still pending (A.2.1).
+            match crate::plugin_target_state(&self.ctx, &slot.cancel).await {
                 crate::PluginTargetState::Ready(description) => HostHelper::Plugin(description),
                 crate::PluginTargetState::Outdated => {
                     if !slot.cancel_requested() {
