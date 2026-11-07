@@ -161,7 +161,7 @@ sequenceDiagram
 
 ### 3.4 Capability 列表与默认模型
 
-`dimcode modality` 和 Web 设置页调用 `modality.capabilities`，返回每个类别与操作及其可用性原因、可选选项、已持久化的默认值，以及任务或使用方现在会使用的模型。不隐藏任何内容，也没有 `--all`。每个不可用的类别或操作都按维度显示原因，例如“not in this build”“Apple Vision needs macOS 12 or later on Apple Silicon”“the PP-OCR plugin is not installed”“no adapter”“not configured”“no adapter for the configured model”（决策 E16）。最后一项由 Modality 已采纳的业务配置（`modality` 设置文档中的默认值或显式模型，及其 Provider 连接）对照 Modality 能解析到的适配器得出（§9.1）。
+`dimcode modality` 和 Web 设置页调用 `modality.capabilities`，返回每个类别与操作及其可用性原因、可选选项、已持久化的默认值，以及任务或使用方现在会使用的模型。不隐藏任何内容，也没有 `--all`。每个不可用的类别或操作都按维度显示原因，例如“not in this build”“Apple Vision needs macOS 12 or later on Apple Silicon”“the PP-OCR plugin is not running”“the PP-OCR plugin needs an update”“no adapter”“not configured”“no adapter for the configured model”（决策 E16）。最后一项由 Modality 已采纳的业务配置（`modality` 设置文档中的默认值或显式模型，及其 Provider 连接）对照 Modality 能解析到的适配器得出（§9.1）。
 
 图像操作是第一个实现切片，该切片只带一个 fixture 适配器：`generate`、`edit` 与 `enhance` 是适配器操作，`understand` 只做选择。可用性是运行时的属性：产品构建中没有适配器，因此 `generate`、`edit` 与 `enhance` 以 `adapter` 原因报告 `unavailable`（“no adapter in this build”），其他类别在适配器与运行时存在之前报告 `build` 原因。已收集的适配器若不为 Provider 列出的任何模型服务，不算缺少适配器，并如实说明：图像操作仍用 `adapter` 维度，报“the adapter serves no image model Provider lists”，其选项是已声明的模型——与任何没有适配器服务的操作相同。`understand` 能解析并显示其默认值，但在 §9.4 落地前没有运行时使用方。可配置性是设置的属性：只要模型在该操作的可选选项中，`configure` 就接受任何有默认 key 的 A.1 操作的默认值，因此默认值可以在运行时落地之前持久化；本构建不能运行的操作仍保持 `available: false` 及其 `build` 或 `adapter` 原因。流程测试配置 fixture 适配器服务它们所覆盖的适配器操作。这是既定范围，满足 issue 的 fixture 任务验收，不是缺陷。
 
@@ -359,9 +359,9 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 
 | 方法 | 类型 | 请求 | 回复 |
 | --- | --- | --- | --- |
-| `describe` | 同步 | `{}` | `{ target: {providerId: "local", modelId}, label, executable, args, read, env? }` 或 `null` |
+| `describe` | 同步 | `{}` | `{ contract: 1, target: {providerId: "local", modelId}, label, executable, args, read }` 或 `null` |
 
-`describe` 返回描述或 null。Modality 在构建快照选项时以及每个 OCR 任务开始时调用它，从不在调用间缓存，也从不把它存入任务记录。`target` 给出服务提供的模型 id（`pp-ocr`），因此目标是 `local/pp-ocr`；`label` 是英文显示文本；`executable` 是绝对路径；`args` 是位于 `--input` 之前的参数，每项一个参数；`read` 列出 helper 必须可读的绝对路径（Node 安装根目录与插件目录）；`env` 是可选的额外环境变量对象，合并到允许列表之上。
+`describe` 返回描述或 null。Modality 在构建快照选项时以及每个 OCR 任务开始时调用它，从不在调用间缓存，也从不把它存入任务记录。`contract` 是插件实现的 helper 契约版本：仅当它为 `1`（Modality 自己的版本）时 Modality 才提供该目标，否则把目标标记为不可用并带 `runtime` 原因“the PP-OCR plugin needs an update”。`target` 给出服务提供的模型 id（`pp-ocr`），因此目标是 `local/pp-ocr`；`label` 是英文显示文本；`executable` 是绝对路径；`args` 是位于 `--input` 之前的参数，每项一个参数；`read` 列出 helper 必须可读的绝对路径——经真实路径解析的 Node 安装根目录与插件目录——Modality 把任务输入加入其中。
 
 由插件提供目标的任务以 `executable args… --input <path> --artifacts <dir> --output-mode <text|layout>` 启动，经 `HostPlatform::spawn_confined`，`Confinement { read: 描述的 read 路径加上输入, write: [任务的工作目录], timeout: 30 分钟, stdout_limit: 64 KiB, stderr_limit: 64 KiB, services: SystemServices::None }`。helper 在产物目录内写临时文件，因为工作目录之外的任何位置都不可写。其产物、JSON 行、错误码与上限同下文；不可信输入只在该 helper 中解析，从不在 Modality 或 daemon 中解析，Modality 也从不点名引擎——它读取描述并发布 helper 写出的内容。
 
@@ -375,7 +375,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 | Linux x64/arm64（musl） | 缺席，`platform` | 是 |
 | Windows x64/arm64 | 缺席，`platform` | 是 |
 
-`local/pp-ocr` 在插件的引擎发布了平台包且 Node 可用的平台上提供；插件未安装或其行未在服务的平台上只列出 `local/apple-vision`。`local/apple-vision` 仍只在 Apple Silicon 上提供，因为其识别路径需要 Apple Silicon 的 I/O 客户端，其他平台如今天一样以 `platform` 原因缺席。当目标未提供时，已持久化的 `local/pp-ocr` 默认值仍留在快照的选项中并标记为不可用：插件未安装时为 `configuration`，已安装但行未在服务时为 `runtime`。`configure` 接受快照当前提供的目标，从不回答 `modality_unavailable`；既非这两个宿主目标之一的显式模型以 `model_unavailable` 失败。
+`local/pp-ocr` 在插件的引擎发布了平台包且 Node 可用的平台上提供；插件未安装或其行未在服务的平台上只列出 `local/apple-vision`。`local/apple-vision` 仍只在 Apple Silicon 上提供，因为其识别路径需要 Apple Silicon 的 I/O 客户端，其他平台如今天一样以 `platform` 原因缺席。Modality 只读取 `ocrHelper` 服务，因此无法也不去区分“插件未安装”与“它的行未在服务”：当目标未提供时，已持久化的 `local/pp-ocr` 默认值仍留在快照的选项中并标记为不可用，只带一个 `runtime` 原因“the PP-OCR plugin is not running”。`configure` 接受快照当前提供的目标，从不回答 `modality_unavailable`；既非这两个宿主目标之一的显式模型以 `model_unavailable` 失败。
 
 文本模式在两个目标间不同：`local/apple-vision` 经 PDFKit 优先使用 PDF 内嵌文本层，只识别必须识别的页面；`local/pp-ocr` 没有原生文本路径，会栅格化每一页，因此同一 PDF 可能得到不同的文本。两者遵守相同上限并产出相同形状的 `result.json`。
 
@@ -440,7 +440,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 - `configure` 先校验操作以及模型在该操作的可选选项中（对 `image.understand`，可选视觉支持；对 `ocr.recognize`，快照当前提供的宿主目标之一），再经 Settings 的所有者写入以 CAS 写入或清除该操作 key。它接受任何有默认 key 的 A.1 操作，且从不答复 `modality_unavailable`：配置是设置写入，不是运行时断言。未知类别或操作答复 `modality_unknown_operation`；操作有自己的 key 时（image、speech、OCR）`operation` 必填，只有按类别划分 key 的类别可以省略。`model: null` 清除该 key（对 OCR 即 `modality.ocr`）；清除即恢复自动解析；缺少 `model` 为 `invalid_params`。写入在回复发出之前完成，因此成功即表示默认值已持久化，且该回复与紧随其后的 `modality.capabilities` 读到的一致（除非 Provider 在此期间变化）。
 - 可配置性与可用性是两个不同的属性：前者属于设置，后者属于运行时。已持久化的默认值可以指向本构建不能运行的操作的模型；快照通过保持该操作的 `available: false` 及其 `build` 或 `adapter` 原因保持诚实，而 `effective` 仍在选项上解析（默认值可用时用默认值，否则自动解析），客户端因此无需自行实现解析。
 
-边界校验：每次提交的内联输入合计至多 8 MiB，更大的输入使用 `node_path`——控制节点上已存在普通文件的绝对路径，最后一个组件不得是链接（更早的链接会被解析）；读取前先将其长度与 100 MiB 提交预算的剩余量比较，记录的是规范路径，执行方在该路径读取，Modality 从不复制；每次提交的输入文件合计至多 100 MiB（A5）。媒体类型遵循 A.1 的输入列：图像操作接受 `image/*`，视频操作接受 `image/*` 与 `video/*`，`speech.transcribe` 接受 `audio/*`，`asset` 接受 `image/*`；输入不指名文件的操作拒绝文件。每个文件名是单个组件、合法的 pluginFiles 名称，且在提交内互不相同。`node` 对提供方类别以 `invalid_input` 拒绝，对宿主类别则指明执行节点，即控制节点（A15）。参数在提交时按适配器的 `params_schema` 校验；非法参数以 `invalid_input` 失败且不写入任何内容。模型选择：显式 `model`；否则操作默认值；否则自动解析；否则 `no_default_model`。不可选的显式模型以 `model_unavailable` 失败，不可用的默认值以 `default_unavailable` 失败，解析出的模型没有可用适配器服务时以 `unavailable` 失败；都不回退到其他模型。解析出的模型固定在记录中。`image.understand` 与 `realtime.connect` 不是任务：为它们提交会以 `modality_unknown_operation` 失败。`ocr.recognize` 是宿主任务（§3.2）：只接受一个输入文件，`image/*` 或 `application/pdf`，接受 `params.outputMode` `"text"`（默认）或 `"layout"`，不校验适配器 schema。其选项是本宿主提供的宿主目标（A.2.1），其默认值是 `modality.ocr`；既非 `local/apple-vision` 也非 `local/pp-ocr` 的显式模型以 `model_unavailable` 失败，本宿主无法运行的宿主目标使 `submit` 以 `unavailable` 失败并带该操作的 `platform`、`configuration` 或 `runtime` 原因。指明控制节点以外节点的任务以 `node_unavailable` 失败。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
+边界校验：每次提交的内联输入合计至多 8 MiB，更大的输入使用 `node_path`——控制节点上已存在普通文件的绝对路径，最后一个组件不得是链接（更早的链接会被解析）；读取前先将其长度与 100 MiB 提交预算的剩余量比较，记录的是规范路径，执行方在该路径读取，Modality 从不复制；每次提交的输入文件合计至多 100 MiB（A5）。媒体类型遵循 A.1 的输入列：图像操作接受 `image/*`，视频操作接受 `image/*` 与 `video/*`，`speech.transcribe` 接受 `audio/*`，`asset` 接受 `image/*`；输入不指名文件的操作拒绝文件。每个文件名是单个组件、合法的 pluginFiles 名称，且在提交内互不相同。`node` 对提供方类别以 `invalid_input` 拒绝，对宿主类别则指明执行节点，即控制节点（A15）。参数在提交时按适配器的 `params_schema` 校验；非法参数以 `invalid_input` 失败且不写入任何内容。模型选择：显式 `model`；否则操作默认值；否则自动解析；否则 `no_default_model`。不可选的显式模型以 `model_unavailable` 失败，不可用的默认值以 `default_unavailable` 失败，解析出的模型没有可用适配器服务时以 `unavailable` 失败；都不回退到其他模型。解析出的模型固定在记录中。`image.understand` 与 `realtime.connect` 不是任务：为它们提交会以 `modality_unknown_operation` 失败。`ocr.recognize` 是宿主任务（§3.2）：只接受一个输入文件，`image/*` 或 `application/pdf`，接受 `params.outputMode` `"text"`（默认）或 `"layout"`，不校验适配器 schema。其选项是本宿主提供的宿主目标（A.2.1），其默认值是 `modality.ocr`；既非 `local/apple-vision` 也非 `local/pp-ocr` 的显式模型以 `model_unavailable` 失败，本宿主无法运行的宿主目标使 `submit` 以 `unavailable` 失败并带该操作的 `platform` 或 `runtime` 原因。指明控制节点以外节点的任务以 `node_unavailable` 失败。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
 
 ### A.4 任务记录（`pluginFiles`（扩展），格式版本 1）
 
@@ -552,7 +552,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 6. 重复 `client_task_id` 返回同一任务。
 7. 重启：宿主任务 `interrupted`；有句柄的提供方任务恢复且不发生第二次 `submit`；无句柄的 `interrupted`；`queued` 的 `interrupted`。
 8. 适配器重载与移除：Modality 从不随适配器重载。在 [#861](https://github.com/arcships/dim/issues/861) 落地前，单个进程服务按调用读取，因此重载或移除适配器插件只影响适配器操作；卸载中断的运行中调用使其任务 `interrupted`。落地后，按适配器名按任务解析：适配器被移除且已配置的默认值指向其模型时，`modality.capabilities` 报告“no adapter for the configured model”，其他操作保持可用。
-9. 在控制节点上运行 OCR。`local/apple-vision` 在 Apple Silicon 上出现，其他平台以 `platform` 原因缺席，其提交以 `unavailable` 失败；任务经受限 spawn 运行 fixture Apple Vision helper 并发布其产物，取消会杀死它，指明其他节点的任务以 `node_unavailable` 失败。`local/pp-ocr` 用一个 fixture 插件演练，其进程行提供 `ocrHelper`，helper 是桩——从不加载引擎或任何下载文件：(a) 在场：目标与 `local/apple-vision` 并列列出，任务带着描述的 read 路径经受限 spawn 运行桩，其产物与 `data.pages` 被发布；(b) 缺席：fixture 插件未安装时目标不被列出，Apple Vision 仍可用，指名 `local/pp-ocr` 的提交以 `unavailable` 失败并带其 `configuration` 原因；(c) 提供方在两次调用之间被移除：移除后取得的快照只列出 Apple Vision，下一次指名 `local/pp-ocr` 的提交失败，移除前已开始的任务用其读到的描述完成；(d) helper 失败：类型化拒绝变成任务的错误码，意外退出变成 `local_runtime_failed`，工作目录被删除。
+9. 在控制节点上运行 OCR。`local/apple-vision` 在 Apple Silicon 上出现，其他平台以 `platform` 原因缺席，其提交以 `unavailable` 失败；任务经受限 spawn 运行 fixture Apple Vision helper 并发布其产物，取消会杀死它，指明其他节点的任务以 `node_unavailable` 失败。`local/pp-ocr` 用一个 fixture 插件演练，其进程行提供 `ocrHelper`，helper 是桩——从不加载引擎或任何下载文件：(a) 在场：目标与 `local/apple-vision` 并列列出，任务带着描述的 read 路径经受限 spawn 运行桩，其产物与 `data.pages` 被发布；(b) 缺席：fixture 插件未安装时目标不被列出，Apple Vision 仍可用，指名 `local/pp-ocr` 的提交以 `unavailable` 失败并带其 `runtime` 原因；(b2) 旧契约：`describe` 报告其他 `contract` 的 fixture 插件使目标不可用并带“the PP-OCR plugin needs an update”，提交以 `unavailable` 失败；(c) 提供方在两次调用之间被移除：移除后取得的快照只列出 Apple Vision，下一次指名 `local/pp-ocr` 的提交失败，移除前已开始的任务用其读到的描述完成；(d) helper 失败：类型化拒绝变成任务的错误码，意外退出变成 `local_runtime_failed`，工作目录被删除。
 10. 实时：事件只到达发起连接；断开连接和空闲超时时关闭。
 11. 任何 Session 中都不出现 Timeline 事件、工具声明或输入。
 12. 修改 `modality` 设置文档（操作默认值、上限）在下次使用时生效，无需重载 Modality。
@@ -579,7 +579,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 | A11 | `queued` 任务在重启或重载后不再启动 | Overview §6.2 约束 4，扩展 | 排队任务在重启后启动 |
 | A12 | 存有句柄的运行中提供方任务通过轮询恢复（观察，而非重新执行） | 决策 E16 | 重启时所有运行中任务 `interrupted` |
 | A13 | 无模型可见工具 | 决策 E16；功能清单只定义了 CLI 命令 | 必须设计 Session 级工具贡献 |
-| A14 | OCR helper 受限运行：输入可读，产物与临时目录可写，无网络。在 HostPlatform 不提供任何隔离的平台上（Windows；没有 bubblewrap 的 Linux），helper 如那里的 agent 命令一样无隔离运行，任务记录 `confined: false`；其他平台记录 `true` | 判断；overview 隔离补充；HostPlatform 隔离表 | 隔离更弱，且任务记录无法说明实际状态 |
+| A14 | OCR helper 受限运行：输入可读，产物与临时目录可写，无网络。在 HostPlatform 不提供任何隔离的平台上（Windows；没有 bubblewrap 的 Linux），helper 如那里的 agent 命令一样无隔离运行，任务记录 `confined: false`；其他平台记录 `true`。在 macOS arm64 与 CPU 提供方上已测量：读集合 {Node 安装根目录、插件目录、输入}、以任务工作目录为唯一可写路径、`SystemServices::None` 已足够；helper 不在工作目录之外写任何东西，也不创建 Core ML 缓存 | 判断；overview 隔离补充；HostPlatform 隔离表；已测量的受限运行 | 隔离更弱，且任务记录无法说明实际状态 |
 | A15 | OCR 在控制节点上运行；指明其他节点的任务以 `node_unavailable` 失败 | Modality 没有 Session；没有别的节点的 HostPlatform 可达 | 远程节点需要导入的 HostPlatform，如 ExternalAgent 的桥接 |
 | A16 | Modality 设置（操作默认值、并发与保留上限）是 Settings 业务来源 `modality` 中的业务配置 | ADR 002 D4；变更在下次使用时读取，不改变已装载的行 | 设置变更会作为结构性 loader 字段重载 Modality |
 
