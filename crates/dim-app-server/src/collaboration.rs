@@ -767,6 +767,12 @@ struct Request {
     agent_id: String,
     session: Session,
     input_event_id: Option<String>,
+    /// A client cancel that arrived before `input_event_id` was set: the
+    /// delivery stops the member once its input is queued. The flag and
+    /// `input_event_id` are written under the state lock, so exactly one side
+    /// stops the member, the cancel when the input is already queued and the
+    /// delivery when it is not.
+    cancelled_by_client: bool,
     approvals_open: bool,
     /// Settlement decided by the leader side instead of the member's work.
     settle: Option<CollaborationOutcome>,
@@ -1156,23 +1162,38 @@ impl CollaborationSession {
         // own; and the request is read under the same lock that inserts and
         // removes it, so one that settles now cannot be replaced before the
         // stop is committed.
-        let session = {
+        //
+        // A request whose input is not queued yet has no turn to stop: this
+        // call marks it, and the delivery stops the member once the input is
+        // queued. The mark and the input's own id are written under this one
+        // lock, so exactly one of the two stops the member.
+        let queued = {
             let mut state = self.state.lock().unwrap();
-            let session = match state.requests.get(&p.member_session_id) {
-                Some(request) if request.branch == branch_id => Some(request.session.clone()),
+            let queued = match state.requests.get(&p.member_session_id) {
+                Some(request) if request.branch == branch_id => {
+                    Some((request.session.clone(), request.input_event_id.is_some()))
+                }
                 _ => None,
             };
-            if session.is_some() {
+            if let Some((_, false)) = &queued
+                && let Some(request) = state.requests.get_mut(&p.member_session_id)
+            {
+                request.cancelled_by_client = true;
+            }
+            if let Some((_, true)) = &queued {
                 *state
                     .stopping
                     .entry(p.member_session_id.clone())
                     .or_default() += 1;
             }
-            session
+            queued
         };
-        let Some(session) = session else {
+        let Some((session, queued)) = queued else {
             return Ok(json!({"status": "idle"}));
         };
+        if !queued {
+            return Ok(json!({"status": "cancelled"}));
+        }
         // Cleared when the stop returns, on every path: a request to the
         // member meanwhile is refused `Busy`, so the stop cannot reach a turn
         // that a later request started.
@@ -1942,6 +1963,7 @@ impl CollaborationSession {
                     agent_id: peer.agent_id.clone(),
                     session: peer.session.clone(),
                     input_event_id: None,
+                    cancelled_by_client: false,
                     approvals_open: true,
                     settle: None,
                     done: watch::channel(false).0,
@@ -1966,19 +1988,26 @@ impl CollaborationSession {
                 return Err(Refusal::MemberClosed.into());
             }
         };
-        let suppressed = {
+        let (suppressed, cancelled) = {
             let mut state = self.state.lock().unwrap();
+            let mut cancelled = false;
             if let Some(request) = state.requests.get_mut(&member) {
                 request.input_event_id = Some(input.id.clone());
+                cancelled = request.cancelled_by_client;
             }
-            state
+            let suppressed = state
                 .branches
                 .get(branch_id)
                 .and_then(|branch| branch.ops.get(&event.id))
-                .is_none_or(|op| op.suppressed)
+                .is_none_or(|op| op.suppressed);
+            (suppressed, cancelled)
         };
+        // A leader interrupt is the earlier, broader decision, so it wins when
+        // a client cancel also asked for the stop.
         if suppressed {
             let _ = peer.session.stop("main", INTERRUPTED.into()).await;
+        } else if cancelled {
+            let _ = peer.session.stop("main", CANCELLED_BY_CLIENT.into()).await;
         }
         Ok(CollaborationDelivery::Ok {
             agent_id: peer.agent_id,

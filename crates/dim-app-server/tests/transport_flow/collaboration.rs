@@ -172,6 +172,157 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
     }
 }
 
+/// Delegates to the in-memory store and holds the first armed request input
+/// inside `append`, which is the span between a request joining
+/// `state.requests` and its `input` returning.
+struct InputHoldStore {
+    memory: dim_agent_runtime::MemoryTimelineStore,
+    armed: std::sync::atomic::AtomicBool,
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+impl InputHoldStore {
+    fn new() -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release) = std::sync::mpsc::channel();
+        let store = Arc::new(Self {
+            memory: Default::default(),
+            armed: Default::default(),
+            entered: std::sync::Mutex::new(Some(entered)),
+            release: std::sync::Mutex::new(release),
+        });
+        (store, entered_rx, release_tx)
+    }
+}
+impl dim_agent_runtime::TimelineStore for InputHoldStore {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a dim_agent_runtime::SessionConfig,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_runtime::SessionConfig>>,
+    > {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Vec<dim_agent_runtime::StoredBranch>>,
+    > {
+        self.memory.branches(id)
+    }
+    fn head<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
+        self.memory.head(key)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn append(
+        &self,
+        key: dim_agent_runtime::TimelineKey,
+        events: Vec<dim_agent_runtime::StoredEvent>,
+        publish: dim_agent_runtime::PublishCallback,
+    ) -> dim_agent_runtime::Result<()> {
+        let request_input = events.iter().any(|stored| {
+            matches!(&stored.event.kind, EventKind::InputMessage(data)
+                if data.blocks.first().is_some_and(|block| matches!(
+                    block, InputBlock::Raw { text, .. }
+                        if text.starts_with("<dim-agent-message "))))
+        });
+        if request_input && self.armed.swap(false, Ordering::SeqCst) {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            // The hold itself: blocking this worker leaves the request in
+            // `state.requests` with its `input` unreturned until released.
+            let _ = self.release.lock().unwrap().recv();
+        }
+        self.memory.append(key, events, publish)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, RangeInclusive<u64>)>,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Vec<Vec<dim_agent_runtime::StoredEvent>>>,
+    > {
+        self.memory.read_segments(session_id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_runtime::TimelineTrace>>,
+    > {
+        self.memory.trace(key, sequence)
+    }
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        snapshot: dim_agent_types::RecoverySnapshot,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_types::RecoverySnapshot>>,
+    > {
+        self.memory.latest_snapshot(key, through, interpreter)
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryPage>,
+    > {
+        self.memory.query(key, query, from, through)
+    }
+}
+
 async fn launch_team() -> (RunningServer, Agent) {
     launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await
 }
@@ -3104,6 +3255,120 @@ async fn a_client_cancel_from_another_branch_leaves_the_owning_branch_turn_runni
     assert_eq!(outcome, CollaborationOutcome::Completed, "{outcome:?}");
     assert_eq!(stops(&member_session).await, 0);
     returned(&mut client, &lead, &lead_session, 1).await;
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A client cancel that lands while the request's input is still being
+/// appended answers `cancelled` and stops nothing itself: it marks the
+/// request, and the delivery stops the member once the input is queued. The
+/// store holds the append, so the window needs no sleep and no production
+/// hook.
+///
+/// Whether that stop covers the turn depends on whether the member applies
+/// the input before or after it handles the stop, an ordering between two
+/// commits this layer does not sequence. So the flow asserts the stop, and
+/// not how the request settles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_before_the_member_input_is_queued_answers_cancelled_and_the_delivery_stops_it()
+ {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let (store, entered, release) = InputHoldStore::new();
+    let mut config = ServerConfig::default();
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
+    config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
+        "dim-server-test-{}/server.sock",
+        uuid::Uuid::new_v4()
+    )));
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(store.clone());
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(GateTools(gate.clone())));
+    dim_app_server::collaboration::install(&mut builder);
+    let server = serve(builder, config).await.unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stops = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+            .count()
+    };
+    // A first request creates the member and settles, so the client knows the
+    // member Session id before the request whose input the store holds.
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder,
+            "prompt": "tool:echo {\"text\":\"ready\"}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    let outcome = poll("the first request completes", async || {
+        result_of(&events(&lead_session).await, &member)
+            .into_iter()
+            .next()
+    })
+    .await;
+    assert_eq!(outcome, CollaborationOutcome::Completed, "{outcome:?}");
+
+    store.armed.store(true, Ordering::SeqCst);
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:hold {}"}),
+        ),
+        "queue",
+    )
+    .await;
+    entered
+        .await
+        .expect("the request's input is being appended");
+    let cancelled = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+        )
+        .await;
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+    assert_eq!(
+        stops(&member_session).await,
+        0,
+        "the cancel alone stops nothing"
+    );
+    release.send(()).unwrap();
+
+    poll("the delivery's stop", async || {
+        (stops(&member_session).await >= 1).then_some(())
+    })
+    .await;
+    assert_eq!(
+        stops(&member_session).await,
+        1,
+        "the delivery stops the member once"
+    );
 
     server.shutdown();
     server.join().await.unwrap();
