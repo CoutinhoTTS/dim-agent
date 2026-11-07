@@ -8,7 +8,8 @@ use dim_agent_types::{CatalogCapabilities, ModelId};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use dim_modality::{
     AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Clock, Job,
-    JobFile, ModalityAdapter, ModalityAdapterService, ProgressSink, RemoteCancel, Submitted,
+    JobFile, ModalityAdapter, ModalityAdapterService, PreflightHook, ProgressSink, RemoteCancel,
+    Submitted,
 };
 use futures_util::{SinkExt, StreamExt};
 use rutis::Disposer;
@@ -140,6 +141,7 @@ async fn launch_with(
     mut config: ServerConfig,
     clock: Option<Arc<dyn Clock>>,
     ocr_helper: Option<std::path::PathBuf>,
+    preflight: Option<Arc<dyn PreflightHook>>,
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> RunningServer {
     config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
@@ -157,6 +159,7 @@ async fn launch_with(
         dim_modality::InstallOptions {
             clock: clock.unwrap_or_else(|| Arc::new(dim_modality::SystemClock)),
             ocr_helper,
+            preflight: preflight.unwrap_or_else(|| Arc::new(dim_modality::NoPreflightHook)),
         },
     );
     extra(&mut builder);
@@ -659,7 +662,7 @@ async fn start_in(home: std::path::PathBuf, fixture: Option<Arc<FixtureAdapter>>
         target_home: Some(home.join("native")),
         ..Default::default()
     };
-    launch_with(Arc::new(MockTools), config, None, None, |builder| {
+    launch_with(Arc::new(MockTools), config, None, None, None, |builder| {
         if let Some(fixture) = fixture.clone() {
             builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
         }
@@ -678,11 +681,18 @@ async fn start_in_with_clock(
         target_home: Some(home.join("native")),
         ..Default::default()
     };
-    launch_with(Arc::new(MockTools), config, Some(clock), None, |builder| {
-        if let Some(fixture) = fixture.clone() {
-            builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
-        }
-    })
+    launch_with(
+        Arc::new(MockTools),
+        config,
+        Some(clock),
+        None,
+        None,
+        |builder| {
+            if let Some(fixture) = fixture.clone() {
+                builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
+            }
+        },
+    )
     .await
 }
 
@@ -3347,7 +3357,36 @@ async fn start_with_helper(home: std::path::PathBuf, helper: std::path::PathBuf)
         target_home: Some(home.join("native")),
         ..Default::default()
     };
-    launch_with(Arc::new(MockTools), config, None, Some(helper), |_| {}).await
+    launch_with(
+        Arc::new(MockTools),
+        config,
+        None,
+        Some(helper),
+        None,
+        |_| {},
+    )
+    .await
+}
+
+async fn start_with_helper_and_preflight(
+    home: std::path::PathBuf,
+    helper: std::path::PathBuf,
+    preflight: Arc<dyn PreflightHook>,
+) -> RunningServer {
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("native")),
+        ..Default::default()
+    };
+    launch_with(
+        Arc::new(MockTools),
+        config,
+        None,
+        Some(helper),
+        Some(preflight),
+        |_| {},
+    )
+    .await
 }
 
 fn ocr_submit(name: &str, mode: &str) -> Value {
@@ -3595,6 +3634,78 @@ async fn an_oversized_helper_result_is_refused_before_it_is_read() {
         .map(|entries| entries.count())
         .unwrap_or(0);
     assert_eq!(leftovers, 0);
+}
+
+/// The preflight hook of the flow below: it records the sizes the host path
+/// counted, then replaces `result.json` and `page-0001.png` with different
+/// bytes under the same names. A copy by name would publish those; a copy from
+/// the counted readers publishes the recorded sizes.
+struct ReplaceAfterPreflight {
+    counted: Mutex<BTreeMap<String, u64>>,
+}
+
+impl PreflightHook for ReplaceAfterPreflight {
+    fn after_preflight(&self, work: &std::path::Path) {
+        let mut counted = self.counted.lock().unwrap();
+        for name in ["result.json", "text.txt", "page-0001.png"] {
+            if let Ok(metadata) = std::fs::metadata(work.join(name)) {
+                counted.insert(name.to_owned(), metadata.len());
+            }
+        }
+        let replacement = work.join("replacement.bin");
+        std::fs::write(
+            &replacement,
+            b"{\"text\":\"CHANGED\",\"pageCount\":1,\"pages\":[{\"page\":1,\"text\":\"CHANGED\",\"width\":10,\"height\":10,\"regions\":[]}]}",
+        )
+        .unwrap();
+        std::fs::rename(&replacement, work.join("result.json")).unwrap();
+        std::fs::write(&replacement, vec![b'X'; 100]).unwrap();
+        std::fs::rename(&replacement, work.join("page-0001.png")).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_host_path_publishes_the_bytes_the_cap_counted() {
+    let home = home("dm-ocr");
+    let helper = fake_helper(&home);
+    let hook = Arc::new(ReplaceAfterPreflight {
+        counted: Mutex::new(BTreeMap::new()),
+    });
+    let server = start_with_helper_and_preflight(home, helper, hook.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = submit_task(&mut client, ocr_submit("scan.png", "layout")).await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let done = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&done), "succeeded", "{done}");
+    let counted = hook.counted.lock().unwrap().clone();
+    assert_eq!(counted["page-0001.png"], 3, "{counted:?}");
+    assert_eq!(counted["text.txt"], 12, "{counted:?}");
+    // Every published file has the size the preflight counted, and the total
+    // is the counted total: the replacements were never copied.
+    let files = done["result"]["files"].as_array().unwrap();
+    let mut total = 0;
+    for file in files {
+        let name = file["name"].as_str().unwrap();
+        let bytes = file["bytes"].as_u64().unwrap();
+        assert_eq!(Some(&bytes), counted.get(name), "{name}: {done}");
+        total += bytes;
+    }
+    assert_eq!(total, counted.values().sum::<u64>(), "{done}");
+    assert_eq!(
+        result_bytes(&mut client, &task_id, "page-0001.png", 65536).await,
+        b"PNG"
+    );
+    // data.pages describes the published result.json, not the replacement.
+    let result_json = result_bytes(&mut client, &task_id, "result.json", 65536).await;
+    let document: Value = serde_json::from_slice(&result_json).unwrap();
+    let expected: Vec<Value> = document["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|page| json!({"page": page["page"], "text": page["text"]}))
+        .collect();
+    assert_eq!(done["result"]["data"]["pages"], json!(expected), "{done}");
+    assert!(!done.to_string().contains("CHANGED"), "{done}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
