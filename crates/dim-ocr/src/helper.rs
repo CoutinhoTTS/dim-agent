@@ -2,10 +2,9 @@
 //! Exit 0 is success, 2 a typed `{ok:false,error:{code,message}}`, 1 anything
 //! else.
 use crate::args::HelperArguments;
-use crate::contract::{
-    Document, HelperError, HelperErrorCode, MAX_ARTIFACT_BYTES, MAX_INPUT_BYTES, OutputMode,
-    RESULT_FILE, TEXT_FILE, page_image_name,
-};
+use crate::contract::{Document, HelperError, HelperErrorCode, MAX_ARTIFACT_BYTES};
+#[cfg(target_os = "macos")]
+use crate::contract::{MAX_INPUT_BYTES, OutputMode, RESULT_FILE, TEXT_FILE, page_image_name};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::io::Write;
