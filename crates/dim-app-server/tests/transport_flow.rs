@@ -169,6 +169,9 @@ mod sessions;
 #[path = "transport_flow/shell_input.rs"]
 mod shell_input;
 
+#[path = "transport_flow/workspace_files.rs"]
+mod workspace_files;
+
 #[path = "transport_flow/deletion.rs"]
 mod deletion;
 

@@ -101,9 +101,17 @@ so an ordering rule for state inputs leaves it last.
 ### Tests
 
 [host_flows.rs](../../../../crates/dim-agent-capabilities/tests/host_flows.rs):
-`steer_and_append_enter_the_current_turn_at_tool_result_while_queue_waits`;
+`steer_and_append_enter_the_current_turn_at_tool_result_while_queue_waits`,
+`a_handover_input_is_held_without_being_applied_or_counted`,
+`a_handover_input_is_deleted_at_its_turn_end_and_never_reaches_the_model`,
+`a_handover_input_for_no_open_turn_is_deleted_on_arrival`,
+`a_consumed_handover_input_is_not_deleted_at_turn_end`,
+`a_held_handover_input_does_not_steal_the_next_queued_input`,
+`a_handover_input_written_while_idle_starts_no_turn`,
+`a_withdrawn_handover_input_is_deleted_once`;
 [context_flow.rs](../../../../crates/dim-agent-capabilities/tests/context_flow.rs):
-`restoring_pending_inputs_runs_each_queued_input_in_its_own_turn`.
+`restoring_pending_inputs_runs_each_queued_input_in_its_own_turn`,
+`a_restored_queue_writes_one_owed_deletion_for_a_handover_input`.
 
 <!-- generated:plugin InputQueue — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

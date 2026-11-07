@@ -118,6 +118,8 @@ pub fn input(blocks: Vec<Block>, mode: InputMode) -> InputMessageData {
         user: None,
         blocks: blocks.into_iter().map(|block| block.raw()).collect(),
         mode: Some(mode),
+        // Goal's own inputs drive turns; none addresses a handover.
+        handover: None,
     }
 }
 

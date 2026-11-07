@@ -1703,6 +1703,7 @@ pub fn input_message(blocks: Vec<InputBlock>, mode: InputMode) -> InputMessageDa
         user: None,
         blocks,
         mode: Some(mode),
+        handover: None,
     }
 }
 

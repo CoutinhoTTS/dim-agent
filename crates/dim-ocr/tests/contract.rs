@@ -109,7 +109,7 @@ fn the_result_document_reads_back_as_pages() {
     };
     let path = directory.join("result.json");
     std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
-    let read = read_pages(&path, u64::MAX).unwrap();
+    let read = read_pages(std::fs::File::open(&path).unwrap(), u64::MAX).unwrap();
     assert_eq!(
         read,
         DocumentText {
@@ -149,7 +149,7 @@ fn pages_past_the_text_budget_keep_only_their_number() {
         ],
     });
     std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
-    let read = read_pages(&path, 6).unwrap();
+    let read = read_pages(std::fs::File::open(&path).unwrap(), 6).unwrap();
     assert_eq!(read.page_count, 3);
     assert!(read.text_truncated);
     assert_eq!(
