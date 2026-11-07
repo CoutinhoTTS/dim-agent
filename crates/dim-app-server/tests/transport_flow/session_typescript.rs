@@ -2251,7 +2251,7 @@ async fn node_session_typescript_failed_part_namespace_stays_unknown() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_session_typescript_tool_only_first_request_on_create_and_restore() {
+async fn node_session_typescript_required_tool_only_part_is_in_the_first_request() {
     let home = std::env::temp_dir().join(format!("dm-ts-tool-{}", uuid::Uuid::new_v4()));
     let mut parts = fixture();
     let entry = PathBuf::from(parts.rows[0]["name"].as_str().unwrap());
@@ -2267,9 +2267,98 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
     };
     let mut saved: Option<String> = None;
     for text in ["created", "restored"] {
-        // A Session is published before the row's parts mount for it
-        // (process TypeScript §2.1, #207), so this flow waits for the row on
-        // each Session before the turn that must offer its tool.
+        // A required tool-only part, with no method namespace, is in the
+        // immediate first request after create and after restore
+        // (docs/design/session-typescript.md:429-431). Declaring it required
+        // publishes each Session only once its copy is Active
+        // (`assembly.rs:1525-1538`), so this flow submits with no readiness
+        // wait and still carries the tool.
+        let (mut builder, mut requests, _) = setup();
+        builder.require_part("SessionToolOnlyFixture");
+        let server = serve(
+            builder,
+            ServerConfig {
+                unix_path: Some(std::env::temp_dir().join(format!(
+                    "dm-ts-{}/server.sock",
+                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                ))),
+                ..config.clone()
+            },
+        )
+        .await
+        .unwrap();
+        plugin_active(
+            &server,
+            &config.session_typescript.as_ref().unwrap().rows[0],
+        )
+        .await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let session_id = match &saved {
+            Some(id) => {
+                assert!(server.agent().unwrap().get_session(id).is_none());
+                id.clone()
+            }
+            None => new_session(&mut client, json!(["ts_echo", "echo"])).await,
+        };
+        // No readiness wait: the required copy is Active before the Session
+        // is published, both for the created Session and for the one this
+        // round restores by its saved id.
+        submit(
+            &mut client,
+            &session_id,
+            &format!(r#"tool:ts_echo {{"text":"{text}"}}"#),
+        )
+        .await;
+        assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
+        let session = server.agent().unwrap().get_session(&session_id).unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
+        let result = history
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolResult(batch) => batch.results.first(),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(result.result.is_error, Some(true));
+        let dim_agent_types::ToolContent::Text(content) = &result.result.content else {
+            panic!("text result")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(content).unwrap()["arguments"]["text"],
+            text
+        );
+        saved = Some(session_id);
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// An optional tool-only row may become Active after the Session that opens
+/// before it was published (process TypeScript §2.1, #207), and
+/// `docs/design/session-typescript.md:429-431` calls optional parts "once
+/// they serve": this flow waits for the copy before the turn that must offer
+/// its tool, which is the race the CI failures showed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_optional_tool_only_part_is_called_once_it_serves() {
+    let home = std::env::temp_dir().join(format!("dm-ts-tool-{}", uuid::Uuid::new_v4()));
+    let mut parts = fixture();
+    let entry = PathBuf::from(parts.rows[0]["name"].as_str().unwrap());
+    parts.rows[0]["name"] = json!(entry.with_file_name("session-tool-only.ts"));
+    parts.rows[0]["provides"] = serde_json::from_str(include_str!(
+        "../../../../runtime/fixtures/session-tool-only.json"
+    ))
+    .unwrap();
+    let config = ServerConfig {
+        database_path: Some(home.join("sessions.sqlite")),
+        session_typescript: Some(parts),
+        ..Default::default()
+    };
+    let mut saved: Option<String> = None;
+    for text in ["created", "restored"] {
         let (server, mut requests, _) = start(config.clone()).await;
         plugin_active(
             &server,
@@ -2284,11 +2373,9 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
             }
             None => new_session(&mut client, json!(["ts_echo", "echo"])).await,
         };
-        // A created or restored Session is published before the row's parts
-        // mount for it (process TypeScript §2.1, #207). This row contributes
-        // no method to wait on, so load the Session (`session.methods` pins
-        // it, restoring the one the previous round saved) and wait for the
-        // copy whose `apply` registers `ts_echo`.
+        // This row contributes no method to wait on, so load the Session
+        // (`session.methods` pins it, restoring the one the previous round
+        // saved) and wait for the copy whose `apply` registers `ts_echo`.
         assert_ok(
             &client
                 .rpc("session.methods", json!({"sessionId": session_id}))
