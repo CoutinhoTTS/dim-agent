@@ -2066,6 +2066,15 @@
       ]
     },
     {
+      "id": "dim_app_server::collaboration::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::collaboration",
+      "file": "crates/dim-app-server/src/collaboration.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_app_server::collaboration_model_policy",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -20092,7 +20101,9 @@
       "from": "dim_app_server::collaboration",
       "to": "dim_agent_capabilities::input_queue",
       "references": [
-        "path dim_agent_capabilities::input_queue::InputQueue"
+        "path dim_agent_capabilities::input_queue::InputQueue",
+        "path dim_agent_capabilities::input_queue::Withdrawal::Deleted",
+        "path dim_agent_capabilities::input_queue::Withdrawal::NotHeld"
       ]
     },
     {
@@ -20426,6 +20437,13 @@
     },
     {
       "from": "dim_app_server::collaboration",
+      "to": "dim_app_server::collaboration::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
       "to": "dim_app_server::collaboration_model_policy",
       "references": [
         "path ModelPolicy",
@@ -20614,6 +20632,21 @@
       "references": [
         "path CollaborationSession",
         "path success"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path CollaborationOutcome::Cancelled"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::tests",
+      "to": "dim_app_server::collaboration",
+      "references": [
+        "path INTERRUPTED",
+        "path NOT_STARTED"
       ]
     },
     {

@@ -57,6 +57,9 @@ const CANCELLED_BY_CLIENT: &str = "cancelled by the client";
 const CANCEL_MEMBER: &str = "session.collaboration.cancel";
 const LEADER_CLOSED: &str = "leader closed";
 const MEMBER_CLOSED: &str = "member closed";
+/// The outcome [`outcome`] derives for a request whose input the member
+/// never consumed: no turn ran for it.
+const NOT_STARTED: &str = "not started";
 const RELOADING: &str = dim_agent_runtime::CAPABILITY_RELOADING;
 
 type Refusal = CollaborationErrorCode;
@@ -767,11 +770,12 @@ struct Request {
     agent_id: String,
     session: Session,
     input_event_id: Option<String>,
-    /// A client cancel that arrived before `input_event_id` was set: the
-    /// delivery stops the member once its input is queued. The flag and
-    /// `input_event_id` are written under the state lock, so exactly one side
-    /// stops the member, the cancel when the input is already queued and the
-    /// delivery when it is not.
+    /// A client cancel on this request: the settle names it when the member
+    /// never started the turn (`client_cancel`), and the queued input is
+    /// withdrawn or the turn stopped so the cancelled request runs no
+    /// further. The flag and `input_event_id` are written under the state
+    /// lock, so exactly one side carries the cancel out, the call when the
+    /// input is already queued and the delivery when it is not.
     cancelled_by_client: bool,
     approvals_open: bool,
     /// Settlement decided by the leader side instead of the member's work.
@@ -783,16 +787,34 @@ struct State {
     branches: BTreeMap<String, BranchRecord>,
     /// Keyed by member Session id: one request per member.
     requests: BTreeMap<String, Request>,
-    /// Member Session id -> the client cancels stopping its turn that have
-    /// not returned. A request to that member is refused `Busy` meanwhile, so
-    /// a stop reaches only the turn of the request it was decided for.
+    /// Member Session id -> the client cancels on that member that are still
+    /// being carried out. A request to that member is refused `Busy` while a
+    /// mark is held, so a stop reaches only the turn of the request it was
+    /// decided for; the mark lasts until the cancel is carried out or
+    /// abandoned: the stop lands, the withdrawal deletes the input, or the
+    /// wait ends on abort, settle or close.
     stopping: BTreeMap<String, usize>,
 }
 
-/// Clears a member's stopping mark when the cancel returns, however it ends.
+/// Holds a member's stopping mark until the cancel is carried out or
+/// abandoned, however it ends: the stop lands, the withdrawal deletes the
+/// input, or the wait ends on abort, settle or close.
 struct Stopping {
     owner: Arc<CollaborationSession>,
     member: String,
+}
+impl Stopping {
+    /// Takes the member's stopping mark in the caller's `state` critical
+    /// section, so the mark and the decision it protects are one step: while
+    /// the guard lives, a new request to that member is refused `Busy`, and
+    /// the stop reaches only the turn it was decided for.
+    fn mark(owner: &Arc<CollaborationSession>, state: &mut State, member: &str) -> Self {
+        *state.stopping.entry(member.to_owned()).or_insert(0) += 1;
+        Stopping {
+            owner: owner.clone(),
+            member: member.to_owned(),
+        }
+    }
 }
 impl Drop for Stopping {
     fn drop(&mut self) {
@@ -1159,50 +1181,42 @@ impl CollaborationSession {
         // The calling branch's own request is the only work this call may
         // stop. `branch.open` also holds a request that is still waiting for
         // its delivery or for a `Busy` refusal, which runs no turn of its
-        // own; and the request is read under the same lock that inserts and
-        // removes it, so one that settles now cannot be replaced before the
-        // stop is committed.
+        // own; and the request is read and marked under the same lock that
+        // inserts and removes it, so one that settles now cannot be replaced
+        // before the cancel is carried out.
         //
-        // A request whose input is not queued yet has no turn to stop: this
-        // call marks it, and the delivery stops the member once the input is
-        // queued. The mark and the input's own id are written under this one
-        // lock, so exactly one of the two stops the member.
-        let queued = {
+        // The cancel is recorded on the request before any effect, so the
+        // settle names it even when the member goes idle first. A request
+        // whose input is not queued yet has no turn to stop, and the delivery
+        // carries the cancel out once the input exists; otherwise this call
+        // does, the immediate part before its reply and the wait for
+        // `input/consumed` after it on the branch's task tracker, under the
+        // stopping mark. The mark and the input's own id are written under
+        // this one lock, so exactly one of the two carries it out.
+        let work = {
             let mut state = self.state.lock().unwrap();
-            let queued = match state.requests.get(&p.member_session_id) {
-                Some(request) if request.branch == branch_id => {
-                    Some((request.session.clone(), request.input_event_id.is_some()))
-                }
-                _ => None,
+            let Some(request) = state
+                .requests
+                .get_mut(&p.member_session_id)
+                .filter(|request| request.branch == branch_id)
+            else {
+                return Ok(json!({"status": "idle"}));
             };
-            if let Some((_, false)) = &queued
-                && let Some(request) = state.requests.get_mut(&p.member_session_id)
-            {
-                request.cancelled_by_client = true;
-            }
-            if let Some((_, true)) = &queued {
-                *state
-                    .stopping
-                    .entry(p.member_session_id.clone())
-                    .or_default() += 1;
-            }
-            queued
+            request.cancelled_by_client = true;
+            let session = request.session.clone();
+            let input = request.input_event_id.clone();
+            let done = request.done.subscribe();
+            // The mark guards only a cancel this call carries out; one whose
+            // input is not queued is left to the delivery, which takes its own.
+            input.map(|input| {
+                let stopping = Stopping::mark(self, &mut state, &p.member_session_id);
+                (session, input, done, stopping)
+            })
         };
-        let Some((session, queued)) = queued else {
-            return Ok(json!({"status": "idle"}));
-        };
-        if !queued {
+        let Some((session, input, done, stopping)) = work else {
             return Ok(json!({"status": "cancelled"}));
-        }
-        // Cleared when the stop returns, on every path: a request to the
-        // member meanwhile is refused `Busy`, so the stop cannot reach a turn
-        // that a later request started.
-        let _stopping = Stopping {
-            owner: self.clone(),
-            member: p.member_session_id.clone(),
         };
-        session
-            .stop("main", CANCELLED_BY_CLIENT.into())
+        self.carry_out_cancel(branch_id, &session, &input, done, stopping)
             .await
             .map_err(|_| refusal_rpc(Refusal::MemberClosed))?;
         Ok(json!({"status": "cancelled"}))
@@ -1988,26 +2002,35 @@ impl CollaborationSession {
                 return Err(Refusal::MemberClosed.into());
             }
         };
-        let (suppressed, cancelled) = {
+        let (suppressed, cancelled, done, stopping) = {
             let mut state = self.state.lock().unwrap();
             let mut cancelled = false;
+            let mut done = None;
             if let Some(request) = state.requests.get_mut(&member) {
                 request.input_event_id = Some(input.id.clone());
                 cancelled = request.cancelled_by_client;
+                done = Some(request.done.subscribe());
             }
+            // The mark is taken with the flag it protects, in the critical
+            // section that publishes the input's id.
+            let stopping = cancelled.then(|| Stopping::mark(self, &mut state, &member));
             let suppressed = state
                 .branches
                 .get(branch_id)
                 .and_then(|branch| branch.ops.get(&event.id))
                 .is_none_or(|op| op.suppressed);
-            (suppressed, cancelled)
+            (suppressed, cancelled, done, stopping)
         };
         // A leader interrupt is the earlier, broader decision, so it wins when
         // a client cancel also asked for the stop.
         if suppressed {
             let _ = peer.session.stop("main", INTERRUPTED.into()).await;
-        } else if cancelled {
-            let _ = peer.session.stop("main", CANCELLED_BY_CLIENT.into()).await;
+        } else if let (true, Some(done), Some(stopping)) = (cancelled, done, stopping) {
+            // The call recorded the cancel and left it to the delivery: this
+            // is the first point the request's input exists.
+            let _ = self
+                .carry_out_cancel(branch_id, &peer.session, input.id.as_str(), done, stopping)
+                .await;
         }
         Ok(CollaborationDelivery::Ok {
             agent_id: peer.agent_id,
@@ -2096,6 +2119,7 @@ impl CollaborationSession {
                             request.agent_id.clone(),
                             request.session.clone(),
                             request.input_event_id.clone(),
+                            request.cancelled_by_client,
                         ),
                         timeline,
                     )
@@ -2104,7 +2128,7 @@ impl CollaborationSession {
             return;
         };
         self.retire_member_approvals(branch_id, member).await;
-        let (op, agent_id, session, input) = request;
+        let (op, agent_id, session, input, cancelled) = request;
         let through = match &idle {
             Some(Ok(cutoff)) => Some(*cutoff),
             _ => None,
@@ -2117,7 +2141,7 @@ impl CollaborationSession {
             .requests
             .get(member)
             .and_then(|request| request.settle.clone());
-        let outcome = settle.unwrap_or_else(|| match idle {
+        let derived = match idle {
             _ if session.is_closing() => CollaborationOutcome::Failed {
                 reason: MEMBER_CLOSED.into(),
             },
@@ -2125,7 +2149,8 @@ impl CollaborationSession {
                 reason: error.to_string(),
             },
             _ => derived,
-        });
+        };
+        let outcome = settle.unwrap_or_else(|| client_cancel(cancelled, derived));
         if let Some(timeline) = timeline {
             let _ = timeline.append(
                 EventKind::CollaborationResult(CollaborationResultData {
@@ -2141,6 +2166,91 @@ impl CollaborationSession {
         }
         if let Some(request) = self.state.lock().unwrap().requests.remove(member) {
             request.done.send_replace(true);
+        }
+    }
+
+    /// Carries out a client cancel already recorded on the request: the turn
+    /// serving the request's input is interrupted now when it has started, and
+    /// the input withdrawn while still unapplied. An input InputQueue already
+    /// handed to Loop is stopped once its `input/consumed` is published; that
+    /// wait is detached on the branch's task tracker, so the caller answers
+    /// first.
+    ///
+    /// `stopping` holds the member's stopping mark across the effect and the
+    /// wait, and is dropped on every exit.
+    async fn carry_out_cancel(
+        self: &Arc<Self>,
+        branch_id: &str,
+        session: &Session,
+        input: &str,
+        mut done: watch::Receiver<bool>,
+        stopping: Stopping,
+    ) -> dim_agent_runtime::Result<()> {
+        let mut after = 0;
+        if consumed_since(session, input, &mut after).await? {
+            session.stop("main", CANCELLED_BY_CLIENT.into()).await?;
+            return Ok(());
+        }
+        // Subscribed before the withdrawal, so no publication between the two
+        // is missed by the wait below.
+        let mut published = session.publication("main")?.watch();
+        match session
+            .service::<dim_agent_capabilities::input_queue::InputQueue>("main")?
+            .withdraw(
+                InputWithdrawData {
+                    input_id: input.to_owned(),
+                    reason: Some(CANCELLED_BY_CLIENT.into()),
+                },
+                None,
+            )
+            .await?
+            .0
+        {
+            // (W): no turn will run for the input; the settle names it.
+            dim_agent_capabilities::input_queue::Withdrawal::Deleted { .. } => return Ok(()),
+            dim_agent_capabilities::input_queue::Withdrawal::NotHeld => {}
+        }
+        // (S): InputQueue handed the input to Loop, so the turn that consumes
+        // it is the one to interrupt. Waiting for its `input/consumed` makes
+        // the interrupt land after that turn started, the documented
+        // `consumed < interrupt` order, instead of racing its application.
+        let abort = self.with_abort(branch_id);
+        let tasks = self
+            .state
+            .lock()
+            .unwrap()
+            .branches
+            .get(branch_id)
+            .map(|branch| branch.tasks.clone());
+        let session = session.clone();
+        let input = input.to_owned();
+        let wait = async move {
+            let _stopping = stopping;
+            loop {
+                tokio::select! {
+                    _ = abort.cancelled() => return Ok(()),
+                    _ = done.wait_for(|done| *done) => return Ok(()),
+                    _ = session.closed() => {
+                        return Err(AgentError::Closed(session.id().into()));
+                    }
+                    result = published.changed() => {
+                        if result.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                if consumed_since(&session, &input, &mut after).await? {
+                    session.stop("main", CANCELLED_BY_CLIENT.into()).await?;
+                    return Ok(());
+                }
+            }
+        };
+        match tasks {
+            Some(tasks) => {
+                tasks.spawn(wait);
+                Ok(())
+            }
+            None => wait.await,
         }
     }
 
@@ -2419,6 +2529,33 @@ fn close_request(open: &mut BTreeMap<String, BTreeSet<String>>, request: &str) {
     });
 }
 
+/// Whether the member consumed `input`, read from its published facts the
+/// way [`outcome`] reads them. `after` carries the page cursor across calls,
+/// so a wait re-reads only what is new.
+async fn consumed_since(
+    session: &Session,
+    input: &str,
+    after: &mut u64,
+) -> dim_agent_runtime::Result<bool> {
+    // One published head for the whole check, so the answer cannot change
+    // under the reader while it pages: a check answers for the moment it
+    // starts, and the caller's next check sees whatever has been published
+    // since.
+    let through = Some(session.sequence("main")?);
+    loop {
+        let (next, events) = read_page(session, *after, 256, through, &["input/consumed"]).await?;
+        if events.iter().any(
+            |event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == input),
+        ) {
+            return Ok(true);
+        }
+        if next <= *after {
+            return Ok(false);
+        }
+        *after = next;
+    }
+}
+
 async fn read_page(
     session: &Session,
     after: u64,
@@ -2638,10 +2775,24 @@ async fn outcome(
             None,
             String::new(),
             CollaborationOutcome::Cancelled {
-                reason: "not started".into(),
+                reason: NOT_STARTED.into(),
             },
         )
     })
+}
+
+/// A client cancel names only a request the member never started: every
+/// other outcome is the member's own ending and stands as derived, so a turn
+/// that completed before the stop landed stays `Completed`.
+fn client_cancel(cancelled: bool, outcome: CollaborationOutcome) -> CollaborationOutcome {
+    match outcome {
+        CollaborationOutcome::Cancelled { reason } if cancelled && reason == NOT_STARTED => {
+            CollaborationOutcome::Cancelled {
+                reason: CANCELLED_BY_CLIENT.into(),
+            }
+        }
+        outcome => outcome,
+    }
 }
 
 fn success(result: Value) -> ToolResult {
@@ -3227,4 +3378,33 @@ async fn restore(
         });
     }
     Ok(reply.through)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client cancel names the cancellation only when no turn ran: every
+    /// other ending is the member's own.
+    #[test]
+    fn a_client_cancel_names_only_the_cancellation_that_never_started() {
+        let not_started = CollaborationOutcome::Cancelled {
+            reason: NOT_STARTED.into(),
+        };
+        assert_eq!(
+            client_cancel(true, not_started.clone()),
+            CollaborationOutcome::Cancelled {
+                reason: CANCELLED_BY_CLIENT.into(),
+            }
+        );
+        assert_eq!(client_cancel(false, not_started.clone()), not_started);
+        assert_eq!(
+            client_cancel(true, CollaborationOutcome::Completed),
+            CollaborationOutcome::Completed
+        );
+        let interrupted = CollaborationOutcome::Cancelled {
+            reason: INTERRUPTED.into(),
+        };
+        assert_eq!(client_cancel(true, interrupted.clone()), interrupted);
+    }
 }
