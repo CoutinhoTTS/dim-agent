@@ -5149,7 +5149,8 @@
         "assert",
         "assert_eq",
         "concat",
-        "format"
+        "format",
+        "vec"
       ]
     },
     {
@@ -37017,7 +37018,9 @@
         "path Frame",
         "path Frame::default",
         "path Screen",
-        "path Screen::new"
+        "path Screen::new",
+        "path visible_rows",
+        "path visible_tail"
       ]
     },
     {
