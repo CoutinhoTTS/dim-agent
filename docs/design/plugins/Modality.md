@@ -456,7 +456,7 @@ Boundary validation: inline inputs at most 8 MiB in total per submission, larger
 | `client_task_id` | string or null |
 | `revision` | integer, incremented on every write |
 | `category`, `operation` | identifiers from A.1 |
-| `executor` | `{ kind: "provider", provider, adapter }` where `provider` is `{providerId, modelId}`, or `{ kind: "host", node, target, confined }` where `node` is the requested node or null, `target` is `{providerId, modelId}`, and `confined` records whether the helper ran under confinement (A14) |
+| `executor` | `{ kind: "provider", provider, adapter }` where `provider` is `{providerId, modelId}`, or `{ kind: "host", node, target, confined }` where `node` is the requested node or null, `target` is `{providerId, modelId}`, and `confined` is `true` or `false` once the helper has started, recording whether it ran under confinement (A14), and null before |
 | `params` | validated object; input files replaced by `{ name, media_type, bytes, sha256 }` for a file stored under `input/`, or by `{ name, media_type, bytes, sha256, node_path }` for the canonical `node_path` read in place |
 | `state` | `queued`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted` |
 | `remote_handle` | string or null; written before `running` progress is reported |

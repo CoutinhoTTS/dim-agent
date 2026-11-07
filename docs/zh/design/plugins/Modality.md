@@ -456,7 +456,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 | `client_task_id` | 字符串或 null |
 | `revision` | 整数，每次写入递增 |
 | `category`、`operation` | A.1 中的标识符 |
-| `executor` | `{ kind: "provider", provider, adapter }`，其中 `provider` 为 `{providerId, modelId}`；或 `{ kind: "host", node, target, confined }`，其中 `node` 为请求的节点或 null，`target` 为 `{providerId, modelId}`，`confined` 记录 helper 是否在隔离下运行（A14） |
+| `executor` | `{ kind: "provider", provider, adapter }`，其中 `provider` 为 `{providerId, modelId}`；或 `{ kind: "host", node, target, confined }`，其中 `node` 为请求的节点或 null，`target` 为 `{providerId, modelId}`，`confined` 在 helper 启动后为 `true` 或 `false`，记录它是否在隔离下运行（A14），启动前为 null |
 | `params` | 已校验的对象；输入文件替换为 `{ name, media_type, bytes, sha256 }`（存放在 `input/` 下）或 `{ name, media_type, bytes, sha256, node_path }`（规范路径，就地读取） |
 | `state` | `queued`、`running`、`succeeded`、`failed`、`cancelled`、`interrupted` |
 | `remote_handle` | 字符串或 null；在报告 `running` 进度之前写入 |
