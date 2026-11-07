@@ -555,6 +555,24 @@ pub enum ModelFailureKind {
 }
 
 impl ModelFailureKind {
+    /// Every kind, in wire order. Tables that word failures from the kind
+    /// cover all of these; a test matches them exhaustively so a new variant
+    /// cannot be missed.
+    pub const ALL: [Self; 12] = [
+        Self::Network,
+        Self::RateLimited,
+        Self::ServerError,
+        Self::MalformedResponse,
+        Self::AuthRejected,
+        Self::QuotaExhausted,
+        Self::NotFound,
+        Self::ContextTooLong,
+        Self::ContentFiltered,
+        Self::InvalidRequest,
+        Self::OutputLimit,
+        Self::Unknown,
+    ];
+
     /// The one-line meaning, without a final full stop.
     #[must_use]
     pub const fn meaning(self) -> &'static str {
@@ -592,6 +610,25 @@ impl ModelFailureKind {
             Self::InvalidRequest => "See the details.",
             Self::OutputLimit => "Increase the output token limit and retry.",
             Self::Unknown => "See the details.",
+        }
+    }
+
+    /// The kind's wire name, snake_case.
+    #[must_use]
+    pub const fn keyword(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::RateLimited => "rate_limited",
+            Self::ServerError => "server_error",
+            Self::MalformedResponse => "malformed_response",
+            Self::AuthRejected => "auth_rejected",
+            Self::QuotaExhausted => "quota_exhausted",
+            Self::NotFound => "not_found",
+            Self::ContextTooLong => "context_too_long",
+            Self::ContentFiltered => "content_filtered",
+            Self::InvalidRequest => "invalid_request",
+            Self::OutputLimit => "output_limit",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -2108,6 +2145,50 @@ impl Serialize for EventKind {
             }
         }
         state.end()
+    }
+}
+
+#[cfg(test)]
+mod failure_kind_tests {
+    use super::ModelFailureKind;
+    use serde_json::json;
+
+    #[test]
+    fn every_kind_is_listed_with_its_keyword() {
+        let mut seen = Vec::new();
+        for kind in ModelFailureKind::ALL {
+            // Exhaustive on purpose: a new variant fails to compile here,
+            // which keeps `ALL` in step with the enum.
+            let name = match kind {
+                ModelFailureKind::Network => "network",
+                ModelFailureKind::RateLimited => "rate_limited",
+                ModelFailureKind::ServerError => "server_error",
+                ModelFailureKind::MalformedResponse => "malformed_response",
+                ModelFailureKind::AuthRejected => "auth_rejected",
+                ModelFailureKind::QuotaExhausted => "quota_exhausted",
+                ModelFailureKind::NotFound => "not_found",
+                ModelFailureKind::ContextTooLong => "context_too_long",
+                ModelFailureKind::ContentFiltered => "content_filtered",
+                ModelFailureKind::InvalidRequest => "invalid_request",
+                ModelFailureKind::OutputLimit => "output_limit",
+                ModelFailureKind::Unknown => "unknown",
+            };
+            assert_eq!(name, kind.keyword());
+            assert!(!seen.contains(&name), "{name} is listed twice");
+            seen.push(name);
+        }
+        assert_eq!(seen.len(), 12);
+    }
+
+    #[test]
+    fn the_keyword_matches_the_wire_name() {
+        for kind in ModelFailureKind::ALL {
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                json!(kind.keyword()),
+                "{kind:?}"
+            );
+        }
     }
 }
 
