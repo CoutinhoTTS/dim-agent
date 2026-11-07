@@ -537,6 +537,24 @@ A wakeup in an active Goal flows in like a user input: it is an ordinary Queue i
 
 Rule check: the timer writes only `input/message` through the public `sessions` service (§4 rule 1); the wakeup input reaches the model only as a consumed Queue input (§4 rule 6); nothing structural or business lives in core — the record is Scheduler's own business store (D4) and the surface is the specified `sessionMethods` namespace (D5); and no ADR is needed because D1's scope rule and D2's client-method row already decide the placement.
 
+## 11. Client change notices
+
+Scheduler's records are process state with no Timeline fact, so a client that shows them reads the owner's query — `session.wakeup.list` for wakeups, `schedule.list` and `schedule.history` for jobs — and otherwise polls. A committed change is announced as a Session notice ([session broadcast notices](../appserver/session-notices.md)): `{source: "Scheduler", kind: "wakeup", data: {branchId, wakeupId, state}}` on the target Session's channel, sent with `session_broadcast::notify` from Scheduler's own context after the record's write commits. The notice reports that the record changed; the owner's query is its truth, and a client that does not handle `source` or `kind` ignores it.
+
+### 11.1 Wakeups
+
+| Change | Notice | When |
+| --- | --- | --- |
+| `create` stores a record | `state` is the state the record was created with: `scheduled`, or `expired` when the instant is already past the grace | After the file write commits |
+| `cancel` settles a `scheduled` record | `cancelled` | After the file write commits; a cancel of a terminal record changes nothing and sends nothing |
+| The timer pass settles records | One notice per settled record: `fired`, `cancelled` (the target Session or branch is gone), or `expired` | After the pass's settle write commits |
+| Retention pruning | None | A pruned record's last readable change was announced when it settled |
+
+- A `fired` notice is a committed-state notice. The pass publishes the input to the Timeline, settles the record, then announces it after the settle commits. It is not ordered against the input's `session.event`, which the Session emits when it dispatches the input, so either may reach a client first ([session notices §4](../appserver/session-notices.md#4-emitting); the contract's Order rule covers an owner that reacts to an event it observed through the broadcast). A client relates the notice and the input by the input's submission id `wakeup:<wakeup_id>`.
+- The notice names `branchId` because the record targets one branch, but it travels on the Session's channel: every client attached to the Session receives it, whichever branch it views.
+- No Timeline event and no `hello.features` entry: a notice is not a fact later decisions use, and notifications are not methods ([session broadcast notices §5](../appserver/session-notices.md#5-rpc-forwarding)). Protocol v3 connections receive it; v1 and v2 never do.
+- Delivery follows the notice contract: a Session that is not loaded, or that no client observes, has no listener, so the notice is dropped and nothing is replayed. A client reads `session.wakeup.list` when it attaches and on every notice.
+
 ## Appendix A. Interface details
 
 ### A.1 Records

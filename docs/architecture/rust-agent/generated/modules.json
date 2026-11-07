@@ -17906,6 +17906,16 @@
     },
     {
       "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_capabilities::session_broadcast",
+      "references": [
+        "path SessionNotice",
+        "path notify",
+        "use dim_agent_capabilities::session_broadcast::SessionNotice",
+        "use dim_agent_capabilities::session_broadcast::notify"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
       "to": "dim_agent_scheduler::document",
       "references": [
         "path MAX_PROMPT_BYTES",
