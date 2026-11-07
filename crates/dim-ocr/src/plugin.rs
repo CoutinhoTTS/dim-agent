@@ -41,10 +41,30 @@ pub struct DescriptionTarget {
     pub model_id: String,
 }
 
+/// The two fields every contract carries, read without the description's
+/// shape: a plugin newer than this build reports its own contract before its
+/// reply is parsed strictly (A.2.1).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HelperVersion {
+    /// The contract version the plugin implements.
+    pub contract: u32,
+    /// The target this reply serves.
+    pub target: DescriptionTarget,
+}
+
+impl DescriptionTarget {
+    /// Whether this target is the one target this build offers from a plugin,
+    /// `local/pp-ocr`; another target is not one Modality knows.
+    pub fn names_plugin_target(&self) -> bool {
+        self.provider_id == PLUGIN_PROVIDER && self.model_id == PLUGIN_MODEL
+    }
+}
+
 impl HelperDescription {
     /// Whether this description names the one target this build offers from
     /// a plugin, `local/pp-ocr`; another target is not one Modality knows.
     pub fn names_plugin_target(&self) -> bool {
-        self.target.provider_id == PLUGIN_PROVIDER && self.target.model_id == PLUGIN_MODEL
+        self.target.names_plugin_target()
     }
 }

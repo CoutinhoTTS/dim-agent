@@ -94,11 +94,16 @@ pub(crate) const PLUGIN_OCR_TARGET: HostTargetSpec = HostTargetSpec {
 pub(crate) const HOST_TARGETS: &[HostTargetSpec] = &[APPLE_VISION_TARGET, PLUGIN_OCR_TARGET];
 
 /// The host targets an operation runs, if this build runs it itself.
-pub(crate) fn host_target(category: &str, operation: &str) -> Option<&'static [HostTargetSpec]> {
-    HOST_TARGETS
+pub(crate) fn host_target<'a>(
+    category: &'a str,
+    operation: &'a str,
+) -> Option<impl Iterator<Item = &'static HostTargetSpec> + 'a> {
+    let mut targets = HOST_TARGETS
         .iter()
-        .any(|target| target.category == category && target.operation == operation)
-        .then_some(HOST_TARGETS)
+        .filter(move |target| target.category == category && target.operation == operation)
+        .peekable();
+    targets.peek()?;
+    Some(targets)
 }
 
 /// The host target `model` names for this operation, if any.
@@ -108,7 +113,6 @@ pub(crate) fn host_target_for(
     model: &ModelId,
 ) -> Option<&'static HostTargetSpec> {
     host_target(category, operation)?
-        .iter()
         .find(|target| target.provider_id == model.provider_id && target.model_id == model.model_id)
 }
 
@@ -466,8 +470,10 @@ impl PluginTargetState {
 }
 
 /// Reads `ocrHelper.describe` once for this call (A.2.1). A missing service,
-/// a failed call, a reply that is not the description shape, or a description
-/// naming another target is absent; another contract is outdated.
+/// a failed call, or a reply naming another target is absent. The contract is
+/// read first, ignoring the rest of the reply's shape, so a newer contract
+/// reports itself outdated whatever its fields are; only this build's
+/// contract is parsed strictly, and a reply that fails that parse is absent.
 pub(crate) async fn plugin_target_state(ctx: &Ctx) -> PluginTargetState {
     use rutis_bridge::session::{HostDispatch, Value as ServiceValue, host_key, settle};
     let Some(service) = ctx.get_at::<dyn HostDispatch>(&host_key("ocrHelper")) else {
@@ -485,13 +491,16 @@ pub(crate) async fn plugin_target_state(ctx: &Ctx) -> PluginTargetState {
     if json.is_null() {
         return PluginTargetState::Absent;
     }
+    let version = match serde_json::from_value::<dim_ocr::HelperVersion>(json.clone()) {
+        Ok(version) if version.target.names_plugin_target() => version,
+        _ => return PluginTargetState::Absent,
+    };
+    if version.contract != dim_ocr::HELPER_CONTRACT {
+        return PluginTargetState::Outdated;
+    }
     match serde_json::from_value::<dim_ocr::HelperDescription>(json) {
         Ok(description) if description.names_plugin_target() => {
-            if description.contract == dim_ocr::HELPER_CONTRACT {
-                PluginTargetState::Ready(description)
-            } else {
-                PluginTargetState::Outdated
-            }
+            PluginTargetState::Ready(description)
         }
         _ => PluginTargetState::Absent,
     }

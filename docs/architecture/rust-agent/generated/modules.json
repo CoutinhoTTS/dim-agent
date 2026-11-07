@@ -43621,6 +43621,7 @@
       "references": [
         "path dim_ocr::HELPER_CONTRACT",
         "path dim_ocr::HelperDescription",
+        "path dim_ocr::HelperVersion",
         "path dim_ocr::PLUGIN_MODEL",
         "path dim_ocr::PLUGIN_PROVIDER"
       ]
@@ -44088,6 +44089,7 @@
         "use plugin::DescriptionTarget",
         "use plugin::HELPER_CONTRACT",
         "use plugin::HelperDescription",
+        "use plugin::HelperVersion",
         "use plugin::PLUGIN_MODEL",
         "use plugin::PLUGIN_PROVIDER"
       ]

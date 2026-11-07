@@ -28,5 +28,6 @@ pub use platform::{
     APPLE_VISION_MODEL, APPLE_VISION_PROVIDER, apple_vision_available, macos_version,
 };
 pub use plugin::{
-    DescriptionTarget, HELPER_CONTRACT, HelperDescription, PLUGIN_MODEL, PLUGIN_PROVIDER,
+    DescriptionTarget, HELPER_CONTRACT, HelperDescription, HelperVersion, PLUGIN_MODEL,
+    PLUGIN_PROVIDER,
 };

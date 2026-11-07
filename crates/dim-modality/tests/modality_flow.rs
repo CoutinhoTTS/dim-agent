@@ -4961,14 +4961,20 @@ async fn ocr_plugin_target_is_absent_without_the_service() {
 async fn ocr_plugin_target_with_an_older_contract_is_unavailable() {
     let home = home("dm-ocr-plugin");
     let plugin = plugin_copy(&home, "pp-ocr-plugin", "plugin-copy");
-    let fixture = OcrHelperFixture::new(Some(ocr_description(
+    // A newer contract changes the description's shape: an unknown field and
+    // no `args`. It must still say its contract and name its target.
+    let mut newer = ocr_description(
         2,
         std::path::Path::new("/bin/sh"),
         &[plugin.join("stub.sh")],
         &[&plugin],
-    )));
+    );
+    let object = newer.as_object_mut().unwrap();
+    object.remove("args");
+    object.insert("gpu".into(), json!(true));
+    let fixture = OcrHelperFixture::new(Some(newer));
     let helper = fake_helper(&home);
-    let server = start_with_ocr_targets(home, Some(helper), fixture).await;
+    let server = start_with_ocr_targets(home, Some(helper), fixture.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let snapshot = client.rpc("modality.capabilities", json!({})).await;
     assert_ok(&snapshot);
@@ -5011,6 +5017,38 @@ async fn ocr_plugin_target_with_an_older_contract_is_unavailable() {
     assert_eq!(
         configured["error"]["message"], "The PP-OCR plugin needs an update",
         "{configured}"
+    );
+    // A reply that says this build's contract but is not the strict
+    // description is no target at all.
+    let mut malformed = ocr_description(
+        1,
+        std::path::Path::new("/bin/sh"),
+        &[plugin.join("stub.sh")],
+        &[&plugin],
+    );
+    malformed.as_object_mut().unwrap().remove("args");
+    fixture.set(Some(malformed));
+    let snapshot = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&snapshot);
+    let recognize = operation_in(&snapshot, "ocr", "recognize");
+    assert!(
+        !recognize["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["modelId"] == PP_OCR_MODEL),
+        "a malformed current-contract reply lists no plugin target: {recognize}"
+    );
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            plugin_ocr_submit("scan.png", "text"),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "unavailable");
+    assert_eq!(
+        refused["error"]["message"], "The PP-OCR plugin is not running",
+        "{refused}"
     );
 }
 
