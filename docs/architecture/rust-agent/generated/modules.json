@@ -15569,15 +15569,6 @@
       ]
     },
     {
-      "from": "dim_agent_capabilities::workspace_tools::mentions",
-      "to": "dim_agent_capabilities::methods",
-      "references": [
-        "path RpcError",
-        "path RpcError::invalid",
-        "use crate::methods::RpcError"
-      ]
-    },
-    {
       "from": "dim_agent_questions",
       "to": "dim_agent_capabilities::host",
       "references": [

@@ -395,7 +395,7 @@ impl DynPlugin for WorkspaceToolsPlugin {
                         if session_id.is_empty() {
                             return Err(RpcError::invalid("sessionId must not be empty"));
                         }
-                        let limit = mentions::parse_limit(limit)?;
+                        let limit = mentions::parse_limit(limit);
                         let found = tokio::task::spawn_blocking(move || {
                             mentions.search(&root, &query, limit)
                         })

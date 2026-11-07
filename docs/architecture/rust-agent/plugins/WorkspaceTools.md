@@ -31,11 +31,12 @@ workspace.files.search {cwd, query, limit?} -> {candidates: [{relativePath, abso
 ```
 
 The method follows `session.files.search` exactly: the same candidate shape and
-ranking over the workspace tree, `limit` defaulting to 20 and at most 50, `0`
-and a negative value refused with `invalid_params`, and a walk failure answered
-with `session_files_failed`. `cwd` is required, absolute, canonical and an
-existing directory, else `invalid_params`; it is the whole authorization, as a
-local connection is the user ([skills.catalog](../../../design/appserver/management-methods.md)
+ranking over the workspace tree, `limit` defaulting to 20 and clamped to
+`1..=50` so `0` answers one candidate, a negative value refused with
+`invalid_params`, and a walk failure answered with `session_files_failed`.
+`cwd` is required, absolute, canonical and an existing directory, else
+`invalid_params`; it is the whole authorization, as a local connection is the
+user ([skills.catalog](../../../design/appserver/management-methods.md)
 precedent), and nothing is registered with Settings. The declaration is
 read-only (`mutating: false`) and declares `Interruption::Report`. Management
 namespaces are served on local v3 connections and listed in `hello.features`

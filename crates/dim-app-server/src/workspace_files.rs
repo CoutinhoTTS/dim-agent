@@ -65,7 +65,7 @@ impl DynPlugin for WorkspaceFilesPlugin {
                             limit: Option<usize>,
                         }
                         let Params { cwd, query, limit } = params(value)?;
-                        let limit = mentions::parse_limit(limit)?;
+                        let limit = mentions::parse_limit(limit);
                         let root = tokio::task::spawn_blocking(move || canonical_cwd(&cwd))
                             .await
                             .map_err(|error| {

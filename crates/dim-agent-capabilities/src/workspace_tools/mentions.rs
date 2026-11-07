@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::methods::RpcError;
-
 pub const DEFAULT_LIMIT: usize = 20;
 pub const MAX_LIMIT: usize = 50;
 const MAX_DEPTH: usize = 8;
@@ -174,14 +172,12 @@ impl MentionIndex {
     }
 }
 
-/// The `limit` rule both file-search entry points share: the default, the
-/// largest answer, and `0` as the caller's error.
-pub fn parse_limit(limit: Option<usize>) -> Result<usize, RpcError> {
-    match limit {
-        Some(0) => Err(RpcError::invalid("limit must be at least 1")),
-        Some(limit) => Ok(limit.clamp(1, MAX_LIMIT)),
-        None => Ok(DEFAULT_LIMIT),
-    }
+/// The `limit` rule both file-search entry points share: `session.files.search`'s
+/// existing one. Absent is [`DEFAULT_LIMIT`], and any given value clamps to
+/// `1..=MAX_LIMIT`, so `0` answers one candidate. A negative value never
+/// reaches here: it fails the parameter's deserialization.
+pub fn parse_limit(limit: Option<usize>) -> usize {
+    limit.map_or(DEFAULT_LIMIT, |limit| limit.clamp(1, MAX_LIMIT))
 }
 
 /// The reply's `candidates` array, the one shape both entry points return.

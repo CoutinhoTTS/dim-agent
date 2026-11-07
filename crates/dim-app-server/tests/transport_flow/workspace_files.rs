@@ -163,17 +163,15 @@ async fn workspace_search_matches_the_session_search_and_shares_its_index() {
         "the same tree and query rank the same"
     );
 
-    // Both entry points share the limit rule: 0 is the caller's error.
+    // Both entry points share the limit rule: 0 answers the first candidate.
     let zero = client
         .rpc(
             "session.files.search",
             json!({"sessionId": session, "query": "notes", "limit": 0}),
         )
         .await;
-    assert_eq!(
-        zero["error"]["data"]["appError"], "invalid_params",
-        "{zero}"
-    );
+    assert_ok(&zero);
+    assert_eq!(candidates(&zero).len(), 1, "{zero}");
 
     server.shutdown();
     server.join().await.unwrap();
@@ -181,10 +179,10 @@ async fn workspace_search_matches_the_session_search_and_shares_its_index() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// `limit` defaults to 20 and is at most 50; 0 and a negative value are the
-/// caller's error.
+/// `limit` defaults to 20 and clamps to `1..=50` on both methods, so 0 answers
+/// one candidate; a negative value is the caller's error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn workspace_search_limit_defaults_clamps_and_refuses_zero() {
+async fn search_limit_defaults_clamps_and_refuses_a_negative() {
     let home = home();
     let server = launch(&home).await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -218,14 +216,21 @@ async fn workspace_search_limit_defaults_clamps_and_refuses_zero() {
             json!({"cwd": root, "query": "match", "limit": 0}),
         )
         .await;
-    assert_eq!(
-        zero["error"]["data"]["appError"], "invalid_params",
-        "{zero}"
-    );
-    assert_eq!(
-        zero["error"]["message"], "limit must be at least 1",
-        "{zero}"
-    );
+    assert_ok(&zero);
+    assert_eq!(candidates(&zero).len(), 1, "{zero}");
+
+    // The Session method keeps the answer it always had on the same tree.
+    let created = client.rpc("session.create", json!({"cwd": root})).await;
+    assert_ok(&created);
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session_zero = client
+        .rpc(
+            "session.files.search",
+            json!({"sessionId": session, "query": "match", "limit": 0}),
+        )
+        .await;
+    assert_ok(&session_zero);
+    assert_eq!(candidates(&session_zero).len(), 1, "{session_zero}");
 
     let negative = client
         .rpc(
