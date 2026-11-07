@@ -15,6 +15,7 @@ The release ships the executable, the default configuration file and the default
 | `runtime.list`, `runtime.install`, `runtime.configure`, the `/runtime` panel and the `dimcode runtime` forms (§5) | yes | client notifications of changes |
 | Default plugins and the default configuration file in the release (§6) | yes | |
 | Python import through PluginManager's link directory (§4) | the runtime side here; links are PluginManager's ([#3](https://github.com/arcships/dim/issues/3)) | |
+| `RuntimeService::installPackages`: a plugin's locked npm dependencies into its own directory (§5, §9 R1) | yes | |
 | Removing runtime versions this Dim no longer uses | | yes |
 
 ## 1. Structure
@@ -135,6 +136,8 @@ For each runtime, in its task:
 
 Nothing unverified is executed: the interpreter that runs npm or pip is the verified archive (or the one the user chose with `system`), npm installs with scripts off and checks each package against the pinned lock, and pip refuses any file without its pinned hash.
 
+A plugin's dependencies are installed by the same npm routine, at PluginManager's request (§5): the verified (or `system`) Node's npm runs in the plugin's staging directory over that plugin's `package-lock.json` with the same flags and the same registry order. That install writes no `runtimes.json` entry and creates nothing under `<home>/runtimes/`: the directory is the plugin's, and PluginManager renames or deletes it (§9 R1).
+
 ### 3.3 Failure and offline
 
 A runtime whose acquisition fails is `failed` with its reason, which lists each source and its error, in `runtime.list`. Nothing was replaced: a partial directory is removed on the next attempt and the previous installed version, if any, stays. Plugin rows needing it stay Pending, waiting for its connection row's session. The next attempt is the next start or `runtime.install` (§5); there is no automatic retry.
@@ -154,7 +157,7 @@ The rutis Python runtime is one process; a row `py:<module>` is imported with `i
 - The Python runtime's project directory is `<home>/plugins/.python/`, which PluginManager owns; the App Server creates it at startup so the runtime's import path exists before the first plugin.
 - When a Python plugin is turned on, PluginManager creates there a directory link `<package>` to the plugin directory (`<package>` is the plugin id with `-` replaced by `_`; a junction on Windows), and creates the row `py:<package>.<entry module>`. A new plugin is importable by the running process without a restart.
 - Inside a plugin, modules import each other relatively (`from . import helpers`). Reload re-imports the entry module when its file changed, as rutis does for every Python row ([requirement 3](../plugin-management.md)).
-- When PluginManager turns on a Python plugin and Python is off, it calls `RuntimeService::install("python")` (§5).
+- When PluginManager turns on a Python plugin and Python is off, it calls `RuntimeService::install("python")` (§5). The same request applies to Node for every plugin with code turned on while Node is off, and Node is requested first when a plugin's dependencies must be installed (§9 R1).
 
 ## 5. Interfaces
 
@@ -162,7 +165,7 @@ The rutis Python runtime is one process; a row `py:<module>` is imported with `i
 | --- | --- |
 | Launch commands | `nodeRuntime`, `pythonRuntime`: Rust-only process services the connection rows `session-node` and `py` inject; provided once the runtime is acquired. |
 | `RuntimeStatus` | Kept by each connection row at a Rust-only process key named after the row: `starting`, `ready`, or `down` with its reason. RuntimeManager reads it. |
-| `RuntimeService` (Rust process service) | `list() -> [RuntimeEntry]`; `install(name)`: turns the runtime on and starts its acquisition; does nothing while it is being acquired or is running; after a failed acquisition, acquires again; once its connection is `down`, provides its launch command again. Read with an optional dependency, so RuntimeManager's reload does not reload the caller. |
+| `RuntimeService` (Rust process service) | `list() -> [RuntimeEntry]`; `install(name)`: turns the runtime on and starts its acquisition; does nothing while it is being acquired or is running; after a failed acquisition, acquires again; once its connection is `down`, provides its launch command again. `installPackages(dir, cancel)`: installs a plugin's locked npm dependencies into `dir` with the managed (or `system`) Node's own npm — `npm ci --omit=dev --ignore-scripts --no-audit --no-fund --registry <r>` over `dir/package-lock.json`, trying `npmRegistries` and then `DIMCODE_NPM_REGISTRY` — and returns when npm exits, with errors `node_unavailable` (no Node installation, or it has no npm), `npm_unavailable` (npm could not be started), `install_failed {reason}` (npm's message) and `cancelled`; `cancel` kills npm and leaves `dir` to its caller. Both are read with an optional dependency, so RuntimeManager's reload does not reload the caller. |
 | `runtime.list` (management method) | `[{name, source, auto, version, status, reason?}]`; `auto` is the configuration in effect, so a client can change it without holding a second copy; `status` is `off`, `acquiring`, `failed`, or, once the launch command is provided, the connection's `RuntimeStatus`: `starting` (also while the connection row has not started), `ready`, or `down` with its reason. |
 | `runtime.install {name}` (management method, mutating) | `RuntimeService::install`: reads the configuration, applies a changed `source` by restarting the connection row (§3.3), and replies at once with the status; an unreadable configuration is the call's `runtime_configuration` error. |
 | `runtime.configure {name, source?, auto?}` (management method, mutating) | Writes `<home>/runtimes/config.json` atomically, merged per runtime and field over the preset (§2.2), then applies as `runtime.install` does; a file it cannot write or read is the call's `runtime_configuration` error. It refuses while that runtime is being acquired, because a plan cannot change under an acquisition (§3.1). |
@@ -175,18 +178,18 @@ The release archive and each npm platform package carry, beside `bin/`:
 ```text
 bin/dimcode[.exe]
 default-plugins.json        # PluginManager §2.3, with `runtimes` (§2.2)
-plugins/<name>/             # plugin-authoring; no production node_modules
+plugins/<name>/             # default and optional plugins; an optional one has no node_modules
 LICENSE  NOTICE  release-manifest.json
 ```
 
-`scripts/stage-plugins.mjs` copies `runtime/default-plugins.json` and each default plugin's directory (without tests, `tsconfig.json` or `node_modules`) and runs `npm ci --omit=dev --ignore-scripts --no-bin-links`, from its pinned lock, in each one with a `package.json`; `stage-release.mjs --plugins DIR` puts the result beside `bin/`. A default plugin resolves `@arcships/rutis` from its own `node_modules`; it must not resolve a Cordis of its own, since rutis-runtime refuses a plugin whose Cordis differs from the runtime's. The plugin entries are TypeScript, also under an npm package's `node_modules`: the Node runtime loads them through tsx, not Node's own type stripping. Finding the file (`<prefix>/default-plugins.json`, the parent of `bin/`, or `DIMCODE_DEFAULT_PLUGINS`) and the App Server's `--defaults` flag are PluginManager's ([#485](https://github.com/arcships/dim/pull/485)); RuntimeManager reads the `runtimes` section of that file. With `--defaults` and without `--node`, the App Server acquires a runtime with RuntimeManager when its `auto` is on or it is recorded as installed; otherwise it behaves as today (explicit `--node`, `--js-runtime` and `--python` remain for development and tests).
+`scripts/stage-plugins.mjs` copies `runtime/default-plugins.json`, each default plugin's directory and each optional plugin's directory (all without tests, `tsconfig.json` or `node_modules`), and runs `npm ci --omit=dev --ignore-scripts --no-bin-links`, from its pinned lock, in each default plugin with a `package.json` — never in an optional plugin, whose dependencies are installed into the user's copy at install time (PluginManager §2.3); `stage-release.mjs --plugins DIR` puts the result beside `bin/`. A default plugin resolves `@arcships/rutis` from its own `node_modules`; it must not resolve a Cordis of its own, since rutis-runtime refuses a plugin whose Cordis differs from the runtime's. The plugin entries are TypeScript, also under an npm package's `node_modules`: the Node runtime loads them through tsx, not Node's own type stripping. Finding the file (`<prefix>/default-plugins.json`, the parent of `bin/`, or `DIMCODE_DEFAULT_PLUGINS`) and the App Server's `--defaults` flag are PluginManager's ([#485](https://github.com/arcships/dim/pull/485)); RuntimeManager reads the `runtimes` section of that file. With `--defaults` and without `--node`, the App Server acquires a runtime with RuntimeManager when its `auto` is on or it is recorded as installed; otherwise it behaves as today (explicit `--node`, `--js-runtime` and `--python` remain for development and tests).
 
 ## 7. Security
 
 - Every downloaded archive is verified against the SHA-256 its official publisher lists, read from a fixed HTTPS address, before it is unpacked or run; npm and pip packages are verified by the pinned lock and requirements in the repository. Sources and mirrors add no trust.
 - Archive entries are unpacked only inside their directory: absolute paths and `..` are refused, and so are links whose target leaves it (on Windows a link inside is unpacked as a copy); link entries of a zip archive are always refused. No setuid, setgid or sticky bit is kept (on Unix permissions are at most `rwxr-xr-x`).
 - npm runs with `--ignore-scripts`; pip installs only wheels (`--only-binary :all:`), so no package code runs during installation.
-- RuntimeManager writes only under `<home>/runtimes/`. No credentials are used or stored.
+- RuntimeManager writes only under `<home>/runtimes/`, except the `node_modules` its `installPackages` writes inside the plugin directory it is given; that directory belongs to PluginManager, which renames or deletes it. No credentials are used or stored.
 - Integrity is established at acquisition. At later starts RuntimeManager trusts its record and the installed directories without hashing them again: they are in the user's home, which only the user's own processes write, and a process that can change them can equally change the configuration or the plugins themselves. Verification guards what comes over the network, not the home.
 
 ## 8. Rule check
@@ -214,12 +217,12 @@ RuntimeManager is not a Capability: it has no Timeline state, writes no Timeline
 
 None to rutis: a connection row starts its process only once its launch command is provided, and rows wait for its session under rutis-loader 0.19.3's existing gating.
 
-**R1. PluginManager: Python links and the runtime request (M1).**
+**R1. PluginManager: Python links, the runtime request, and a plugin's npm packages (M1).**
 
 | Item | Content |
 | --- | --- |
-| Blocked by | A Python plugin's directory is not on the running Python runtime's import path. |
-| Existing mechanisms considered | Adding each directory to `PYTHONPATH` and restarting the Python runtime per install (restarts every Python row; same-named modules of two plugins collide). |
-| Generic capability | PluginManager keeps `<home>/plugins/.python/<package>` links and names Python rows `py:<package>.<entry>` (§4), and calls `RuntimeService::install("python")` when it turns on a Python plugin while Python is off. |
+| Blocked by | A Python plugin's directory is not on the running Python runtime's import path; a Node plugin turned on while Node is off can only wait; and a plugin that declares npm dependencies has no way to have its lock installed into its own directory. |
+| Existing mechanisms considered | Adding each directory to `PYTHONPATH` and restarting the Python runtime per install (restarts every Python row; same-named modules of two plugins collide); PluginManager running npm itself (duplicates this document's registry, verification and failure rules). |
+| Generic capability | PluginManager keeps `<home>/plugins/.python/<package>` links and names Python rows `py:<package>.<entry>` (§4), and calls `RuntimeService::install("python")` when it turns on a Python plugin while Python is off. The same `install("node")` request applies to every plugin with code turned on while Node is off, not only one that declares dependencies. PluginManager calls `RuntimeService::installPackages(dir, cancel)` (§5) to install a plugin's locked npm dependencies into its staging directory before the directory is renamed into place, and deletes the directory if that fails. |
 | Effect on sequence, batch, interrupt, reload | None on the Timeline. |
 | Owner and issue | PluginManager, [#3](https://github.com/arcships/dim/issues/3). |
