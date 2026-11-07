@@ -691,6 +691,9 @@ impl RecoverModelConnection for RecoveryProbe {
             if self.mode == 6 {
                 cancel.cancel();
             }
+            if self.mode == 33 {
+                return Err(HostError::failed("fixture credential refresh failed"));
+            }
             Ok(RecoveredModelConnection {
                 connection: ModelConnection::Local,
                 recovery: Arc::new(self.clone()),
@@ -700,6 +703,9 @@ impl RecoverModelConnection for RecoveryProbe {
     fn finish_rejected(&self, _: CancellationToken) -> HostFuture<'_, ()> {
         Box::pin(async move {
             self.rejected.fetch_add(1, Ordering::SeqCst);
+            if self.mode == 34 {
+                return Err(HostError::failed("fixture credential settlement failed"));
+            }
             Ok(())
         })
     }
@@ -739,7 +745,7 @@ impl ModelDriver for RecoveryProbe {
             {
                 resume.notified().await;
             }
-            if call > 0 && !matches!(self.mode, 4 | 7 | 8 | 12 | 15..=20 | 23..=32) {
+            if call > 0 && !matches!(self.mode, 4 | 7 | 8 | 12 | 15..=20 | 23..=34) {
                 return EchoModel.invoke(request, connection, cancel).await;
             }
             let special = match self.mode {
@@ -777,6 +783,12 @@ impl ModelDriver for RecoveryProbe {
                 )),
                 32 if call == 1 => {
                     Some(self.failure_kind(ModelFailureKind::ServerError, Some(503), None))
+                }
+                33 if call == 0 => {
+                    Some(self.failure_kind(ModelFailureKind::ServerError, Some(503), None))
+                }
+                33 if call == 1 => {
+                    Some(self.failure_kind(ModelFailureKind::AuthRejected, Some(401), None))
                 }
                 _ => None,
             };
@@ -1142,6 +1154,89 @@ async fn a_continuation_waits_no_longer_than_the_chain_budget_left() {
         (299_800..=300_000).contains(&failure.waited_ms),
         "{failure:?}"
     );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_credential_refresh_keeps_the_chain_totals() {
+    let chain = FailureChain {
+        from_request_id: "request-before".into(),
+        attempts: 5,
+        waited_ms: 1_500,
+    };
+    let (agent, session, probe) = recovery_agent_with(33, None, Some(("model/call", chain))).await;
+    let started = tokio::time::Instant::now();
+    session
+        .submit("continue".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.recovered.load(Ordering::SeqCst), 1);
+    let slept = started.elapsed();
+    assert!(
+        slept >= Duration::from_millis(800) && slept <= Duration::from_secs(1),
+        "{slept:?}"
+    );
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let (error, failure) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                outcome:
+                    ModelOutputOutcome::Failed {
+                        error,
+                        failure: Some(failure),
+                        ..
+                    },
+                ..
+            }) => Some((error, failure)),
+            _ => None,
+        })
+        .expect("a failed model output with facts");
+    assert_eq!(error, "fixture credential refresh failed");
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    assert_eq!(failure.attempts, 7);
+    assert!((2_300..=2_500).contains(&failure.waited_ms), "{failure:?}");
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_credential_settlement_keeps_the_chain_totals() {
+    let chain = FailureChain {
+        from_request_id: "request-before".into(),
+        attempts: 5,
+        waited_ms: 1_500,
+    };
+    let (agent, session, probe) = recovery_agent_with(34, None, Some(("model/call", chain))).await;
+    session
+        .submit("continue".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.recovered.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.rejected.load(Ordering::SeqCst), 1);
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let (error, failure) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                outcome:
+                    ModelOutputOutcome::Failed {
+                        error,
+                        failure: Some(failure),
+                        ..
+                    },
+                ..
+            }) => Some((error, failure)),
+            _ => None,
+        })
+        .expect("a failed model output with facts");
+    assert_eq!(error, "fixture credential settlement failed");
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    assert_eq!(failure.attempts, 7);
+    assert_eq!(failure.waited_ms, 1_500);
     agent.close().await.unwrap();
 }
 

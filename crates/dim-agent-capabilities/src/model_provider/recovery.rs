@@ -127,11 +127,14 @@ pub async fn invoke<S: Send + RetryObserver, T>(
                 FailureAction::Stop => break result,
                 FailureAction::SettleCredentials => {
                     check_cancel(cancel)?;
-                    recovery
+                    let settled = recovery
                         .as_ref()
                         .expect("terminal rejection has a credential owner")
                         .finish_rejected(cancel.clone())
-                        .await?;
+                        .await;
+                    if let Err(error) = settled {
+                        break Err(error);
+                    }
                     break result;
                 }
                 FailureAction::Retry(delay) | FailureAction::RecoverCredentials(delay) => delay,
@@ -160,11 +163,15 @@ pub async fn invoke<S: Send + RetryObserver, T>(
             }
             if let FailureAction::RecoverCredentials(_) = action {
                 check_cancel(cancel)?;
-                let recovered = recovery
+                let recovered = match recovery
                     .as_ref()
                     .expect("recoverable rejection has a credential owner")
                     .recover(cancel.clone())
-                    .await?;
+                    .await
+                {
+                    Ok(recovered) => recovered,
+                    Err(error) => break Err(error),
+                };
                 connection = recovered.connection;
                 recovery = Some(recovered.recovery);
                 recovery_state.phase = CredentialRecoveryPhase::Recovered;
