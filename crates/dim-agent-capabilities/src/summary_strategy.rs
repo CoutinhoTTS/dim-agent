@@ -431,6 +431,7 @@ impl SummaryStrategy {
         let (text, complete) = invoke_with_recovery(
             &host,
             &request,
+            None,
             resolved,
             cancel,
             stats,
