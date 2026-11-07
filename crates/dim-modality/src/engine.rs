@@ -593,6 +593,35 @@ impl Shared {
         Write::Discarded(Some(self.record(slot)))
     }
 
+    /// Fails a host task after its work directory exists: the directory is
+    /// removed first, so a failed host task leaves nothing behind.
+    async fn fail_host(
+        self: &Arc<Self>,
+        slot: &Arc<Slot>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        let record = self.record(slot);
+        let _ = task::remove_work(&self.files, &record.task_id).await;
+        self.fail(slot, code, message).await;
+    }
+
+    /// Fails a task from `settle_files`: the host call (`cap` set) removes
+    /// its work directory first, the adapter call (`cap` none) does not.
+    async fn fail_settled(
+        self: &Arc<Self>,
+        slot: &Arc<Slot>,
+        cap: Option<u64>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        if cap.is_some() {
+            let record = self.record(slot);
+            let _ = task::remove_work(&self.files, &record.task_id).await;
+        }
+        self.fail(slot, code, message).await;
+    }
+
     /// Fails a task whose outcome is still open.
     async fn fail(&self, slot: &Arc<Slot>, code: impl Into<String>, message: impl Into<String>) {
         let current = self.record(slot);
@@ -2031,7 +2060,7 @@ impl Shared {
             Ok(paths) => paths,
             Err(error) => {
                 if !slot.cancel_requested() {
-                    self.fail(slot, "storage_error", error).await;
+                    self.fail_host(slot, "storage_error", error).await;
                 }
                 return;
             }
@@ -2076,7 +2105,7 @@ impl Shared {
             Ok(output) => output,
             Err(ConfinedError::Cancelled) => return,
             Err(error) => {
-                self.fail(slot, confinement_code(&error), error.to_string())
+                self.fail_host(slot, confinement_code(&error), error.to_string())
                     .await;
                 return;
             }
@@ -2118,7 +2147,7 @@ impl Shared {
                 let ok = serde_json::from_str::<HelperSuccess>(stdout.trim())
                     .is_ok_and(|payload| payload.ok);
                 if !ok {
-                    self.fail(
+                    self.fail_host(
                         slot,
                         "executor_error",
                         format!(
@@ -2144,10 +2173,10 @@ impl Shared {
                             dim_ocr::HelperErrorCode::LocalRuntimeUnavailable => "unavailable",
                             dim_ocr::HelperErrorCode::LocalRuntimeFailed => "executor_error",
                         };
-                        self.fail(slot, code, payload.error.message).await;
+                        self.fail_host(slot, code, payload.error.message).await;
                     }
                     None => {
-                        self.fail(
+                        self.fail_host(
                             slot,
                             "executor_error",
                             "The OCR helper printed no valid error line",
@@ -2157,7 +2186,7 @@ impl Shared {
                 }
             }
             _ => {
-                self.fail(
+                self.fail_host(
                     slot,
                     "executor_error",
                     format!("The OCR helper failed{}", stderr_tail(&output.stderr)),
@@ -2185,7 +2214,8 @@ impl Shared {
         let listed = match self.files.list(&work_name).await {
             Ok(entries) => entries,
             Err(error) => {
-                self.fail(slot, "executor_error", error.to_string()).await;
+                self.fail_host(slot, "executor_error", error.to_string())
+                    .await;
                 return;
             }
         };
@@ -2287,7 +2317,8 @@ impl Shared {
         {
             Ok(path) => path,
             Err(error) => {
-                self.fail(slot, "provider_error", error.to_string()).await;
+                self.fail_settled(slot, cap, "provider_error", error.to_string())
+                    .await;
                 return;
             }
         };
@@ -2298,8 +2329,13 @@ impl Shared {
             .await
         {
             let _ = error;
-            self.fail(slot, "storage_error", "The result directory is unavailable")
-                .await;
+            self.fail_settled(
+                slot,
+                cap,
+                "storage_error",
+                "The result directory is unavailable",
+            )
+            .await;
             return;
         }
         let mut names = BTreeSet::new();
@@ -2309,8 +2345,9 @@ impl Shared {
         for file in files {
             if !valid_file_name(&file.name) || !names.insert(file.name.clone()) {
                 self.discard_results(&record.task_id, &written).await;
-                self.fail(
+                self.fail_settled(
                     slot,
+                    cap,
                     "provider_error",
                     "The adapter returned an invalid file name",
                 )
@@ -2330,20 +2367,22 @@ impl Shared {
                             _ => "The OCR artifacts cannot be read",
                         };
                         self.discard_results(&record.task_id, &written).await;
-                        self.fail(slot, "executor_error", message).await;
+                        self.fail_settled(slot, cap, "executor_error", message)
+                            .await;
                         return;
                     }
                     Err(error) => {
                         self.discard_results(&record.task_id, &written).await;
-                        self.fail(slot, "executor_error", error).await;
+                        self.fail_settled(slot, cap, "executor_error", error).await;
                         return;
                     }
                 },
                 OutputSource::Path(path) => {
                     let Some(relative) = work_relative_name(&work, &path) else {
                         self.discard_results(&record.task_id, &written).await;
-                        self.fail(
+                        self.fail_settled(
                             slot,
+                            cap,
                             "provider_error",
                             "The adapter returned a file outside its work directory",
                         )
@@ -2354,8 +2393,9 @@ impl Shared {
                         Ok(Some(source)) => source,
                         Ok(None) => {
                             self.discard_results(&record.task_id, &written).await;
-                            self.fail(
+                            self.fail_settled(
                                 slot,
+                                cap,
                                 "provider_error",
                                 "The adapter returned a file outside its work directory",
                             )
@@ -2364,22 +2404,22 @@ impl Shared {
                         }
                         Err(error) => {
                             self.discard_results(&record.task_id, &written).await;
-                            self.fail(slot, "provider_error", error).await;
+                            self.fail_settled(slot, cap, "provider_error", error).await;
                             return;
                         }
                     }
                 }
             };
-            if let Some(cap) = cap {
+            if let Some(limit) = cap {
                 total = total.saturating_add(source.len());
-                if total > cap {
+                if total > limit {
                     drop(source);
                     self.discard_results(&record.task_id, &written).await;
-                    let _ = task::remove_work(&self.files, &record.task_id).await;
-                    self.fail(
+                    self.fail_settled(
                         slot,
+                        cap,
                         "executor_error",
-                        format!("The OCR artifacts exceed {cap} bytes"),
+                        format!("The OCR artifacts exceed {limit} bytes"),
                     )
                     .await;
                     return;
@@ -2397,7 +2437,8 @@ impl Shared {
                 Ok(result) => result,
                 Err(error) => {
                     self.discard_results(&record.task_id, &written).await;
-                    self.fail(slot, "storage_error", error.to_string()).await;
+                    self.fail_settled(slot, cap, "storage_error", error.to_string())
+                        .await;
                     return;
                 }
             };
@@ -2415,7 +2456,8 @@ impl Shared {
                 Ok(data) => Some(data),
                 Err(message) => {
                     self.discard_results(&record.task_id, &written).await;
-                    self.fail(slot, "executor_error", message).await;
+                    self.fail_settled(slot, cap, "executor_error", message)
+                        .await;
                     return;
                 }
             },
