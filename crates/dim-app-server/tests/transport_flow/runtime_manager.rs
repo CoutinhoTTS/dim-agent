@@ -60,22 +60,6 @@ fn on_path(program: &str) -> PathBuf {
         .expect("the program is on PATH")
 }
 
-/// Puts `PATH` back when its flow ends, pass or panic.
-struct RestorePath(Option<std::ffi::OsString>);
-
-impl Drop for RestorePath {
-    fn drop(&mut self) {
-        // SAFETY: the flow holds PATH_LOCK until after this guard drops, so
-        // no other flow reads or writes PATH meanwhile.
-        unsafe {
-            match self.0.take() {
-                Some(path) => std::env::set_var("PATH", path),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-    }
-}
-
 /// `runtime.list` reports an interpreter only while the record marks the
 /// runtime installed under the plan in effect (§2.4, §5), the same test that
 /// skips a download. Nothing is acquired here: the record and the directories
@@ -97,6 +81,7 @@ async fn runtime_list_reports_a_path_only_while_its_record_matches_the_plan() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -160,13 +145,11 @@ async fn runtime_list_reports_a_path_only_while_its_record_matches_the_plan() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// A relative `PATH` entry (§5): `which` resolves it against the daemon's
+/// A relative search-path entry (§5): `which` resolves it against the daemon's
 /// working directory, so `runtime.list` reports the absolute interpreter path
 /// that a process started from another working directory can launch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
-    let _path = PATH_LOCK.lock().await;
-    let _restore = RestorePath(std::env::var_os("PATH"));
     let home = std::env::temp_dir().join(format!("drm-relative-{}", uuid::Uuid::new_v4()));
     let fixture = home.join("system-node");
     let bin = fixture.join("bin");
@@ -196,13 +179,6 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
         !relative.is_absolute(),
         "the entry is relative: {relative:?}"
     );
-    let previous = std::env::var_os("PATH").unwrap();
-    let joined = std::env::join_paths(
-        std::iter::once(relative.clone()).chain(std::env::split_paths(&previous)),
-    )
-    .unwrap();
-    // SAFETY: the flow holds PATH_LOCK, and RestorePath puts PATH back.
-    unsafe { std::env::set_var("PATH", &joined) };
 
     let defaults = home.join("default-plugins.json");
     std::fs::write(
@@ -217,6 +193,7 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            Some(relative.into_os_string()),
         )
         .unwrap(),
     );
@@ -271,17 +248,14 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// Fixture `uv` and `uvx` pairs in front of this process's `PATH`, restored
-/// and removed on drop. Tests that use one hold `PATH_LOCK` for their whole
-/// life, because `runtime.install` reads `PATH` when it applies the
-/// configuration.
+/// Fixture `uv` and `uvx` pairs in directories a search path points at,
+/// removed on drop; the process environment is never changed.
 struct FixtureUv {
     /// The first directory: the uv the plan starts with.
     directory: PathBuf,
-    /// Directories between it and the original `PATH`. A reload resolves the
-    /// first of these once the first directory has no uv.
+    /// Directories after it on the search path. A reload resolves the first
+    /// of these once the first directory has no uv.
     fallbacks: Vec<PathBuf>,
-    path: Option<std::ffi::OsString>,
 }
 
 impl FixtureUv {
@@ -289,25 +263,23 @@ impl FixtureUv {
         Self::with_fallback(version, None)
     }
 
-    /// `A:B:<original PATH>`: `A` holds the `version` uv and `B` one that
-    /// reports `fallback`, so removing `A`'s uv leaves the reload resolving
-    /// `B` before any uv installed on the host.
+    /// `A:B`: `A` holds the `version` uv and `B` one that reports
+    /// `fallback`, so removing `A`'s uv leaves the reload resolving `B`
+    /// before any uv installed on the host.
     fn with_fallback(version: &str, fallback: Option<&str>) -> Self {
-        let path = std::env::var_os("PATH");
         let directory = Self::fixture(version);
         let fallbacks: Vec<PathBuf> = fallback.into_iter().map(Self::fixture).collect();
-        let mut paths = vec![directory.clone()];
-        paths.extend(fallbacks.iter().cloned());
-        paths.extend(path.iter().flat_map(std::env::split_paths));
-        let joined = std::env::join_paths(paths).unwrap();
-        // SAFETY: every test that changes PATH holds PATH_LOCK until it
-        // restores it, so no other test reads a half-prefixed PATH.
-        unsafe { std::env::set_var("PATH", &joined) };
         Self {
             directory,
             fallbacks,
-            path,
         }
+    }
+
+    /// The search path the runtimes resolve uv on: the fixture directories in
+    /// order, so a reload resolves the one written first and then the
+    /// fallback. The process environment is not involved.
+    fn search_path(&self) -> std::ffi::OsString {
+        std::env::join_paths(std::iter::once(&self.directory).chain(&self.fallbacks)).unwrap()
     }
 
     /// One fixture directory: `uv` reporting `version`, and `uvx`.
@@ -333,20 +305,11 @@ fn write_script(directory: &Path, name: &str, body: &str) {
 
 impl Drop for FixtureUv {
     fn drop(&mut self) {
-        // SAFETY: as above: PATH_LOCK is held for the whole lifetime.
-        unsafe {
-            match &self.path {
-                Some(path) => std::env::set_var("PATH", path),
-                None => std::env::remove_var("PATH"),
-            }
-        }
         for directory in std::iter::once(&self.directory).chain(&self.fallbacks) {
             let _ = std::fs::remove_dir_all(directory);
         }
     }
 }
-
-static PATH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn write_defaults(home: &Path, runtimes: &str) -> PathBuf {
     let path = home.join("default-plugins.json");
@@ -354,13 +317,18 @@ fn write_defaults(home: &Path, runtimes: &str) -> PathBuf {
     path
 }
 
-fn load_runtimes(home: &Path, defaults: &Path) -> Arc<Runtimes> {
+fn load_runtimes(
+    home: &Path,
+    defaults: &Path,
+    search_path: Option<std::ffi::OsString>,
+) -> Arc<Runtimes> {
     Arc::new(
         Runtimes::load(
             home,
             &dim_app_server::plugin_manager::Defaults::read(defaults)
                 .unwrap()
                 .runtimes,
+            search_path,
         )
         .unwrap(),
     )
@@ -378,7 +346,7 @@ async fn runtime_list_shows_the_uv_tool_off() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "download", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, None);
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -412,7 +380,6 @@ async fn runtime_list_shows_the_uv_tool_off() {
 /// node and python runtimes are untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_system_uv_fixture_reads_ready_with_its_own_path() {
-    let _path = PATH_LOCK.lock().await;
     let fixture = FixtureUv::new("0.13.7");
     let home = std::env::temp_dir().join(format!("drm-uv-system-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -422,7 +389,7 @@ async fn a_system_uv_fixture_reads_ready_with_its_own_path() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
     assert_eq!(
         runtimes.plan(Kind::Uv).interpreter,
         fixture.directory.join("uv"),
@@ -486,7 +453,6 @@ async fn a_system_uv_fixture_reads_ready_with_its_own_path() {
 /// rather than with a missing file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_removed_system_uv_reads_off_and_installs_again() {
-    let _path = PATH_LOCK.lock().await;
     let fixture = FixtureUv::with_fallback("0.13.7", Some("0.10.9"));
     let home = std::env::temp_dir().join(format!("drm-uv-removed-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -496,7 +462,7 @@ async fn a_removed_system_uv_reads_off_and_installs_again() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -548,7 +514,6 @@ async fn a_removed_system_uv_reads_off_and_installs_again() {
 /// reason.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_system_uv_below_the_floor_fails_with_its_version() {
-    let _path = PATH_LOCK.lock().await;
     let _fixture = FixtureUv::new("0.10.9");
     let home = std::env::temp_dir().join(format!("drm-uv-old-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -558,7 +523,7 @@ async fn a_system_uv_below_the_floor_fails_with_its_version() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -585,7 +550,6 @@ async fn a_system_uv_below_the_floor_fails_with_its_version() {
 /// without a launch command to withdraw or provide.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn configuring_uv_writes_the_merged_file_and_applies_it() {
-    let _path = PATH_LOCK.lock().await;
     let fixture = FixtureUv::new("0.13.7");
     let home = std::env::temp_dir().join(format!("drm-uv-configure-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
@@ -595,7 +559,7 @@ async fn configuring_uv_writes_the_merged_file_and_applies_it() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "download", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -659,7 +623,7 @@ async fn uv_runtime_manager_downloads_the_pinned_tool() {
             "python": {"source": "system", "auto": false},
             "uv": {"source": "download", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults);
+    let runtimes = load_runtimes(&home, &defaults, None);
     let uv = runtimes.plan(Kind::Uv).clone();
     assert!(
         uv.interpreter.to_string_lossy().contains("uv-0.13.7-"),
@@ -762,6 +726,7 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -847,6 +812,7 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -899,6 +865,7 @@ async fn node_runtime_manager_reads_the_configuration_when_it_applies_it() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -1025,6 +992,7 @@ async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
@@ -1112,6 +1080,7 @@ async fn python_runtime_manager_marks_the_downloaded_interpreter_as_externally_m
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
