@@ -2768,9 +2768,10 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
 }
 
 /// A client's `session.collaboration.cancel` interrupts the member's running
-/// turn: the member records `stop/interrupt` and a cancelled `turn/end`, and
-/// the leader records the cancelled `collaboration/result` and its report.
-/// Called again once nothing runs, it answers `idle` and writes nothing.
+/// turn when it names the branch that owns the request: the member records
+/// `stop/interrupt` and a cancelled `turn/end`, and the leader records the
+/// cancelled `collaboration/result` and its report. Called again once nothing
+/// runs, it answers `idle` and writes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_client_cancel_stops_a_running_member_and_writes_nothing_when_idle() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
@@ -2819,7 +2820,7 @@ async fn a_client_cancel_stops_a_running_member_and_writes_nothing_when_idle() {
     let cancelled = client
         .rpc(
             "session.collaboration.cancel",
-            json!({"sessionId": lead, "memberSessionId": member}),
+            json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
         )
         .await;
     assert_ok(&cancelled);
@@ -2896,6 +2897,213 @@ async fn a_client_cancel_stops_a_running_member_and_writes_nothing_when_idle() {
         before,
         "an idle cancel writes no stop/interrupt"
     );
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A cancel from a branch whose own request to the member is still waiting
+/// for delivery stops nothing: that request is refused `busy`, and the
+/// member's running turn belongs to the branch that owns the open request.
+/// The flow commits the competing request and a barrier of its own as one
+/// batch: the request's `open` entry exists before the barrier's listener
+/// holds the branch's dispatch, and its refusal's `delivered` is published
+/// but not dispatched until the flow releases the gate. No sleep decides
+/// the timing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_from_another_branch_leaves_the_owning_branch_turn_running() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let dispatch = DispatchGate::new({
+        let entered = entered.clone();
+        let release = release.clone();
+        Arc::new(move |_, event| {
+            let hold = event.kind.key() == "collaborationtest/barrier";
+            let entered = entered.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                if hold {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+            })
+        })
+    });
+    let mut config = ServerConfig::default();
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
+    let (server, agent) = launch_gated_tools(
+        dispatch.clone(),
+        Arc::new(GateTools(gate.clone())),
+        config,
+        |_| {},
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd": std::env::temp_dir(), "tools": ["echo", "wait", "agent", "branch"],
+                "permissionPolicy": {"allowedTools": ["echo", "wait", "agent", "hold"]}}),
+        )
+        .await;
+    assert_ok(&created);
+    let lead = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    dispatch.leader.set(lead.clone()).unwrap();
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    let holds = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| {
+                matches!(&event.kind,
+                EventKind::ToolCall(data) if data.calls[0].name == "hold")
+            })
+            .count()
+    };
+    let stops = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+            .count()
+    };
+    poll("the member's hold started", async || {
+        (holds(&member_session).await == 1).then_some(())
+    })
+    .await;
+
+    // A second branch of the same leader requests the same member. The
+    // request joins the branch's `open` and is refused `busy`; the barrier
+    // committed with it keeps the refusal's `delivered` from being
+    // dispatched, so `open` still holds the member when the client cancels.
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId": lead, "branchId": "main", "after": 0, "limit": 256}),
+        )
+        .await;
+    assert_ok(&history);
+    let at = history["result"]["through"].as_u64().unwrap();
+    let opened = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId": lead, "parentBranchId": "main", "at": at,
+                "prompt": "competing branch"}),
+        )
+        .await;
+    assert_ok(&opened);
+    let branch = opened["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    poll("the competing branch is idle", async || {
+        lead_session
+            .state(&branch)
+            .is_ok_and(|state| !state.running)
+            .then_some(())
+    })
+    .await;
+    let branch_timeline = dispatch
+        .branches
+        .lock()
+        .unwrap()
+        .get(&(lead.clone(), branch.clone()))
+        .cloned()
+        .expect("the competing branch's Timeline");
+    branch_timeline
+        .append_batch_registered(
+            vec![
+                EventKind::CollaborationRequest(dim_agent_types::CollaborationRequestData {
+                    turn_id: "competing-turn".into(),
+                    request_id: "competing-request".into(),
+                    call_id: "competing-call".into(),
+                    target: dim_agent_types::CollaborationTarget::Member {
+                        agent_id: holder.clone(),
+                        session_id: member.clone(),
+                    },
+                    prompt: "later".into(),
+                })
+                .into(),
+                EventKind::Extension(
+                    dim_agent_types::ExtensionEvent::new("collaborationtest", "barrier", json!({}))
+                        .unwrap(),
+                )
+                .into(),
+            ],
+            |_| Ok(()),
+        )
+        .unwrap();
+
+    entered.notified().await;
+    let cancelled = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": lead, "branchId": branch, "memberSessionId": member}),
+        )
+        .await;
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "idle", "{cancelled}");
+    assert_eq!(
+        stops(&member_session).await,
+        0,
+        "the cancel stopped nothing"
+    );
+    assert!(
+        member_session
+            .state("main")
+            .is_ok_and(|state| state.running),
+        "the owning branch's member turn is still running"
+    );
+
+    release.notify_one();
+    let delivery = poll("the competing request's refusal", async || {
+        branch_events(&lead_session, &branch, ..)
+            .await
+            .unwrap()
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::CollaborationDelivered(data) => Some(data.delivery.clone()),
+                _ => None,
+            })
+    })
+    .await;
+    assert_eq!(
+        delivery,
+        CollaborationDelivery::Error {
+            error: dim_agent_types::CollaborationErrorCode::Busy
+        }
+    );
+
+    // The owning request finishes with its own result once the member's hold
+    // ends: nothing cancelled it.
+    gate.add_permits(1);
+    let outcome = poll("the owning branch's result", async || {
+        result_of(&events(&lead_session).await, &member)
+            .into_iter()
+            .next()
+    })
+    .await;
+    assert_eq!(outcome, CollaborationOutcome::Completed, "{outcome:?}");
+    assert_eq!(stops(&member_session).await, 0);
+    returned(&mut client, &lead, &lead_session, 1).await;
 
     server.shutdown();
     server.join().await.unwrap();
@@ -3674,6 +3882,11 @@ struct DispatchGate {
     contexts: std::sync::Mutex<
         std::collections::BTreeMap<String, (rutis::Ctx, Arc<dim_agent_runtime::Timeline>)>,
     >,
+    /// Each branch's Timeline, keyed by Session and branch id, so a flow can
+    /// write a fact of its own on a branch it did not open through the model.
+    branches: std::sync::Mutex<
+        std::collections::BTreeMap<(String, String), Arc<dim_agent_runtime::Timeline>>,
+    >,
 }
 impl DispatchGate {
     fn new(hold: Hold) -> Arc<Self> {
@@ -3682,6 +3895,7 @@ impl DispatchGate {
             hold,
             timeline: Default::default(),
             contexts: Default::default(),
+            branches: Default::default(),
         })
     }
 }
@@ -3727,6 +3941,10 @@ impl rutis::host::DynPlugin for DispatchGatePlugin {
                 .lock()
                 .unwrap()
                 .insert(session.clone(), (ctx.clone(), timeline.clone()));
+            gate.branches
+                .lock()
+                .unwrap()
+                .insert((session.clone(), timeline.branch_id()), timeline.clone());
             if gate.leader.get() == Some(&session) {
                 *gate.timeline.lock().unwrap() = Some(timeline.clone());
             }
@@ -3808,6 +4026,16 @@ impl rutis::host::DynPlugin for MemberHoldPlugin {
 
 async fn launch_gated_with(
     gate: Arc<DispatchGate>,
+    config: ServerConfig,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> (RunningServer, Agent) {
+    launch_gated_tools(gate, Arc::new(MockTools), config, extra).await
+}
+
+/// [`launch_gated_with`] with the deployment's tool driver.
+async fn launch_gated_tools(
+    gate: Arc<DispatchGate>,
+    tools: Arc<dyn ToolDriver>,
     mut config: ServerConfig,
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> (RunningServer, Agent) {
@@ -3819,7 +4047,7 @@ async fn launch_gated_with(
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
-    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     builder.require_feature(
         Feature::new("collaboration-test.dispatch-gate")
             .branch("collaboration-test.dispatch-gate", move |names| {

@@ -777,6 +777,27 @@ struct State {
     branches: BTreeMap<String, BranchRecord>,
     /// Keyed by member Session id: one request per member.
     requests: BTreeMap<String, Request>,
+    /// Member Session id -> the client cancels stopping its turn that have
+    /// not returned. A request to that member is refused `Busy` meanwhile, so
+    /// a stop reaches only the turn of the request it was decided for.
+    stopping: BTreeMap<String, usize>,
+}
+
+/// Clears a member's stopping mark when the cancel returns, however it ends.
+struct Stopping {
+    owner: Arc<CollaborationSession>,
+    member: String,
+}
+impl Drop for Stopping {
+    fn drop(&mut self) {
+        let mut state = self.owner.state.lock().unwrap();
+        if let Some(count) = state.stopping.get_mut(&self.member) {
+            *count -= 1;
+            if *count == 0 {
+                state.stopping.remove(&self.member);
+            }
+        }
+    }
 }
 
 /// Per-Session collaboration: operations this Session starts and the
@@ -1105,12 +1126,12 @@ impl CollaborationSession {
         })).collect::<Vec<_>>()})))
     }
     /// `session.collaboration.cancel`: interrupts the member's current turn
-    /// when this leader branch holds an open request to it, and says whether
+    /// when the calling branch's own request to it is open, and says whether
     /// anything was running. A client call has no turn, request or call id,
     /// so no `collaboration/cancel` op is written; the effect is recorded by
     /// the member's `stop/interrupt`, its `turn/end` and the leader's
     /// `collaboration/result` and report (Collaboration §6.7).
-    async fn cancel_member(&self, p: CancelParams) -> Result<Value, RpcError> {
+    async fn cancel_member(self: &Arc<Self>, p: CancelParams) -> Result<Value, RpcError> {
         if p.session_id != self.session_id {
             return Err(RpcError::invalid("sessionId must name this Session"));
         }
@@ -1120,8 +1141,7 @@ impl CollaborationSession {
         if self.role == CollaborationRole::Member {
             return Err(RpcError::invalid("members can only message, read and list"));
         }
-        let agent_id = self
-            .collaboration
+        self.collaboration
             .member_agent(&self.session_id, &p.member_session_id)
             .ok_or_else(|| refusal_rpc(Refusal::TeamMemberNotFound))?;
         let branch_id = p.branch_id.as_deref().unwrap_or("main");
@@ -1130,22 +1150,37 @@ impl CollaborationSession {
         }
         // An ended or unknown branch answers its own error, never `idle`.
         let _branch = self.tree.get(branch_id)?;
-        let running = self
-            .state
-            .lock()
-            .unwrap()
-            .branches
-            .get(branch_id)
-            .is_some_and(|branch| branch.open.contains_key(&p.member_session_id));
-        if !running {
+        // The calling branch's own request is the only work this call may
+        // stop. `branch.open` also holds a request that is still waiting for
+        // its delivery or for a `Busy` refusal, which runs no turn of its
+        // own; and the request is read under the same lock that inserts and
+        // removes it, so one that settles now cannot be replaced before the
+        // stop is committed.
+        let session = {
+            let mut state = self.state.lock().unwrap();
+            let session = match state.requests.get(&p.member_session_id) {
+                Some(request) if request.branch == branch_id => Some(request.session.clone()),
+                _ => None,
+            };
+            if session.is_some() {
+                *state
+                    .stopping
+                    .entry(p.member_session_id.clone())
+                    .or_default() += 1;
+            }
+            session
+        };
+        let Some(session) = session else {
             return Ok(json!({"status": "idle"}));
-        }
-        let peer = self
-            .collaboration
-            .lookup(&agent_id, &p.member_session_id)
-            .await
-            .map_err(refusal_rpc)?;
-        peer.session
+        };
+        // Cleared when the stop returns, on every path: a request to the
+        // member meanwhile is refused `Busy`, so the stop cannot reach a turn
+        // that a later request started.
+        let _stopping = Stopping {
+            owner: self.clone(),
+            member: p.member_session_id.clone(),
+        };
+        session
             .stop("main", CANCELLED_BY_CLIENT.into())
             .await
             .map_err(|_| refusal_rpc(Refusal::MemberClosed))?;
@@ -1448,7 +1483,9 @@ impl CollaborationSession {
     /// (branch close) covers every request of this branch.
     fn interrupt(self: &Arc<Self>, branch_id: &str, scope: InterruptScope) {
         let mut state = self.state.lock().unwrap();
-        let State { branches, requests } = &mut *state;
+        let State {
+            branches, requests, ..
+        } = &mut *state;
         let Some(branch) = branches.get_mut(branch_id) else {
             return;
         };
@@ -1889,6 +1926,7 @@ impl CollaborationSession {
             let mut state = self.state.lock().unwrap();
             if !new
                 && (state.requests.contains_key(&member)
+                    || state.stopping.contains_key(&member)
                     || peer.session.state("main").is_ok_and(|state| state.running))
             {
                 return Err(Refusal::Busy.into());
@@ -1954,7 +1992,9 @@ impl CollaborationSession {
     /// completion work.
     fn delivered(self: &Arc<Self>, branch_id: &str, data: &CollaborationDeliveredData) {
         let mut state = self.state.lock().unwrap();
-        let State { branches, requests } = &mut *state;
+        let State {
+            branches, requests, ..
+        } = &mut *state;
         let Some(branch) = branches.get_mut(branch_id) else {
             return;
         };
