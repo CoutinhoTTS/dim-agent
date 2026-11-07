@@ -6776,7 +6776,8 @@
       "from": "dim_agent_aimux",
       "to": "dim_agent_aimux::driver",
       "references": [
-        "mod driver"
+        "mod driver",
+        "use driver::MediaTransport"
       ]
     },
     {
@@ -6817,7 +6818,16 @@
       "from": "dim_agent_aimux",
       "to": "dim_agent_aimux::stream",
       "references": [
-        "mod stream"
+        "mod stream",
+        "path stream::error"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "use dim_agent_capabilities::host::HostError"
       ]
     },
     {

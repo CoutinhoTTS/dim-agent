@@ -176,9 +176,6 @@ impl ProgressSink {
 pub trait ModalityAdapter: Send + Sync + 'static {
     /// Whether the adapter can run now, without a reload (A.2 `available`).
     fn available(&self) -> bool;
-    /// The Provider connection kinds this adapter serves (A.2
-    /// `connectionKinds`).
-    fn connection_kinds(&self) -> Vec<String>;
     /// The operations this adapter serves for `model`, each with its parameter
     /// schema (A.2 `operations`).
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
