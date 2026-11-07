@@ -2107,6 +2107,16 @@
       ]
     },
     {
+      "id": "dim_app_server::collaboration::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::collaboration",
+      "file": "crates/dim-app-server/src/collaboration.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_app_server::collaboration_model_policy",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -8707,11 +8717,13 @@
         "path InputConsumedData",
         "path InputMode",
         "path InputMode::Append",
+        "path InterruptScope::Turn",
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Cancelled",
         "path ModelOutputOutcome::Completed",
         "path ModelOutputOutcome::Failed",
         "path ModelStartData",
+        "path StopInterruptData",
         "path ToolCallData",
         "path ToolCallResult",
         "path ToolResultData",
@@ -20648,6 +20660,13 @@
     },
     {
       "from": "dim_app_server::collaboration",
+      "to": "dim_agent_capabilities::agent_loop",
+      "references": [
+        "path dim_agent_capabilities::agent_loop::AgentLoop"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
       "to": "dim_agent_capabilities::context_block",
       "references": [
         "path context_block::element",
@@ -20675,14 +20694,21 @@
       "from": "dim_app_server::collaboration",
       "to": "dim_agent_capabilities::input_queue",
       "references": [
-        "path dim_agent_capabilities::input_queue::InputQueue"
+        "path dim_agent_capabilities::input_queue::InputQueue",
+        "path dim_agent_capabilities::input_queue::Withdrawal::Deleted",
+        "path dim_agent_capabilities::input_queue::Withdrawal::NotHeld"
       ]
     },
     {
       "from": "dim_app_server::collaboration",
       "to": "dim_agent_capabilities::methods",
       "references": [
-        "path dim_agent_capabilities::methods::SessionMethods"
+        "path RpcError",
+        "path RpcError::from",
+        "path RpcError::invalid",
+        "path RpcError::service",
+        "path dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::RpcError"
       ]
     },
     {
@@ -20891,6 +20917,7 @@
         "path EventKind::CollaborationRequest",
         "path EventKind::CollaborationResult",
         "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::ModelStart",
@@ -21005,6 +21032,13 @@
     },
     {
       "from": "dim_app_server::collaboration",
+      "to": "dim_app_server::collaboration::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
       "to": "dim_app_server::collaboration_model_policy",
       "references": [
         "path ModelPolicy",
@@ -21074,6 +21108,7 @@
         "path MethodCall",
         "path RpcError",
         "path RpcError::invalid",
+        "path RpcError::unknown_method",
         "path SessionMethods",
         "path params",
         "path reply",
@@ -21192,6 +21227,30 @@
       "references": [
         "path CollaborationSession",
         "path success"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::tests",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::Closed",
+        "path AgentError::Storage"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path CollaborationOutcome::Cancelled"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::tests",
+      "to": "dim_app_server::collaboration",
+      "references": [
+        "path INTERRUPTED",
+        "path NOT_STARTED",
+        "path cancel_rpc"
       ]
     },
     {
