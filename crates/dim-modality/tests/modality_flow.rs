@@ -7,8 +7,10 @@ use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::{CatalogCapabilities, ModelId};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use dim_modality::{
-    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Clock, Job,
-    JobFile, ModalityAdapter, ModalityAdapterService, ProgressSink, RemoteCancel, Submitted,
+    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Clock,
+    InstallOptions, Job, JobFile, ModalityAdapter, ModalityAdapterService, ProgressSink,
+    RealtimeConnection, RealtimeEnd, RealtimeEvent, RealtimeFrame, RealtimeLimits, RealtimeOpened,
+    RealtimeTransport, RemoteCancel, Submitted,
 };
 use futures_util::{SinkExt, StreamExt};
 use rutis::Disposer;
@@ -138,7 +140,7 @@ impl Client {
 async fn launch_with(
     tools: Arc<dyn ToolDriver>,
     mut config: ServerConfig,
-    clock: Option<Arc<dyn Clock>>,
+    options: Option<InstallOptions>,
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> RunningServer {
     config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
@@ -151,8 +153,8 @@ async fn launch_with(
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     dim_app_server::collaboration::install(&mut builder);
-    match clock {
-        Some(clock) => dim_modality::install_with_clock(&mut builder, clock),
+    match options {
+        Some(options) => dim_modality::install_with(&mut builder, options),
         None => dim_modality::install(&mut builder),
     }
     extra(&mut builder);
@@ -220,6 +222,36 @@ impl Default for Behavior {
     }
 }
 
+/// How the fixture serves one `open` (A.2 `realtimeOpen`).
+#[derive(Clone, Debug, Default)]
+struct RealtimeBehavior {
+    /// Serve `direct` with a short-lived connection instead of a relay.
+    direct: bool,
+    /// The connection's `expires_at`, this far in the future.
+    expires_in: Option<Duration>,
+    /// Fail the next `open` with this error.
+    open_error: Option<AdapterError>,
+}
+
+/// One session the fixture opened, and what it was given.
+struct RealtimeOpen {
+    channel: String,
+    params: Value,
+    protocol: Option<String>,
+    path: Option<String>,
+}
+
+/// The fixture's realtime side: what it serves and what reached it.
+#[derive(Default)]
+struct RealtimeState {
+    behavior: RealtimeBehavior,
+    opens: Vec<RealtimeOpen>,
+    /// The event sender of each open channel, so a test can emit an event.
+    events: HashMap<String, tokio::sync::mpsc::Sender<RealtimeEvent>>,
+    frames: Vec<(String, RealtimeFrame)>,
+    closes: Vec<String>,
+}
+
 struct FixtureAdapter {
     /// Model id to the operation ids it serves; `None` serves all three.
     served: Mutex<Option<BTreeMap<String, BTreeSet<String>>>>,
@@ -242,6 +274,7 @@ struct FixtureAdapter {
     waits: AtomicUsize,
     remote_cancels: AtomicUsize,
     disposer: Mutex<Option<Disposer>>,
+    realtime: Mutex<RealtimeState>,
 }
 impl Default for FixtureAdapter {
     fn default() -> Self {
@@ -250,6 +283,7 @@ impl Default for FixtureAdapter {
             schemas: Mutex::new(BTreeMap::new()),
             available: AtomicBool::new(true),
             behavior: Mutex::new(Behavior::default()),
+            realtime: Mutex::new(RealtimeState::default()),
             jobs: Mutex::new(HashMap::new()),
             handles: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
@@ -317,13 +351,50 @@ impl FixtureAdapter {
             let _ = disposer.dispose().await;
         }
     }
+    fn set_realtime_behavior(&self, behavior: RealtimeBehavior) {
+        self.realtime.lock().unwrap().behavior = behavior;
+    }
+    fn realtime_opens(&self) -> usize {
+        self.realtime.lock().unwrap().opens.len()
+    }
+    /// The newest open's channel, params, and the declaration Modality's
+    /// connection carried.
+    fn realtime_open(&self) -> (String, Value, Option<String>, Option<String>) {
+        let state = self.realtime.lock().unwrap();
+        let open = state.opens.last().expect("the fixture opened a session");
+        (
+            open.channel.clone(),
+            open.params.clone(),
+            open.protocol.clone(),
+            open.path.clone(),
+        )
+    }
+    fn realtime_frames(&self) -> Vec<(String, RealtimeFrame)> {
+        self.realtime.lock().unwrap().frames.clone()
+    }
+    fn realtime_closes(&self) -> Vec<String> {
+        self.realtime.lock().unwrap().closes.clone()
+    }
+    /// Emits one provider event on the newest session.
+    fn emit(&self, event: Value) {
+        let state = self.realtime.lock().unwrap();
+        let open = state.opens.last().expect("the fixture opened a session");
+        state.events[&open.channel]
+            .try_send(RealtimeEvent::Event(event))
+            .expect("the fixture's session accepts an event");
+    }
+    /// Ends the newest session from the provider's side.
+    fn end(&self, end: RealtimeEnd) {
+        let state = self.realtime.lock().unwrap();
+        let open = state.opens.last().expect("the fixture opened a session");
+        state.events[&open.channel]
+            .try_send(RealtimeEvent::Ended(end))
+            .expect("the fixture's session accepts its end");
+    }
 }
 impl ModalityAdapter for FixtureAdapter {
     fn available(&self) -> bool {
         self.available.load(Ordering::SeqCst)
-    }
-    fn connection_kinds(&self) -> Vec<String> {
-        Vec::new()
     }
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation> {
         let served = self.served.lock().unwrap();
@@ -337,13 +408,15 @@ impl ModalityAdapter for FixtureAdapter {
         let schemas = self.schemas.lock().unwrap();
         operations
             .into_iter()
-            .map(|operation| AdapterOperation {
-                params_schema: schemas
-                    .get(&operation)
-                    .cloned()
-                    .unwrap_or_else(|| json!({})),
-                category: "image".into(),
-                operation,
+            .map(|id| {
+                // A bare name is an image operation; a qualified id names its
+                // category, as `realtime.voice` does.
+                let (category, operation) = id.split_once('.').unwrap_or(("image", id.as_str()));
+                AdapterOperation {
+                    params_schema: schemas.get(&id).cloned().unwrap_or_else(|| json!({})),
+                    category: category.to_owned(),
+                    operation: operation.to_owned(),
+                }
             })
             .collect()
     }
@@ -497,6 +570,71 @@ impl ModalityAdapter for FixtureAdapter {
         self.remote_cancels.fetch_add(1, Ordering::SeqCst);
         let outcome = self.behavior().remote_cancel;
         Box::pin(async move { Ok(outcome) })
+    }
+    fn realtime_open(
+        &self,
+        connection: ModalityConnection,
+        params: Value,
+        events: tokio::sync::mpsc::Sender<RealtimeEvent>,
+        _cancel: CancellationToken,
+    ) -> AdapterFuture<'_, RealtimeOpened> {
+        let behavior = self.realtime.lock().unwrap().behavior.clone();
+        if let Some(error) = behavior.open_error {
+            return Box::pin(async move { Err(error) });
+        }
+        let mut state = self.realtime.lock().unwrap();
+        let channel = format!("chan-{}", state.opens.len() + 1);
+        state.opens.push(RealtimeOpen {
+            channel: channel.clone(),
+            params,
+            protocol: connection.realtime.as_ref().map(|r| r.protocol.clone()),
+            path: connection.realtime.as_ref().map(|r| r.path.clone()),
+        });
+        state.events.insert(channel.clone(), events);
+        let opened = if behavior.direct {
+            RealtimeOpened {
+                channel_id: channel,
+                transport: RealtimeTransport::Direct,
+                connection: Some(RealtimeConnection {
+                    kind: "webrtc".into(),
+                    url: Some("https://realtime.invalid/session".into()),
+                    token: Some("ephemeral-session-token".into()),
+                    expires_at: behavior.expires_in.map(|after| {
+                        (chrono::Utc::now() + chrono::Duration::from_std(after).unwrap())
+                            .to_rfc3339()
+                    }),
+                    ..Default::default()
+                }),
+            }
+        } else {
+            RealtimeOpened {
+                channel_id: channel,
+                transport: RealtimeTransport::Relay,
+                connection: None,
+            }
+        };
+        Box::pin(async move { Ok(opened) })
+    }
+    fn realtime_send(
+        &self,
+        channel_id: &str,
+        frame: RealtimeFrame,
+        _cancel: CancellationToken,
+    ) -> AdapterFuture<'_, ()> {
+        self.realtime
+            .lock()
+            .unwrap()
+            .frames
+            .push((channel_id.to_owned(), frame));
+        Box::pin(async { Ok(()) })
+    }
+    fn realtime_close(&self, channel_id: &str) -> AdapterFuture<'_, ()> {
+        self.realtime
+            .lock()
+            .unwrap()
+            .closes
+            .push(channel_id.to_owned());
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -658,11 +796,47 @@ async fn start_in_with_clock(
         target_home: Some(home.join("native")),
         ..Default::default()
     };
-    launch_with(Arc::new(MockTools), config, Some(clock), |builder| {
-        if let Some(fixture) = fixture.clone() {
-            builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
-        }
-    })
+    launch_with(
+        Arc::new(MockTools),
+        config,
+        Some(InstallOptions {
+            clock,
+            ..Default::default()
+        }),
+        |builder| {
+            if let Some(fixture) = fixture.clone() {
+                builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
+            }
+        },
+    )
+    .await
+}
+
+/// [`start_in`] with the realtime bounds a generation reads, so a lifetime
+/// rule is observable in milliseconds.
+async fn start_in_with_limits(
+    home: std::path::PathBuf,
+    fixture: Option<Arc<FixtureAdapter>>,
+    realtime: RealtimeLimits,
+) -> RunningServer {
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("native")),
+        ..Default::default()
+    };
+    launch_with(
+        Arc::new(MockTools),
+        config,
+        Some(InstallOptions {
+            realtime,
+            ..Default::default()
+        }),
+        |builder| {
+            if let Some(fixture) = fixture.clone() {
+                builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
+            }
+        },
+    )
     .await
 }
 
@@ -1275,10 +1449,18 @@ async fn every_a1_category_and_operation_is_reported_with_its_default_key() {
         ("audio", "generate", "modality.audio"),
         ("asset", "generate", "modality.asset"),
         ("motion", "generate", "modality.motion"),
-        ("realtime", "connect", "modality.realtime"),
     ] {
         assert_operations(categories, category, &[(operation, Some(key))]);
     }
+    assert_operations(
+        categories,
+        "realtime",
+        &[
+            ("voice", Some("modality.realtime")),
+            ("transcribe", Some("modality.realtime")),
+            ("avatar", Some("modality.realtime")),
+        ],
+    );
     assert_operations(categories, "ocr", &[("recognize", None)]);
     server.shutdown();
     server.join().await.unwrap();
@@ -2528,7 +2710,9 @@ async fn operations_that_are_not_tasks_answer_for_themselves() {
     create_task_provider(&mut client).await;
     for (category, operation, code) in [
         ("image", "understand", "modality_unknown_operation"),
-        ("realtime", "connect", "modality_unknown_operation"),
+        ("realtime", "voice", "modality_unknown_operation"),
+        ("realtime", "transcribe", "modality_unknown_operation"),
+        ("realtime", "avatar", "modality_unknown_operation"),
         ("ocr", "recognize", "modality_unavailable"),
     ] {
         let refused = client
@@ -2546,6 +2730,497 @@ async fn operations_that_are_not_tasks_answer_for_themselves() {
         )
         .await;
     assert_eq!(app_error(&unknown), "invalid_input");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A non-chat model that declares one realtime operation, and its transport
+/// unless `declared` is false.
+fn realtime_model(model_id: &str, operation: &str, declared: bool) -> Value {
+    let mut raw = json!({"modalityCapabilities": [format!("realtime.{operation}")]});
+    if declared {
+        raw["realtime"] = json!({"protocol": "openai-realtime", "path": "/realtime"});
+    }
+    json!({
+        "modelId": model_id, "displayName": model_id, "status": "active",
+        "capabilities": {"modalities":["audio"],"toolCalling":false,"streaming":true,
+            "structuredOutput":false,"vision":false,"audio":true,"reasoning":false},
+        "metadata": {"raw": raw}
+    })
+}
+
+/// A provider with a bearer credential and the models a realtime flow needs.
+async fn create_realtime_provider(client: &mut Client, models: Vec<Value>) {
+    assert_ok(
+        &client
+            .rpc(
+                "provider.create",
+                json!({
+                    "providerId": PROVIDER,
+                    "displayName": "Fixture",
+                    "connection": {
+                        "driverKind": "openai-compatible",
+                        "baseUrl": "http://127.0.0.1:1/v1",
+                        "auth": {"type": "bearer"},
+                        "credential": {"action": "set", "value": REALTIME_CREDENTIAL}
+                    },
+                    "models": models,
+                    "enabled": true
+                }),
+            )
+            .await,
+    );
+}
+
+const REALTIME_CREDENTIAL: &str = "sk-realtime-secret-key";
+
+/// The next notification `method` names, buffering every other message.
+async fn notice(client: &mut Client, method: &str) -> Value {
+    if let Some(index) = client
+        .notices
+        .iter()
+        .position(|value| value["method"] == method)
+    {
+        return client.notices.remove(index);
+    }
+    loop {
+        let value = client.read(method).await;
+        if value["method"] == method {
+            return value;
+        }
+        client.notices.push(value);
+    }
+}
+
+/// Opens one session and returns the reply's result.
+async fn open_realtime(client: &mut Client, operation: &str, params: Value) -> Value {
+    let reply = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": operation, "model": model("voice"), "params": params}),
+        )
+        .await;
+    assert_ok(&reply);
+    reply["result"].clone()
+}
+
+/// A relay fixture that serves `realtime.voice` for the `voice` model with a
+/// params schema that accepts nothing (D7).
+fn realtime_fixture() -> Arc<FixtureAdapter> {
+    let fixture = Arc::new(FixtureAdapter::default());
+    fixture.serve(&[
+        ("voice", &["realtime.voice"]),
+        ("undeclared", &["realtime.voice"]),
+    ]);
+    fixture.set_schema(
+        "realtime.voice",
+        json!({"type": "object", "maxProperties": 0}),
+    );
+    fixture
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_realtime_session_relays_frames_and_events_to_its_owner() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let opened = open_realtime(&mut client, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("rc_"));
+    assert_eq!(opened["transport"], "relay");
+    assert!(
+        opened.get("connection").is_none(),
+        "a relay session has no connection object"
+    );
+    let (channel, params, protocol, path) = fixture.realtime_open();
+    assert_eq!(params, json!({}), "the relay's params are empty (D7)");
+    assert_eq!(protocol.as_deref(), Some("openai-realtime"));
+    assert_eq!(path.as_deref(), Some("/realtime"));
+
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "session.update", "session": {"instructions": "hi"}}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "audio", "data": "aGk="}}),
+        )
+        .await;
+    assert_ok(&sent);
+    let frames = fixture.realtime_frames();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].1.kind, dim_modality::RealtimeFrameKind::Text);
+    assert_eq!(frames[0].1.data["type"], "session.update");
+    assert_eq!(frames[1].1.kind, dim_modality::RealtimeFrameKind::Audio);
+    assert_eq!(frames[1].1.data, "aGk=", "an audio frame's data is base64");
+
+    fixture.emit(json!({"type": "response.text.delta", "delta": "hello"}));
+    let event = notice(&mut client, "modality.realtime.event").await;
+    assert_eq!(event["params"]["connectionId"], id);
+    assert_eq!(
+        event["params"]["event"],
+        json!({"type": "response.text.delta", "delta": "hello"})
+    );
+
+    let closed = client
+        .rpc("modality.realtime.close", json!({"connectionId": id}))
+        .await;
+    assert_ok(&closed);
+    let ended = notice(&mut client, "modality.realtime.ended").await;
+    assert_eq!(ended["params"]["connectionId"], id);
+    assert_eq!(ended["params"]["reason"], "closed");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while fixture.realtime_closes().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was not closed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        fixture.realtime_closes(),
+        [channel],
+        "the adapter saw its channel close"
+    );
+    for value in client.notices.iter().chain([&ended, &opened, &closed]) {
+        assert!(
+            !value.to_string().contains(REALTIME_CREDENTIAL),
+            "no reply or notice carries the credential: {value}"
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_realtime_session_ends_with_its_opening_connection() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-drop").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    open_realtime(&mut client, "voice", json!({})).await;
+    drop(client);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while fixture.realtime_closes().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped connection did not end its session"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_provider_ending_a_realtime_session_is_reported_once() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-provider").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let opened = open_realtime(&mut client, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    fixture.end(RealtimeEnd::Provider);
+    let ended = notice(&mut client, "modality.realtime.ended").await;
+    assert_eq!(ended["params"]["reason"], "provider");
+    let refused = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "x"}}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "not_found", "an ended session is gone");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversized_realtime_frame_is_refused_and_the_session_stays() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-frame").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let opened = open_realtime(&mut client, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    let oversized = "x".repeat(1024 * 1024 + 1024);
+    let refused = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "input_audio_buffer.append", "padding": oversized}}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "invalid_input");
+    assert!(
+        fixture.realtime_frames().is_empty(),
+        "the adapter saw nothing"
+    );
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "still.here"}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    assert_eq!(
+        fixture.realtime_frames().len(),
+        1,
+        "the session stayed open"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fifth_realtime_session_is_refused_before_the_adapter_is_called() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-cap").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let opened = open_realtime(&mut client, "voice", json!({})).await;
+        ids.push(opened["connectionId"].as_str().unwrap().to_owned());
+    }
+    let refused = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "voice", "model": model("voice"), "params": {}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "realtime_limit");
+    assert_eq!(
+        fixture.realtime_opens(),
+        4,
+        "the fifth never reached the adapter"
+    );
+    let closed = client
+        .rpc("modality.realtime.close", json!({"connectionId": ids[0]}))
+        .await;
+    assert_ok(&closed);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let opened = client
+            .rpc(
+                "modality.realtime.open",
+                json!({"operation": "voice", "model": model("voice"), "params": {}}),
+            )
+            .await;
+        if opened.get("error").is_none() {
+            break;
+        }
+        assert_eq!(app_error(&opened), "realtime_limit");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the closed slot never freed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_realtime_session_ends_after_its_bound() {
+    let fixture = realtime_fixture();
+    let home = home("dm-realtime-idle");
+    let server = start_in_with_limits(
+        home.clone(),
+        Some(fixture.clone()),
+        RealtimeLimits {
+            idle: Duration::from_millis(200),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    open_realtime(&mut client, "voice", json!({})).await;
+    let ended = notice(&mut client, "modality.realtime.ended").await;
+    assert_eq!(ended["params"]["reason"], "idle");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_opening_connection_may_send_or_close_a_realtime_session() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-owner").await;
+    let mut owner = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut owner, vec![realtime_model("voice", "voice", true)]).await;
+    let opened = open_realtime(&mut owner, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    let mut other = Client::new_version(&server, false, 3).await;
+    let refused = other
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "x"}}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "not_found");
+    let refused = other
+        .rpc("modality.realtime.close", json!({"connectionId": id}))
+        .await;
+    assert_eq!(app_error(&refused), "not_found");
+    assert!(fixture.realtime_frames().is_empty());
+    let sent = owner
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "mine"}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_capabilities_name_the_unserved_operations() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-caps").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(
+        &mut client,
+        vec![
+            realtime_model("voice", "voice", true),
+            realtime_model("undeclared", "voice", false),
+        ],
+    )
+    .await;
+    let snapshot = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&snapshot);
+    let voice = operation_in(&snapshot, "realtime", "voice");
+    assert_eq!(voice["available"], true);
+    assert_eq!(
+        voice["options"],
+        json!([
+            {"providerId": PROVIDER, "modelId": "voice", "available": true},
+            {"providerId": PROVIDER, "modelId": "undeclared", "available": true}
+        ])
+    );
+    for operation in ["transcribe", "avatar"] {
+        let unserved = operation_in(&snapshot, "realtime", operation);
+        assert_eq!(unserved["available"], false, "{operation}");
+        assert_eq!(unserved["reasons"][0]["dimension"], "adapter");
+        assert_eq!(
+            unserved["reasons"][0]["detail"],
+            format!("No available adapter serves realtime.{operation}")
+        );
+        assert!(unserved["options"].as_array().unwrap().is_empty());
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_realtime_model_without_a_declaration_cannot_open() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-undeclared").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(
+        &mut client,
+        vec![
+            realtime_model("voice", "voice", true),
+            realtime_model("undeclared", "voice", false),
+        ],
+    )
+    .await;
+    let refused = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "voice", "model": model("undeclared"), "params": {}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "unavailable");
+    assert_eq!(
+        refused["error"]["message"],
+        "The model declares no realtime transport"
+    );
+    assert_eq!(fixture.realtime_opens(), 0, "no provider side was reached");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_open_refuses_unknown_operations_and_unserved_parameters() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-params").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let unknown = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "connect", "model": model("voice"), "params": {}}),
+        )
+        .await;
+    assert_eq!(app_error(&unknown), "modality_unknown_operation");
+    let invalid = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "voice", "model": model("voice"), "params": {"session": {}}}),
+        )
+        .await;
+    assert_eq!(app_error(&invalid), "invalid_input");
+    assert_eq!(fixture.realtime_opens(), 0);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_direct_realtime_session_passes_its_connection_through_and_expires() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-direct").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    fixture.set_realtime_behavior(RealtimeBehavior {
+        direct: true,
+        expires_in: Some(Duration::from_millis(500)),
+        ..Default::default()
+    });
+    let opened = open_realtime(&mut client, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    assert_eq!(opened["transport"], "direct");
+    let connection = &opened["connection"];
+    assert_eq!(connection["kind"], "webrtc");
+    assert_eq!(connection["url"], "https://realtime.invalid/session");
+    assert!(
+        connection.get("expiresAt").is_some(),
+        "a direct session states when it expires"
+    );
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "control", "data": {"type": "ice", "candidate": "c"}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    let frames = fixture.realtime_frames();
+    assert_eq!(frames[0].1.kind, dim_modality::RealtimeFrameKind::Control);
+    let ended = notice(&mut client, "modality.realtime.ended").await;
+    assert_eq!(ended["params"]["reason"], "expired");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while fixture.realtime_closes().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was not closed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

@@ -1345,6 +1345,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode acp [--agent ID]` | Serve ACP over stdin/stdout through the client-host [AcpGateway](plugins/AcpGateway.md); lifecycle and unsupported features follow its contract. |
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | Run text and/or local images and exit; read redirected stdin when `-p` is absent. |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | Continue the named persisted Session with text and/or images. |
+| `dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` | Open one realtime session and stream it as JSON lines ([Realtime sessions](#realtime-sessions)): stdin lines are text frames, events and the end print to stdout, and EOF or Ctrl+C closes it. |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `dimcode session rename SESSION TITLE` | Set the Session's manual title through `session.rename` and print the title the server returns. |
 | `dimcode session rename SESSION --clear` | Clear the manual title, so the Session is untitled again. |
@@ -2008,6 +2009,29 @@ JSON encoding escapes control characters; the terminal text filter does not
 rewrite data in machine output. The CLI adds no synthetic lifecycle events or
 second event schema. Notification delivery keeps the daemon's existing
 best-effort semantics; consumers needing a fixed complete record use export.
+
+## Realtime sessions
+
+`dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` opens one session over
+`modality.realtime.open` with `params: {}`
+([Modality A.3](plugins/Modality.md#a3-methods)). The operation defaults to `voice`; `--model`
+names the provider and model as every CLI model reference does. The command names no workspace.
+
+The provider session is configured by the client, not the command: each stdin line is one JSON
+value sent as a text frame over `modality.realtime.send`, so the first line a pipe carries can be
+the provider's own `session.update`. Blank lines are skipped; a line that is not JSON ends the
+command with exit code 1.
+
+Each `modality.realtime.event` notification prints its `event` as one compact JSON line on
+stdout, and `modality.realtime.ended` prints its params, so a consumer reads one JSON value per
+line and keeps the `reason` of the end. Errors stay off stdout: an error reply prints its message
+on stderr and the command exits 1.
+
+Stdin EOF closes the session over `modality.realtime.close` and exits 0; so does Ctrl+C once the
+session is open. Ctrl+C before the open reply exits 130 and opens nothing. A `direct` session
+prints its `connection` object as the first line and then holds: the caller talks to the
+provider's own transport, stdin lines are ignored, and EOF or Ctrl+C still closes the session
+over `modality.realtime.close`.
 
 ## Conversation export
 
