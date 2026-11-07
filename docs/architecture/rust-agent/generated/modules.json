@@ -8544,11 +8544,13 @@
         "path InputConsumedData",
         "path InputMode",
         "path InputMode::Append",
+        "path InterruptScope::Turn",
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Cancelled",
         "path ModelOutputOutcome::Completed",
         "path ModelOutputOutcome::Failed",
         "path ModelStartData",
+        "path StopInterruptData",
         "path ToolCallData",
         "path ToolCallResult",
         "path ToolResultData",
@@ -20474,6 +20476,13 @@
     },
     {
       "from": "dim_app_server::collaboration",
+      "to": "dim_agent_capabilities::agent_loop",
+      "references": [
+        "path dim_agent_capabilities::agent_loop::AgentLoop"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
       "to": "dim_agent_capabilities::context_block",
       "references": [
         "path context_block::element",
@@ -20724,6 +20733,7 @@
         "path EventKind::CollaborationRequest",
         "path EventKind::CollaborationResult",
         "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::ModelStart",

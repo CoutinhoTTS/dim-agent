@@ -185,6 +185,9 @@ enum HoldKind {
     /// The read of this Session's `input/consumed` after the cancel's own: the
     /// (S) wait's check, which decides when the stop is written.
     Consumed(String),
+    /// The next read of this Session's `input/consumed` after the arm: the
+    /// cancel's own check, held before the stop is decided.
+    ConsumedNow(String),
 }
 
 /// Delegates to the in-memory store and holds the next armed append or read of
@@ -266,6 +269,11 @@ impl InputHoldStore {
                 let (checked, checked_rx) = tokio::sync::oneshot::channel();
                 *self.check.lock().unwrap() = Some(checked);
                 check = Some(checked_rx);
+                Release::Read(release)
+            }
+            HoldKind::ConsumedNow(_) => {
+                let (release, release_rx) = tokio::sync::oneshot::channel();
+                *self.read_release.lock().unwrap() = Some(release_rx);
                 Release::Read(release)
             }
             _ => {
@@ -406,6 +414,7 @@ impl dim_agent_runtime::TimelineStore for InputHoldStore {
                         .iter()
                         .any(|stored| matches!(&stored.event.kind, EventKind::InputWithdraw(_))),
             ),
+            HoldKind::ConsumedNow(_) => (false, false),
         };
         // The withdrawal that carries the cancel arms the read window: every
         // read after it belongs to the wait, the cancel's own check before it
@@ -470,10 +479,9 @@ impl dim_agent_runtime::TimelineStore for InputHoldStore {
     > {
         Box::pin(async move {
             let matching = match &*self.hold.lock().unwrap() {
-                HoldKind::Consumed(session) => {
+                HoldKind::Consumed(session) | HoldKind::ConsumedNow(session) => {
                     key.session_id == *session
-                        && query.kinds.len() == 1
-                        && query.kinds[0] == "input/consumed"
+                        && query.kinds.iter().any(|kind| kind == "input/consumed")
                 }
                 _ => false,
             };
@@ -3920,6 +3928,264 @@ async fn a_client_cancel_refuses_a_new_request_to_the_member_until_it_returns() 
         (count(&lead_session, false).await > accepted).then_some(())
     })
     .await;
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A cancel stops the turn that consumed the request's input, nothing else:
+/// the turn ends, a client's own submit starts the replacing turn, and the
+/// stop decided for the old turn writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_stops_the_turn_it_named_not_the_one_that_replaced_it() {
+    let (store, _, _) = InputHoldStore::new();
+    let (server, agent, mut client, lead, lead_session, holder, gate) =
+        launch_held_team(store.clone()).await;
+    let (member, member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:hold {}"}),
+        ),
+        "queue",
+    )
+    .await;
+    let (input, _) = request_input(&member_session, "tool:hold").await;
+    let consumed = poll("the request's turn consumes its input", async || {
+        consumed_at(&member_session, &input).await.first().copied()
+    })
+    .await;
+
+    // The cancel's own check reads the member's facts; hold that read, so the
+    // turn can end and a client's submit start another before the stop is
+    // decided.
+    let (entered, release_read, _) = store.arm(HoldKind::ConsumedNow(member.clone()));
+    let cancelling = {
+        let lead = lead.clone();
+        let member = member.clone();
+        let mut other = Client::new_version(&server, false, 3).await;
+        tokio::spawn(async move {
+            other
+                .rpc(
+                    "session.collaboration.cancel",
+                    json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+                )
+                .await
+        })
+    };
+    entered.await.expect("the cancel checks the member's facts");
+
+    // The request's turn ends on its own, and a client's submit starts the
+    // replacing turn.
+    gate.add_permits(1);
+    let first_end = poll("the request's turn ends", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| event.sequence > consumed && matches!(&event.kind, EventKind::TurnEnd(_)))
+            .map(|event| event.sequence)
+    })
+    .await;
+    say(
+        &mut client,
+        &member,
+        "tool:echo {\"text\":\"after\"}".to_owned(),
+        "queue",
+    )
+    .await;
+    let second_start = poll("the replacing turn starts", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| {
+                event.sequence > first_end && matches!(&event.kind, EventKind::TurnStart(_))
+            })
+            .map(|event| event.sequence)
+    })
+    .await;
+    gate.add_permits(1);
+
+    release_read.release();
+    let cancelled = cancelling.await.expect("the cancel call");
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+
+    // The replacing turn runs to its own end, and no stop lands on it.
+    let second_end = poll("the replacing turn ends", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| {
+                event.sequence > second_start && matches!(&event.kind, EventKind::TurnEnd(_))
+            })
+            .map(|event| (event.sequence, event.kind.clone()))
+    })
+    .await;
+    assert!(
+        matches!(&second_end.1, EventKind::TurnEnd(data)
+            if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. })),
+        "the replacing turn ends on its own: {:?}",
+        second_end.1
+    );
+    let stops: Vec<u64> = events(&member_session)
+        .await
+        .iter()
+        .filter(|event| {
+            event.sequence > second_start && matches!(&event.kind, EventKind::StopInterrupt(_))
+        })
+        .map(|event| event.sequence)
+        .collect();
+    assert!(
+        stops.is_empty(),
+        "no stop lands on the replacing turn: {stops:?}"
+    );
+    let outcomes = result_of(&events(&lead_session).await, &member);
+    assert_eq!(
+        outcomes.last(),
+        Some(&CollaborationOutcome::Completed),
+        "{outcomes:?}"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The same interleaving for the detached (S) wait: the wait names the turn
+/// that consumed the request's input, so a turn that ended first writes
+/// nothing on the replacing turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_detached_cancel_wait_stops_the_turn_it_named_not_the_one_that_replaced_it() {
+    let (store, _, _) = InputHoldStore::new();
+    let (server, agent, mut client, lead, lead_session, holder, gate) =
+        launch_held_team(store.clone()).await;
+    let (member, member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+    // Hold the applied append, so the cancel's own check runs before the
+    // input is consumed and takes the (S) path.
+    let (entered, release, _) = store.arm(HoldKind::Applied(member.clone()));
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:hold {}"}),
+        ),
+        "queue",
+    )
+    .await;
+    entered
+        .await
+        .expect("the member applies the request's input");
+    // The wait's own read is the next window: it arms after the withdrawal.
+    let (entered_read, release_read, checked) = store.arm(HoldKind::Consumed(member.clone()));
+    let cancelling = {
+        let lead = lead.clone();
+        let member = member.clone();
+        let mut other = Client::new_version(&server, false, 3).await;
+        tokio::spawn(async move {
+            other
+                .rpc(
+                    "session.collaboration.cancel",
+                    json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+                )
+                .await
+        })
+    };
+    checked
+        .expect("the cancel checks the input")
+        .await
+        .expect("the cancel checks the input");
+    release.release();
+    entered_read
+        .await
+        .expect("the wait reads the member's consumed input");
+    let (input, _) = request_input(&member_session, "tool:hold").await;
+    let consumed = poll("the request's turn consumes its input", async || {
+        consumed_at(&member_session, &input).await.first().copied()
+    })
+    .await;
+
+    // The request's turn ends on its own, and a client's submit starts the
+    // replacing turn.
+    gate.add_permits(1);
+    let first_end = poll("the request's turn ends", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| event.sequence > consumed && matches!(&event.kind, EventKind::TurnEnd(_)))
+            .map(|event| (event.sequence, event.kind.clone()))
+    })
+    .await;
+    assert!(
+        matches!(&first_end.1, EventKind::TurnEnd(data)
+            if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. })),
+        "the request's turn ends on its own: {:?}",
+        first_end.1
+    );
+    say(
+        &mut client,
+        &member,
+        "tool:echo {\"text\":\"after\"}".to_owned(),
+        "queue",
+    )
+    .await;
+    let second_start = poll("the replacing turn starts", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| {
+                event.sequence > first_end.0 && matches!(&event.kind, EventKind::TurnStart(_))
+            })
+            .map(|event| event.sequence)
+    })
+    .await;
+    gate.add_permits(1);
+
+    release_read.release();
+    let cancelled = cancelling.await.expect("the cancel call");
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+
+    // The replacing turn runs to its own end, and no stop lands on it.
+    let second_end = poll("the replacing turn ends", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| {
+                event.sequence > second_start && matches!(&event.kind, EventKind::TurnEnd(_))
+            })
+            .map(|event| (event.sequence, event.kind.clone()))
+    })
+    .await;
+    assert!(
+        matches!(&second_end.1, EventKind::TurnEnd(data)
+            if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. })),
+        "the replacing turn ends on its own: {:?}",
+        second_end.1
+    );
+    let stops: Vec<u64> = events(&member_session)
+        .await
+        .iter()
+        .filter(|event| {
+            event.sequence > second_start && matches!(&event.kind, EventKind::StopInterrupt(_))
+        })
+        .map(|event| event.sequence)
+        .collect();
+    assert!(
+        stops.is_empty(),
+        "no stop lands on the replacing turn: {stops:?}"
+    );
+    let outcomes = result_of(&events(&lead_session).await, &member);
+    assert_eq!(
+        outcomes.last(),
+        Some(&CollaborationOutcome::Completed),
+        "{outcomes:?}"
+    );
 
     server.shutdown();
     server.join().await.unwrap();

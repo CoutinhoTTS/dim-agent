@@ -2170,11 +2170,12 @@ impl CollaborationSession {
     }
 
     /// Carries out a client cancel already recorded on the request: the turn
-    /// serving the request's input is interrupted now when it has started, and
-    /// the input withdrawn while still unapplied. An input InputQueue already
+    /// that consumed the request's input is stopped now when it has, and the
+    /// input withdrawn while still unapplied. An input InputQueue already
     /// handed to Loop is stopped once its `input/consumed` is published; that
     /// wait is detached on the branch's task tracker, so the caller answers
-    /// first.
+    /// first. The stop names that turn, so a turn that already ended writes
+    /// nothing.
     ///
     /// `stopping` holds the member's stopping mark across the effect and the
     /// wait, and is dropped on every exit.
@@ -2187,8 +2188,9 @@ impl CollaborationSession {
         stopping: Stopping,
     ) -> dim_agent_runtime::Result<()> {
         let mut after = 0;
-        if consumed_since(session, input, &mut after).await? {
-            session.stop("main", CANCELLED_BY_CLIENT.into()).await?;
+        let mut open = None;
+        if let Some(turn) = consuming_turn(session, input, &mut after, &mut open).await? {
+            stop_member_turn(session, &turn)?;
             return Ok(());
         }
         // Subscribed before the withdrawal, so no publication between the two
@@ -2211,9 +2213,9 @@ impl CollaborationSession {
             dim_agent_capabilities::input_queue::Withdrawal::NotHeld => {}
         }
         // (S): InputQueue handed the input to Loop, so the turn that consumes
-        // it is the one to interrupt. Waiting for its `input/consumed` makes
-        // the interrupt land after that turn started, the documented
-        // `consumed < interrupt` order, instead of racing its application.
+        // it is the one to stop. Waiting for its `input/consumed` names that
+        // turn, the documented `consumed < interrupt` order, instead of
+        // racing its application.
         let abort = self.with_abort(branch_id);
         let tasks = self
             .state
@@ -2239,8 +2241,8 @@ impl CollaborationSession {
                         }
                     }
                 }
-                if consumed_since(&session, &input, &mut after).await? {
-                    session.stop("main", CANCELLED_BY_CLIENT.into()).await?;
+                if let Some(turn) = consuming_turn(&session, &input, &mut after, &mut open).await? {
+                    stop_member_turn(&session, &turn)?;
                     return Ok(());
                 }
             }
@@ -2529,28 +2531,55 @@ fn close_request(open: &mut BTreeMap<String, BTreeSet<String>>, request: &str) {
     });
 }
 
-/// Whether the member consumed `input`, read from its published facts the
-/// way [`outcome`] reads them. `after` carries the page cursor across calls,
-/// so a wait re-reads only what is new.
-async fn consumed_since(
+/// Stops the member's turn that consumed the cancel's input, through Loop's
+/// turn-scoped stop: a turn that already ended writes nothing.
+fn stop_member_turn(session: &Session, turn: &str) -> dim_agent_runtime::Result<()> {
+    session
+        .service::<dim_agent_capabilities::agent_loop::AgentLoop>("main")?
+        .stop_turn(turn, CANCELLED_BY_CLIENT.into())?;
+    Ok(())
+}
+
+/// The turn that consumed `input`, from the member's own facts: the
+/// `turn/start` open at the input's `input/consumed`. The open turn is
+/// tracked across pages and checks, so a page that begins inside a turn
+/// still names it.
+async fn consuming_turn(
     session: &Session,
     input: &str,
     after: &mut u64,
-) -> dim_agent_runtime::Result<bool> {
+    open: &mut Option<String>,
+) -> dim_agent_runtime::Result<Option<String>> {
     // One published head for the whole check, so the answer cannot change
     // under the reader while it pages: a check answers for the moment it
     // starts, and the caller's next check sees whatever has been published
     // since.
     let through = Some(session.sequence("main")?);
     loop {
-        let (next, events) = read_page(session, *after, 256, through, &["input/consumed"]).await?;
-        if events.iter().any(
-            |event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == input),
-        ) {
-            return Ok(true);
+        let (next, events) = read_page(
+            session,
+            *after,
+            256,
+            through,
+            &["input/consumed", "turn/start", "turn/end"],
+        )
+        .await?;
+        for event in &events {
+            match &event.kind {
+                EventKind::TurnStart(data) => *open = Some(data.turn_id.clone()),
+                EventKind::TurnEnd(data) => {
+                    if open.as_deref() == Some(data.turn_id.as_str()) {
+                        *open = None;
+                    }
+                }
+                EventKind::InputConsumed(data) if data.input_id == input => {
+                    return Ok(open.clone());
+                }
+                _ => {}
+            }
         }
         if next <= *after {
-            return Ok(false);
+            return Ok(None);
         }
         *after = next;
     }
