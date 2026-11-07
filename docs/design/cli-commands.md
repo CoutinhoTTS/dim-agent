@@ -463,7 +463,7 @@ commands.
 
 ## Plugin runtimes
 
-RuntimeManager supplies the Node and Python runtimes that plugin code runs in
+RuntimeManager supplies the Node and Python runtimes that plugin code runs in, and the uv tool that launches Python MCP servers
 ([RuntimeManager](plugins/RuntimeManager.md)). The daemon reads its configuration when an
 action applies it (RuntimeManager §3.3), so a client can turn a runtime on, say where it comes
 from and show what it is doing, without editing `<home>/runtimes/config.json` by hand and without
@@ -472,11 +472,13 @@ restarting anything. `/runtime` opens one panel in both terminal modes and the s
 
 ### The panel
 
-Rows are the two runtimes, always node then python. A row shows its name, the configured source
+Rows are the two runtimes and the uv tool, always node, then python, then uv. A row shows its name,
+the configured source
 (`download` or `system`), the version in effect (the fixed version for `download`, the checked
 interpreter's version for `system`, empty while it is `off` and nothing has been checked), `auto`
 when it is on, and the status `runtime.list` gives: `off`, `acquiring`, `starting`, `ready`, `down` with its reason, or
-`failed` with the reason that lists every source and its error.
+`failed` with the reason that lists every source and its error. uv launches no runtime, so it never
+shows `starting` or `down`: it is `ready` once installed under the plan in effect.
 
 Below the rows the panel names what waits on the runtime — the plugin rows that are Pending because
 one is `off` or `down` ([PluginManager §2.5](plugins/PluginManager.md#25-runtimes)) — so "why is
@@ -488,6 +490,7 @@ as `runtime.list` reports it.
 ╭─ Plugin runtimes ─────────────────────────────────────────────────────────╮
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      not installed                   │
+│   uv        download  0.13.7     off                                      │
 │                                                                           │
 │   1 plugin waits for node: workflow                                       │
 ╰─ Enter install or apply · s source · a auto · r retry · Esc close ────────╯
@@ -575,6 +578,7 @@ The typed forms are the whole area, so a caller needs no panel:
 ```text
 /runtime                              the same rows, in the scrollback client
 /runtime install node                 apply the configuration for node
+/runtime install uv                   install the uv tool
 /runtime source node system           switch node to the system interpreter and apply
 /runtime auto python on               turn python on by configuration and apply
 ```
@@ -590,7 +594,7 @@ $ dimcode runtime config python --source system --auto on
 python  system    3.12.15   off
 ```
 
-`dimcode runtime list` prints one tab-separated row per runtime with the fields the panel shows.
+`dimcode runtime list` prints one tab-separated row per runtime or tool (node, python, uv) with the fields the panel shows.
 Which plugins wait for a runtime is `/plugins`' answer (`dimcode plugin list` in the line client), not
 this command's: one place names it per plugin, and the panel repeats it only for the runtime in view. `install` and `config` print the runtime's row after the
 call, which is `acquiring` or the state it returned to; a failed call prints the error and exits
