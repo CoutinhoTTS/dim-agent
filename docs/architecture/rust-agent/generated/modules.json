@@ -3828,6 +3828,18 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "panic",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::modality::tests_scripted",
+      "crate": "dim_cli",
+      "parent": "dim_cli::modality",
+      "file": "crates/dim-cli/src/modality/tests_scripted.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "json",
         "matches",
         "panic",
@@ -31099,6 +31111,13 @@
     },
     {
       "from": "dim_cli::modality",
+      "to": "dim_cli::modality::tests_scripted",
+      "references": [
+        "mod tests_scripted"
+      ]
+    },
+    {
+      "from": "dim_cli::modality",
       "to": "dim_cli::sanitize",
       "references": [
         "path safe_line",
@@ -31387,13 +31406,6 @@
     },
     {
       "from": "dim_cli::modality::tests",
-      "to": "dim_cli",
-      "references": [
-        "path crate::Result"
-      ]
-    },
-    {
-      "from": "dim_cli::modality::tests",
       "to": "dim_cli::args",
       "references": [
         "path Action::Modality",
@@ -31412,20 +31424,67 @@
         "path Command::TaskCancel",
         "path Command::TaskStatus",
         "path Command::TaskWait",
-        "path run",
-        "use super::Command",
-        "use super::run"
+        "use super::Command"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::tests",
+      "to": "dim_cli::modality::ocr",
+      "references": [
+        "use super::ocr"
       ]
     },
     {
       "from": "dim_cli::modality::tests",
       "to": "dim_cli::modality::task",
       "references": [
+        "path task::check_targets",
+        "path task::copy_in_place",
+        "use super::task"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::tests_scripted",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::tests_scripted",
+      "to": "dim_cli::args",
+      "references": [
+        "path Action::Modality",
+        "path Options",
+        "use crate::args::Action",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::tests_scripted",
+      "to": "dim_cli::modality",
+      "references": [
+        "path run",
+        "use super::run"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::tests_scripted",
+      "to": "dim_cli::modality::task",
+      "references": [
         "path super::task::Output"
       ]
     },
     {
-      "from": "dim_cli::modality::tests",
+      "from": "dim_cli::modality::tests_scripted",
+      "to": "dim_cli::modality::tests",
+      "references": [
+        "path parse",
+        "use super::tests::parse"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::tests_scripted",
       "to": "dim_client",
       "references": [
         "path Client",
