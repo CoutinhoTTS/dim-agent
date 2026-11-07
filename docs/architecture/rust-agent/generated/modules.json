@@ -5366,7 +5366,23 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::terminal",
       "file": "crates/dim-cli/src/ui/terminal/windows.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "debug_assert"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::terminal::windows::windows_flow",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::terminal::windows",
+      "file": "crates/dim-cli/src/ui/terminal/windows.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "concat",
+        "format",
+        "panic",
+        "vec"
+      ]
     },
     {
       "id": "dim_cli::ui::text",
@@ -38022,6 +38038,29 @@
       ]
     },
     {
+      "from": "dim_cli::ui::terminal::windows",
+      "to": "dim_cli::ui::terminal::windows::windows_flow",
+      "references": [
+        "mod windows_flow"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::terminal::windows::windows_flow",
+      "to": "dim_cli::ui::terminal::windows",
+      "references": [
+        "path ReadOutcome::Closed",
+        "path ReadOutcome::Data",
+        "path ReadOutcome::Timeout",
+        "path STDIN",
+        "path STDOUT",
+        "path disable_raw_mode",
+        "path enable_raw_mode",
+        "path read_timeout",
+        "path write_all",
+        "path write_until"
+      ]
+    },
+    {
       "from": "dim_cli::ui::text",
       "to": "dim_cli::ui::text::tests",
       "references": [
@@ -43828,6 +43867,14 @@
     {
       "module": "dim_cli::ui::terminal::input",
       "path": "char::from_u32"
+    },
+    {
+      "module": "dim_cli::ui::terminal::windows",
+      "path": "char::REPLACEMENT_CHARACTER"
+    },
+    {
+      "module": "dim_cli::ui::terminal::windows",
+      "path": "char::decode_utf16"
     },
     {
       "module": "dim_cli::ui::theme::ansi",
