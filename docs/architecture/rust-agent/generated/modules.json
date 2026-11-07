@@ -3320,6 +3320,7 @@
       "unexpandedMacros": [
         "cfg",
         "env",
+        "eprintln",
         "format",
         "json",
         "matches",
@@ -3543,6 +3544,13 @@
         "format",
         "matches"
       ]
+    },
+    {
+      "id": "dim_cli::locale",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/locale.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_cli::login",
@@ -26708,6 +26716,7 @@
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin",
         "use sqlite::Vacuumed",
+        "use sqlite::set_upgrade_report_delay",
         "use sqlite::vacuum_store"
       ]
     },
@@ -27215,6 +27224,13 @@
       "references": [
         "path SessionStore",
         "use super::SessionStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::opening_advanced"
       ]
     },
     {
@@ -28357,6 +28373,7 @@
         "mod client",
         "path client",
         "path client::DaemonNotice",
+        "path client::StoreUpgrade",
         "path client::connect_inner",
         "path client::shutdown",
         "path client::stop",
@@ -28437,6 +28454,15 @@
       "to": "dim_cli::leaf",
       "references": [
         "mod leaf"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::locale",
+      "references": [
+        "mod locale",
+        "path locale",
+        "path locale::Locale"
       ]
     },
     {
@@ -28649,7 +28675,8 @@
         "path crate::ui::i18n::interface_locale",
         "path crate::ui::i18n::set",
         "path crate::ui::i18n::t",
-        "path crate::ui::i18n::tf"
+        "path crate::ui::i18n::tf",
+        "path crate::ui::i18n::tf_in"
       ]
     },
     {
@@ -28891,6 +28918,13 @@
       "to": "dim_cli::client::web_assets_tests",
       "references": [
         "mod web_assets_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::locale::Locale"
       ]
     },
     {
@@ -29633,6 +29667,13 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::locale",
+      "references": [
+        "path i18n::Locale::from_code"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_cli::management::editor",
       "references": [
         "mod editor"
@@ -29788,7 +29829,6 @@
       "from": "dim_cli::management",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path i18n::Locale::from_code",
         "path i18n::set",
         "path t",
         "path tf",
@@ -30754,6 +30794,13 @@
     },
     {
       "from": "dim_cli::migration_command",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::locale::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
       "to": "dim_cli::sanitize",
       "references": [
         "use crate::sanitize::safe"
@@ -31241,6 +31288,13 @@
     },
     {
       "from": "dim_cli::plugins",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::locale::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
       "to": "dim_cli::session_host",
       "references": [
         "path SessionHost::start",
@@ -31608,6 +31662,14 @@
     },
     {
       "from": "dim_cli::projection::tests",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::ui::i18n::Locale::En",
+        "path crate::ui::i18n::Locale::ZhCn"
+      ]
+    },
+    {
+      "from": "dim_cli::projection::tests",
       "to": "dim_cli::model::view",
       "references": [
         "path CompactionState",
@@ -31627,8 +31689,6 @@
       "from": "dim_cli::projection::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::Locale::En",
-        "path crate::ui::i18n::Locale::ZhCn",
         "path crate::ui::i18n::active",
         "path crate::ui::i18n::set"
       ]
@@ -33650,6 +33710,14 @@
     },
     {
       "from": "dim_cli::ui::composer::palette::tests",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::ui::i18n::Locale::En",
+        "path crate::ui::i18n::Locale::ZhCn"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::commands",
       "references": [
         "path Context",
@@ -33672,8 +33740,6 @@
       "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::Locale::En",
-        "path crate::ui::i18n::Locale::ZhCn",
         "path crate::ui::i18n::set"
       ]
     },
@@ -33720,6 +33786,13 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::ui::i18n::Locale::ZhCn"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::model::session",
       "references": [
         "path DraftPart",
@@ -33750,7 +33823,6 @@
       "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::Locale::ZhCn",
         "path crate::ui::i18n::active",
         "path crate::ui::i18n::set"
       ]
@@ -33825,6 +33897,28 @@
         "path remove",
         "path text",
         "path write"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::locale",
+      "references": [
+        "path Locale",
+        "path Locale::De",
+        "path Locale::En",
+        "path Locale::Es",
+        "path Locale::Fr",
+        "path Locale::Id",
+        "path Locale::Ja",
+        "path Locale::Ko",
+        "path Locale::PtBr",
+        "path Locale::PtPt",
+        "path Locale::ZhCn",
+        "path Locale::ZhHant",
+        "path Locale::from_code",
+        "path Locale::from_env_value",
+        "use crate::locale::LOCALES",
+        "use crate::locale::Locale"
       ]
     },
     {
@@ -34381,12 +34475,13 @@
       "to": "dim_cli",
       "references": [
         "path crate::DAEMON_BUSY",
-        "path crate::DAEMON_BUSY_COUNTS"
+        "path crate::DAEMON_BUSY_COUNTS",
+        "path crate::DAEMON_UPGRADING"
       ]
     },
     {
       "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n",
+      "to": "dim_cli::locale",
       "references": [
         "path LOCALES",
         "path Locale",
@@ -34401,7 +34496,13 @@
         "path Locale::PtPt",
         "path Locale::ZhCn",
         "path Locale::ZhHant",
-        "path Locale::from_env_value",
+        "path Locale::from_env_value"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
         "path active",
         "path set",
         "path tf"
@@ -34684,17 +34785,23 @@
     },
     {
       "from": "dim_cli::ui::language_panel",
-      "to": "dim_cli::ui::i18n",
+      "to": "dim_cli::locale",
       "references": [
         "path LOCALES",
         "path Locale",
         "path Locale::code",
         "path Locale::from_code",
+        "use crate::ui::i18n::LOCALES",
+        "use crate::ui::i18n::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::language_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
         "path i18n::system_locale",
         "path tf",
         "use crate::ui::i18n",
-        "use crate::ui::i18n::LOCALES",
-        "use crate::ui::i18n::Locale",
         "use crate::ui::i18n::tf"
       ]
     },
@@ -36113,6 +36220,13 @@
     },
     {
       "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::ui::i18n::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
       "to": "dim_cli::member_approval",
       "references": [
         "path crate::member_approval::DetailError",
@@ -36153,7 +36267,6 @@
       "from": "dim_cli::ui::prompts",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::Locale",
         "path t",
         "path tf",
         "use crate::ui::i18n::t",
@@ -40203,6 +40316,15 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::locale",
+      "references": [
+        "path i18n::LOCALES",
+        "path i18n::Locale::En",
+        "path i18n::Locale::ZhCn"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::management::editor",
       "references": [
         "path editor::Draft",
@@ -40330,9 +40452,6 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path i18n::LOCALES",
-        "path i18n::Locale::En",
-        "path i18n::Locale::ZhCn",
         "path i18n::active",
         "path i18n::set",
         "path t"
