@@ -1,5 +1,7 @@
 //! The process boundary the sandbox switch applies, before ordinary spawn/PTY.
-use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, TemporaryDirectory};
+use super::{
+    ENVIRONMENT, HostPlatform, Isolation, ProcessSpec, ProcessSpecError, TemporaryDirectory,
+};
 use std::path::Path;
 use std::{ffi::OsString, path::PathBuf};
 
@@ -98,57 +100,13 @@ impl HostPlatform {
         if !settings.sandbox {
             return Ok((spec, None, None));
         }
-        let environment: Vec<String> = [
-            "PATH",
-            "HOME",
-            "LANG",
-            "LC_ALL",
-            "LC_CTYPE",
-            "TERM",
-            "NO_COLOR",
-            "PAGER",
-            "GIT_PAGER",
-            "GH_PAGER",
-            #[cfg(target_os = "macos")]
-            "DEVELOPER_DIR",
-            #[cfg(target_os = "macos")]
-            "XDG_CONFIG_HOME",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-        let (read_only_paths, default_files) = {
-            let mut installed = Vec::new();
-            for path in &self.platform_roots {
-                match tokio::fs::metadata(path).await {
-                    Ok(_) => installed.push(path.clone()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(invalid(format!(
-                            "System isolation root {}: {error}",
-                            path.display()
-                        )));
-                    }
-                }
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let developer = received(&environment, &spec.env, "DEVELOPER_DIR")
-                    .unwrap_or_else(|| "/var/select/developer_dir".into());
-                if developer.is_absolute()
-                    && tokio::fs::metadata(&developer)
-                        .await
-                        .is_ok_and(|metadata| metadata.is_dir())
-                {
-                    installed.push(developer);
-                }
-            }
-            #[cfg(target_os = "macos")]
-            let files = git_configuration(&environment, &spec.env).await;
-            #[cfg(not(target_os = "macos"))]
-            let files = Vec::new();
-            (installed, files)
-        };
+        let read_only_paths = baseline_read_paths(self, &spec.env)
+            .await
+            .map_err(invalid)?;
+        #[cfg(target_os = "macos")]
+        let default_files = git_configuration(ENVIRONMENT, &spec.env).await;
+        #[cfg(not(target_os = "macos"))]
+        let default_files = Vec::new();
         let (read_only, mut read_only_files) =
             roots(read_only_paths, true).await.map_err(invalid)?;
         let writable_paths: Vec<PathBuf> = workspaces
@@ -161,7 +119,7 @@ impl HostPlatform {
         validate_overlap(&read_only, &read_only_files, &writable).map_err(invalid)?;
         read_only_files.extend(default_files);
         spec.env
-            .retain(|(name, _)| environment.iter().any(|allowed| name == allowed.as_str()));
+            .retain(|(name, _)| ENVIRONMENT.iter().any(|allowed| name == allowed));
         let temporary = if cfg!(target_os = "macos") {
             let temporary = temporary_directory()
                 .await
@@ -191,10 +149,43 @@ impl HostPlatform {
     }
 }
 
+/// The system roots installed on this host, with the developer directory that
+/// runs the `/usr/bin` shims: what a process may read to run a program. The
+/// sandbox switch grants them to agent commands, and a host-owned confined
+/// helper reads them without the switch.
+pub(super) async fn baseline_read_paths(
+    platform: &HostPlatform,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] env: &[(OsString, OsString)],
+) -> Result<Vec<PathBuf>, String> {
+    let mut installed = Vec::new();
+    for path in &platform.platform_roots {
+        match tokio::fs::metadata(path).await {
+            Ok(_) => installed.push(path.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("System isolation root {}: {error}", path.display()));
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let developer = received(ENVIRONMENT, env, "DEVELOPER_DIR")
+            .unwrap_or_else(|| "/var/select/developer_dir".into());
+        if developer.is_absolute()
+            && tokio::fs::metadata(&developer)
+                .await
+                .is_ok_and(|metadata| metadata.is_dir())
+        {
+            installed.push(developer);
+        }
+    }
+    Ok(installed)
+}
+
 /// A nonempty value that `environment` passes to the command from `env`.
 #[cfg(target_os = "macos")]
-fn received(environment: &[String], env: &[(OsString, OsString)], name: &str) -> Option<PathBuf> {
-    if !environment.iter().any(|allowed| allowed == name) {
+fn received(environment: &[&str], env: &[(OsString, OsString)], name: &str) -> Option<PathBuf> {
+    if !environment.contains(&name) {
         return None;
     }
     env.iter()
@@ -210,7 +201,7 @@ fn received(environment: &[String], env: &[(OsString, OsString)], name: &str) ->
 /// whole because git's credential store also reads it.
 #[cfg(target_os = "macos")]
 async fn git_configuration(
-    environment: &[String],
+    environment: &[&str],
     env: &[(OsString, OsString)],
 ) -> Vec<(PathBuf, PathBuf)> {
     let home = received(environment, env, "HOME");
@@ -248,7 +239,7 @@ async fn temporary_directory() -> std::io::Result<TemporaryDirectory> {
 }
 
 #[cfg(target_os = "macos")]
-fn prepare(
+pub(super) fn prepare(
     _host: &HostPlatform,
     mut spec: ProcessSpec,
     read_only: &[(PathBuf, PathBuf)],
@@ -328,7 +319,7 @@ fn prepare(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn prepare(
+pub(super) fn prepare(
     host: &HostPlatform,
     mut spec: ProcessSpec,
     read_only: &[(PathBuf, PathBuf)],
