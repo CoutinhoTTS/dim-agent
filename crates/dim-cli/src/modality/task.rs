@@ -300,7 +300,7 @@ pub(super) fn one_component(name: &str) -> bool {
 /// the same directory would otherwise replace the first run's results. The
 /// task keeps its files, and the message names the command that fetches them
 /// into another directory (D1).
-fn check_targets(out: &Path, names: &[String], id: &str) -> Result<()> {
+pub(super) fn check_targets(out: &Path, names: &[String], id: &str) -> Result<()> {
     let existing: Vec<&str> = names
         .iter()
         .filter(|name| out.join(name.as_str()).symlink_metadata().is_ok())
@@ -375,26 +375,42 @@ async fn transfer(
 }
 
 /// Places the transferred file under its target name without replacing
-/// anything. A hard link fails with `AlreadyExists` where `rename` would
-/// replace the file, so a target that appeared while the transfer ran is
-/// refused. A file system without hard links answers another error, and only
-/// there is the target re-checked and the file renamed, which is a window no
-/// wider than that check.
+/// anything. A hard link is tried first because it publishes the complete
+/// file at once. The copy is the fallback where hard links are unsupported,
+/// and it never replaces a file; during that copy the target may briefly be
+/// visible incomplete, which is the cost on such file systems.
 fn place(partial: &Path, path: &Path, name: &str, id: &str) -> Result<()> {
     match std::fs::hard_link(partial, path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(refused(&[name], id))
         }
-        Err(_) => {
-            if path.symlink_metadata().is_ok() {
-                return Err(refused(&[name], id));
-            }
-            std::fs::rename(partial, path)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-            Ok(())
-        }
+        Err(_) => copy_in_place(partial, path, name, id),
     }
+}
+
+/// The fallback where hard links are unsupported: the target is created with
+/// `create_new` (`O_EXCL` on Unix, `CREATE_NEW` on Windows), so an existing
+/// file is refused rather than replaced, and the temporary's bytes are copied
+/// into it. A copy that fails removes the target this call created, which it
+/// owns.
+pub(super) fn copy_in_place(partial: &Path, path: &Path, name: &str, id: &str) -> Result<()> {
+    let mut target = match std::fs::File::create_new(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(refused(&[name], id));
+        }
+        Err(error) => return Err(format!("{}: {error}", path.display()).into()),
+    };
+    let copied = std::fs::File::open(partial)
+        .and_then(|mut source| std::io::copy(&mut source, &mut target).map(|_| ()))
+        .and_then(|()| target.flush());
+    if let Err(error) = copied {
+        drop(target);
+        let _ = std::fs::remove_file(path);
+        return Err(format!("{}: {error}", path.display()).into());
+    }
+    Ok(())
 }
 
 /// The sibling a transfer writes before it renames it into place.

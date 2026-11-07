@@ -579,8 +579,10 @@ directory that defaults to `.` and is created when missing. It never replaces an
 when a target exists, nothing is written, the files are named, and the message gives `dimcode
 modality task wait <id> --out <dir>` for fetching them into another directory; the task keeps its
 files. Each file is transferred in 4 MiB chunks into a temporary sibling and hard-linked into
-place, so a file created at the target while the transfer ran is refused, not replaced; a failed
-or stopped transfer removes the temporary. `--no-wait` stops after the submission and prints the
+place, so a file created at the target while the transfer ran is refused, not replaced; where the
+file system has no hard links, the file is copied into a target created without replacement
+instead, which may show the target incomplete while the copy runs, and a failed or stopped
+transfer removes the temporary. `--no-wait` stops after the submission and prints the
 id; `--json` prints the record instead of the command's own lines. The first Ctrl+C during a wait
 stops waiting, prints the id and exits 130, and the task continues; a Ctrl+C during a result
 transfer stops the transfer, removes the partial file and exits 130, printing `Stopped; the task

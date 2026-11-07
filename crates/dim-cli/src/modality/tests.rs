@@ -146,6 +146,37 @@ fn the_result_name_is_one_normal_component() {
     }
 }
 
+/// The fallback where hard links are unsupported never replaces a file: a
+/// target that already exists is refused with the same message the pre-write
+/// check gives and keeps its bytes; a normal call writes the bytes, and a
+/// copy that fails removes the target it created.
+#[test]
+fn the_copy_fallback_never_replaces_a_target() {
+    let root = tempfile::tempdir().unwrap();
+    let partial = root.path().join(".image-1.png.partial");
+    std::fs::write(&partial, b"hello").unwrap();
+    let target = root.path().join("image-1.png");
+
+    std::fs::write(&target, b"mine").unwrap();
+    let refusal = task::copy_in_place(&partial, &target, "image-1.png", "task-1").unwrap_err();
+    let checked =
+        task::check_targets(root.path(), &["image-1.png".to_string()], "task-1").unwrap_err();
+    assert_eq!(refusal.to_string(), checked.to_string());
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+
+    std::fs::remove_file(&target).unwrap();
+    task::copy_in_place(&partial, &target, "image-1.png", "task-1").unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"hello");
+
+    let missing = root.path().join("missing.partial");
+    let second = root.path().join("image-2.png");
+    assert!(task::copy_in_place(&missing, &second, "image-2.png", "task-1").is_err());
+    assert!(
+        !second.exists(),
+        "a failed copy removes the target it created"
+    );
+}
+
 /// The inline rule holds both limits: at most 64 KiB of text and at most
 /// 30,000 UTF-16 units (A.5).
 #[test]
