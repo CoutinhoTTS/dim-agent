@@ -1498,6 +1498,21 @@ the flag must name a standalone `dim-app-server` binary. The failed launch
 removes the note after reading; a successful connection removes any note. The
 CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
 the store, and exits 1.
+
+While a store format upgrade runs, the daemon writes the same note as a
+progress kind, `dimcode-startup-progress v1 pid=<pid>` with
+`store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
+after each upgrade step; a fresh store or one at the current format writes
+none. Both startup waits read it: the spawn wait counts only its child's pid,
+the start-lock wait any pid, and each new counter moves the wait's bound
+forward by the bound itself (10 s for the spawn, one verified shutdown plus
+one startup plus a margin for the lock). A store format upgrade is the long
+phase that reports progress and moves the bound; every other phase of
+startup is bounded by the client's fixed value. The first such
+note prints, once on stderr in every mode, `Upgrading the local store from
+format v<from> to v<to>; this can take a while on a large store.`; stdout and
+JSON output stay unchanged. A client that only knows the failure kind ignores
+the progress kind and falls back to the generic messages above.
 Development documentation continues to use `./dev` and its isolated home; the
 terminal note itself names a compatible build or `--home PATH`.
 
