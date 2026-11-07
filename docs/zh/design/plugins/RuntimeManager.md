@@ -157,7 +157,7 @@ rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.imp
 - Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginManager；App Server 启动时创建它，让运行时的导入路径在第一个插件之前就存在。
 - 开启一个 Python 插件时，PluginManager 在那里建一个目录链接 `<包名>` 指向插件目录（`<包名>` 是插件 id 把 `-` 换成 `_`；Windows 上用 junction），并建行 `py:<包名>.<入口模块>`。正在运行的进程不重启就能导入新插件。
 - 插件内部的模块之间用相对导入（`from . import helpers`）。reload 时，入口模块文件变了就重新导入，这是 rutis 对每个 Python 行的做法（[需求第 3 条](../../../design/plugin-management.md)）。
-- PluginManager 开启 Python 插件而 Python 处于关闭时，调用 `RuntimeService::install("python")`（§5）。同一请求也适用于 Node：在 Node 关闭时开启的任何带代码插件都会请求它；插件依赖必须安装时，先请求 Node（§9 R1）。
+- 客户端的 `plugin.install`、`plugin.enable` 或 `plugin.update` 打开 Python 插件而 Python 处于关闭时，PluginManager 调用 `RuntimeService::install("python")`（§5）；同样的调用适用于这些客户端调用中的 Node 插件，以及 PluginManager 对可选插件的后台重新获取。启动、所有者打开时的 reconcile、reload，以及处于出厂状态的名字，都从不触发它。插件依赖必须安装时，`installPackages` 打开 Node 并等待它（§9 R1）。
 
 ## 5. 接口
 
@@ -165,7 +165,7 @@ rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.imp
 | --- | --- |
 | 启动命令 | `nodeRuntime`、`pythonRuntime`：连接行 `session-node` 和 `py` 注入的只在 Rust 里的进程服务；运行时获取后提供。 |
 | `RuntimeStatus` | 每个连接行在以行名命名的只在 Rust 里的进程键上维护：`starting`、`ready`，或带原因的 `down`。RuntimeManager 读取它。 |
-| `RuntimeService`（Rust 进程服务） | `list() -> [RuntimeEntry]`；`install(name)`：开启运行时并开始获取；正在获取或正在运行时什么都不做；获取失败后再获取一次；连接 `down` 后重新提供启动命令。`installPackages(dir, cancel)`：在 `dir` 内用受管（或 `system`）Node 自带的 npm 安装插件的锁定 npm 依赖——按 `dir/package-lock.json` 执行 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund --registry <r>`，registry 依次尝试 `npmRegistries` 与 `DIMCODE_NPM_REGISTRY`——npm 退出即返回；错误为 `node_unavailable`（没有 Node 安装，或它没有 npm）、`npm_unavailable`（npm 无法启动）、`install_failed {reason}`（npm 的消息）与 `cancelled`；`cancel` 会杀死 npm，并把 `dir` 留给调用方。两者都用可选依赖读取，所以 RuntimeManager reload 不会让调用方 reload。 |
+| `RuntimeService`（Rust 进程服务） | `list() -> [RuntimeEntry]`；`install(name)`：开启运行时并开始获取；正在获取或正在运行时什么都不做；获取失败后再获取一次；连接 `down` 后重新提供启动命令。`installPackages(dir, cancel)`：Node 关闭时打开 Node 并用 RuntimeManager 自己的状态等待其获取，然后在 `dir` 内用受管（或 `system`）Node 自带的 npm 安装插件的锁定 npm 依赖——按 `dir/package-lock.json` 执行 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund --registry <r>`，registry 依次尝试 `npmRegistries` 与 `DIMCODE_NPM_REGISTRY`——npm 退出即返回。错误：Node 无法提供时是带获取失败原因的 `node_unavailable`、`npm_unavailable`（npm 无法启动）、`install_failed {reason}`（npm 的消息）与 `cancelled`；`cancel` 会杀死 npm，并把 `dir` 留给调用方。两者都用可选依赖读取，所以 RuntimeManager reload 不会让调用方 reload。 |
 | `runtime.list`（管理方法） | `[{name, source, auto, version, status, reason?}]`；`auto` 是正在生效的配置，客户端因此不必自己存一份；`status` 是 `off`、`acquiring`、`failed`，或提供启动命令后连接的 `RuntimeStatus`：`starting`（连接行还没启动时也是）、`ready`，或带原因的 `down`。 |
 | `runtime.install {name}`（管理方法，有修改） | `RuntimeService::install`：重读配置，`source` 变化时通过重启连接行应用（§3.3），并立即回复当前状态；配置无法读取时该调用以 `runtime_configuration` 错误返回。 |
 | `runtime.configure {name, source?, auto?}`（管理方法，有修改） | 原子地写 `<home>/runtimes/config.json`，按运行时、按字段覆盖预置（§2.2），随后按 `runtime.install` 的方式应用；写不出或读不出时该调用以 `runtime_configuration` 错误返回。该运行时正在获取时拒绝，因为获取过程中它的 plan 不能变（§3.1）。 |
@@ -221,8 +221,8 @@ RuntimeManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 | 项 | 内容 |
 | --- | --- |
-| 阻塞 | Python 插件的目录不在正在运行的 Python 运行时的导入路径上；在 Node 关闭时开启的 Node 插件只能等待；声明了 npm 依赖的插件无法把它的 lock 安装到自己的目录。 |
+| 阻塞 | Python 插件的目录不在正在运行的 Python 运行时的导入路径上；在 Node 关闭时开启的 Node 插件只能等待；声明了 npm 依赖的插件无法把它的 lock 安装到自己的目录，调用方也无法在运行 npm 前等待 Node 的获取。 |
 | 考虑过的已有机制 | 把每个目录加到 `PYTHONPATH`、每次安装重启 Python 运行时（所有 Python 行都要重启；两个插件的同名模块会冲突）；PluginManager 自己运行 npm（重复本文档的 registry、校验与失败规则）。 |
-| 通用能力 | PluginManager 维护 `<home>/plugins/.python/<包名>` 链接，Python 行命名为 `py:<包名>.<入口>`（§4）；开启 Python 插件而 Python 关闭时调用 `RuntimeService::install("python")`。同一 `install("node")` 请求适用于在 Node 关闭时打开的所有带代码插件，而不只是声明了依赖的插件。PluginManager 调用 `RuntimeService::installPackages(dir, cancel)`（§5）把插件的锁定 npm 依赖安装到暂存目录，然后才把目录改名到位；失败时删除该目录。 |
+| 通用能力 | PluginManager 维护 `<home>/plugins/.python/<包名>` 链接，Python 行命名为 `py:<包名>.<入口>`（§4）；客户端的 install、enable 或 update 打开 Python 插件而 Python 关闭时调用 `RuntimeService::install("python")`，同样的调用适用于这些客户端调用中的 Node 插件，以及 PluginManager 对可选插件的后台重新获取；启动、所有者打开时的 reconcile、reload 与出厂状态的名字从不触发它。PluginManager 每次获取调用一次 `RuntimeService::installPackages(dir, cancel)`（§5）：该调用在 Node 关闭时打开 Node 并等待其获取，然后把插件的锁定 npm 依赖安装到暂存目录，之后才把目录改名到位；失败时 PluginManager 删除该目录。 |
 | 对序列、批次、中断、reload 的影响 | 对 Timeline 没有影响。 |
 | 所有者与 issue | PluginManager，[#3](https://github.com/arcships/dim/issues/3)。 |
