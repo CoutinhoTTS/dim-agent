@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
+    ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -100,6 +101,11 @@ pub struct Runtimes {
     /// The home the configuration was read from, kept so an action can read it
     /// again (§2.2).
     home: PathBuf,
+    /// The search path a `system` runtime resolves on, an embedding host's
+    /// input like the home: `None` reads the process `PATH` at each lookup,
+    /// and a host that gives one keeps its lookups out of the process
+    /// environment. Production leaves it `None`.
+    search_path: Option<OsString>,
     preset: Choices,
     node: Plan,
     python: Plan,
@@ -119,7 +125,11 @@ pub type Choices = BTreeMap<String, Choice>;
 impl Runtimes {
     /// The runtimes of `home`: the default configuration file's `preset`,
     /// overridden by `<home>/runtimes/config.json`.
-    pub fn load(home: &Path, preset: &Choices) -> Result<Self, String> {
+    pub fn load(
+        home: &Path,
+        preset: &Choices,
+        search_path: Option<OsString>,
+    ) -> Result<Self, String> {
         let root = home.join("runtimes");
         let user_file = root.join("config.json");
         let user = match std::fs::read(&user_file) {
@@ -145,6 +155,7 @@ impl Runtimes {
             home,
             root,
             preset.clone(),
+            search_path,
             choice(Kind::Node),
             choice(Kind::Python),
         )
@@ -155,18 +166,20 @@ impl Runtimes {
     /// the environment at that moment instead of at startup. `runtime.list`
     /// keeps reporting the runtime in effect until such an action runs.
     pub fn reload(&self) -> Result<Self, String> {
-        Self::load(&self.home, &self.preset)
+        Self::load(&self.home, &self.preset, self.search_path.clone())
     }
 
     fn new(
         home: &Path,
         root: PathBuf,
         preset: Choices,
+        search_path: Option<OsString>,
         node: (Source, bool),
         python: (Source, bool),
     ) -> Result<Self, String> {
         let pins: Pins = serde_json::from_str(PINS).expect("runtime/runtimes.json is valid");
         let platform = platform();
+        let search = search_path.as_deref();
         let mirror = |variable: &str| std::env::var(variable).ok().filter(|v| !v.is_empty());
         let sources = |pin: &Pin, variable: &str| {
             mirror(variable)
@@ -213,7 +226,7 @@ impl Runtimes {
                     directory.join("bin/node")
                 }
             }
-            Source::System => which("node").unwrap_or_else(|| root.join("no-system-node")),
+            Source::System => which("node", search).unwrap_or_else(|| root.join("no-system-node")),
         };
         let python_archive = archive(
             &pins.python,
@@ -232,7 +245,7 @@ impl Runtimes {
             }
             Source::System => {
                 let name = if cfg!(windows) { "python" } else { "python3" };
-                which(name).unwrap_or_else(|| root.join("no-system-python"))
+                which(name, search).unwrap_or_else(|| root.join("no-system-python"))
             }
         };
         let node_plan = Plan {
@@ -268,6 +281,7 @@ impl Runtimes {
         Ok(Self {
             root,
             home: home.to_owned(),
+            search_path,
             preset,
             node: node_plan,
             python: python_plan,
@@ -317,15 +331,28 @@ fn platform() -> String {
     format!("{os}-{arch}")
 }
 
-fn which(program: &str) -> Option<PathBuf> {
+fn which(program: &str, search: Option<&OsStr>) -> Option<PathBuf> {
     let file = if cfg!(windows) {
         format!("{program}.exe")
     } else {
         program.to_owned()
     };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(&file))
-        .find(|path| path.is_file())
+    let path = match search {
+        Some(path) => path.to_owned(),
+        None => std::env::var_os("PATH")?,
+    };
+    std::env::split_paths(&path).find_map(|directory| {
+        let candidate = directory.join(&file);
+        // An entry may be relative, or empty for the current directory
+        // (§5). Resolve it lexically, so every caller gets the absolute
+        // path the entry names from any working directory.
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            std::path::absolute(&candidate).ok()?
+        };
+        candidate.is_file().then_some(candidate)
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -363,6 +390,18 @@ fn read_records(path: &Path) -> BTreeMap<String, Record> {
         .unwrap_or_default()
 }
 
+/// Whether `record` has `plan` installed (§2.4): the record is this plan's
+/// with `version`, and the directories it names are present. An acquisition
+/// skips the download on it, and `runtime.list` reports `path` on it.
+fn is_installed(plan: &Plan, version: &str, record: Option<&Record>) -> bool {
+    record.is_some_and(|record| *record == Record::of(plan, version, record.sha256.clone()))
+        && plan
+            .archive
+            .as_ref()
+            .is_none_or(|(_, directory)| directory.is_dir())
+        && plan.packages.is_dir()
+}
+
 /// A runtime's entry in `runtime.list` (design §5).
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct RuntimeEntry {
@@ -374,6 +413,10 @@ pub struct RuntimeEntry {
     /// checked interpreter, absent until it is checked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The interpreter the daemon resolved, present while the record marks
+    /// this runtime installed under the plan in effect (§2.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// `off`, `acquiring`, `failed`, or, once its launch command is
     /// provided, its connection's status: `starting`, `ready`, `down`.
     pub status: &'static str,
@@ -425,14 +468,16 @@ impl RuntimeService {
     }
     /// Every runtime's status.
     pub fn list(&self) -> Vec<RuntimeEntry> {
+        let records = read_records(&self.runtimes.lock().unwrap().record_file());
         let plans = self.plans.lock().unwrap().clone();
         let states = self.states.lock().unwrap();
         let versions = self.versions.lock().unwrap();
         Kind::ALL
             .into_iter()
             .map(|kind| {
-                let plan = &plans[Self::index(kind)];
-                let (status, reason) = match &states[Self::index(kind)] {
+                let index = Self::index(kind);
+                let plan = &plans[index];
+                let (status, mut reason) = match &states[index] {
                     State::Off => ("off", None),
                     State::Acquiring => ("acquiring", None),
                     State::Failed(reason) => ("failed", Some(reason.clone())),
@@ -442,14 +487,32 @@ impl RuntimeService {
                         RuntimeState::Down(reason) => ("down", Some(reason)),
                     },
                 };
+                let version = match plan.source {
+                    Source::Download => Some(plan.version.clone()),
+                    Source::System => versions[index].clone(),
+                };
+                let mut path = None;
+                if version
+                    .as_deref()
+                    .is_some_and(|version| is_installed(plan, version, records.get(kind.name())))
+                {
+                    match plan.interpreter.to_str() {
+                        Some(interpreter) => path = Some(interpreter.to_owned()),
+                        None => {
+                            let unrepresentable = "the interpreter path is not valid UTF-8";
+                            reason = Some(match reason.take() {
+                                Some(reason) => format!("{reason}; {unrepresentable}"),
+                                None => unrepresentable.to_owned(),
+                            });
+                        }
+                    }
+                }
                 RuntimeEntry {
                     name: kind.name(),
                     source: plan.source,
                     auto: plan.auto,
-                    version: match plan.source {
-                        Source::Download => Some(plan.version.clone()),
-                        Source::System => versions[Self::index(kind)].clone(),
-                    },
+                    version,
+                    path,
                     status,
                     reason,
                 }
@@ -639,14 +702,11 @@ impl RuntimeService {
             Source::Download => plan.version.clone(),
             Source::System => check_system(kind, &plan.interpreter).await?,
         };
-        let installed = read_records(&runtimes.record_file())
-            .get(kind.name())
-            .is_some_and(|record| *record == Record::of(&plan, &version, record.sha256.clone()))
-            && plan
-                .archive
-                .as_ref()
-                .is_none_or(|(_, directory)| directory.is_dir())
-            && plan.packages.is_dir();
+        let installed = is_installed(
+            &plan,
+            &version,
+            read_records(&runtimes.record_file()).get(kind.name()),
+        );
         if installed {
             return Ok(version);
         }
