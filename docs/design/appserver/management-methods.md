@@ -355,11 +355,16 @@ disconnect ([A.2](../contracts/session-boundary.md#a2-call-channel)). Progress
 is best effort: a connection queues at most 256 progress frames and 4 MiB of
 them, beside the 1024 frames and 32 MiB of replies and notifications; it
 drops a notice that does not fit, so one over 4 MiB never arrives, and stays
-open. Management and Session methods share this path. `schedule.watch`
+open. Management and Session methods share this path. `runtime.watch`
 declares `progress`: its call stays open while the connection watches, each
-item is one change, and it is answered only when a later `schedule.watch` on
-the same connection takes over (`{}`) or its generation unloads
-(`operation_interrupted`)
+item is one committed runtime change, and it is answered only when a later
+`runtime.watch` on the same connection takes over (`{}`) or its generation
+unloads (`operation_interrupted`)
+([RuntimeManager §10](../plugins/RuntimeManager.md#10-client-change-notices)).
+`schedule.watch` declares `progress`: its call stays open while the
+connection watches, each item is one change, and it is answered only when a
+later `schedule.watch` on the same connection takes over (`{}`) or its
+generation unloads (`operation_interrupted`)
 ([Scheduler §11.2](../plugins/Scheduler.md#112-jobs-and-runs)).
 Connection-bound notifications are the contract's `callChannel.notify`
 and `closed` ([A.2](../contracts/session-boundary.md#a2-call-channel)): a
