@@ -7,10 +7,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// One runtime Dim downloaded and installed (§2.4). It is the runtimes
-/// RuntimeManager owns that a started process may run; a `system` interpreter
-/// is the user's own and is reached through the user's `PATH`, so it is never
-/// one of these.
+/// One runtime or tool Dim downloaded and installed (§2.4). It is the
+/// runtimes and the uv tool RuntimeManager owns that a started process may
+/// run; a `system` interpreter is the user's own and is reached through the
+/// user's `PATH`, so it is never one of these.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstalledToolchain {
     /// The directory holding the interpreter: appended to a child's PATH.
@@ -20,9 +20,9 @@ pub struct InstalledToolchain {
     pub root: PathBuf,
 }
 
-/// The downloaded runtimes installed under the plan in effect, in the fixed
-/// order node, then python. Read when a process starts, so a runtime installed
-/// meanwhile reaches the next process without a reload.
+/// The downloaded runtimes and tools installed under the plan in effect, in
+/// the fixed order node, python, then uv. Read when a process starts, so a
+/// runtime installed meanwhile reaches the next process without a reload.
 pub trait ToolchainSource: Send + Sync + 'static {
     fn toolchains(&self) -> Vec<InstalledToolchain>;
 }
