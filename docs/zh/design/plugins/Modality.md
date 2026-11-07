@@ -43,8 +43,8 @@ flowchart LR
 | `Modality` | 进程（控制节点） | Provider 的模型选择（`ModelSelectionHost`）与非对话连接解析；`pluginFiles`（扩展：UTF-8 与二进制）；Settings 业务来源 `modality`；[#40](https://github.com/arcships/dim/issues/40) 决定、[#861](https://github.com/arcships/dim/issues/861) 跟踪的按任务适配器查找（尚未交付；落地前每次调用读取单个进程服务）；控制节点及每个已配置 OCR 节点的 HostPlatform；诊断 | `modalityTasks` 进程服务；把 `modality`（`modality.*`）注册到 `managementMethods` |
 | 适配器插件 | 进程 | 各自的提供方依赖 | `modalityAdapter` 服务，key 为适配器名，在插件的 `provides` 中声明；[#861](https://github.com/arcships/dim/issues/861) 落地后按任务解析 |
 
-**依赖的契约：**[方法](../contracts/session-boundary.md)契约（注册到 `managementMethods` 的命名空间、每次调用的进度接收器、绑定连接的通知）；按任务适配器查找（[#861](https://github.com/arcships/dim/issues/861)，§9.1）；Provider 的模型选择（`ResolveModelSelection::resolve`，拒绝不可选的显式模型；[AuxiliaryModel](../appserver/auxiliary-model.md)）、用于选项列表的可选模型读取（§9.2），以及图像生成、编辑与增强所需的非对话连接解析（[overview 附录 B.2](../overview.md#b2-app-server-进程插件)，§9.3）；`pluginFiles`（扩展），含二进制原子替换与格式版本（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；带隔离的 HostPlatform spawn（[HostPlatform](../../../architecture/rust-agent/plugins/HostPlatform.md)，隔离补充见 [overview 附录 B.1](../overview.md#b1-session-与分支-capability)）。
-**此处定义的契约：**类别与操作标识符；`modality` 设置文档中的默认值 key `modality.<category>` 与 `modality.<category>.<operation>`（Modality 自有；Provider 不持有任何 key）；`modalityAdapter` 与 `modalityTasks` 服务（[语言中立](../../adr/002-plugin-scope.md#d5-合同语言中立)，A.2 与 A.3；Rust 绑定见附录 G）；`modality` 设置文档及其 schema；任务记录与结果格式（格式版本 1）；`modality.*` 方法与 `modality.realtime.event` 通知。Provider 对模态一无所知；Modality 在适配器之外不了解任何提供方特有语义。
+**依赖的契约：**[方法](../contracts/session-boundary.md)契约（注册到 `managementMethods` 的命名空间、每次调用的进度接收器、绑定连接的通知）；按任务适配器查找（[#861](https://github.com/arcships/dim/issues/861)，§9.1）；Provider 的模型选择（`ResolveModelSelection::resolve`，拒绝不可选的显式模型；[AuxiliaryModel](../appserver/auxiliary-model.md)）、用于选项列表的可选模型读取（§9.2），以及每个适配器操作与实时会话所需的非对话连接解析（[overview 附录 B.2](../overview.md#b2-app-server-进程插件)，§9.3）；`pluginFiles`（扩展），含二进制原子替换与格式版本（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；带隔离的 HostPlatform spawn（[HostPlatform](../../../architecture/rust-agent/plugins/HostPlatform.md)，隔离补充见 [overview 附录 B.1](../overview.md#b1-session-与分支-capability)）。
+**此处定义的契约：**类别与操作标识符；`modality` 设置文档中的默认值 key `modality.<category>` 与 `modality.<category>.<operation>`（Modality 自有；Provider 不持有任何 key）；`modalityAdapter` 与 `modalityTasks` 服务（[语言中立](../../adr/002-plugin-scope.md#d5-合同语言中立)，A.2 与 A.3；Rust 绑定见附录 G）；`modality` 设置文档及其 schema；任务记录与结果格式（格式版本 1）；`modality.*` 方法与 `modality.realtime.event`、`modality.realtime.ended` 通知。Provider 对模态一无所知；Modality 在适配器之外不了解任何提供方特有语义。
 
 ## 2. 数据与状态
 
@@ -62,7 +62,7 @@ flowchart TB
   subgraph MEM["Modality 内存（不持久化）"]
     Idx["client_task_id 索引"]
     Run["运行中的工作：令牌、轮询循环、子进程"]
-    RT["实时连接：所属连接 id"]
+    RT["实时会话：connection_id、所属连接、channel"]
     Av["按类别与维度的可用性快照"]
   end
   Mod["Modality"] -->|"在每任务锁下原子替换"| Rec
@@ -147,16 +147,17 @@ sequenceDiagram
   participant A as Adapter
   C->>R: modality.realtime.open
   R->>D: 携带连接通知接收器调用
-  D->>A: realtime(connection, params, cancel)
-  A-->>D: channel
-  D-->>C: connection_id
+  D->>A: realtimeOpen(connection, params, cancel)
+  A-->>D: channel、transport、connection?
+  D-->>C: { connection_id, transport, connection? }
   C->>R: modality.realtime.send 帧
   A-->>D: 提供方事件
   D-->>C: modality.realtime.event 通知，仅发往发起连接
   C->>R: modality.realtime.close
+  D-->>C: modality.realtime.ended 通知 { connection_id, reason }
 ```
 
-连接在以下情况关闭：`close`、发起它的客户端连接结束、空闲 10 分钟后（A9）、Modality 重载、进程退出。它没有任务记录，也从不恢复。
+会话在以下情况结束：`close`；发起它的客户端连接结束，此时静默结束，因为已无处可写；提供方结束它；`direct` 连接的 `expires_at` 到期；连续 10 分钟既无 `send` 也无提供方事件（A9）；Modality 卸载，尽力以 `unloaded` 上报；以及进程退出。慢客户端会被传输的持有额度断开，其会话随之结束。会话没有任务记录、从不持久化，也不会在守护进程重启后恢复。帧有上限：`send` 的数据解码后超过 1 MiB 以 `invalid_input` 失败且会话保持打开，而提供方消息超过适配器的上限时会话以 `ended {reason: "error"}` 结束。每个进程至多四个会话；超过时 `open` 在任何提供方调用之前以 `realtime_limit` 失败。来自非发起连接的 `send` 与 `close` 以 `not_found` 拒绝。
 
 ### 3.4 Capability 列表与默认模型
 
@@ -219,7 +220,7 @@ sequenceDiagram
 | `modality.capabilities` | 管理方法 | 每个类别与操作，含可用性原因、可选选项、已持久化的默认值、生效模型与设置 revision |
 | `modality.configure` | 管理方法 | 先校验，再在 Modality 的 `modality` 设置文档中设置或清除一个操作默认值（所有者写入，Settings CAS）；返回新快照 |
 | `modality.task.submit/status/list/wait/cancel/result` | 管理方法 | 任务生命周期；分块二进制结果取回 |
-| `modality.realtime.open/send/close`、`modality.realtime.event` | 管理方法及绑定连接的通知 | 实时连接 |
+| `modality.realtime.open/send/close`、`modality.realtime.event`、`modality.realtime.ended` | 管理方法及绑定连接的通知 | 实时会话 |
 | `modalityTasks` | 进程服务，无 key | 与任务方法相同的操作，供其他进程插件使用 |
 | `modalityAdapter` | 进程服务，key 为适配器名；[#861](https://github.com/arcships/dim/issues/861) 落地后按任务按名解析，图像切片在此之前每次调用读取单个进程服务（§9.1） | 由提供方执行的类别 |
 | `modality` 设置文档 | 业务配置（Settings 来源，schema 由 Modality 声明，经 Settings 类型化操作写入） | 操作默认值、每节点 OCR 组件路径、上限；使用时读取 |
@@ -319,12 +320,12 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `audio` | `audio` | `generate` | 提示词 | 音频文件 | Provider | `modality.audio` |
 | `asset` | `asset` | `generate` | 提示词、可选图像 | 3D 文件 | Provider | `modality.asset` |
 | `motion` | `motion` | `generate` | 提示词 | 动作数据文件 | Provider | `modality.motion` |
-| `realtime` | `realtime` | `connect` | — | 连接 | Provider | `modality.realtime` |
+| `realtime` | `realtime` | `voice`、`transcribe`、`avatar` | — | 会话 | Provider | `modality.realtime` |
 | `ocr` | `ocr` | `recognize` | 图像或 PDF | `data: { pages: [{ index, text }] }` 加 `text.txt` | 宿主运行时组件 | 无；每节点组件路径在 `modality` 设置文档中 |
 
 图像理解是图像类别中的一个操作，其默认值由 Modality 解析（`modality.image.understand`）。它的使用方是 Session 图像理解路径（附件与 `read`，见 [WorkspaceTools §read results and images](../../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images)）；该路径尚未读取该默认值，因此 §9.4 中 Agent/Prompt 的需求必须先落地，默认值才会改变运行时使用的模型。在此之前，理解这一行只解析与显示。图像操作使用按操作的 key，本设计中不设类别回退；其他类别先解析按操作的 key，再解析类别 key（A3）。输入之外的操作参数由各适配器声明，并在提交时校验（A4）。
 
-操作的规范能力 id 是 `<category>.<operation>`，例如 `image.generate` 与 `realtime.connect`；Provider 的 `modalityCapabilities` 声明使用同一组字符串，快照携带这两个字段而不再重复 id。不存在别名（`image.read` 不是别名），实时子调用也没有 id：`open`、`send`、`close` 与 `event` 是方法，`realtime.connect` 是唯一的实时能力。
+操作的规范能力 id 是 `<category>.<operation>`，例如 `image.generate` 与 `realtime.voice`；Provider 的 `modalityCapabilities` 声明使用同一组字符串，快照携带这两个字段而不再重复 id。不存在别名（`image.read` 不是别名），实时子调用也没有 id：`open`、`send`、`close` 与 `event` 是方法，`realtime.voice`、`realtime.transcribe` 与 `realtime.avatar` 是实时能力。本构建通过内置适配器服务 `realtime.voice`；另外两个以 `adapter` 维度上报，其 detail 指名该操作，例如 “No available adapter serves realtime.transcribe”。
 
 ### A.2 适配器与 OCR 节点
 
@@ -337,13 +338,13 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `submit` | 异步 | `{ job: Job, connection: ResolvedConnection }` | `{ remote_handle? }` |
 | `wait` | 异步 | `{ task_id, remote_handle?, connection }`；进度以该调用上的 `{ fraction?, message? }` 通知送达 | `{ files: [{ name, media_type, path }], data? }`；`path` 位于作业的工作目录内 |
 | `cancelRemote` | 异步 | `{ remote_handle, connection }` | `{ outcome: "cancelled" \| "unsupported" \| "already_finished" }` |
-| `realtimeOpen` | 异步 | `{ connection, params }`；提供方事件以该调用上的 `{ channel_id, event }` 通知送达，直到关闭 | `{ channel_id } \| null`（不支持） |
-| `realtimeSend` | 异步 | `{ channel_id, frame }` | `{}` |
+| `realtimeOpen` | 异步 | `{ connection, params }`；提供方事件以该调用上的 `{ channel_id, event }` 通知送达，直到关闭 | `{ channel_id, transport, connection? }`；`transport` 为 `relay` 或 `direct`，`connection` 是 `direct` 会话的短期提供方材料 `{ kind, url?, token?, offer?, ice_servers?, expires_at? }` |
+| `realtimeSend` | 异步 | `{ channel_id, frame: { kind: "text" \| "audio" \| "control", data } }` | `{}` |
 | `realtimeClose` | 异步 | `{ channel_id }` | `{}` |
 
-`Job` 为 `{ task_id, category, operation, model: {providerId, modelId}, params, files: [{ name, media_type, path }], work_dir }`。内联输入的 `path` 是 Modality 存放在 `modality/tasks/<task_id>/input/<name>` 的文件的绝对路径；通过 `node_path` 给出的输入记录 Modality 得到的规范路径（最后一个组件不得是链接；更早的链接会被解析），Modality 只读取一次以取得 `bytes` 与 `sha256`，从不复制，执行方就地读取。`work_dir` 是任务的 `modality/tasks/<task_id>/work` 目录，调用前创建；每个结果文件解析为其中的普通文件。`ResolvedConnection` 是 Provider 非对话连接解析返回的数据形态（`kind`、`provider_id`、`model`、端点与凭据材料），每次调用传入，从不存储或记录日志。
+`Job` 为 `{ task_id, category, operation, model: {providerId, modelId}, params, files: [{ name, media_type, path }], work_dir }`。内联输入的 `path` 是 Modality 存放在 `modality/tasks/<task_id>/input/<name>` 的文件的绝对路径；通过 `node_path` 给出的输入记录 Modality 得到的规范路径（最后一个组件不得是链接；更早的链接会被解析），Modality 只读取一次以取得 `bytes` 与 `sha256`，从不复制，执行方就地读取。`work_dir` 是任务的 `modality/tasks/<task_id>/work` 目录，调用前创建；每个结果文件解析为其中的普通文件。`ResolvedConnection` 是 Provider 非对话连接解析返回的数据形态（`kind`、`provider_id`、`model`、端点与凭据材料，以及 `realtime.*` 用途下目录条目的 `realtime: { protocol, path }` 声明），每次调用传入，从不存储或记录日志。该声明是 Provider 对条目 `metadata.raw.realtime` 的读取；条目未声明的模型，以及从不携带它的配置模型 profile，会在适配器被调用之前以 `unavailable` 拒绝，消息为 “The model declares no realtime transport”。中继从连接的 base URL、声明的 `path` 与模型 id 组合出套接字地址，因此路径由目录条目声明，从不推导。
 
-产品内置适配器是 `dim-modality-aimux` crate：aimux 的词汇留在适配器内部。它服务 `image.generate`、`image.edit`、`video.generate`、`speech.synthesize` 与 `speech.transcribe`，按目录提供方 id 绑定。凡是其媒体模型由某个 aimux 厂商包执行的内建目录提供方都有一行（openai、google、xai、grok-build、elevenlabs、fal、deepgram、assemblyai、cartesia、gladia、groq、replicate、stability-ai、recraft、black-forest-labs、luma-ai、runway、kling、hume-ai、mistral-ai、rev-ai），每行只服务其包实际实现的操作。`image.edit` 只由读取编辑输入字节的包服务：openai、google、fal、replicate、black-forest-labs 会读取；stability-ai、recraft、luma-ai 只服务 `image.generate`；包对某个模型报告不接受文件输入时，该模型也不提供 edit。xAI 的图像模型因该包回答 `NoSuchModel` 而报 `adapter`，其转录与合成模型则被服务。自建提供方的 id 是规范 UUID，不匹配任何行，因此其媒体操作报 `adapter` 原因，`configure` 也以该原因拒绝其模型。其他 A.1 类别（音乐、音频、3D 资产、动作、实时）没有对应行，保持 `build` 原因。内建目录没有为 Amazon Bedrock 声明任何媒体模型，因此 Bedrock 连接不服务媒体操作。安装后 `available` 即为 true；服务范围按模型由 `operations` 回答，端点不可达是某次调用的失败，而不是能力。视频是唯一可恢复的操作：`submit` 把提供方的操作引用存为句柄，`wait` 轮询它并把结果流式写入文件，因此重启恢复同一作业而不会重新发起；开始后一小时仍未结束的作业以 `provider_error` 失败，避免永不结束的作业一直占用调度槽位。该上限同样约束在途的状态请求与两次轮询之间的等待，因此挂起的请求会在截止时失败，而不是跑满连接更长的超时。aimux 对已启动的视频作业不提供取消，因此 `cancelRemote` 回答 `unsupported`，提供方作业会在其一侧跑完并计费。输出文件的媒体类型从返回字节读取，提供方返回与请求不同的格式时，按实际返回记录。
+产品内置适配器是 `dim-modality-aimux` crate：aimux 的词汇留在适配器内部。它服务 `image.generate`、`image.edit`、`video.generate`、`speech.synthesize` 与 `speech.transcribe`，按目录提供方 id 绑定；并对任何条目声明了 openai-realtime 传输的模型服务 `realtime.voice`，因为实时会话由连接构建，而不是由厂商行决定。中继以连接的 base URL 加声明的路径和作为查询的模型 id 连接，`http` 与 `https` 变为 `ws` 与 `wss`；它发送连接的头部与 bearer、经连接的代理连接、在套接字处以 1 MiB 限制一条提供方消息、把文本帧写成 JSON 并把音频帧写成解码后的字节，并在提供方关闭、套接字失败或十秒内写不出一帧时结束会话。它不承载控制帧——控制帧属于 `direct` 传输。凡是其媒体模型由某个 aimux 厂商包执行的内建目录提供方都有一行（openai、google、xai、grok-build、elevenlabs、fal、deepgram、assemblyai、cartesia、gladia、groq、replicate、stability-ai、recraft、black-forest-labs、luma-ai、runway、kling、hume-ai、mistral-ai、rev-ai），每行只服务其包实际实现的操作。`image.edit` 只由读取编辑输入字节的包服务：openai、google、fal、replicate、black-forest-labs 会读取；stability-ai、recraft、luma-ai 只服务 `image.generate`；包对某个模型报告不接受文件输入时，该模型也不提供 edit。xAI 的图像模型因该包回答 `NoSuchModel` 而报 `adapter`，其转录与合成模型则被服务。自建提供方的 id 是规范 UUID，不匹配任何行，因此其媒体操作报 `adapter` 原因，`configure` 也以该原因拒绝其模型。其他 A.1 类别（音乐、音频、3D 资产、动作）没有对应行，保持 `build` 原因。内建目录没有为 Amazon Bedrock 声明任何媒体模型，因此 Bedrock 连接不服务媒体操作。安装后 `available` 即为 true；服务范围按模型由 `operations` 回答，端点不可达是某次调用的失败，而不是能力。视频是唯一可恢复的操作：`submit` 把提供方的操作引用存为句柄，`wait` 轮询它并把结果流式写入文件，因此重启恢复同一作业而不会重新发起；开始后一小时仍未结束的作业以 `provider_error` 失败，避免永不结束的作业一直占用调度槽位。该上限同样约束在途的状态请求与两次轮询之间的等待，因此挂起的请求会在截止时失败，而不是跑满连接更长的超时。aimux 对已启动的视频作业不提供取消，因此 `cancelRemote` 回答 `unsupported`，提供方作业会在其一侧跑完并计费。输出文件的媒体类型从返回字节读取，提供方返回与请求不同的格式时，按实际返回记录。
 
 `available` 在不重载的情况下报告运行时可用性（例如提供方端点不可达）。若某个操作的可用适配器都不服务已配置或显式指定的模型，则报告为“no adapter for the configured model”，其提交以 `unavailable` 失败。`image.understand` 不是适配器操作：它由一个可选的视觉模型服务，且只做选择。OCR 不是适配器：对每个任务，Modality 使用目标节点的 HostPlatform（缺失或不可用：`node_unavailable`），探测 `modality` 设置文档为该节点给出的 OCR 组件路径，并在那里 spawn 它；离线的对端节点使调用以 `node_unavailable` 失败，且不发生任何重载（§3.2）。`wait` 以 `task_id` 指名它等待的作业；当 `submit` 返回了 `remote_handle` 时，适配器可以改用它。带已存储 `remote_handle` 的 `wait` 必须能在新一代中工作；不返回句柄的适配器以 `task_id` 记录自己进行中的工作，且仅限同一代内，因此无法恢复。
 
@@ -361,10 +362,13 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `modality.task.wait` | `{ task_id, timeout_ms? (≤600000, default 600000) }` | 终态时或超时时返回 `{ task }`（超时不是错误）；进度通过该调用的进度接收器 |
 | `modality.task.cancel` | `{ task_id }` | `{ task }`；幂等 |
 | `modality.task.result` | `{ task_id, name, offset, length (≤4 MiB) }` | `{ data_base64, eof }` |
-| `modality.realtime.open` | `{ model?, params }` | `{ connection_id }` |
-| `modality.realtime.send` | `{ connection_id, frame: { type: "text" \| "audio" \| "control", data } }` | `{}` |
-| `modality.realtime.close` | `{ connection_id }` | `{}` |
-| `modality.realtime.event` | 通知 `{ connection_id, event }` | 仅发往发起连接 |
+| `modality.realtime.open` | `{ operation, model?, params }`；`params` 按适配器的 schema 校验，中继的 schema 不接受任何字段 | `{ connectionId, transport, connection? }`；仅 `direct` 带 `connection` |
+| `modality.realtime.send` | `{ connectionId, frame: { kind: "text" \| "audio" \| "control", data } }` | `{}` |
+| `modality.realtime.close` | `{ connectionId }` | `{}` |
+| `modality.realtime.event` | 通知 `{ connectionId, event }` | 仅发往发起连接 |
+| `modality.realtime.ended` | 通知 `{ connectionId, reason: "closed" \| "provider" \| "expired" \| "idle" \| "unloaded" \| "error" }` | 仅发往发起连接 |
+
+`open` 像任务一样解析模型（显式 → `modality.realtime` 默认值 → 自动），要求有可用适配器为该模型服务该操作，计入进程的会话数，解析连接并拒绝没有 `realtime` 声明的模型，之后才调用适配器。会话属于发起它的连接：来自其他连接的 `send` 与 `close`，以及二者对未知 id 的调用，都以 `not_found` 答复。对已结束会话的 `close` 同样以 `not_found` 答复。每个 `realtime.*` 操作都不是任务：`modality.task.submit` 以 `modality_unknown_operation` 答复，因为会话没有可存储的记录。
 
 默认快照是两个方法共同返回的唯一形态。模型引用是 `{providerId, modelId}`；原因是 `{dimension: "build" | "platform" | "runtime" | "adapter" | "configuration" | "provider", detail}`，`detail` 是所有者提供的英文展示文本，客户端从不解析、也不翻译。
 
@@ -391,11 +395,11 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 - `revision` 是 `modality` 设置文档的 revision；一次 CAS 覆盖该文档中的全部操作 key，因此对某个操作的 `configure` 也会让持有其他操作草稿的客户端失效。只有 `configure` 使用它。
 - `default` 是已持久化的选择或 `null`。模型不再可选、或没有可用适配器服务它时（对 `image.understand`，是它不是可选的视觉模型时），`available` 为 `false`，`reason` 说明原因。
 - `effective` 是该操作能运行之后，任务或使用方现在会使用的模型：即使操作本身 `available: false`（本构建没有适配器），它仍从选项解析，客户端因此无需分辨哪部分属于设置、哪部分属于运行时。默认值可用时就是默认值。`default` 为 `null` 时它是自动解析：Provider 的全局默认选择可选且服务该操作时用它，否则用 Provider 可选模型读取顺序中第一个可选的、服务该操作的模型；`source` 为 `"automatic"`。不可用的默认值给出 `effective: null`，从不替换成别的模型。
-- `options` 列出服务该操作的模型。候选来自 Provider 的非会话读取（`selectableForModality`，§9.2），因此被执行拒绝的媒体模型——非 chat 模型，或未声明文本上限的模型——只要其目录条目声明了该操作就是候选。对 `generate`、`edit` 与 `enhance`，由可用适配器决定哪些候选服务哪个操作：选项是 Provider 两次读取的去重并集，先执行可选的模型、后已声明的模型，各自按读取顺序，并保留适配器的 `operations` 为该操作服务的那些。对 `image.understand`，改由可选的视觉模型服务，取自 Provider 的 `vision` 能力。当没有适配器服务该操作的类别时，适配器不收窄任何候选，选项是其 Provider 目录条目声明了该 `<category>.<operation>` id 的模型，按 Provider 的顺序；没有任何声明的操作选项为空。所有者从 Provider 的已声明能力计算候选，客户端不自行推导。当前默认值不再是选项时也会列出，并标注原因。所有者读取时从 Provider 的只读契约（§9.2）与可用适配器计算它们。选项只带 `{providerId, modelId, available, reason?}`：读取返回 id 与能力，不返回展示名，因此客户端按 `{providerId, modelId}` 从它已有的 Provider 列表或目录读取中并入名字，取不到名字时显示 id。
+- `options` 列出服务该操作的模型。候选来自 Provider 的非会话读取（`selectableForModality`，§9.2），因此被执行拒绝的媒体模型——非 chat 模型，或未声明文本上限的模型——只要其目录条目声明了该操作就是候选。对 `generate`、`edit` 与 `enhance`，由可用适配器决定哪些候选服务哪个操作：选项是 Provider 两次读取的去重并集，先执行可选的模型、后已声明的模型，各自按读取顺序，并保留适配器的 `operations` 为该操作服务的那些。对 `image.understand`，改由可选的视觉模型服务，取自 Provider 的 `vision` 能力。对实时操作，选项是其条目声明了该 `<category>.<operation>` id 的模型，按 Provider 的顺序：会话适配器收到的正是条目声明的传输，因此条目本身就是逐模型答案；声明了操作但没有传输的模型由 `open` 以 `unavailable` 拒绝。当没有适配器服务该操作的类别时，适配器不收窄任何候选，选项是其 Provider 目录条目声明了该 `<category>.<operation>` id 的模型，按 Provider 的顺序；没有任何声明的操作选项为空。所有者从 Provider 的已声明能力计算候选，客户端不自行推导。当前默认值不再是选项时也会列出，并标注原因。所有者读取时从 Provider 的只读契约（§9.2）与可用适配器计算它们。选项只带 `{providerId, modelId, available, reason?}`：读取返回 id 与能力，不返回展示名，因此客户端按 `{providerId, modelId}` 从它已有的 Provider 列表或目录读取中并入名字，取不到名字时显示 id。
 - `configure` 先校验操作以及模型在该操作的可选选项中（对 `image.understand`，可选视觉支持），再经 Settings 的所有者写入以 CAS 写入或清除该操作 key。它接受任何有默认 key 的 A.1 操作，且从不答复 `modality_unavailable`：配置是设置写入，不是运行时断言。未知类别或操作、以及操作没有默认 key 的 OCR，答复 `modality_unknown_operation`；操作有自己的 key 时（image、speech）`operation` 必填，只有按类别划分 key 的类别可以省略。`model: null` 清除该 key；清除即恢复自动解析；缺少 `model` 为 `invalid_params`。写入在回复发出之前完成，因此成功即表示默认值已持久化，且该回复与紧随其后的 `modality.capabilities` 读到的一致（除非 Provider 在此期间变化）。
 - 可配置性与可用性是两个不同的属性：前者属于设置，后者属于运行时。已持久化的默认值可以指向本构建不能运行的操作的模型；快照通过保持该操作的 `available: false` 及其 `build` 或 `adapter` 原因保持诚实，而 `effective` 仍在选项上解析（默认值可用时用默认值，否则自动解析），客户端因此无需自行实现解析。
 
-边界校验：每次提交的内联输入合计至多 8 MiB，更大的输入使用 `node_path`——控制节点上已存在普通文件的绝对路径，最后一个组件不得是链接（更早的链接会被解析）；读取前先将其长度与 100 MiB 提交预算的剩余量比较，记录的是规范路径，执行方在该路径读取，Modality 从不复制；每次提交的输入文件合计至多 100 MiB（A5）。媒体类型遵循 A.1 的输入列：图像操作接受 `image/*`，视频操作接受 `image/*` 与 `video/*`，`speech.transcribe` 接受 `audio/*`，`asset` 接受 `image/*`；输入不指名文件的操作拒绝文件。每个文件名是单个组件、合法的 pluginFiles 名称，且在提交内互不相同。`node` 对提供方类别以 `invalid_input` 拒绝，否则默认为控制节点（A15）。参数在提交时按适配器的 `params_schema` 校验；非法参数以 `invalid_input` 失败且不写入任何内容。模型选择：显式 `model`；否则操作默认值；否则自动解析；否则 `no_default_model`。不可选的显式模型以 `model_unavailable` 失败，不可用的默认值以 `default_unavailable` 失败，解析出的模型没有可用适配器服务时以 `unavailable` 失败；都不回退到其他模型。解析出的模型固定在记录中。`image.understand` 与 `realtime.connect` 不是任务：为它们提交会以 `modality_unknown_operation` 失败。`ocr.recognize` 在本构建中不是适配器任务，以 `modality_unavailable` 及其 `build` 原因失败。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
+边界校验：每次提交的内联输入合计至多 8 MiB，更大的输入使用 `node_path`——控制节点上已存在普通文件的绝对路径，最后一个组件不得是链接（更早的链接会被解析）；读取前先将其长度与 100 MiB 提交预算的剩余量比较，记录的是规范路径，执行方在该路径读取，Modality 从不复制；每次提交的输入文件合计至多 100 MiB（A5）。媒体类型遵循 A.1 的输入列：图像操作接受 `image/*`，视频操作接受 `image/*` 与 `video/*`，`speech.transcribe` 接受 `audio/*`，`asset` 接受 `image/*`；输入不指名文件的操作拒绝文件。每个文件名是单个组件、合法的 pluginFiles 名称，且在提交内互不相同。`node` 对提供方类别以 `invalid_input` 拒绝，否则默认为控制节点（A15）。参数在提交时按适配器的 `params_schema` 校验；非法参数以 `invalid_input` 失败且不写入任何内容。模型选择：显式 `model`；否则操作默认值；否则自动解析；否则 `no_default_model`。不可选的显式模型以 `model_unavailable` 失败，不可用的默认值以 `default_unavailable` 失败，解析出的模型没有可用适配器服务时以 `unavailable` 失败；都不回退到其他模型。解析出的模型固定在记录中。`image.understand` 与每个 `realtime.*` 操作都不是任务：为它们提交会以 `modality_unknown_operation` 失败。`ocr.recognize` 在本构建中不是适配器任务，以 `modality_unavailable` 及其 `build` 原因失败。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
 
 ### A.4 任务记录（`pluginFiles`（扩展），格式版本 1）
 
@@ -430,7 +434,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `dimcode modality task list\|status\|wait\|cancel` | 任务方法；`wait --out <path>` 取回结果 |
 | `dimcode image generate\|edit\|enhance`、`video`、`speech synthesize\|transcribe`、`music`、`audio`、`asset`、`motion` | 提交；8 MiB 以内的输入内联发送，更大的用 `node_path`；默认等待并将结果写到 `--out` 或当前目录；`--no-wait` 打印 id；`--json` 打印记录 |
 | `dimcode ocr <file> [--node <id>]` | 提交 `ocr.recognize`；打印文本 |
-| `dimcode realtime` | 打开连接，将 stdin 行作为文本帧转发，打印事件 |
+| `dimcode realtime [--operation <operation>] [--model <provider>/<model>]` | `realtime.open`，`params` 为 `{}`；将 stdin 行作为 text 帧转发，事件与 `ended` 打印为 JSON 行，EOF 或 Ctrl+C 时关闭；`direct` 回复打印其 connection 并保持（[CLI 命令](../cli-commands.md#realtime-会话)） |
 
 调用不可用的类别时打印与列表相同的原因。前台等待期间第一次 Ctrl+C 停止等待并打印任务 id；任务继续（A8）。
 
@@ -481,6 +485,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 | `no_default_model` | 无显式模型、无操作默认值，且自动解析没有找到可服务的模型 |
 | `default_unavailable` | 已持久化的操作默认值不再可选；清除或替换它 |
 | `model_unavailable` | 显式模型不可选 |
+| `realtime_limit` | 每个进程至多四个实时会话；关闭一个后重试 |
 | `modality_conflict` | 设置 revision 已过期；重新读取后重试 |
 | `modality_invalid_selection` | 模型不可经 Provider 选择、没有可用适配器服务该操作，或 `image.understand` 指定的模型没有视觉能力；回复带原因 |
 | `modality_unknown_operation` | 未知操作或默认值 key |
@@ -508,7 +513,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 7. 重启：宿主任务 `interrupted`；有句柄的提供方任务恢复且不发生第二次 `submit`；无句柄的 `interrupted`；`queued` 的 `interrupted`。
 8. 适配器重载与移除：Modality 从不随适配器重载。在 [#861](https://github.com/arcships/dim/issues/861) 落地前，单个进程服务按调用读取，因此重载或移除适配器插件只影响适配器操作；卸载中断的运行中调用使其任务 `interrupted`。落地后，按适配器名按任务解析：适配器被移除且已配置的默认值指向其模型时，`modality.capabilities` 报告“no adapter for the configured model”，其他操作保持可用。
 9. 在控制节点和第二个节点上运行 OCR；该节点离线时只有其任务以 `node_unavailable` 失败，且不重载 Modality 或 Rpc。
-10. 实时：事件只到达发起连接；断开连接和空闲超时时关闭。
+10. 实时：会话以 `{ connectionId, transport }` 打开，把文本、音频与控制帧转发给适配器，并且只向发起连接发送提供方事件；它在 `close`、发起连接结束、提供方结束、`direct` 连接的 `expires_at` 到期、空闲上限与卸载时结束，各有自己的 `ended` 原因；超过上限的帧以 `invalid_input` 拒绝且会话保持打开；第五个会话以 `realtime_limit` 失败；其他连接的 `send` 与 `close` 为 `not_found`；没有声明的模型在适配器被调用之前使 `open` 失败；每个 `realtime.*` 提交都是 `modality_unknown_operation`。
 11. 任何 Session 中都不出现 Timeline 事件、工具声明或输入。
 12. 修改 `modality` 设置文档（操作默认值、OCR 路径、上限）在下次使用时生效，无需重载 Modality。
 13. 禁用或删除默认模型、其 Provider 或其适配器会使 `default.available` 为 false 并带原因；对任务操作，提交以 `default_unavailable` 失败；清除默认值恢复自动解析；没有其他操作被禁用。
@@ -564,6 +569,25 @@ pub enum RemoteCancel { Cancelled, Unsupported, AlreadyFinished }
 pub struct AdapterProgress { pub fraction: Option<f64>, pub message: Option<String> }
 pub struct ProgressSink(Arc<dyn Fn(AdapterProgress) + Send + Sync>);
 
+pub struct RealtimeFrame { pub kind: RealtimeFrameKind, pub data: Value }
+pub enum RealtimeFrameKind { Text, Audio, Control }
+pub enum RealtimeTransport { Relay, Direct }
+pub struct RealtimeConnection {
+    pub kind: String,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub offer: Option<Value>,
+    pub ice_servers: Option<Value>,
+    pub expires_at: Option<String>,
+}
+pub struct RealtimeOpened {
+    pub channel_id: String,
+    pub transport: RealtimeTransport,
+    pub connection: Option<RealtimeConnection>,
+}
+pub enum RealtimeEvent { Event(Value), Ended(RealtimeEnd) }
+pub enum RealtimeEnd { Provider, Error(String) }
+
 pub trait ModalityAdapter: Send + Sync + 'static {
     fn available(&self) -> bool;
     fn operations(&self, model: &ModelId) -> Vec<AdapterOperation>;
@@ -573,10 +597,16 @@ pub trait ModalityAdapter: Send + Sync + 'static {
         progress: ProgressSink, cancel: CancellationToken) -> AdapterFuture<'_, AdapterOutput>;
     fn cancel_remote(&self, handle: &str, connection: ModalityConnection)
         -> AdapterFuture<'_, RemoteCancel>;
+    fn realtime_open(&self, connection: ModalityConnection, params: Value,
+        events: mpsc::Sender<RealtimeEvent>, cancel: CancellationToken)
+        -> AdapterFuture<'_, RealtimeOpened>;
+    fn realtime_send(&self, channel_id: &str, frame: RealtimeFrame, cancel: CancellationToken)
+        -> AdapterFuture<'_, ()>;
+    fn realtime_close(&self, channel_id: &str) -> AdapterFuture<'_, ()>;
 }
 ```
 
-A.2 中的实时操作映射到实时方法，随它们一起绑定。在 Rust 中注册以 `TypeKey::named("modalityAdapter")` 提供 `ModalityAdapter`，以适配器名作为实例 key。适配器如何注册与发现，遵循 [#40](https://github.com/arcships/dim/issues/40) 决定并由 [#861](https://github.com/arcships/dim/issues/861) 跟踪的按任务查找；本附录只绑定各操作。
+A.2 中的实时操作映射到实时方法，随它们一起绑定：适配器通过 `events` 上报事件，提供方关闭会话时上报 `Ended(Provider)`，协议失败时上报 `Ended(Error(message))`；该消息只记录日志，从不写入连接。对 Modality 结束的每个会话，Modality 都会调用 `realtime_close`，上限五秒；适配器无法完成时丢弃该会话。在 Rust 中注册以 `TypeKey::named("modalityAdapter")` 提供 `ModalityAdapter`，以适配器名作为实例 key。适配器如何注册与发现，遵循 [#40](https://github.com/arcships/dim/issues/40) 决定并由 [#861](https://github.com/arcships/dim/issues/861) 跟踪的按任务查找；本附录只绑定各操作。
 
 Modality 自身的 `managementMethods` 使用[方法](../contracts/session-boundary.md)契约的绑定。`modalityTasks` 服务由同一实现以 `TypeKey::named("modalityTasks")` 提供，每个 `modality.task.*` 声明对应一个方法，请求与回复类型相同：
 

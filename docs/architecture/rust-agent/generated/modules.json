@@ -3950,6 +3950,33 @@
       ]
     },
     {
+      "id": "dim_cli::realtime_command",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/realtime_command.rs",
+      "unexpandedMacros": [
+        "eprintln",
+        "json",
+        "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_cli::realtime_command::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::realtime_command",
+      "file": "crates/dim-cli/src/realtime_command.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "json",
+        "matches",
+        "panic",
+        "tokio::join",
+        "vec",
+        "writeln"
+      ]
+    },
+    {
       "id": "dim_cli::recording",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -6176,7 +6203,9 @@
       "crate": "dim_modality",
       "parent": "dim_modality",
       "file": "crates/dim-modality/src/adapter.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "format"
+      ]
     },
     {
       "id": "dim_modality::engine",
@@ -6188,6 +6217,17 @@
         "json",
         "tokio::select",
         "tracing::warn"
+      ]
+    },
+    {
+      "id": "dim_modality::realtime",
+      "crate": "dim_modality",
+      "parent": "dim_modality",
+      "file": "crates/dim-modality/src/realtime.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::select"
       ]
     },
     {
@@ -24901,6 +24941,7 @@
         "path ModelNetwork::default",
         "path ModelSelectionHost",
         "path ProviderConnectionResolver",
+        "path RealtimeDeclaration",
         "path RecoverModelConnection",
         "path RecoveredModelConnection",
         "path ResolveModalityConnection",
@@ -28689,6 +28730,7 @@
         "path Action::Migration",
         "path Action::Models",
         "path Action::Plugin",
+        "path Action::Realtime",
         "path Action::Recording",
         "path Action::RuntimeConfig",
         "path Action::RuntimeInstall",
@@ -28962,6 +29004,14 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::realtime_command",
+      "references": [
+        "mod realtime_command",
+        "path realtime_command::run"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::recording",
       "references": [
         "mod recording",
@@ -29227,6 +29277,7 @@
       "from": "dim_cli::args::workspace_tests",
       "to": "dim_cli::args",
       "references": [
+        "path Action::Realtime",
         "path Options::parse",
         "path Workspace::resolve"
       ]
@@ -32139,6 +32190,85 @@
       "references": [
         "path History",
         "use crate::session::History"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command",
+      "to": "dim_cli::plugins",
+      "references": [
+        "path Signals::listen",
+        "use crate::plugins::Signals"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command",
+      "to": "dim_cli::realtime_command::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path Message",
+        "path Message::Notice",
+        "path Message::Response",
+        "path dim_client::Result",
+        "use crate::client::Client",
+        "use crate::client::Message"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command::tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "path Options::parse"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command::tests",
+      "to": "dim_cli::realtime_command",
+      "references": [
+        "path run_with"
+      ]
+    },
+    {
+      "from": "dim_cli::realtime_command::tests",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path Client::open",
+        "path ConnectionConfig",
+        "path Server",
+        "use dim_client::ConnectionConfig",
+        "use dim_client::Server"
       ]
     },
     {
@@ -43165,6 +43295,13 @@
         "use adapter::JobFile",
         "use adapter::ModalityAdapter",
         "use adapter::ProgressSink",
+        "use adapter::RealtimeConnection",
+        "use adapter::RealtimeEnd",
+        "use adapter::RealtimeEvent",
+        "use adapter::RealtimeFrame",
+        "use adapter::RealtimeFrameKind",
+        "use adapter::RealtimeOpened",
+        "use adapter::RealtimeTransport",
         "use adapter::RemoteCancel",
         "use adapter::Submitted"
       ]
@@ -43185,6 +43322,8 @@
         "path TaskSubmit",
         "path TaskWait",
         "path engine::Shared::new",
+        "path not_found",
+        "path unavailable",
         "use engine::Clock",
         "use engine::DEFAULT_LIST_LIMIT",
         "use engine::MAX_INLINE_BYTES",
@@ -43205,7 +43344,28 @@
         "use engine::TaskResultReply",
         "use engine::TaskStatus",
         "use engine::TaskSubmit",
-        "use engine::TaskWait"
+        "use engine::TaskWait",
+        "use engine::not_found",
+        "use engine::unavailable"
+      ]
+    },
+    {
+      "from": "dim_modality",
+      "to": "dim_modality::realtime",
+      "references": [
+        "mod realtime",
+        "path Realtime::new",
+        "path RealtimeLimits",
+        "path RealtimeLimits::default",
+        "path realtime",
+        "path realtime::RealtimeClose",
+        "path realtime::RealtimeOpen",
+        "path realtime::RealtimeSend",
+        "use realtime::DEFAULT_FRAME_BYTES",
+        "use realtime::DEFAULT_IDLE",
+        "use realtime::DEFAULT_SESSIONS",
+        "use realtime::Realtime",
+        "use realtime::RealtimeLimits"
       ]
     },
     {
@@ -43301,6 +43461,7 @@
         "path catalog_category",
         "path crate::OperationRow",
         "path crate::evaluate",
+        "path crate::is_realtime",
         "path crate::unknown_operation",
         "path is_understand",
         "use crate::Evaluation",
@@ -43313,12 +43474,14 @@
       "from": "dim_modality::engine",
       "to": "dim_modality::adapter",
       "references": [
+        "path AdapterOperation",
         "path AdapterOutput",
         "path AdapterProgress",
         "path Job",
         "path JobFile",
         "path ProgressSink::new",
         "path RemoteCancel",
+        "use crate::adapter::AdapterOperation",
         "use crate::adapter::AdapterOutput",
         "use crate::adapter::AdapterProgress",
         "use crate::adapter::Job",
@@ -43379,6 +43542,92 @@
         "use crate::task::TaskResult",
         "use crate::task::TaskState",
         "use crate::task::Write"
+      ]
+    },
+    {
+      "from": "dim_modality::realtime",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModalityConnection",
+        "path ModalityConnectionHost",
+        "path ModalityTarget",
+        "use dim_agent_capabilities::host::ModalityConnection",
+        "use dim_agent_capabilities::host::ModalityConnectionHost",
+        "use dim_agent_capabilities::host::ModalityTarget"
+      ]
+    },
+    {
+      "from": "dim_modality::realtime",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Caller",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::reloading",
+        "use dim_agent_capabilities::methods::Caller",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_modality::realtime",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_modality::realtime",
+      "to": "dim_modality",
+      "references": [
+        "path ModalityAdapterService",
+        "path catalog_category",
+        "path crate::OperationRow",
+        "path crate::host_error",
+        "path evaluate",
+        "path unknown_operation",
+        "use crate::ModalityAdapterService",
+        "use crate::catalog_category",
+        "use crate::evaluate",
+        "use crate::unknown_operation"
+      ]
+    },
+    {
+      "from": "dim_modality::realtime",
+      "to": "dim_modality::adapter",
+      "references": [
+        "path AdapterError",
+        "path AdapterErrorCode::InvalidInput",
+        "path AdapterErrorCode::ProviderError",
+        "path AdapterErrorCode::Unavailable",
+        "path RealtimeConnection",
+        "path RealtimeEvent",
+        "path RealtimeFrame",
+        "path RealtimeTransport",
+        "use crate::adapter::AdapterError",
+        "use crate::adapter::AdapterErrorCode",
+        "use crate::adapter::RealtimeConnection",
+        "use crate::adapter::RealtimeEnd",
+        "use crate::adapter::RealtimeEvent",
+        "use crate::adapter::RealtimeFrame",
+        "use crate::adapter::RealtimeTransport"
+      ]
+    },
+    {
+      "from": "dim_modality::realtime",
+      "to": "dim_modality::engine",
+      "references": [
+        "path Shared",
+        "path crate::engine::check_spec_params",
+        "path invalid_input",
+        "path not_found",
+        "path resolve_task_model",
+        "path unavailable",
+        "use crate::engine::Shared",
+        "use crate::engine::invalid_input",
+        "use crate::engine::not_found",
+        "use crate::engine::resolve_task_model",
+        "use crate::engine::unavailable"
       ]
     },
     {

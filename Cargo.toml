@@ -22,7 +22,7 @@ dim-agent-aimux = { path = "crates/dim-agent-aimux" }
 dim-agent-attachments = { path = "crates/dim-agent-attachments" }
 dim-agent-questions = { path = "crates/dim-agent-questions" }
 aimux-core = { path = "vendor/aimux/aimux-core" }
-aimux-provider-utils = { path = "vendor/aimux/aimux-provider-utils" }
+aimux-provider-utils = { path = "vendor/aimux/aimux-provider-utils", features = ["ws"] }
 aimux-providers = { path = "vendor/aimux/aimux-providers", default-features = false }
 dim-app-server = { path = "crates/dim-app-server" }
 dim-session-title = { path = "crates/dim-session-title" }
