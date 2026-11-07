@@ -51,10 +51,10 @@ use dim_app_server::{
     settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
 };
 pub use engine::{
-    Clock, DEFAULT_LIST_LIMIT, MAX_INLINE_BYTES, MAX_LIST_LIMIT, MAX_RESULT_BYTES,
-    MAX_RUNNING_PER_CATEGORY, MAX_SUBMISSION_BYTES, MAX_WAIT_MS, ModalityTasks, NoPreflightHook,
-    PROGRESS_INTERVAL, PreflightHook, SystemClock, TaskCancel, TaskInput, TaskList, TaskListReply,
-    TaskReply, TaskResultQuery, TaskResultReply, TaskStatus, TaskSubmit, TaskWait,
+    ArtifactHook, Clock, DEFAULT_LIST_LIMIT, MAX_INLINE_BYTES, MAX_LIST_LIMIT, MAX_RESULT_BYTES,
+    MAX_RUNNING_PER_CATEGORY, MAX_SUBMISSION_BYTES, MAX_WAIT_MS, ModalityTasks, NoArtifactHook,
+    PROGRESS_INTERVAL, SystemClock, TaskCancel, TaskInput, TaskList, TaskListReply, TaskReply,
+    TaskResultQuery, TaskResultReply, TaskStatus, TaskSubmit, TaskWait,
 };
 use engine::{not_found, unavailable};
 use realtime::Realtime;
@@ -1166,7 +1166,7 @@ impl DynPlugin for ModalityPlugin {
                 ctx.clone(),
                 self.options.clock.clone(),
                 self.options.ocr_helper.clone(),
-                self.options.preflight.clone(),
+                self.options.artifact.clone(),
             ));
             let tasks = Arc::new(ModalityTasks::new(shared.clone()));
             let task_handle = tasks.clone();
@@ -1396,10 +1396,10 @@ pub struct InstallOptions {
     /// with the hidden `ocr-helper` subcommand. `None` starts none, and the
     /// host targets are absent from the snapshot.
     pub ocr_helper: Option<PathBuf>,
-    /// The seam between a host call's artifact size check and its copy; the
-    /// product's does nothing. A test injects one to change a work file in
-    /// that window.
-    pub preflight: Arc<dyn PreflightHook>,
+    /// The seam between one host artifact's size check and its copy; the
+    /// product's does nothing. A test injects one to change that work file in
+    /// the window.
+    pub artifact: Arc<dyn ArtifactHook>,
 }
 impl Default for InstallOptions {
     fn default() -> Self {
@@ -1407,7 +1407,7 @@ impl Default for InstallOptions {
             clock: Arc::new(SystemClock),
             realtime: RealtimeLimits::default(),
             ocr_helper: None,
-            preflight: Arc::new(NoPreflightHook),
+            artifact: Arc::new(NoArtifactHook),
         }
     }
 }
