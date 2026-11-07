@@ -593,7 +593,11 @@ flowchart LR
   m589["dim_migration::source"]
   m590["dim_migration::terminal"]
   m591["dim_modality"]
-  m592["dim_session_title"]
+  m592["dim_modality::adapter"]
+  m593["dim_modality::engine"]
+  m594["dim_modality::task"]
+  m595["dim_modality::task::tests"]
+  m596["dim_session_title"]
   m0 --> m1
   m0 -.-> m2
   m0 -.-> m3
@@ -4013,20 +4017,40 @@ flowchart LR
   m591 --> m166
   m591 --> m169
   m591 --> m226
+  m591 --> m233
   m591 --> m240
   m591 --> m259
+  m591 --> m592
+  m591 --> m593
+  m591 --> m594
   m592 --> m58
-  m592 --> m68
-  m592 --> m85
-  m592 --> m87
-  m592 --> m124
-  m592 --> m126
-  m592 --> m136
-  m592 --> m138
-  m592 --> m158
-  m592 --> m160
   m592 --> m169
-  m592 --> m259
-  m592 --> m260
-  m592 --> m273
-  m592 --> m276
+  m593 --> m48
+  m593 --> m58
+  m593 --> m68
+  m593 --> m169
+  m593 --> m233
+  m593 --> m259
+  m593 --> m591
+  m593 --> m592
+  m593 --> m594
+  m594 --> m169
+  m594 --> m233
+  m594 --> m592
+  m594 -.-> m595
+  m595 --> m594
+  m596 --> m58
+  m596 --> m68
+  m596 --> m85
+  m596 --> m87
+  m596 --> m124
+  m596 --> m126
+  m596 --> m136
+  m596 --> m138
+  m596 --> m158
+  m596 --> m160
+  m596 --> m169
+  m596 --> m259
+  m596 --> m260
+  m596 --> m273
+  m596 --> m276
