@@ -155,6 +155,27 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 
 删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构后执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和。`VACUUM` 重写整个库，需要约等于库大小的临时空间；守护进程持锁时该命令拒绝执行，也不升级或创建库。
 
+### `storage.report` 与维护边界
+
+`storage.report {}` → `{databaseBytes, walBytes, reclaimableBytes}`，三个都是整数。前两项是库文件与 WAL 当前的字节数；`reclaimableBytes` 是空闲页（`freelist_count × page_size`），也就是一次离线 `VACUUM` 会还回去的空间。协议不暴露页大小、页数或空闲页数，它们是存储引擎的内部。`StorageMethods` 注册命名空间 `storage`，建立在 `SqliteStorage` 提供的服务之上，与 `SettingsMethods` 建立在 Settings 之上同形；所以没有原生存储的宿主根本不注册这一行，该名字就是 `unknown_method`；正在关闭的库以 `storage_unavailable` 作答，说明它已关闭。
+
+压缩仍然只有离线入口，客户端按这个次序编排：`daemon.shutdown` → `dimcode --home <home> daemon vacuum`（它自己解析该 home 的库）→ 重新启动。持锁的库继续以既有错误拒绝（`another process owns the SQLite database`）。不能在守护进程服务 Session 时就地 `VACUUM`：它重写整个库、需要约等于库大小的临时空间，任何一个持页的读者都会让它失败，而守护进程常驻四个只读连接，期间所有 Session 停写。
+
+**不提供跨 owner 的 `scan`／`clean`。** 读由拥有状态的部件作答（[ADR 021](../../adr/021-reads-follow-the-state-owner.md) D1、D5）：这样一个扫描会去遍历 RuntimeManager 的 `<home>/runtimes`、PluginManager 的 `<home>/plugins`、model-log 与每个插件的 `pluginFiles` 目录，正是 ADR 021 Context 描述的"同一份规则两处实现"；而且它做不全——用 `--database` 启动时守护进程没有 home，`pluginFiles` 根也可能是宿主显式命名的目录。删除别人的数据同样不行：别的 owner 的状态由它自己的类型化写操作改（[设计规则 §4 第 1、7 条](../../architecture/rust-agent/principles.md)），[Session 清理 §5.1](session-deletion-and-fork.md#51-cleanup-by-age-or-count) 已在更小的场景里否决过服务端的 `session.cleanup`。`expectedRevision` 也没有对象：App Server 不给"类别清单"编版本。
+
+每个类别由它自己的 owner 答复：
+
+| 类别 | owner 的答复 |
+| --- | --- |
+| Session 行、Session 文件、命令输出 | `session.summaries` + `session.delete` 由客户端组合（[§5.1](session-deletion-and-fork.md#51-cleanup-by-age-or-count)）；Session 文件由 SessionStore 的 sweep 清扫，命令输出在删除提交前移除 |
+| 库内空闲页 | `storage.report` 读出，离线 `daemon vacuum` 回收 |
+| 插件 clone 与 `.staging` | PluginManager 的启动清理；remove 故意不删目录 |
+| 插件私有文件 | 每个插件自己的保留策略（例如 Modality 的 30 天、200 个终态任务） |
+| 不再使用的运行时版本 | RuntimeManager 的旧版本清理（[RuntimeManager](../plugins/RuntimeManager.md#0-implementation-boundary) §0 的 Later 行） |
+| legacy home | 不是 App Server 的状态：Migration 只在导入时临时加载，导入后保留来源 |
+
+**验证**：`transport_flow` 的 `storage_report_counts_the_pages_the_offline_vacuum_returns` 建一个 Session 再删除，`reclaimableBytes > 0`；停机跑 `--vacuum` 后重启，`reclaimableBytes == 0` 且 `databaseBytes` 变小。`storage_report_needs_native_storage` 在没有原生存储的 profile 上得到 `unknown_method`，`hello.features` 也不列它。
+
 ## Current v34 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。

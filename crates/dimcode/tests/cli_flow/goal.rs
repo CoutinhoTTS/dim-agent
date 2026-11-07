@@ -360,6 +360,7 @@ fn tui_goal_set_is_released_by_a_daemon_that_publishes_the_old_keys() {
         "the command was released at the returned sequence: {}",
         terminal.transcript
     );
+    terminal.until("\n> ");
     terminal.write(b"/exit\n");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
