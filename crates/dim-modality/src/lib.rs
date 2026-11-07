@@ -493,6 +493,20 @@ pub(crate) async fn plugin_target_state(
     let Some(service) = ctx.get_at::<dyn HostDispatch>(&host_key("ocrHelper")) else {
         return PluginTargetState::Absent;
     };
+    // The declared kind decides how the call would run before it is made
+    // (A.2.1): only `async` never blocks the calling thread. A `describe`
+    // declared with another kind is a package that does not implement this
+    // contract's `async` method, and an update is the honest reason; a
+    // service that declares no `describe` method is not this contract's
+    // service.
+    match service.methods() {
+        Some(methods) => match methods.get("describe").and_then(|kind| kind.as_str()) {
+            Some("async") => {}
+            Some(_) => return PluginTargetState::Outdated,
+            None => return PluginTargetState::Absent,
+        },
+        None => return PluginTargetState::Absent,
+    }
     let Ok(reply) = service.invoke("describe", ServiceValue::List(Vec::new())) else {
         return PluginTargetState::Absent;
     };

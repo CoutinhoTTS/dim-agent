@@ -4684,14 +4684,23 @@ const PP_OCR_MODEL: &str = "pp-ocr";
 #[derive(Clone, Default)]
 struct OcrHelperFixture {
     description: Arc<Mutex<Option<Value>>>,
+    /// The service's declared method kinds, as `HostDispatch::methods`
+    /// returns them.
+    declared: Arc<Mutex<Value>>,
     describes: Arc<AtomicUsize>,
     replies: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
 }
 impl OcrHelperFixture {
     fn new(description: Option<Value>) -> Self {
+        Self::declaring(description, json!({"describe": "async"}))
+    }
+    /// A fixture whose service declares `declared` — `{ method: kind }`, as a
+    /// manifest's `provides` entry does.
+    fn declaring(description: Option<Value>, declared: Value) -> Self {
         Self {
             description: Arc::new(Mutex::new(description)),
+            declared: Arc::new(Mutex::new(declared)),
             describes: Default::default(),
             replies: Arc::new(AtomicUsize::new(usize::MAX)),
             dropped: Default::default(),
@@ -4725,7 +4734,7 @@ impl Drop for PendingRead {
 }
 impl HostDispatch for OcrHelperFixture {
     fn methods(&self) -> Option<Value> {
-        Some(json!({"describe": "async"}))
+        Some(self.declared.lock().unwrap().clone())
     }
     fn invoke(&self, method: &str, _args: ServiceValue) -> Reply {
         assert_eq!(method, "describe", "the fixture serves one method");
@@ -5154,6 +5163,59 @@ async fn ocr_plugin_target_with_an_older_contract_is_unavailable() {
     assert_eq!(
         refused["error"]["message"], "The PP-OCR plugin is not running",
         "{refused}"
+    );
+}
+
+/// A service that declares `describe` sync is never called: it reads as
+/// needing an update, so the target is listed unavailable and a submission
+/// fails with that reason. The kind is checked before the call, so a package
+/// built against the old form cannot block a thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ocr_plugin_target_declaring_describe_sync_needs_an_update() {
+    let home = home("dm-ocr-plugin");
+    let plugin = plugin_copy(&home, "pp-ocr-plugin", "plugin-copy");
+    let fixture = OcrHelperFixture::declaring(
+        Some(ocr_description(
+            1,
+            std::path::Path::new("/bin/sh"),
+            &[plugin.join("stub.sh")],
+            &[&plugin],
+        )),
+        json!({"describe": "sync"}),
+    );
+    let helper = fake_helper(&home);
+    let server = start_with_ocr_targets(home.clone(), Some(helper), fixture.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let snapshot = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&snapshot);
+    let recognize = operation_in(&snapshot, "ocr", "recognize");
+    let plugin_option = recognize["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["modelId"] == PP_OCR_MODEL)
+        .unwrap_or_else(|| panic!("the outdated target is still listed: {recognize}"));
+    assert_eq!(plugin_option["available"], false, "{recognize}");
+    assert_eq!(
+        plugin_option["reason"],
+        json!({"dimension": "runtime", "detail": "The PP-OCR plugin needs an update"}),
+        "{recognize}"
+    );
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            plugin_ocr_submit("scan.png", "text"),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "unavailable", "{refused}");
+    assert_eq!(
+        refused["error"]["message"], "The PP-OCR plugin needs an update",
+        "{refused}"
+    );
+    assert_eq!(
+        fixture.describes(),
+        0,
+        "a service declaring describe sync is never called"
     );
 }
 

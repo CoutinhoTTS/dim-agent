@@ -68,7 +68,7 @@ runtime/plugins/light-ocr/
 - `args` 是 `[<插件目录>/helper.cjs]`，绝对路径。Modality 只追加 `--input`、`--artifacts` 与 `--output-mode`，别无其他。
 - `read` 是经 `fs.realpathSync` 解析的 Node 安装根目录与插件目录——分别对可执行文件与插件目录解析——因此符号链接的 `node`（包管理器的 `bin` 链接）授权的是二进制真正所在的目录。Modality 把任务输入加入这些路径，使 helper 能加载自己的脚本与 `node_modules`、平台包中的 Node addon，以及输入。
 
-行从不自己执行 OCR 来回应请求，也从不检查输入。`describe` 声明为 `async`，因此发起调用从不阻塞调用方；Modality 限定等待时长，停止应答的行按缺席读取（Modality §A.2.1）。它在进程生命周期内返回相同的值；Modality 可以在每个任务上调用它。
+行从不自己执行 OCR 来回应请求，也从不检查输入。`describe` 声明为 `async`，因此发起调用从不阻塞调用方；Modality 在调用前读取声明的类型，从不调用声明为其他类型的 `describe`，并把该目标读作需要更新（Modality §A.2.1）。Modality 限定等待时长，停止应答的行按缺席读取。它在进程生命周期内返回相同的值；Modality 可以在每个任务上调用它。
 
 ## 4. helper
 
@@ -190,7 +190,7 @@ HostPlatform 的 `spawn_confined` 与 `Confinement` 已存在；本插件对它�
   "name": "light-ocr",
   "version": "<插件版本>",
   "description": "Local PP-OCR for Modality through light-ocr",
-  "code": { "entry": "index.ts", "provides": { "ocrHelper": { "call": "sync" } } },
+  "code": { "entry": "index.ts", "provides": { "ocrHelper": { "describe": "async" } } },
   "dependencies": "npm"
 }
 ```

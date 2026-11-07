@@ -68,7 +68,7 @@ Service `ocrHelper`, scope process, no key, provided by the `light-ocr` row's `p
 - `args` is `[<plugin directory>/helper.cjs]`, an absolute path. Modality appends `--input`, `--artifacts` and `--output-mode` and nothing else.
 - `read` is the canonical Node installation root and the canonical plugin directory, each derived through `fs.realpathSync` — of the executable and of the plugin directory — so a symlinked `node` (a package manager's `bin` link) grants the directory the binary really lives in. Modality adds the task's input to these paths, so the helper can load its own script and `node_modules`, the Node addon in the platform package, and the input.
 
-The row never answers a request by doing OCR itself and never inspects the input. `describe` is declared `async`, so starting it never blocks the caller; Modality bounds its wait, and a row that stops answering reads as absent (Modality §A.2.1). It returns the same value for the life of the process; Modality may call it on every task.
+The row never answers a request by doing OCR itself and never inspects the input. `describe` is declared `async`, so starting it never blocks the caller; Modality reads the declared kind before calling, never calls a `describe` declared with any other kind, and reads that target as needing an update (Modality §A.2.1). Modality bounds its wait, and a row that stops answering reads as absent. It returns the same value for the life of the process; Modality may call it on every task.
 
 ## 4. The helper
 
@@ -190,7 +190,7 @@ HostPlatform's `spawn_confined` with `Confinement` already exists; this plugin a
   "name": "light-ocr",
   "version": "<plugin version>",
   "description": "Local PP-OCR for Modality through light-ocr",
-  "code": { "entry": "index.ts", "provides": { "ocrHelper": { "call": "sync" } } },
+  "code": { "entry": "index.ts", "provides": { "ocrHelper": { "describe": "async" } } },
   "dependencies": "npm"
 }
 ```
