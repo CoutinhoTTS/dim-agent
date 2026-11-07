@@ -673,7 +673,7 @@ connection one non-conversational call uses, so an adapter holds no Provider
 credential and reads no Provider record. It is a second process host port beside
 `ProviderConnectionResolver`, not a management method: operation
 `resolveModalityConnection`, asynchronous, request `{target: {providerId,
-modelId}, operation: string}`, reply `{connection, protocol, model}`.
+modelId}, operation: string}`, reply `{connection, protocol, model, realtime}`.
 
 `connection` is the existing `ResolvedModelConnection` a chat call to the same
 model would get — the connection facts, the failure policy and, on a managed
@@ -699,6 +699,18 @@ the stored reason together with the entry's status: an `unavailable` status
 excludes every use whatever reason was stored, so a record an older projection
 wrote for such a model is listed by neither read and leases nothing.
 
+**Realtime declaration.** An entry that serves a realtime operation declares the
+transport it speaks in `metadata.raw.realtime: {protocol, path}`. Provider parses
+it into `RealtimeDeclaration` and carries it on the connection reply as
+`realtime`; an entry that declares none replies `null`, and the configured model
+profile replies `null` for every target, because a model file has no catalog
+entry. The operation is still declared in `metadata.raw.modalityCapabilities`
+with every other one, so a model that lists `realtime.voice` without a transport
+resolves a connection whose `realtime` is `null`: Modality refuses that model's
+`open` before any network call instead of guessing a URL. `protocol` is the
+adapter's name for the wire protocol it accepts, and `path` is appended to the
+route's base URL by that adapter.
+
 **Credential rule and lifetime.** The connection lives for that one call. Provider
 never persists it, never returns it to a client and never writes it to a task
 record, result, diagnostic or error. Its `Debug` prints the model, the route, the
@@ -719,7 +731,8 @@ carrying the model identity and the operation. Provider provides it in
 model file, whose entries declare no operation and therefore answer every target
 with the declaration refusal. The App Server catalog registers the Rust-only name
 `modalityConnectionHost`. The reply reuses `ResolvedModelConnection` and
-`ModelProtocol`; it adds no credential type.
+`ModelProtocol` and adds `RealtimeDeclaration`, the entry's declared transport;
+it adds no credential type.
 
 ### 3.7 Offline validation of a stored selection
 
