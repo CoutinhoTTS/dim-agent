@@ -46,6 +46,8 @@ pub struct ModelFailureFacts {
     /// Set only when the provider asked to wait longer than the budget left,
     /// which is why the request stopped.
     pub retry_after_stop: Option<std::time::Duration>,
+    /// The failure policy forbids retrying this failure.
+    pub retry_forbidden: bool,
 }
 impl ModelFailureFacts {
     /// A failure from a host with no provider boundary: nothing is known
@@ -64,6 +66,7 @@ impl ModelFailureFacts {
             attempts: 1,
             waited: std::time::Duration::ZERO,
             retry_after_stop: None,
+            retry_forbidden: false,
         }
     }
 }

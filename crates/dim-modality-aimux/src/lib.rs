@@ -371,22 +371,33 @@ impl MediaAdapter {
         });
         let deadline = handle.started_at.saturating_add(MAX_VIDEO_WAIT.as_secs());
         let result = loop {
-            if now() >= deadline {
+            // The hour bounds the provider settling the job, including a status
+            // request in flight and the wait between polls: the connection's
+            // own timeout may be longer than what is left.
+            let remaining = deadline.saturating_sub(now());
+            if remaining == 0 {
                 return Err(AdapterError::provider_error(
                     "the provider did not finish the job within 1 hour",
                 ));
             }
-            let status = model
-                .do_status(&handle.operation, &options)
-                .await
-                .map_err(|error| failure(error, &cancel, &secrets))?;
+            let status = tokio::time::timeout(
+                Duration::from_secs(remaining),
+                model.do_status(&handle.operation, &options),
+            )
+            .await
+            .map_err(|_| {
+                AdapterError::provider_error("the provider did not finish the job within 1 hour")
+            })?
+            .map_err(|error| failure(error, &cancel, &secrets))?;
             match status {
                 VideoOperationStatus::Pending => {
                     tokio::select! {
                         _ = cancel.cancelled() => {
                             return Err(AdapterError::provider_error("The job was cancelled"));
                         }
-                        _ = tokio::time::sleep(VIDEO_POLL_INTERVAL) => {}
+                        _ = tokio::time::sleep(
+                            VIDEO_POLL_INTERVAL.min(Duration::from_secs(remaining)),
+                        ) => {}
                     }
                 }
                 VideoOperationStatus::Completed(result) => break result,
