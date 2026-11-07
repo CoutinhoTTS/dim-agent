@@ -43,9 +43,9 @@ use dim_app_server::{
 };
 pub use engine::{
     Clock, DEFAULT_LIST_LIMIT, MAX_INLINE_BYTES, MAX_LIST_LIMIT, MAX_RESULT_BYTES,
-    MAX_RUNNING_PER_CATEGORY, MAX_SUBMISSION_BYTES, MAX_WAIT_MS, ModalityTasks, PROGRESS_INTERVAL,
-    SystemClock, TaskCancel, TaskInput, TaskList, TaskListReply, TaskReply, TaskResultQuery,
-    TaskResultReply, TaskStatus, TaskSubmit, TaskWait,
+    MAX_RUNNING_PER_CATEGORY, MAX_SUBMISSION_BYTES, MAX_WAIT_MS, ModalityTasks, NoPreflightHook,
+    PROGRESS_INTERVAL, PreflightHook, SystemClock, TaskCancel, TaskInput, TaskList, TaskListReply,
+    TaskReply, TaskResultQuery, TaskResultReply, TaskStatus, TaskSubmit, TaskWait,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -1062,12 +1062,14 @@ pub struct ModalityPlugin {
     files: Key<PluginFileTransactions>,
     clock: Arc<dyn Clock>,
     ocr_helper: Option<PathBuf>,
+    preflight: Arc<dyn PreflightHook>,
 }
 impl ModalityPlugin {
     pub fn new(
         names: &Names<'_>,
         clock: Arc<dyn Clock>,
         ocr_helper: Option<PathBuf>,
+        preflight: Arc<dyn PreflightHook>,
     ) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
@@ -1077,6 +1079,7 @@ impl ModalityPlugin {
             files: names.key()?,
             clock,
             ocr_helper,
+            preflight,
         })
     }
 }
@@ -1111,6 +1114,7 @@ impl DynPlugin for ModalityPlugin {
                 ctx.clone(),
                 self.clock.clone(),
                 self.ocr_helper.clone(),
+                self.preflight.clone(),
             ));
             let tasks = Arc::new(ModalityTasks::new(shared.clone()));
             let task_handle = tasks.clone();
@@ -1296,12 +1300,17 @@ pub struct InstallOptions {
     /// with the hidden `ocr-helper` subcommand. `None` starts none, and the
     /// host targets are absent from the snapshot.
     pub ocr_helper: Option<PathBuf>,
+    /// The seam between a host call's artifact size check and its copy; the
+    /// product's does nothing. A test injects one to change a work file in
+    /// that window.
+    pub preflight: Arc<dyn PreflightHook>,
 }
 impl Default for InstallOptions {
     fn default() -> Self {
         Self {
             clock: Arc::new(SystemClock),
             ocr_helper: None,
+            preflight: Arc::new(NoPreflightHook),
         }
     }
 }
@@ -1323,6 +1332,7 @@ pub fn install_with(builder: &mut AgentBuilder, options: InstallOptions) {
             names,
             options.clock.clone(),
             options.ocr_helper.clone(),
+            options.preflight.clone(),
         )?) as Box<dyn DynPlugin>)
     });
 }
