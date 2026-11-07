@@ -309,7 +309,7 @@ impl Runtimes {
                     directory.join("uv")
                 }
             }
-            Source::System => which("uv").unwrap_or_else(|| root.join("no-system-uv")),
+            Source::System => which("uv", search).unwrap_or_else(|| root.join("no-system-uv")),
         };
         let uv_plan = Plan {
             source: uv.0,
