@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
+    ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -116,6 +117,11 @@ pub struct Runtimes {
     /// The home the configuration was read from, kept so an action can read it
     /// again (§2.2).
     home: PathBuf,
+    /// The search path a `system` runtime resolves on, an embedding host's
+    /// input like the home: `None` reads the process `PATH` at each lookup,
+    /// and a host that gives one keeps its lookups out of the process
+    /// environment. Production leaves it `None`.
+    search_path: Option<OsString>,
     preset: Choices,
     node: Plan,
     python: Plan,
@@ -136,7 +142,11 @@ pub type Choices = BTreeMap<String, Choice>;
 impl Runtimes {
     /// The runtimes of `home`: the default configuration file's `preset`,
     /// overridden by `<home>/runtimes/config.json`.
-    pub fn load(home: &Path, preset: &Choices) -> Result<Self, String> {
+    pub fn load(
+        home: &Path,
+        preset: &Choices,
+        search_path: Option<OsString>,
+    ) -> Result<Self, String> {
         let root = home.join("runtimes");
         let user_file = root.join("config.json");
         let user = match std::fs::read(&user_file) {
@@ -162,6 +172,7 @@ impl Runtimes {
             home,
             root,
             preset.clone(),
+            search_path,
             choice(Kind::Node),
             choice(Kind::Python),
             choice(Kind::Uv),
@@ -173,19 +184,21 @@ impl Runtimes {
     /// the environment at that moment instead of at startup. `runtime.list`
     /// keeps reporting the runtime in effect until such an action runs.
     pub fn reload(&self) -> Result<Self, String> {
-        Self::load(&self.home, &self.preset)
+        Self::load(&self.home, &self.preset, self.search_path.clone())
     }
 
     fn new(
         home: &Path,
         root: PathBuf,
         preset: Choices,
+        search_path: Option<OsString>,
         node: (Source, bool),
         python: (Source, bool),
         uv: (Source, bool),
     ) -> Result<Self, String> {
         let pins: Pins = serde_json::from_str(PINS).expect("runtime/runtimes.json is valid");
         let platform = platform();
+        let search = search_path.as_deref();
         let mirror = |variable: &str| std::env::var(variable).ok().filter(|v| !v.is_empty());
         let sources = |pin: &Pin, variable: &str| {
             mirror(variable)
@@ -232,7 +245,7 @@ impl Runtimes {
                     directory.join("bin/node")
                 }
             }
-            Source::System => which("node").unwrap_or_else(|| root.join("no-system-node")),
+            Source::System => which("node", search).unwrap_or_else(|| root.join("no-system-node")),
         };
         let python_archive = archive(
             &pins.python,
@@ -251,7 +264,7 @@ impl Runtimes {
             }
             Source::System => {
                 let name = if cfg!(windows) { "python" } else { "python3" };
-                which(name).unwrap_or_else(|| root.join("no-system-python"))
+                which(name, search).unwrap_or_else(|| root.join("no-system-python"))
             }
         };
         let node_plan = Plan {
@@ -311,6 +324,7 @@ impl Runtimes {
         Ok(Self {
             root,
             home: home.to_owned(),
+            search_path,
             preset,
             node: node_plan,
             python: python_plan,
@@ -368,13 +382,17 @@ fn platform() -> String {
     format!("{os}-{arch}")
 }
 
-fn which(program: &str) -> Option<PathBuf> {
+fn which(program: &str, search: Option<&OsStr>) -> Option<PathBuf> {
     let file = if cfg!(windows) {
         format!("{program}.exe")
     } else {
         program.to_owned()
     };
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|directory| {
+    let path = match search {
+        Some(path) => path.to_owned(),
+        None => std::env::var_os("PATH")?,
+    };
+    std::env::split_paths(&path).find_map(|directory| {
         let candidate = directory.join(&file);
         // An entry may be relative, or empty for the current directory
         // (§5). Resolve it lexically, so every caller gets the absolute
