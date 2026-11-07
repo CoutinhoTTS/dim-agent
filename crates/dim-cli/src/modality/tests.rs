@@ -523,6 +523,34 @@ fn the_command_lines_parse_to_their_commands() {
         }
         _ => panic!("--clear did not parse"),
     }
+    assert!(matches!(
+        command(&["modality", "task", "list"]),
+        Some(Command::TaskList)
+    ));
+    match command(&["modality", "task", "status", "task-1"]) {
+        Some(Command::TaskStatus { task_id }) => assert_eq!(task_id, "task-1"),
+        _ => panic!("task status did not parse"),
+    }
+    match command(&["modality", "task", "wait", "task-2", "--out", "/tmp"]) {
+        Some(Command::TaskWait { task_id }) => assert_eq!(task_id, "task-2"),
+        _ => panic!("task wait did not parse"),
+    }
+    match command(&["modality", "task", "cancel", "task-3"]) {
+        Some(Command::TaskCancel { task_id }) => assert_eq!(task_id, "task-3"),
+        _ => panic!("task cancel did not parse"),
+    }
+    assert!(
+        Options::parse(raw(home.path(), &["modality", "task", "list", "--limit", "5"]).into_iter())
+            .is_ok()
+    );
+    assert!(
+        Options::parse(raw(home.path(), &["modality", "task", "list", "--limit", "x"]).into_iter())
+            .is_err()
+    );
+    assert!(
+        Options::parse(raw(home.path(), &["models", "openai", "--state", "running"]).into_iter())
+            .is_err()
+    );
     assert!(Options::parse(raw(home.path(), &["modality", "frobnicate"]).into_iter()).is_err());
     assert!(Options::parse(raw(home.path(), &["modality", "--json"]).into_iter()).is_ok());
     assert!(Options::parse(raw(home.path(), &["models", "openai", "--json"]).into_iter()).is_err());
@@ -853,6 +881,176 @@ async fn a_failed_task_exits_two_and_a_cancelled_task_exits_130() {
     let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 130);
     assert_eq!(stdout, "Cancelled task-7.\n");
+    script.join();
+}
+
+/// `task list` renders one row per task, asks with the flags it was given,
+/// and puts the page hint on stderr; `--json` is the reply unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_list_prints_rows_and_the_page_hint() {
+    let mut first = record("task-1", "running")["task"].clone();
+    first["created_at"] = json!("2026-11-07T00:00:02Z");
+    let mut second = record("task-2", "succeeded")["task"].clone();
+    second["created_at"] = json!("2026-11-07T00:00:01Z");
+    second["executor"] = json!({
+        "kind": "host",
+        "node": null,
+        "target": {"providerId": "local", "modelId": "apple-vision"},
+    });
+    let mut script = Script::start(move |wire| {
+        wire.hello(&[CAPABILITIES]);
+        let list = wire.frame();
+        assert_eq!(list["method"], "modality.task.list");
+        assert_eq!(
+            list["params"],
+            json!({"state": "running", "category": "image", "limit": 2, "after": "task-0"})
+        );
+        wire.reply(&list, json!({"tasks": [first, second], "next": "task-2"}));
+        let list = wire.frame();
+        assert_eq!(list["params"], json!({}));
+        wire.reply(&list, json!({"tasks": [], "next": null}));
+    });
+    let mut client = script.client().await;
+    let options = parse(
+        script.home(),
+        &[
+            "modality",
+            "task",
+            "list",
+            "--state",
+            "running",
+            "--category",
+            "image",
+            "--limit",
+            "2",
+            "--after",
+            "task-0",
+        ],
+    );
+    let (code, stdout, stderr) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        "ID\tSTATE\tOPERATION\tMODEL\tCREATED\n\
+         task-1\trunning\timage.generate\topenai/gpt-image-2\t2026-11-07T00:00:02Z\n\
+         task-2\tsucceeded\timage.generate\tlocal/apple-vision\t2026-11-07T00:00:01Z\n"
+    );
+    assert_eq!(stderr, "More: --after task-2\n");
+
+    let options = parse(script.home(), &["modality", "task", "list", "--json"]);
+    let (code, stdout, stderr) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout).unwrap(),
+        json!({"tasks": [], "next": null})
+    );
+    assert_eq!(stderr, "");
+    script.join();
+}
+
+/// `task status` prints the row, the progress and one line per result file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_status_prints_progress_and_files() {
+    let mut answered = succeeded("task-3", "image-1.png", 1234);
+    answered["task"]["progress"] = json!({"fraction": 0.5, "message": "Retrying"});
+    let mut script = Script::start(move |wire| {
+        wire.hello(&[CAPABILITIES]);
+        let status = wire.frame();
+        assert_eq!(status["method"], "modality.task.status");
+        assert_eq!(status["params"], json!({"task_id": "task-3"}));
+        wire.reply(&status, answered);
+    });
+    let mut client = script.client().await;
+    let options = parse(script.home(), &["modality", "task", "status", "task-3"]);
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        "ID\tSTATE\tOPERATION\tMODEL\tCREATED\n\
+         task-3\tsucceeded\timage.generate\topenai/gpt-image-2\t2026-11-07T00:00:00Z\n\
+         Progress: 50% Retrying\n\
+         Result: image-1.png\timage/png\t1234\n"
+    );
+    script.join();
+}
+
+/// `task wait` writes results only when `--out` names a directory; without
+/// it the state line is all it prints.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_wait_writes_only_with_out() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let wait = wire.frame();
+        assert_eq!(wait["method"], "modality.task.wait");
+        wire.reply(&wait, succeeded("task-4", "image-1.png", 5));
+        // No `modality.task.result` arrives: results are written only with
+        // `--out`, so a status check never litters the working directory.
+        assert!(wire.next_frame().is_none(), "the transfer must not start");
+    });
+    let mut client = script.client().await;
+    let options = parse(script.home(), &["modality", "task", "wait", "task-4"]);
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "Succeeded task-4.\n");
+    let out = tempfile::tempdir().unwrap();
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    drop(client);
+    script.join();
+
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let wait = wire.frame();
+        wire.reply(&wait, succeeded("task-5", "image-1.png", 5));
+        let result = wire.frame();
+        wire.reply(&result, json!({"data_base64": "aGVsbG8=", "eof": true}));
+    });
+    let mut client = script.client().await;
+    let options = parse(
+        script.home(),
+        &[
+            "modality",
+            "task",
+            "wait",
+            "task-5",
+            "--out",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        format!("{}\n", out.path().join("image-1.png").display())
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("image-1.png")).unwrap(),
+        b"hello"
+    );
+    script.join();
+}
+
+/// `task cancel` says `Cancelled` for a task it cancelled, and reports the
+/// state of one that was already terminal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_cancel_reports_the_state_it_found() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let cancel = wire.frame();
+        assert_eq!(cancel["method"], "modality.task.cancel");
+        assert_eq!(cancel["params"], json!({"task_id": "task-6"}));
+        wire.reply(&cancel, record("task-6", "cancelled"));
+        let cancel = wire.frame();
+        wire.reply(&cancel, record("task-7", "succeeded"));
+    });
+    let mut client = script.client().await;
+    let options = parse(script.home(), &["modality", "task", "cancel", "task-6"]);
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "Cancelled task-6.\n");
+    let options = parse(script.home(), &["modality", "task", "cancel", "task-7"]);
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "succeeded task-7 (unchanged).\n");
     script.join();
 }
 

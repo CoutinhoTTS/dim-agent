@@ -587,6 +587,16 @@ transfer stops the transfer, removes the partial file and exits 130, printing `S
 keeps its results. Fetch them with: dimcode modality task wait <id> --out <dir>`. A failed task
 prints its `code: message` and exits 2; a cancelled one exits 130.
 
+`dimcode modality task list [--state S] [--category C] [--limit N] [--after ID]` prints one page
+of tasks over `modality.task.list`, newest first, as `ID STATE OPERATION MODEL CREATED`; when the
+reply names a further page, `More: --after <id>` goes to stderr so stdout stays a table.
+`dimcode modality task status ID` prints the same row, then the task's progress, its error and one
+line per result file. `dimcode modality task wait ID [--out DIR]` is the submission's wait on its
+own: the task's results are written only when `--out` names a directory, so checking on a task
+never litters the working directory. `dimcode modality task cancel ID` reports the state the owner
+returned; an already-terminal task says it is unchanged. `--json` prints the reply unchanged for
+all four.
+
 ## Permission presets and approvals
 
 The App Server decides each tool call; the CLI selects settings and never decides a call itself.

@@ -115,6 +115,12 @@ Commands:\n\
                                    Set one operation's default model\n\
   modality set-default <category>[.<operation>] --clear\n\
                                    Clear it, restoring automatic resolution\n\
+  modality task list [--state S] [--category C] [--limit N] [--after ID]\n\
+                                   List Modality tasks, newest first\n\
+  modality task status ID          Print a task's state, progress and files\n\
+  modality task wait ID [--out DIR]\n\
+                                   Wait for a task; write its results with --out\n\
+  modality task cancel ID          Cancel a task\n\
   image generate|edit PROMPT [FILE...] [--mask PATH]\n\
   image enhance MODE [FILE...]     Submit an image task\n\
   video generate|edit|enhance PROMPT [FILE...]\n\
@@ -256,9 +262,12 @@ Exit codes: 0 success, 1 configuration/transport error, a delete that removed\n\
             already exists, 2 model/turn failure or a failed Modality task,\n\
             3 interactive approval or answer required, 130 interrupted.\n";
 
+/// What `dimcode modality task` names.
+const USAGE_TASK: &str = "Use modality task list | status ID | wait ID [--out DIR] | cancel ID";
+
 /// What `dimcode modality` names.
 const USAGE_MODALITY: &str = "Use modality, modality set-default \
-<category>[.<operation>] <provider>/<model> | --clear";
+<category>[.<operation>] <provider>/<model> | --clear, or modality task";
 
 /// What `dimcode session` names besides `export`.
 const USAGE_SESSION: &str =
@@ -450,6 +459,14 @@ pub struct ModalityFlags {
     pub out: Option<PathBuf>,
     /// `--no-wait`: stop after the submission and print the id.
     pub no_wait: bool,
+    /// `task list --state STATE`: one task state.
+    pub state: Option<String>,
+    /// `task list --category CATEGORY`: one category.
+    pub category: Option<String>,
+    /// `task list --limit N`: at most N tasks; the daemon's default otherwise.
+    pub limit: Option<u64>,
+    /// `task list --after ID`: the page after this task.
+    pub after: Option<String>,
 }
 
 #[derive(Clone)]
@@ -621,6 +638,46 @@ impl Options {
                         );
                     }
                 },
+                "--out" => {
+                    let Action::Modality(crate::modality::Command::TaskWait { .. }) =
+                        &options.action
+                    else {
+                        return Err("--out requires a submission or modality task wait".into());
+                    };
+                    options.modality.out = Some(PathBuf::from(value(&mut args)?));
+                }
+                "--state" => {
+                    let Action::Modality(crate::modality::Command::TaskList) = &options.action
+                    else {
+                        return Err("--state requires modality task list".into());
+                    };
+                    options.modality.state = Some(value(&mut args)?);
+                }
+                "--category" => {
+                    let Action::Modality(crate::modality::Command::TaskList) = &options.action
+                    else {
+                        return Err("--category requires modality task list".into());
+                    };
+                    options.modality.category = Some(value(&mut args)?);
+                }
+                "--limit" => {
+                    let Action::Modality(crate::modality::Command::TaskList) = &options.action
+                    else {
+                        return Err("--limit requires modality task list".into());
+                    };
+                    let limit = value(&mut args)?;
+                    options.modality.limit =
+                        Some(limit.parse().map_err(|_| {
+                            format!("--limit takes a number of tasks, not {limit}")
+                        })?);
+                }
+                "--after" => {
+                    let Action::Modality(crate::modality::Command::TaskList) = &options.action
+                    else {
+                        return Err("--after requires modality task list".into());
+                    };
+                    options.modality.after = Some(value(&mut args)?);
+                }
                 "--older-than" => {
                     let value = parse_age(&value(&mut args)?)?;
                     let Action::SessionCleanup { older_than, .. } = &mut options.action else {
@@ -859,6 +916,19 @@ impl Options {
                                 clear: false,
                             }
                         }
+                        Some("task") => match value(&mut args)?.as_str() {
+                            "list" => Command::TaskList,
+                            "status" => Command::TaskStatus {
+                                task_id: value(&mut args)?,
+                            },
+                            "wait" => Command::TaskWait {
+                                task_id: value(&mut args)?,
+                            },
+                            "cancel" => Command::TaskCancel {
+                                task_id: value(&mut args)?,
+                            },
+                            _ => return Err(USAGE_TASK.into()),
+                        },
                         Some(_) => return Err(USAGE_MODALITY.into()),
                     });
                 }

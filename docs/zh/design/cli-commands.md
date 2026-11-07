@@ -880,6 +880,8 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode modality [--json]` | 经 `modality.capabilities` 列出每个 Modality 类别与操作的表格（[Modality](plugins/Modality.md#a5-cli)）：可用性、owner 的 `dimension: detail` 原因行、默认与生效模型；`--json` 原样打印回复。守护进程不公布该方法时提示它不提供 Modality 并以 1 退出。 |
 | `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | 经 `modality.configure` 写入一个操作默认值：revision 取紧邻写入前读到的，`modality_conflict` 后重读并重试一次；`--clear` 发送 `model: null`；打印该操作的行，`--json` 下打印回复。 |
 | `dimcode image generate\|edit PROMPT [FILE...]`、`image enhance MODE [FILE...]`、`video generate\|edit\|enhance PROMPT [FILE...]`、`speech synthesize TEXT`、`speech transcribe FILE`、`music\|audio\|motion generate PROMPT`、`asset generate PROMPT [FILE...]` | 经 `modality.task.submit` 提交一个任务（[Modality](plugins/Modality.md#a5-cli)）：`--mask` 把 mask 作为名为 `params.mask` 的输入文件发送，`--param KEY=VALUE` 添加一个适配器参数（能解析为 JSON 时按 JSON，否则按字符串），输入整体不超过 8 MiB 时内联发送，超过则用 `node_path`。等待并把结果文件写到 `--out`（目录，默认 `.`），已有的文件绝不覆盖；`--no-wait` 打印 id，`--json` 打印记录。 |
+| `dimcode modality task list [--state S] [--category C] [--limit N] [--after ID]` | 经 `modality.task.list` 列出一页 Modality 任务（[Modality](plugins/Modality.md#a5-cli)），最新的在前，格式为 `ID STATE OPERATION MODEL CREATED`；还有下一页时在 stderr 打印 `More: --after <id>`；`--json` 原样打印回复。 |
+| `dimcode modality task status\|wait\|cancel ID` | 经 `modality.task.status` 打印一个任务的行、进度、错误和结果文件；经 `modality.task.wait` 等待它，只在 `--out DIR` 时写结果；或经 `modality.task.cancel` 取消它，报告 owner 返回的状态。 |
 
 | `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
 | `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |

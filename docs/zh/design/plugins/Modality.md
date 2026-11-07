@@ -436,7 +436,7 @@ helper 的调用形式是 `dimcode ocr-helper --input <path> --artifacts <dir> -
 | --- | --- |
 | `dimcode modality [--json]` | 全部类别与操作的表格：可用性、以 `dimension: detail` 行给出的原因、默认模型与实际生效模型；`--json` 原样打印 `modality.capabilities` 的应答。未提供该方法的守护进程回答说它不提供 Modality |
 | `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | 以紧接读取的 revision 调用 `modality.configure`；遇到 `modality_conflict` 时重新读取并重试一次；打印该操作的行，`--json` 时打印应答 |
-| `dimcode modality task list\|status\|wait\|cancel` | 任务方法；`wait --out <path>` 取回结果 |
+| `dimcode modality task list [--state S] [--category C] [--limit N] [--after ID]`、`task status ID`、`task wait ID [--out DIR]`、`task cancel ID` | 任务方法（A.3）。`list` 按 `ID STATE OPERATION MODEL CREATED` 打印一页，最新在前，还有下一页时在 stderr 打印 `More: --after <id>`；`status` 打印该行、进度、错误，以及每个结果文件一行；`wait` 与提交时同一套等待，只有 `--out` 给出目录时才写结果；`cancel` 报告所有者返回的状态，已是终态的任务据此说明未改变。`--json` 原样打印应答 |
 | `dimcode image generate\|edit PROMPT [FILE...]`、`image edit --mask PATH`、`image enhance MODE [FILE...]`、`video generate\|edit\|enhance PROMPT [FILE...]`、`speech synthesize TEXT`、`speech transcribe FILE`、`music\|audio\|motion generate PROMPT`、`asset generate PROMPT [FILE...]` | 提交 `modality.task.submit`：`--model PROVIDER/MODEL` 指定模型，其余适配器参数一律用 `--param KEY=VALUE`（值能解析为 JSON 时按 JSON，否则按字符串，因此本会解析为 JSON 的字符串要写成带引号的形式）；输入（含 mask）整体不超过 8 MiB 时内联发送，否则全部用 `node_path`。默认等待并把结果文件写到 `--out`（目录，默认 `.`）；绝不覆盖已有文件：一个都不写，点名这些文件，并给出 `dimcode modality task wait <id> --out <dir>` 到别处取回。`--no-wait` 打印 id；`--json` 打印记录。退出码：0 成功，1 传输、RPC、不可用、被中断或目标已存在，2 任务失败，130 Ctrl+C 或任务被取消 |
 | `dimcode ocr <file> [--out PATH] [--json] [--no-wait]` | 提交 `ocr.recognize`；打印文本 |
 | `dimcode realtime` | 打开连接，将 stdin 行作为文本帧转发，打印事件 |

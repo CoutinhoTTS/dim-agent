@@ -124,6 +124,15 @@ fn render_progress(output: &mut Output<'_>, data: &Value) -> Result<()> {
     if !output.progress {
         return Ok(());
     }
+    let text = progress_text(data);
+    if !text.is_empty() {
+        line(output.err, &text)?;
+    }
+    Ok(())
+}
+
+/// One progress report as text: its fraction, its message, or both.
+pub(crate) fn progress_text(data: &Value) -> String {
     let mut text = String::new();
     if let Some(fraction) = data["fraction"].as_f64() {
         text.push_str(&format!("{:.0}%", fraction * 100.0));
@@ -134,10 +143,7 @@ fn render_progress(output: &mut Output<'_>, data: &Value) -> Result<()> {
         }
         text.push_str(&safe(message));
     }
-    if !text.is_empty() {
-        line(output.err, &text)?;
-    }
-    Ok(())
+    text
 }
 
 /// Applies a terminal record: its results are written under `out` when one is

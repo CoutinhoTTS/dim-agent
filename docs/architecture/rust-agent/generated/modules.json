@@ -29009,7 +29009,9 @@
       "references": [
         "path crate::modality::Command",
         "path crate::modality::Command::SetDefault",
-        "path crate::modality::Command::Submit"
+        "path crate::modality::Command::Submit",
+        "path crate::modality::Command::TaskList",
+        "path crate::modality::Command::TaskWait"
       ]
     },
     {
@@ -31119,6 +31121,10 @@
         "path Command::List",
         "path Command::SetDefault",
         "path Command::Submit",
+        "path Command::TaskCancel",
+        "path Command::TaskList",
+        "path Command::TaskStatus",
+        "path Command::TaskWait",
         "path Modality",
         "path Modality::open",
         "path model_reference",
@@ -31147,7 +31153,20 @@
       "to": "dim_cli::modality::task",
       "references": [
         "path Output",
+        "path task",
+        "path task::finish",
+        "path task::progress_text",
+        "path task::wait",
+        "use super::task",
         "use super::task::Output"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::command",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe_line",
+        "use crate::sanitize::safe_line"
       ]
     },
     {
@@ -31299,6 +31318,9 @@
       "to": "dim_cli::modality",
       "references": [
         "path Command::SetDefault",
+        "path Command::TaskCancel",
+        "path Command::TaskStatus",
+        "path Command::TaskWait",
         "path run",
         "use super::Command",
         "use super::run"
@@ -44652,6 +44674,22 @@
     {
       "module": "dim_cli::args",
       "path": "Command::SetDefault"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Command::TaskCancel"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Command::TaskList"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Command::TaskStatus"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Command::TaskWait"
     },
     {
       "module": "dim_cli::args",

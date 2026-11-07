@@ -233,35 +233,91 @@ fn record(task_id: &str, state: &str) -> Value {
     })
 }
 
-/// A result transfer is stopped by the first Ctrl+C: no target and no
-/// temporary remain, the id is printed, and the command exits 130.
+/// `dimcode modality task status` prints a host task's row, its files and
+/// the executor's target.
 #[test]
-fn the_first_interrupt_stops_a_result_transfer() {
+fn task_status_prints_a_host_task() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["modality.capabilities", "modality.task.status"]);
+        let status = wire.read("modality.task.status");
+        assert_eq!(status["params"], json!({"task_id": "ocr-1"}));
+        let mut answered = record("ocr-1", "succeeded");
+        answered["progress"] = json!({"fraction": 1.0, "message": "Done"});
+        answered["result"] = json!({"files": [
+            {"name": "text.txt", "media_type": "text/plain", "bytes": 12, "sha256": "00"},
+            {"name": "result.json", "media_type": "application/json", "bytes": 34, "sha256": "01"},
+        ], "data": {"pages": [{"page": 1}]}});
+        wire.reply(&status, json!({"task": answered}));
+    });
+    let output = home
+        .command()
+        .args(["modality", "task", "status", "ocr-1"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "ID\tSTATE\tOPERATION\tMODEL\tCREATED\n\
+         ocr-1\tsucceeded\tocr.recognize\tlocal/apple-vision\t2026-11-07T00:00:00Z\n\
+         Progress: 100% Done\n\
+         Result: text.txt\ttext/plain\t12\n\
+         Result: result.json\tapplication/json\t34\n"
+    );
+}
+
+/// `dimcode modality task cancel` reports the state the owner returned.
+#[test]
+fn task_cancel_cancels_a_host_task() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["modality.capabilities", "modality.task.cancel"]);
+        let cancel = wire.read("modality.task.cancel");
+        assert_eq!(cancel["params"], json!({"task_id": "ocr-1"}));
+        wire.reply(&cancel, json!({"task": record("ocr-1", "cancelled")}));
+    });
+    let output = home
+        .command()
+        .args(["modality", "task", "cancel", "ocr-1"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Cancelled ocr-1.\n"
+    );
+}
+
+/// The first Ctrl+C during a wait prints the id, says the task continues,
+/// and exits 130 (A.5, A8).
+#[test]
+fn the_first_interrupt_prints_the_id_and_exits_130() {
     use std::sync::mpsc;
     let home = Home::new();
-    let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("modality-transfer-{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&out).unwrap();
     let (waiting, waiting_rx) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["modality.capabilities", "modality.task.submit"]);
         let submit = wire.read("modality.task.submit");
-        wire.reply(&submit, json!({"task": record("ocr-3", "queued")}));
+        wire.reply(&submit, json!({"task": record("ocr-2", "queued")}));
         let wait = wire.read("modality.task.wait");
-        let mut done = record("ocr-3", "succeeded");
-        done["result"] = json!({"files": [
-            {"name": "image-1.png", "media_type": "image/png", "bytes": 4, "sha256": "00"},
-        ], "data": null});
-        wire.reply(&wait, json!({"task": done}));
-        let result = wire.read("modality.task.result");
-        assert_eq!(result["params"]["name"], "image-1.png");
+        assert_eq!(wait["params"]["task_id"], "ocr-2");
         waiting.send(()).unwrap();
-        // Left unanswered: the interrupt arrives inside the transfer.
+        // Left unanswered: the interrupt arrives while the CLI waits.
         assert!(wire.trailing_request().is_none());
     });
     let child = home
         .command()
-        .args(["image", "generate", "a cat", "--out", out.to_str().unwrap()])
+        .args(["image", "generate", "a cat"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -272,19 +328,84 @@ fn the_first_interrupt_stops_a_result_transfer() {
     let output = child.wait_with_output().unwrap();
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(130));
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "ocr-3\n");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "ocr-2\n");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains(
-            "Stopped; the task keeps its results. Fetch them with: \
-             dimcode modality task wait ocr-3 --out <dir>"
-        ),
+        String::from_utf8_lossy(&output.stderr).contains("Stopped waiting"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        fs::read_dir(&out).unwrap().count(),
-        0,
-        "neither the target nor a temporary exists"
+}
+
+/// One operation of a `modality.capabilities` reply.
+fn listed<'a>(snapshot: &'a Value, category: &str, name: &str) -> &'a Value {
+    snapshot["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["category"] == category)
+        .and_then(|entry| {
+            entry["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|operation| operation["operation"] == name)
+        })
+        .unwrap()
+}
+
+/// The product daemon's own refusal reaches the CLI unchanged: the listing's
+/// reasons for `image.generate`, in order, then no task (D3, Appendix C).
+#[test]
+fn the_product_refusal_reaches_the_cli_unchanged() {
+    let home = Home::new();
+    // The first command starts the product daemon for this home.
+    let listing = home
+        .command()
+        .args(["modality", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        listing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listing.stderr)
     );
-    fs::remove_dir_all(&out).unwrap();
+    let snapshot: Value = serde_json::from_slice(&listing.stdout).unwrap();
+    let generate = listed(&snapshot, "image", "generate");
+    assert_eq!(generate["available"], false, "{generate}");
+    let reasons = generate["reasons"].as_array().unwrap();
+    assert!(!reasons.is_empty(), "{generate}");
+    let mut expected = String::from("Error: image.generate is unavailable.");
+    for reason in reasons {
+        expected.push_str(&format!(
+            "\n{}: {}",
+            reason["dimension"].as_str().unwrap(),
+            reason["detail"].as_str().unwrap()
+        ));
+    }
+    expected.push('\n');
+
+    let output = home
+        .command()
+        .args(["image", "generate", "a cat"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), expected);
+
+    let list = home
+        .command()
+        .args(["modality", "task", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&list.stdout),
+        "ID\tSTATE\tOPERATION\tMODEL\tCREATED\n",
+        "a refused submission writes no task"
+    );
 }

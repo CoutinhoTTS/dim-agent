@@ -43,6 +43,14 @@ pub(crate) enum Command {
     },
     /// `image|video|speech|music|audio|asset|motion ...`: one submission.
     Submit(media::Submit),
+    /// `task list [--state S] [--category C] [--limit N] [--after ID]`.
+    TaskList,
+    /// `task status ID`.
+    TaskStatus { task_id: String },
+    /// `task wait ID [--out DIR]`.
+    TaskWait { task_id: String },
+    /// `task cancel ID`.
+    TaskCancel { task_id: String },
 }
 
 /// The `modality` method client.
