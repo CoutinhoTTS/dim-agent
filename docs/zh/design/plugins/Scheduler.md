@@ -495,6 +495,24 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 
 规则检查：定时器只经公共 `sessions` 服务写 `input/message`（§4 规则 1）；唤醒输入只作为已消费的 Queue 输入到达模型（§4 规则 6）；core 中不新增任何结构或业务——记录是 Scheduler 自己的业务存储（D4），表面是指定的 `sessionMethods` 命名空间（D5）；无需 ADR，因为 D1 的作用域规则与 D2 的客户端方法行已决定归属。
 
+## 11. 客户端变更通知
+
+Scheduler 的记录是进程状态，没有 Timeline 事实，因此要展示它们的客户端读取所有者自己的查询——唤醒读 `session.wakeup.list`，任务读 `schedule.list` 与 `schedule.history`——否则只能轮询。已提交的变更以 Session 通知的形式公告（[Session 广播通知](../appserver/session-notices.md)）：`{source: "Scheduler", kind: "wakeup", data: {branchId, wakeupId, state}}` 发往目标 Session 的通道，在记录写入提交之后由 Scheduler 自己的上下文调用 `session_broadcast::notify` 发出。通知报告记录已经改变；所有者自己的查询才是真相，不认识 `source` 或 `kind` 的客户端直接忽略。
+
+### 11.1 一次性唤醒
+
+| 变更 | 通知 | 时机 |
+| --- | --- | --- |
+| `create` 存入记录 | `state` 是记录创建时的状态：`scheduled`；时刻已超出宽限期时为 `expired` | 文件写入提交之后 |
+| `cancel` 结算一条 `scheduled` 记录 | `cancelled` | 文件写入提交之后；对终态记录的 cancel 不改变任何东西，也不发通知 |
+| 定时器通道结算记录 | 每条被结算的记录一条通知：`fired`、`cancelled`（目标 Session 或分支已不存在）或 `expired` | 这一趟的结算写入提交之后 |
+| 保留期清理 | 无 | 被清理记录最后一次可读的变化在它结算时就已公告 |
+
+- `fired` 通知跟在本次触发写下的 `input/message` 之后：通道先发布输入，再结算记录，再公告，而对每个监听者 Session 通道保持这个顺序。
+- 通知带 `branchId`，因为记录指向一个分支；但它在 Session 的通道上传递：attach 到该 Session 的每个客户端都会收到，与它查看哪个分支无关。
+- 不写 Timeline 事件，也不加入 `hello.features`：通知不是后续决策使用的事实，通知也不是方法（[Session 广播通知 §5](../appserver/session-notices.md#5-rpc-转发)）。协议 v3 连接会收到它；v1 与 v2 永远不会。
+- 投递遵循通知契约：没有装载、或没有客户端观察的 Session 没有监听者，通知被丢弃，也不会重放。客户端在 attach 之后、以及收到每条通知时读取 `session.wakeup.list`。
+
 ## 附录 A. 接口细节
 
 ### A.1 记录

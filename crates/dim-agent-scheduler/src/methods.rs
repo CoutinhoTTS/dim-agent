@@ -80,6 +80,7 @@ impl DynPlugin for SchedulerPlugin {
             let sessions = ctx.require_at(&self.sessions)?;
             settings.register::<ScheduleDocument>(ctx)?;
             let shared = Arc::new(Shared {
+                ctx: ctx.clone(),
                 sessions,
                 settings,
                 files,
@@ -173,6 +174,9 @@ impl DynPlugin for SchedulerPlugin {
 }
 
 pub(crate) struct Shared {
+    /// This generation's context, used to announce committed changes on a
+    /// Session's channel (design §11).
+    pub(crate) ctx: Ctx,
     pub(crate) sessions: Arc<dyn HostDispatch>,
     pub(crate) settings: Arc<SettingsService>,
     pub(crate) files: Arc<PluginFileTransactions>,
