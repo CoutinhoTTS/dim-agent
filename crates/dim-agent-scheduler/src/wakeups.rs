@@ -488,9 +488,12 @@ impl Wakeups {
             Ok((changed, applied))
         })
         .await?;
-        // One notice per record this pass settled, after the settle commits,
-        // so a `fired` notice follows the input the pass wrote. Retention
-        // pruning changes no readable record and announces nothing.
+        // One notice per record this pass settled, sent after the settle
+        // commits. A `fired` notice is a committed-state notice, not ordered
+        // against the input's `session.event`, which the Session emits when
+        // it dispatches the input; a client relates the two by the input's
+        // submission id `wakeup:<wakeup_id>`. Retention pruning changes no
+        // readable record and announces nothing.
         for record in &applied {
             self.notice(record);
         }
