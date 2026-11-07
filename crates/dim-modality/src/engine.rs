@@ -103,18 +103,18 @@ impl Clock for SystemClock {
     }
 }
 
-/// A hook a generation calls after the host path has opened and counted its
-/// artifacts and before any of them is copied: the product's does nothing,
-/// and a test injects one to change a work file in the window the size cap
+/// A hook a generation calls after the host path has opened and counted one
+/// artifact and before it copies that artifact: the product's does nothing,
+/// and a test injects one to change the work file in the window the size cap
 /// must cover. It is the same seam shape as [`Clock`].
-pub trait PreflightHook: Send + Sync + 'static {
-    fn after_preflight(&self, work: &Path);
+pub trait ArtifactHook: Send + Sync + 'static {
+    fn after_count(&self, work: &Path, name: &str);
 }
 /// The product's hook: it does nothing.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NoPreflightHook;
-impl PreflightHook for NoPreflightHook {
-    fn after_preflight(&self, _work: &Path) {}
+pub struct NoArtifactHook;
+impl ArtifactHook for NoArtifactHook {
+    fn after_count(&self, _work: &Path, _name: &str) {}
 }
 
 fn rfc3339(time: DateTime<Utc>) -> String {
@@ -434,8 +434,9 @@ pub(crate) struct Shared {
     pub(crate) state: Mutex<State>,
     /// The executable host targets run (`ocr-helper`), from the installer.
     pub(crate) ocr_helper: Option<PathBuf>,
-    /// The seam a test uses between the host path's size check and its copy.
-    pub(crate) preflight: Arc<dyn PreflightHook>,
+    /// The seam a test uses after one host artifact is counted and before it
+    /// is copied.
+    pub(crate) artifacts: Arc<dyn ArtifactHook>,
 }
 
 impl Shared {
@@ -448,7 +449,7 @@ impl Shared {
         ctx: Ctx,
         clock: Arc<dyn Clock>,
         ocr_helper: Option<PathBuf>,
-        preflight: Arc<dyn PreflightHook>,
+        artifacts: Arc<dyn ArtifactHook>,
     ) -> Self {
         Self {
             files,
@@ -462,7 +463,7 @@ impl Shared {
             wake: Notify::new(),
             state: Mutex::new(State::default()),
             ocr_helper,
-            preflight,
+            artifacts,
         }
     }
 
@@ -2080,7 +2081,7 @@ impl Shared {
                 return;
             }
         };
-        self.settle_host(slot, &work, output).await;
+        self.settle_host(slot, output).await;
     }
 
     /// The work, temporary and cache directories one host task uses.
@@ -2110,7 +2111,7 @@ impl Shared {
     /// Maps one finished helper call to a terminal outcome (decision 7):
     /// exit 0 publishes the artifacts, exit 2 carries a typed code, anything
     /// else is `executor_error` with the tail of standard error.
-    async fn settle_host(self: &Arc<Self>, slot: &Arc<Slot>, work: &Path, output: ConfinedOutput) {
+    async fn settle_host(self: &Arc<Self>, slot: &Arc<Slot>, output: ConfinedOutput) {
         let stdout = String::from_utf8_lossy(&output.stdout);
         match output.status.code() {
             Some(0) => {
@@ -2128,7 +2129,7 @@ impl Shared {
                     .await;
                     return;
                 }
-                self.publish_host(slot, work).await;
+                self.publish_host(slot).await;
             }
             Some(2) => {
                 let failure = serde_json::from_str::<HelperFailure>(stdout.trim())
@@ -2167,46 +2168,20 @@ impl Shared {
     }
 
     /// Publishes the artifacts one successful call wrote: `result.json`,
-    /// `text.txt` and the rasterized page images, with `data.pages` read
-    /// from `result.json` and bounded by [`MAX_DATA_TEXT_BYTES`] (decision 8).
-    /// Every artifact is opened through the plugin files storage first: that
-    /// walk never follows a link and accepts only a regular file, so a FIFO
-    /// left at an artifact name cannot block the read and a link cannot point
-    /// it outside the work directory. The opened lengths are checked against
-    /// [`dim_ocr::MAX_ARTIFACT_BYTES`] before any byte is read, and those same
-    /// readers are what `settle_files` publishes, so the bytes counted are the
-    /// bytes copied even when a late writer changes the names afterwards.
-    async fn publish_host(self: &Arc<Self>, slot: &Arc<Slot>, work: &Path) {
+    /// `text.txt` and the rasterized page images, in that order, with
+    /// `data.pages` read from `result.json` and bounded by
+    /// [`MAX_DATA_TEXT_BYTES`] (decision 8). Each artifact is opened through
+    /// the plugin files storage when it is its turn: that walk never follows
+    /// a link and accepts only a regular file, so a FIFO left at an artifact
+    /// name cannot block the read and a link cannot point it outside the work
+    /// directory. The opened length is added to the running total before that
+    /// file is copied, and the task fails before copying the file that would
+    /// pass [`dim_ocr::MAX_ARTIFACT_BYTES`]; at most one artifact reader is
+    /// open at a time, and the bytes copied are the bytes counted even when a
+    /// late writer changes the names afterwards.
+    async fn publish_host(self: &Arc<Self>, slot: &Arc<Slot>) {
         let record = self.record(slot);
         let work_name = task::work_name(&record.task_id);
-        let result_reader = match self.open_work_file(&work_name, dim_ocr::RESULT_FILE).await {
-            Ok(Some(reader)) => reader,
-            Ok(None) => {
-                self.fail(
-                    slot,
-                    "executor_error",
-                    "The OCR helper wrote no readable result",
-                )
-                .await;
-                return;
-            }
-            Err(error) => {
-                self.fail(slot, "executor_error", error).await;
-                return;
-            }
-        };
-        let text_reader = match self.open_work_file(&work_name, dim_ocr::TEXT_FILE).await {
-            Ok(Some(reader)) => reader,
-            Ok(None) => {
-                self.fail(slot, "executor_error", "The OCR helper wrote no text")
-                    .await;
-                return;
-            }
-            Err(error) => {
-                self.fail(slot, "executor_error", error).await;
-                return;
-            }
-        };
         let listed = match self.files.list(&work_name).await {
             Ok(entries) => entries,
             Err(error) => {
@@ -2225,60 +2200,32 @@ impl Shared {
             }
         }
         images.sort();
-        let mut total = result_reader.len().saturating_add(text_reader.len());
-        let mut image_readers = Vec::new();
-        for name in &images {
-            let reader = match self.open_work_file(&work_name, name).await {
-                Ok(Some(reader)) => reader,
-                Ok(None) => {
-                    self.fail(slot, "executor_error", "The OCR artifacts cannot be read")
-                        .await;
-                    return;
-                }
-                Err(error) => {
-                    self.fail(slot, "executor_error", error).await;
-                    return;
-                }
-            };
-            total = total.saturating_add(reader.len());
-            image_readers.push(reader);
-        }
-        if total > dim_ocr::MAX_ARTIFACT_BYTES {
-            self.fail(
-                slot,
-                "executor_error",
-                format!(
-                    "The OCR artifacts exceed {} bytes",
-                    dim_ocr::MAX_ARTIFACT_BYTES
-                ),
-            )
-            .await;
-            return;
-        }
-        self.preflight.after_preflight(work);
-        // The readers the cap counted are the ones copied into `result/`:
-        // a write or a replacement under the same name after this point
-        // changes neither what is published nor its size.
         let mut files = vec![
             OutputFile {
                 name: dim_ocr::RESULT_FILE.to_owned(),
                 media_type: "application/json".to_owned(),
-                source: OutputSource::Reader(result_reader),
+                source: OutputSource::Work,
             },
             OutputFile {
                 name: dim_ocr::TEXT_FILE.to_owned(),
                 media_type: "text/plain".to_owned(),
-                source: OutputSource::Reader(text_reader),
+                source: OutputSource::Work,
             },
         ];
-        for (name, reader) in images.into_iter().zip(image_readers) {
+        for name in images {
             files.push(OutputFile {
                 name,
                 media_type: "image/png".to_owned(),
-                source: OutputSource::Reader(reader),
+                source: OutputSource::Work,
             });
         }
-        self.settle_files(slot, files, OutputData::ResultJson).await;
+        self.settle_files(
+            slot,
+            files,
+            OutputData::ResultJson,
+            Some(dim_ocr::MAX_ARTIFACT_BYTES),
+        )
+        .await;
     }
 
     /// Opens one file of the task's work directory through the plugin files
@@ -2308,20 +2255,23 @@ impl Shared {
                 source: OutputSource::Path(file.path),
             })
             .collect();
-        self.settle_files(slot, files, OutputData::Given(output.data))
+        self.settle_files(slot, files, OutputData::Given(output.data), None)
             .await;
     }
 
     /// The one publication routine both paths use: copies each file into
     /// `result/` from its source and writes the terminal `succeeded` record.
-    /// A path source is opened through the plugin files storage here; a reader
-    /// source is the host path's counted reader and is never reopened, so the
-    /// bytes published are exactly the bytes the cap counted.
+    /// Every source is opened through the plugin files storage when its turn
+    /// comes and dropped before the next file opens, so a publication holds
+    /// one source reader at a time; the host path's `cap` adds each opened
+    /// length to a running total and fails before copying the file that would
+    /// pass it, so the bytes published are exactly the bytes counted.
     async fn settle_files(
         self: &Arc<Self>,
         slot: &Arc<Slot>,
         files: Vec<OutputFile>,
         data: OutputData,
+        cap: Option<u64>,
     ) {
         let record = self.record(slot);
         if record.state.is_terminal() {
@@ -2355,6 +2305,7 @@ impl Shared {
         let mut names = BTreeSet::new();
         let mut written: Vec<String> = Vec::new();
         let mut results: Vec<ResultFile> = Vec::new();
+        let mut total: u64 = 0;
         for file in files {
             if !valid_file_name(&file.name) || !names.insert(file.name.clone()) {
                 self.discard_results(&record.task_id, &written).await;
@@ -2367,7 +2318,27 @@ impl Shared {
                 return;
             }
             let source = match file.source {
-                OutputSource::Reader(reader) => reader,
+                OutputSource::Work => match self.open_work_file(&work_name, &file.name).await {
+                    Ok(Some(reader)) => reader,
+                    Ok(None) => {
+                        // A helper that exits 0 without its document files is
+                        // named for what is missing; any other artifact name
+                        // (a page image) keeps the generic refusal.
+                        let message = match file.name.as_str() {
+                            dim_ocr::RESULT_FILE => "The OCR helper wrote no readable result",
+                            dim_ocr::TEXT_FILE => "The OCR helper wrote no text",
+                            _ => "The OCR artifacts cannot be read",
+                        };
+                        self.discard_results(&record.task_id, &written).await;
+                        self.fail(slot, "executor_error", message).await;
+                        return;
+                    }
+                    Err(error) => {
+                        self.discard_results(&record.task_id, &written).await;
+                        self.fail(slot, "executor_error", error).await;
+                        return;
+                    }
+                },
                 OutputSource::Path(path) => {
                     let Some(relative) = work_relative_name(&work, &path) else {
                         self.discard_results(&record.task_id, &written).await;
@@ -2399,6 +2370,22 @@ impl Shared {
                     }
                 }
             };
+            if let Some(cap) = cap {
+                total = total.saturating_add(source.len());
+                if total > cap {
+                    drop(source);
+                    self.discard_results(&record.task_id, &written).await;
+                    let _ = task::remove_work(&self.files, &record.task_id).await;
+                    self.fail(
+                        slot,
+                        "executor_error",
+                        format!("The OCR artifacts exceed {cap} bytes"),
+                    )
+                    .await;
+                    return;
+                }
+                self.artifacts.after_count(&work, &file.name);
+            }
             let (bytes, sha256) = match task::write_result(
                 &self.files,
                 &record.task_id,
@@ -2593,12 +2580,12 @@ struct OutputFile {
     source: OutputSource,
 }
 
-/// Where an output file's bytes come from: a path an adapter named, opened
-/// through the storage at copy time, or a reader the host path already opened
-/// and counted, which is never reopened.
+/// Where an output file's bytes come from: a path an adapter named, or a name
+/// in the task's work directory the host path publishes. Both are opened
+/// through the plugin files storage when their turn comes.
 enum OutputSource {
     Path(PathBuf),
-    Reader(FileReader),
+    Work,
 }
 
 /// Where the terminal record's `data` comes from: the adapter's own value, or
