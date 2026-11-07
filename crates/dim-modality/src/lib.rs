@@ -19,15 +19,24 @@
 //! `pluginFiles`, runs at most four tasks per category, and settles every
 //! terminal state once under the record's lock.
 //!
+//! The realtime layer (`modality.realtime.open/send/close`) keeps one session
+//! per `open` in this generation's memory, owned by the connection that opened
+//! it, and reports each event and the session's end to that connection alone.
+//! A session is bounded in frames, in number and in idle time, and every way
+//! it can end passes through its supervisor.
+//!
 //! The plugin lives in this crate, which depends on the App Server for the
 //! Settings service and management methods; a host installs it with
 //! [`install`].
 mod adapter;
 mod engine;
+mod realtime;
 pub mod task;
 pub use adapter::{
     AdapterError, AdapterErrorCode, AdapterFuture, AdapterOperation, AdapterOutput,
-    AdapterProgress, Job, JobFile, ModalityAdapter, ProgressSink, RemoteCancel, Submitted,
+    AdapterProgress, Job, JobFile, ModalityAdapter, ProgressSink, RealtimeConnection, RealtimeEnd,
+    RealtimeEvent, RealtimeFrame, RealtimeFrameKind, RealtimeOpened, RealtimeTransport,
+    RemoteCancel, Submitted,
 };
 use dim_agent_capabilities::{
     host::{HostError, HostErrorKind, ModelSelectionHost, SelectableModelsHost},
@@ -47,6 +56,9 @@ pub use engine::{
     SystemClock, TaskCancel, TaskInput, TaskList, TaskListReply, TaskReply, TaskResultQuery,
     TaskResultReply, TaskStatus, TaskSubmit, TaskWait,
 };
+use engine::{not_found, unavailable};
+use realtime::Realtime;
+pub use realtime::{DEFAULT_FRAME_BYTES, DEFAULT_IDLE, DEFAULT_SESSIONS, RealtimeLimits};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -174,10 +186,20 @@ pub(crate) const CATALOG: [CatalogCategory; 9] = [
     CatalogCategory {
         name: "realtime",
         category_key: true,
-        rows: &[OperationRow {
-            operation: "connect",
-            key: Some("modality.realtime"),
-        }],
+        rows: &[
+            OperationRow {
+                operation: "voice",
+                key: Some("modality.realtime"),
+            },
+            OperationRow {
+                operation: "transcribe",
+                key: Some("modality.realtime"),
+            },
+            OperationRow {
+                operation: "avatar",
+                key: Some("modality.realtime"),
+            },
+        ],
     },
     CatalogCategory {
         name: "ocr",
@@ -197,6 +219,12 @@ pub(crate) fn catalog_category(name: &str) -> Option<&'static CatalogCategory> {
 /// models, never the adapter (Modality §9.4).
 pub(crate) fn is_understand(category: &str, operation: &str) -> bool {
     category == "image" && operation == "understand"
+}
+
+/// Every `realtime.<operation>` is opened as a session, never submitted as a
+/// task (A.3, decision 6).
+pub(crate) fn is_realtime(category: &str) -> bool {
+    category == "realtime"
 }
 
 /// Whether a model's declared `<category>.<operation>` ids include this
@@ -423,6 +451,10 @@ impl Evaluation {
                 .declared_for(&model.provider_id, &model.model_id)
                 .is_some()
     }
+    /// The collected adapter, when the process has one.
+    pub(crate) fn adapter(&self) -> Option<&Arc<ModalityAdapterService>> {
+        self.adapter.as_ref()
+    }
     /// The adapter's declaration of one operation for `model`: its parameter
     /// schema, read per submission (A.2, decision 3). `None` when no
     /// available adapter serves the operation for that model.
@@ -452,17 +484,26 @@ impl Evaluation {
     }
     /// Options for one operation: Provider's candidates narrowed by the
     /// adapter when it serves the category, a selectable vision model for
-    /// understanding, and otherwise the models Provider declares for the
-    /// operation id (Modality §9.2), in each read's order. The candidates of
-    /// an adapter-served category are the deduplicated union of the two
-    /// Provider reads, selectable first, so a declared media model execution
-    /// rejects is still offered when the adapter serves it. The persisted
-    /// default follows when it is no longer an option.
+    /// understanding, the models Provider declares for a realtime operation,
+    /// and otherwise the models Provider declares for the operation id
+    /// (Modality §9.2), in each read's order. The candidates of an
+    /// adapter-served category are the deduplicated union of the two Provider
+    /// reads, selectable first, so a declared media model execution rejects is
+    /// still offered when the adapter serves it. A realtime session's adapter
+    /// is handed the transport its entry declares, so the entry is the
+    /// per-model answer and narrows nothing (A.3, D2). The persisted default
+    /// follows when it is no longer an option.
     fn options(&self, category: &str, row: &OperationRow) -> Vec<OptionSnapshot> {
         let mut options: Vec<OptionSnapshot> = if is_understand(category, row.operation) {
             self.selectable
                 .iter()
                 .filter(|model| model.capabilities.vision)
+                .map(|model| Self::option(&model.target))
+                .collect()
+        } else if is_realtime(category) {
+            self.declared
+                .iter()
+                .filter(|model| declares(&model.operations, category, row.operation))
                 .map(|model| Self::option(&model.target))
                 .collect()
         } else if self.adapter_serves(category) {
@@ -563,6 +604,17 @@ impl Evaluation {
         } else if self.adapter_serves(category) {
             match self.adapter_available() {
                 false => (false, vec![reason("runtime", "The adapter is unavailable")]),
+                // A realtime operation names itself: the adapter serves the
+                // category for one of its operations and nothing serves this
+                // one, which a client reads as an adapter gap, not a
+                // configuration one (A.3).
+                true if !served && is_realtime(category) => (
+                    false,
+                    vec![reason(
+                        "adapter",
+                        format!("No available adapter serves {}", row.id(category)),
+                    )],
+                ),
                 true if !served => (
                     false,
                     vec![reason(
@@ -695,7 +747,7 @@ fn settings_error(error: SettingsError) -> RpcError {
     }
 }
 
-fn host_error(error: HostError) -> RpcError {
+pub(crate) fn host_error(error: HostError) -> RpcError {
     match error {
         HostError::Cancelled(_) => RpcError::interrupted(),
         HostError::Failed {
@@ -850,17 +902,17 @@ pub struct ModalityPlugin {
     selection: Key<ModelSelectionHost>,
     selectable: Key<SelectableModelsHost>,
     files: Key<PluginFileTransactions>,
-    clock: Arc<dyn Clock>,
+    options: InstallOptions,
 }
 impl ModalityPlugin {
-    pub fn new(names: &Names<'_>, clock: Arc<dyn Clock>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>, options: InstallOptions) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
             methods: names.key()?,
             selection: names.key()?,
             selectable: names.key()?,
             files: names.key()?,
-            clock,
+            options,
         })
     }
 }
@@ -893,13 +945,19 @@ impl DynPlugin for ModalityPlugin {
                 selection.clone(),
                 selectable.clone(),
                 ctx.clone(),
-                self.clock.clone(),
+                self.options.clock.clone(),
             ));
             let tasks = Arc::new(ModalityTasks::new(shared.clone()));
             let task_handle = tasks.clone();
             ctx.provide_at(Key::<ModalityTasks>::named("modalityTasks"), tasks)?;
+            // The realtime layer: sessions live in this generation and end
+            // with it (§3.3).
+            let realtime = Arc::new(Realtime::new(shared.clone(), self.options.realtime));
+            let realtime_handle = realtime.clone();
             let cleanup = shared.clone();
+            let cleanup_realtime = realtime.clone();
             ctx.effect(move || async move {
+                cleanup_realtime.shutdown().await;
                 cleanup.shutdown().await;
                 Ok(())
             })?;
@@ -910,6 +968,11 @@ impl DynPlugin for ModalityPlugin {
             let context = ctx.clone();
             let mut wait = MethodDecl::new("modality.task.wait", false, Interruption::Report);
             wait.progress = true;
+            let mut open = MethodDecl::new("modality.realtime.open", true, Interruption::Report);
+            open.notifications = vec![
+                "modality.realtime.event".to_owned(),
+                "modality.realtime.ended".to_owned(),
+            ];
             methods.register(
                 ctx,
                 "modality",
@@ -922,18 +985,22 @@ impl DynPlugin for ModalityPlugin {
                     wait,
                     MethodDecl::new("modality.task.cancel", true, Interruption::Report),
                     MethodDecl::new("modality.task.result", false, Interruption::Report),
+                    open,
+                    MethodDecl::new("modality.realtime.send", true, Interruption::Report),
+                    MethodDecl::new("modality.realtime.close", true, Interruption::Report),
                 ],
                 Arc::new(move |call, stopping, progress| {
                     let MethodCall {
                         method,
                         params: value,
-                        ..
+                        origin,
                     } = call;
                     let settings = settings.clone();
                     let selection = selection.clone();
                     let selectable = selectable.clone();
                     let context = context.clone();
                     let tasks = task_handle.clone();
+                    let realtime = realtime_handle.clone();
                     Box::pin(async move {
                         match method.as_str() {
                             "modality.capabilities" => {
@@ -1044,6 +1111,29 @@ impl DynPlugin for ModalityPlugin {
                                 let request: TaskResultQuery = params(value)?;
                                 reply(tasks.result(request, &stopping).await?)
                             }
+                            "modality.realtime.open" => {
+                                let request: realtime::RealtimeOpen = params(value)?;
+                                let Some(caller) = origin.caller.clone() else {
+                                    return Err(unavailable(
+                                        "A realtime session needs a client connection",
+                                    ));
+                                };
+                                reply(realtime.open(request, caller, &stopping).await?)
+                            }
+                            "modality.realtime.send" => {
+                                let request: realtime::RealtimeSend = params(value)?;
+                                let Some(caller) = origin.caller.clone() else {
+                                    return Err(not_found("No realtime session on this caller"));
+                                };
+                                reply(realtime.send(request, &caller, &stopping).await?)
+                            }
+                            "modality.realtime.close" => {
+                                let request: realtime::RealtimeClose = params(value)?;
+                                let Some(caller) = origin.caller.clone() else {
+                                    return Err(not_found("No realtime session on this caller"));
+                                };
+                                reply(realtime.close(request, &caller)?)
+                            }
                             _ => unreachable!("registered modality management method"),
                         }
                     })
@@ -1062,14 +1152,31 @@ impl DynPlugin for ModalityPlugin {
 /// them has no provider, the host still starts and opens Sessions, and only
 /// `modality.*` is unavailable.
 pub fn install(builder: &mut AgentBuilder) {
-    install_with_clock(builder, Arc::new(SystemClock));
+    install_with(builder, InstallOptions::default());
 }
 
-/// [`install`] with the clock a generation reads; a test injects a clock to
-/// control retention.
-pub fn install_with_clock(builder: &mut AgentBuilder, clock: Arc<dyn Clock>) {
+/// What an installation varies: the clock a generation reads and the bounds
+/// on realtime sessions. `Default` is the product's set; a test injects its
+/// own so a lifetime rule or the cap can be observed without waiting.
+#[derive(Clone)]
+pub struct InstallOptions {
+    pub clock: Arc<dyn Clock>,
+    pub realtime: RealtimeLimits,
+}
+impl Default for InstallOptions {
+    fn default() -> Self {
+        Self {
+            clock: Arc::new(SystemClock),
+            realtime: RealtimeLimits::default(),
+        }
+    }
+}
+
+/// [`install`] with what the generation reads; a test injects a clock to
+/// control retention and short realtime bounds to observe their rules.
+pub fn install_with(builder: &mut AgentBuilder, options: InstallOptions) {
     dim_agent_runtime::names::register::<ModalityAdapterService>(builder.catalog_mut(), None);
     builder.optional_plugin(move |names| {
-        Ok(Box::new(ModalityPlugin::new(names, clock.clone())?) as Box<dyn DynPlugin>)
+        Ok(Box::new(ModalityPlugin::new(names, options.clone())?) as Box<dyn DynPlugin>)
     });
 }
