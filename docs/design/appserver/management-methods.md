@@ -32,8 +32,10 @@ table, not on any owner ([methods contract §3.2](../contracts/session-boundary.
 The table has no dependencies, so it reloads neither with Rpc nor with an owner.
 The owners register `account`, `account.codex`, `account.grok` and `provider`
 with a product home; `settings` (SettingsMethods) wherever Settings is assembled;
-`storage` (StorageMethods) with native storage; and `mcp`, `skills` and
-`permission` with local execution. Adding an owner adds
+`storage` (StorageMethods) with native storage; `mcp`, `skills` and `permission`
+with local execution; and `workspace.files` (WorkspaceFiles), also with local
+execution, which injects the process file index WorkspaceTools provides and
+serves a sessionless working-directory file search. Adding an owner adds
 its row, whose `apply` registers its namespace; nothing else in the assembly
 changes. On each call Rpc reads the table for the namespace that holds the name
 and dispatches to its provider; it reads the status of the row that registered

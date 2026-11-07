@@ -636,6 +636,7 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
                 },
             ],
             mode: Some(dim_agent_types::InputMode::Queue),
+            handover: None,
         }
     );
     let at = |submission: &str| json!({"sessionId":session.id(),"branchId":"main","submissionId":submission});
