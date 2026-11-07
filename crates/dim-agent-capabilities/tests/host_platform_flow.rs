@@ -2,6 +2,7 @@
 #![cfg(unix)]
 use dim_agent_capabilities::execution_settings::{ExecutionSettings, ExecutionSettingsHost};
 use dim_agent_capabilities::host_platform::*;
+use dim_agent_capabilities::toolchain::{InstalledToolchain, ToolchainSourceHost};
 use rutis::host::CtxHost;
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 use tokio::io::AsyncReadExt;
@@ -203,11 +204,15 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
             ),
         )
         .unwrap();
+    let _toolchain = root
+        .provide(dim_agent_capabilities::toolchain::ToolchainSourceHost::fixed(vec![]))
+        .unwrap();
     let platform = root.plugin(
         HostPlatformPlugin::new(
             &names,
             HostPlatformConfig {
                 execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 home: None,
             },
@@ -1086,4 +1091,74 @@ async fn a_confined_helper_gets_the_allowlist_plus_its_own_environment() {
     );
     assert!(created.exists());
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// The directory an installed runtime lives in, from one `fixturetool` a test
+/// writes there.
+fn runtime_fixture(base: &std::path::Path, name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = base.join(name);
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("fixturetool");
+    std::fs::write(&tool, "#!/bin/sh\necho fixture\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+/// A platform whose shell is `/bin/sh` and whose captured environment is
+/// `env`, with `toolchains` as the runtimes Dim downloaded.
+fn toolchain_platform(pairs: &[(&str, &str)], toolchains: Vec<InstalledToolchain>) -> HostPlatform {
+    let mut platform = HostPlatform::current(ShellStatus::Available(ExecShellRuntime {
+        executable_path: "/bin/sh".into(),
+        edition: ShellEdition::Sh,
+        source: ShellSource::Login,
+        output_encoding: OutputEncoding::Utf8,
+    }))
+    .unwrap();
+    platform.env = env(pairs);
+    platform.with_toolchain_source(ToolchainSourceHost::fixed(toolchains))
+}
+
+/// An exec resolves a command only the toolchain source provides, and a
+/// command already on the base PATH wins: the directories are appended after
+/// it, never before.
+#[tokio::test]
+async fn an_exec_resolves_a_command_only_the_toolchain_source_provides() {
+    let base = std::env::temp_dir().join(unique("dim-toolchain"));
+    let bin = runtime_fixture(&base, "runtimes/node-v-test/bin");
+    let installed = InstalledToolchain {
+        bin: bin.clone(),
+        root: bin.parent().unwrap().to_path_buf(),
+    };
+    let platform = toolchain_platform(&[("PATH", "/usr/bin:/bin")], vec![installed]);
+    let (spec, _) = platform
+        .build_process_spec("command -v fixturetool", &base)
+        .await
+        .unwrap();
+    let mut tree = platform.spawn(spec).unwrap();
+    let mut output = String::new();
+    tree.stdout().read_to_string(&mut output).await.unwrap();
+    assert!(tree.wait().await.unwrap().success());
+    assert_eq!(output.trim(), bin.join("fixturetool").to_str().unwrap());
+
+    let shadow = runtime_fixture(&base, "shadow");
+    let installed = InstalledToolchain {
+        bin: bin.clone(),
+        root: bin.parent().unwrap().to_path_buf(),
+    };
+    let platform = toolchain_platform(&[("PATH", shadow.to_str().unwrap())], vec![installed]);
+    let (spec, _) = platform
+        .build_process_spec("command -v fixturetool", &base)
+        .await
+        .unwrap();
+    let mut tree = platform.spawn(spec).unwrap();
+    let mut output = String::new();
+    tree.stdout().read_to_string(&mut output).await.unwrap();
+    assert!(tree.wait().await.unwrap().success());
+    assert_eq!(
+        output.trim(),
+        shadow.join("fixturetool").to_str().unwrap(),
+        "a command on the base PATH is not replaced by the runtime's"
+    );
+    std::fs::remove_dir_all(base).unwrap();
 }
