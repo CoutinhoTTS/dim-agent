@@ -54,6 +54,14 @@ runtime/plugins/light-ocr/
 - 随发行的目录不带 `node_modules`，也没有构建产物：`scripts/stage-plugins.mjs` 复制它但不运行 `npm ci`（[RuntimeManager §6](RuntimeManager.md#6-发布)）。安装时不运行任何包的 lifecycle 脚本，因为安装使用 `--ignore-scripts`。
 - 发行包既不携带 Node，也不携带任何引擎包：只有客户端的 `plugin.install`、`plugin.enable` 或 `plugin.update`——或已安装副本的后台重新获取——打开插件时，才经 RuntimeManager 获取 Node（[PluginManager §2.5](PluginManager.md#25-运行时)、[RuntimeManager §3.2](RuntimeManager.md#32-获取)）；引擎包只经 `npm ci` 进入用户的副本（[RuntimeManager §6](RuntimeManager.md#6-发布)）。从不安装该插件的用户不会为它下载任何东西。
 
+### 2.1 客户端与旧安装
+
+Dim 只从插件的 `ocrHelper` 读取 PP-OCR 目标。它从不读取客户端自带的运行时根目录，例如 Desktop 的 feature-runtime 安装，也不为其保留兼容路径。
+
+Desktop 迁移到 `plugin.install {source: {optional: "light-ocr"}}`，启用该插件，并废弃自己的 light-ocr feature-runtime 条目。它通过 `modality.capabilities` 列出 `local/pp-ocr` 来检查结果，而不是通过 CLI 调用；设计中的客户端 CLI 是 `dimcode ocr <file> [--out PATH] [--json] [--no-wait]`，见 [Modality §A.5](Modality.md#a5-cli)，一个提交命令。
+
+只有旧安装的用户会看到 `local/pp-ocr` 以 `runtime` 原因不可用，直到插件被安装。客户端可以在升级后的首次启动时安装它。没有就地迁移：旧目录由客户端自行删除。
+
 ## 3. 行与 `ocrHelper`
 
 服务 `ocrHelper`，作用域为进程，无 key，由 `light-ocr` 行的 `provides` 提供。一个方法：

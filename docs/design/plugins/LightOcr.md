@@ -54,6 +54,14 @@ runtime/plugins/light-ocr/
 - The shipped directory carries no `node_modules` and no build output: `scripts/stage-plugins.mjs` copies it without running `npm ci` ([RuntimeManager §6](RuntimeManager.md#6-release)). No package lifecycle script runs at install, because the install uses `--ignore-scripts`.
 - The release carries neither Node nor any engine package: Node is acquired only when a client's `plugin.install`, `plugin.enable` or `plugin.update` — or an installed copy's background re-acquisition — turns the plugin on ([PluginManager §2.5](PluginManager.md#25-runtimes), [RuntimeManager §3.2](RuntimeManager.md#32-acquire)), and the engine packages only by `npm ci` into the user's copy ([RuntimeManager §6](RuntimeManager.md#6-release)). A user who never installs the plugin downloads nothing for it.
 
+### 2.1 Clients and the old install
+
+Dim reads the PP-OCR target only from the plugin's `ocrHelper`. It never reads a client's own runtime root, such as Desktop's feature-runtime install, and keeps no compatibility path for one.
+
+Desktop moves to `plugin.install {source: {optional: "light-ocr"}}`, enables the plugin, and retires its own light-ocr feature-runtime entry. It checks the result through `modality.capabilities` listing `local/pp-ocr`, not through a CLI call; the design's client CLI is `dimcode ocr <file> [--out PATH] [--json] [--no-wait]` ([Modality §A.5](Modality.md#a5-cli)), a submit command.
+
+A user who has only the old install sees `local/pp-ocr` unavailable with its `runtime` reason until the plugin is installed. A client may install it on its first start after the upgrade. Nothing is migrated in place: the old directory is the client's to remove.
+
 ## 3. The row and `ocrHelper`
 
 Service `ocrHelper`, scope process, no key, provided by the `light-ocr` row's `provides`. One method:
