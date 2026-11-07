@@ -1048,3 +1048,510 @@ async fn python_runtime_manager_marks_the_downloaded_interpreter_as_externally_m
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// The next item of watch call `id`: its `management.progress` data.
+async fn watch_item(client: &mut Client, id: u64) -> Value {
+    loop {
+        let notice = client.notice("management.progress").await;
+        if notice["params"]["id"] == id {
+            assert_eq!(
+                notice["params"]["method"], "runtime.watch",
+                "an item belongs to the watch call: {notice}"
+            );
+            return notice["params"]["data"].clone();
+        }
+    }
+}
+
+/// Reads the watch's items, re-reading `runtime.list` after each as the
+/// client does, until `accept` takes the listing.
+async fn watch_until(
+    client: &mut Client,
+    id: u64,
+    mut accept: impl FnMut(&Value) -> bool,
+) -> (Vec<Value>, Value) {
+    let mut items = Vec::new();
+    loop {
+        items.push(watch_item(client, id).await);
+        let listed = client.rpc("runtime.list", json!({})).await;
+        assert_ok(&listed);
+        if accept(&listed["result"]) {
+            return (items, listed["result"].clone());
+        }
+    }
+}
+
+/// A `system` Node that passes the version check and the package step but
+/// never greets, so its connection row goes down without a real runtime.
+struct FixtureNode {
+    directory: PathBuf,
+    path: Option<std::ffi::OsString>,
+}
+
+impl FixtureNode {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!("dm-node-{}", uuid::Uuid::new_v4()));
+        let bin = directory.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_script(
+            &bin,
+            "node",
+            "if [ \"$1\" = \"--version\" ]; then echo v22.19.0; fi",
+        );
+        let npm = directory.join("lib/node_modules/npm/bin");
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::write(npm.join("npm-cli.js"), "").unwrap();
+        let path = std::env::var_os("PATH");
+        let mut paths = vec![bin];
+        paths.extend(path.iter().flat_map(std::env::split_paths));
+        // SAFETY: every test that changes PATH holds PATH_LOCK until it
+        // restores it, so no other test reads a half-prefixed PATH.
+        unsafe { std::env::set_var("PATH", std::env::join_paths(paths).unwrap()) };
+        Self { directory, path }
+    }
+}
+
+impl Drop for FixtureNode {
+    fn drop(&mut self) {
+        // SAFETY: as above: PATH_LOCK is held for the whole lifetime.
+        unsafe {
+            match &self.path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// Keeps the runtime context so a test can restart a row the way a reload
+/// does.
+struct Probe(Arc<std::sync::Mutex<Option<rutis::Ctx>>>);
+
+impl rutis::host::DynPlugin for Probe {
+    fn name(&self) -> &str {
+        "test.runtime-watch-probe"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            *self.0.lock().unwrap() = Some(ctx.clone());
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+/// A watch streams one item per committed change, and only to the connection
+/// that opened it; the client's re-read shows the installed tool (§10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_streams_a_tool_install_to_the_watching_connection_only() {
+    let _path = PATH_LOCK.lock().await;
+    let fixture = FixtureUv::new("0.13.7");
+    let home = std::env::temp_dir().join(format!("drm-watch-uv-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults);
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut other = Client::new_version(&server, false, 3).await;
+
+    let id = client.send("runtime.watch", json!({})).await;
+    assert_eq!(
+        watch_item(&mut client, id).await,
+        json!({"kind": "watching", "seq": 0})
+    );
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    let (items, listed) = watch_until(&mut client, id, |list| list[2]["status"] == "ready").await;
+    for (index, item) in items.iter().enumerate() {
+        assert_eq!(item["kind"], "runtime", "{item}");
+        assert_eq!(item["name"], "uv", "{item}");
+        assert_eq!(
+            item["seq"],
+            (index + 1) as u64,
+            "one item per change, in order: {item}"
+        );
+    }
+    assert_eq!(
+        listed[2]["path"],
+        fixture.directory.join("uv").to_str().unwrap(),
+        "{listed}"
+    );
+    assert_ok(&other.rpc("daemon.ping", json!({})).await);
+    assert!(
+        other
+            .notices
+            .iter()
+            .all(|notice| notice["method"] != "management.progress"),
+        "a connection that did not watch received items: {:?}",
+        other.notices
+    );
+
+    drop(client);
+    drop(other);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A failed acquisition streams its item too, and the client's re-read shows
+/// `failed` with the reason (§10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_streams_a_failed_acquisition() {
+    let _path = PATH_LOCK.lock().await;
+    let fixture = FixtureUv::with_fallback("0.13.7", Some("0.10.9"));
+    let home = std::env::temp_dir().join(format!("drm-watch-failed-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults);
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = client.send("runtime.watch", json!({})).await;
+    watch_item(&mut client, id).await;
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    watch_until(&mut client, id, |list| list[2]["status"] == "ready").await;
+
+    std::fs::remove_file(fixture.directory.join("uv")).unwrap();
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    let (items, listed) = watch_until(&mut client, id, |list| list[2]["status"] == "failed").await;
+    assert!(!items.is_empty(), "the failed acquisition sent no item");
+    let reason = listed[2]["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("0.10.9"), "{listed}");
+    assert!(reason.contains("0.11"), "{listed}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// `runtime.configure` streams its item, and the client's re-read shows the
+/// configuration in effect (§10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_streams_a_configuration_change() {
+    let _path = PATH_LOCK.lock().await;
+    let _fixture = FixtureUv::new("0.13.7");
+    let home = std::env::temp_dir().join(format!("drm-watch-config-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults);
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = client.send("runtime.watch", json!({})).await;
+    watch_item(&mut client, id).await;
+    assert_ok(
+        &client
+            .rpc("runtime.configure", json!({"name": "uv", "auto": true}))
+            .await,
+    );
+    let (items, listed) = watch_until(&mut client, id, |list| {
+        list[2]["auto"] == true && list[2]["status"] == "ready"
+    })
+    .await;
+    assert!(!items.is_empty(), "the configuration change sent no item");
+    assert_eq!(listed[2]["auto"], true, "{listed}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// One watch per connection: a second watch answers the first `{}`, and the
+/// surviving call receives one item per change (§10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_watch_takes_over_the_first() {
+    let _path = PATH_LOCK.lock().await;
+    let _fixture = FixtureUv::new("0.13.7");
+    let home = std::env::temp_dir().join(format!("drm-watch-twice-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults);
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let first = client.send("runtime.watch", json!({})).await;
+    assert_eq!(
+        watch_item(&mut client, first).await,
+        json!({"kind": "watching", "seq": 0})
+    );
+    let second = client.send("runtime.watch", json!({})).await;
+    assert_eq!(
+        watch_item(&mut client, second).await,
+        json!({"kind": "watching", "seq": 0})
+    );
+    let taken = client.response(first).await;
+    assert_eq!(
+        taken["result"],
+        json!({}),
+        "the first watch answers the takeover: {taken}"
+    );
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    let (items, _) = watch_until(&mut client, second, |list| list[2]["status"] == "ready").await;
+    for (index, item) in items.iter().enumerate() {
+        assert_eq!(
+            item["seq"],
+            (index + 1) as u64,
+            "one item per change on the surviving watch: {item}"
+        );
+    }
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A closed connection stops being a watcher and fails nothing: the other
+/// watcher still receives its items (§10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_watcher_fails_nothing_for_another_watcher() {
+    let _path = PATH_LOCK.lock().await;
+    let fixture = FixtureUv::new("0.13.7");
+    let home = std::env::temp_dir().join(format!("drm-watch-closed-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults);
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut gone = Client::new_version(&server, false, 3).await;
+    let mut survivor = Client::new_version(&server, false, 3).await;
+    let gone_id = gone.send("runtime.watch", json!({})).await;
+    watch_item(&mut gone, gone_id).await;
+    let survivor_id = survivor.send("runtime.watch", json!({})).await;
+    watch_item(&mut survivor, survivor_id).await;
+    drop(gone);
+
+    assert_ok(&survivor.rpc("runtime.install", json!({"name": "uv"})).await);
+    let (_, listed) = watch_until(&mut survivor, survivor_id, |list| {
+        list[2]["status"] == "ready"
+    })
+    .await;
+    assert_eq!(
+        listed[2]["path"],
+        fixture.directory.join("uv").to_str().unwrap(),
+        "{listed}"
+    );
+    // The change after the close failed nothing: the next one is served too.
+    assert_ok(
+        &survivor
+            .rpc("runtime.configure", json!({"name": "uv", "auto": true}))
+            .await,
+    );
+    let (items, listed) = watch_until(&mut survivor, survivor_id, |list| {
+        list[2]["auto"] == true && list[2]["status"] == "ready"
+    })
+    .await;
+    assert!(!items.is_empty(), "the change after the close sent no item");
+    assert_eq!(listed[2]["auto"], true, "{listed}");
+
+    drop(survivor);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A reload answers the open call `operation_interrupted`; a watch made on
+/// the new generation receives the next change (§10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_answers_the_open_call_operation_interrupted() {
+    let _path = PATH_LOCK.lock().await;
+    let fixture = FixtureUv::new("0.13.7");
+    let home = std::env::temp_dir().join(format!("drm-watch-reload-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults);
+    let probe = Arc::new(std::sync::Mutex::new(None));
+    let (server, _) = launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+        {
+            let probe = probe.clone();
+            move |builder| {
+                builder.plugin(move |_| {
+                    Ok(Box::new(Probe(probe.clone())) as Box<dyn rutis::host::DynPlugin>)
+                });
+            }
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = client.send("runtime.watch", json!({})).await;
+    watch_item(&mut client, id).await;
+
+    let row = server
+        .diagnostics()
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "RuntimeManager")
+        .map(|plugin| plugin.id)
+        .expect("the RuntimeManager row");
+    let ctx = probe
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the probe kept the runtime context");
+    ctx.view(row)
+        .expect("the RuntimeManager fiber")
+        .restart()
+        .await
+        .unwrap();
+    let interrupted = client.response(id).await;
+    assert_eq!(
+        interrupted["error"]["data"]["appError"], "operation_interrupted",
+        "{interrupted}"
+    );
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let listed = client.rpc("runtime.list", json!({})).await;
+            if listed.get("result").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the runtime namespace is served again");
+
+    let again = client.send("runtime.watch", json!({})).await;
+    assert_eq!(
+        watch_item(&mut client, again).await,
+        json!({"kind": "watching", "seq": 0})
+    );
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    let (items, listed) =
+        watch_until(&mut client, again, |list| list[2]["status"] == "ready").await;
+    assert!(!items.is_empty(), "the new watch received no item");
+    assert_eq!(
+        listed[2]["path"],
+        fixture.directory.join("uv").to_str().unwrap(),
+        "{listed}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A connection row going `down` streams an item, and the client's re-read
+/// shows `down` with its reason (§10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_watch_streams_a_row_going_down() {
+    let _path = PATH_LOCK.lock().await;
+    let node = FixtureNode::new();
+    let home = std::env::temp_dir().join(format!("drm-watch-down-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "system", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "download", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults);
+    assert_eq!(
+        runtimes.plan(Kind::Node).interpreter,
+        node.directory.join("bin/node"),
+        "the plan resolves the fixture node"
+    );
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = client.send("runtime.watch", json!({})).await;
+    watch_item(&mut client, id).await;
+    assert_ok(&client.rpc("runtime.install", json!({"name": "node"})).await);
+    let (items, listed) = watch_until(&mut client, id, |list| list[0]["status"] == "down").await;
+    assert!(!items.is_empty(), "the row going down sent no item");
+    assert!(
+        listed[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{listed}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

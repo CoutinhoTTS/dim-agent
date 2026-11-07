@@ -13,7 +13,7 @@ RuntimeManager 提供插件代码运行所需的 Node 与 Python rutis 运行时
 | uv：下载固定版本、按官方校验文件校验、`source: system` 用 `PATH` 上的 uv；没有启动命令、包目录和连接行（§3） | 是 | |
 | 两个运行时和 uv 都支持 `source: system`（§2.2） | 是 | |
 | 下载源列表：官方源在前，镜像在后（§2.1） | 是 | |
-| `runtime.list`、`runtime.install`、`runtime.configure`、`/runtime` 面板与 `dimcode runtime` 各形态（§5） | 是 | 状态变化通知客户端 |
+| `runtime.list`、`runtime.install`、`runtime.configure`、`runtime.watch`、`/runtime` 面板与 `dimcode runtime` 各形态（§5、§10） | 是 | |
 | 发布包带默认插件和默认配置文件（§6） | 是 | |
 | Python 通过 PluginManager 的链接目录导入插件（§4） | 运行时一侧在这里；链接由 PluginManager 建（[#3](https://github.com/arcships/dim/issues/3)） | |
 | 删除本版 Dim 不再使用的运行时目录 | | 是 |
@@ -172,12 +172,13 @@ rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.imp
 | 接口 | 内容 |
 | --- | --- |
 | 启动命令 | `nodeRuntime`、`pythonRuntime`：连接行 `session-node` 和 `py` 注入的只在 Rust 里的进程服务；运行时获取后提供。uv 没有。 |
-| `RuntimeStatus` | 每个连接行在以行名命名的只在 Rust 里的进程键上维护：`starting`、`ready`，或带原因的 `down`。RuntimeManager 读取它。uv 没有。 |
+| `RuntimeStatus` | 每个连接行在以行名命名的只在 Rust 里的进程键上维护：`starting`、`ready`，或带原因的 `down`。这个 cell 放在启动命令里，所以这条命令启动的每一代都写同一个 cell，每次装载都重置为 `starting`，并把每个状态发布到 watch 通道。RuntimeManager 读取它，并把它的变化转发给 `runtime.watch`（§10）。uv 没有。 |
 | `RuntimeService`（Rust 进程服务） | `list() -> [RuntimeEntry]`；`install(name)`：开启运行时或工具并开始获取；正在获取或正在运行时什么都不做；获取失败后再获取一次；连接 `down` 后重新提供启动命令。对 uv 它只安装并让工具 `ready`，没有连接可重启。用可选依赖读取，所以 RuntimeManager reload 不会让调用方 reload。 |
 | `ToolchainSource`（Rust 端口，HostPlatform 读取） | `toolchains() -> [InstalledToolchain { bin, root }]`：按正在生效的 plan（§2.4）已安装的下载运行时与工具，顺序固定为 node、python、uv，每项带可执行文件所在的目录（`bin`）和它的归档目录（`root`）。`system` 解释器不贡献任何一项：它是用户自己的，用户的 `PATH` 已经能到达它。HostPlatform 在每次启动进程时读取，把 `bin` 接在子进程 `PATH` 中用户自己的目录和嵌入宿主目录之后，并把 `root` 作为受沙箱限制的进程的只读根（§7）。App Server 的 `ToolchainSource` 行通过可选依赖读取 `RuntimeService` 来作答，所以 RuntimeManager reload 既不会让 HostPlatform reload，也不会让它持有一个已被撤销的服务。没有这一行的宿主，启动的进程只有没有任何运行时时的那份 `PATH`。 |
 | `runtime.list`（管理方法） | `[{name, source, auto, version, path?, status, reason?}]`；`auto` 是正在生效的配置，客户端因此不必自己存一份；`path` 是该运行时所用可执行文件的绝对路径，只在 §2.4 的记录按正在生效的 plan 判定为已安装时出现——与跳过下载是同一条判断——路径不是合法 UTF-8 时省略，并由 `reason` 说明；`status` 是 `off`、`acquiring`、`failed`，不启动运行时的工具装好后是 `ready`，或提供启动命令后连接的 `RuntimeStatus`：`starting`（连接行还没启动时也是）、`ready`，或带原因的 `down`。 |
 | `runtime.install {name}`（管理方法，有修改） | `RuntimeService::install`：重读配置，`source` 变化时通过重启连接行应用（§3.3），并立即回复当前状态；配置无法读取时该调用以 `runtime_configuration` 错误返回。 |
 | `runtime.configure {name, source?, auto?}`（管理方法，有修改） | 原子地写 `<home>/runtimes/config.json`，按运行时、按字段覆盖预置（§2.2），随后按 `runtime.install` 的方式应用；写不出或读不出时该调用以 `runtime_configuration` 错误返回。该运行时正在获取时拒绝，因为获取过程中它的 plan 不能变（§3.1）。 |
+| `runtime.watch {}`（管理方法，只读） | 打开调用连接的 watch 并回答 `{}`；调用保持打开，变化作为该调用的 `progress` 下发（§10）：先是 `{seq: 0, kind: "watching"}`，之后每个已提交变化一条 `{seq: n, kind: "runtime", name}`。同一连接上的第二次 watch 让第一次回答 `{}` 并接管。generation 停止时回答 `operation_interrupted`；连接断开时调用结束，没有回复。 |
 | 客户端 | 两种终端模式下的 `/runtime`（面板，以及打字的 `/runtime install|source|auto`），以及 `dimcode runtime list`、`install <node|python|uv>` 和 `config NAME [--source …] [--auto …]`（[CLI 命令](../../../zh/design/cli-commands.md#插件运行时)）。 |
 
 ## 6. 发布
@@ -208,7 +209,7 @@ RuntimeManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 | 规则 | 本文如何满足 |
 | --- | --- |
-| 原则 §4 第 1 条（别人的状态用命令） | RuntimeManager 拥有自己的记录和目录。PluginManager 用 `install` 请求；插件行的状态是 rutis 的，运行时的 `RuntimeStatus` 是它的连接行的，RuntimeManager 只读取。HostPlatform 在每次启动进程时通过 `ToolchainSource` 读取已安装的 bin 和归档目录；运行时的目录仍归 RuntimeManager，其他部件不写它们。 |
+| 原则 §4 第 1 条（别人的状态用命令） | RuntimeManager 拥有自己的记录和目录。PluginManager 用 `install` 请求；插件行的状态是 rutis 的，运行时的 `RuntimeStatus` 是它的连接行的，RuntimeManager 只读取，并把它的变化转发（§10）。HostPlatform 在每次启动进程时通过 `ToolchainSource` 读取已安装的 bin 和归档目录；运行时的目录仍归 RuntimeManager，其他部件不写它们。 |
 | 原则 §4 第 2 条（移交） | 不适用。 |
 | 原则 §4 第 3 条（只有 before 回调） | 写入前没有干预。 |
 | 原则 §4 第 4 条（核心不带业务含义） | 连接行是 rutis 给宿主自己的连接用的形式；rutis 的依赖等待不带 Dim 的含义。 |
@@ -236,3 +237,19 @@ RuntimeManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | 通用能力 | PluginManager 维护 `<home>/plugins/.python/<包名>` 链接，Python 行命名为 `py:<包名>.<入口>`（§4）；开启 Python 插件而 Python 关闭时调用 `RuntimeService::install("python")`。 |
 | 对序列、批次、中断、reload 的影响 | 对 Timeline 没有影响。 |
 | 所有者与 issue | PluginManager，[#3](https://github.com/arcships/dim/issues/3)。 |
+
+## 10. 客户端变更通知
+
+RuntimeManager 的记录是没有 Timeline fact 的进程状态，所以展示它们的客户端读取 `runtime.list`，否则只能轮询。需要免轮询得知变化的客户端打开 `runtime.watch {}`：它回答 `{}` 并保持打开，变化作为这次调用的 `progress` 下发（[方法契约 A.2](../contracts/session-boundary.md#a2-调用通道)）：
+
+| 条目 | 时机 |
+| --- | --- |
+| `{seq: 0, kind: "watching"}` | watch 注册时一次 |
+| `{seq: n, kind: "runtime", name}` | 该运行时条目的一次已提交变化之后：获取开始或完成、`runtime.configure` 写入配置，或它的连接行状态变化 |
+
+- 每个已提交变化一条：`install` 在 Acquiring 与 plan 提交之后、以及完成写入之后各发一次，`configure` 在配置写入之后发一次，行的状态转发器在该行每次写状态之后发一次（§1、§5）。不做合并；客户端每收到一条就重读 `runtime.list` 里那个名字，丢掉中间态没有代价。
+- `seq` 每次 watch 调用从 0 开始，每条加一。progress 是尽力送达：连接装不下的会被丢弃，所以出现空号时客户端应重读所有条目。
+- 客户端规则：调用 `runtime.watch`；收到 `seq: 0` 后读一次 `runtime.list`；每条都重读；出现空号时重读所有条目；收到 `operation_interrupted` 时重新调用。`service_reloading` 可重试。
+- 每个连接一个 watch：同一连接上的第二次 `runtime.watch` 接管，第一次调用回答 `{}`，于是一个变化只发一条。连接关闭时它的 watch 结束，没有人收到回复。
+- watch 属于受理它的那一代。RuntimeManager 的 generation 停止时——reload、停用、关闭——打开的调用回答 `operation_interrupted`，客户端重新调用 `runtime.watch`；在新一代服务它之前，命名空间回答 `service_reloading`。停止的一代无法用通知宣告结束：rutis 在停止的一代的任何任务运行之前就取消了 generation token，它的 caller 从此回答 `gone`（A.2）。
+- `runtime.watch` 声明 `progress`，不声明 notification；条目表是增量的，不处理它的客户端忽略即可。

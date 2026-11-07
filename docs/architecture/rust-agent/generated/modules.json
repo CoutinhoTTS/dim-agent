@@ -2807,6 +2807,7 @@
         "format",
         "include_str",
         "matches",
+        "tokio::pin",
         "tokio::select",
         "tracing::warn",
         "unreachable",

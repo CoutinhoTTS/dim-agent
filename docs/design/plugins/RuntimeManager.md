@@ -13,7 +13,7 @@ The release ships the executable, the default configuration file and the default
 | uv: download of the fixed version, verification against the official checksum, `source: system` on `PATH`; no launch command, packages or connection row (§3) | yes | |
 | `source: system` for both runtimes and uv (§2.2) | yes | |
 | Source lists with official sources first and mirrors after (§2.1) | yes | |
-| `runtime.list`, `runtime.install`, `runtime.configure`, the `/runtime` panel and the `dimcode runtime` forms (§5) | yes | client notifications of changes |
+| `runtime.list`, `runtime.install`, `runtime.configure`, `runtime.watch`, the `/runtime` panel and the `dimcode runtime` forms (§5, §10) | yes | |
 | Default plugins and the default configuration file in the release (§6) | yes | |
 | Python import through PluginManager's link directory (§4) | the runtime side here; links are PluginManager's ([#3](https://github.com/arcships/dim/issues/3)) | |
 | Removing runtime versions this Dim no longer uses | | yes |
@@ -172,12 +172,13 @@ The rutis Python runtime is one process; a row `py:<module>` is imported with `i
 | Interface | Content |
 | --- | --- |
 | Launch commands | `nodeRuntime`, `pythonRuntime`: Rust-only process services the connection rows `session-node` and `py` inject; provided once the runtime is acquired. uv has none. |
-| `RuntimeStatus` | Kept by each connection row at a Rust-only process key named after the row: `starting`, `ready`, or `down` with its reason. RuntimeManager reads it. uv has none. |
+| `RuntimeStatus` | Kept by each connection row at a Rust-only process key named after the row: `starting`, `ready`, or `down` with its reason. The cell lives in the launch command, so every generation that command starts writes the same cell and each load resets it to `starting`; it publishes every state on a watch channel. RuntimeManager reads it and forwards its changes to `runtime.watch` (§10). uv has none. |
 | `RuntimeService` (Rust process service) | `list() -> [RuntimeEntry]`; `install(name)`: turns the runtime or tool on and starts its acquisition; does nothing while it is being acquired or is running; after a failed acquisition, acquires again; once its connection is `down`, provides its launch command again. For uv it installs and leaves the tool `ready`; there is no connection to restart. Read with an optional dependency, so RuntimeManager's reload does not reload the caller. |
 | `ToolchainSource` (Rust port, read by HostPlatform) | `toolchains() -> [InstalledToolchain { bin, root }]`: the downloaded runtimes and tools installed under the plan in effect (§2.4), in the fixed order node, then python, then uv, each with the directory holding its executable (`bin`) and its archive directory (`root`). A `system` interpreter contributes nothing: it is the user's own, and the user's `PATH` already reaches it. HostPlatform reads it at each process start, appends the `bin`s to the child's `PATH` after the user's own and any embedding-host directories, and grants the `root`s to a confined process read-only (§7). The App Server's `ToolchainSource` row answers by reading `RuntimeService` through an optional dependency, so RuntimeManager's reload neither reloads HostPlatform nor leaves it holding a withdrawn service. A host without the row starts processes with the `PATH` it would have without any runtime. |
 | `runtime.list` (management method) | `[{name, source, auto, version, path?, status, reason?}]`; `auto` is the configuration in effect, so a client can change it without holding a second copy; `path` is the absolute path of the executable this runtime runs with, present exactly while §2.4's record marks it installed under the plan in effect — the same test that skips a download — and omitted, with `reason` saying so, when that path is not valid UTF-8; `status` is `off`, `acquiring`, `failed`, `ready` for a tool that launches no runtime once it is installed, or, once the launch command is provided, the connection's `RuntimeStatus`: `starting` (also while the connection row has not started), `ready`, or `down` with its reason. |
 | `runtime.install {name}` (management method, mutating) | `RuntimeService::install`: reads the configuration, applies a changed `source` by restarting the connection row (§3.3), and replies at once with the status; an unreadable configuration is the call's `runtime_configuration` error. |
 | `runtime.configure {name, source?, auto?}` (management method, mutating) | Writes `<home>/runtimes/config.json` atomically, merged per runtime and field over the preset (§2.2), then applies as `runtime.install` does; a file it cannot write or read is the call's `runtime_configuration` error. It refuses while that runtime is being acquired, because a plan cannot change under an acquisition (§3.1). |
+| `runtime.watch {}` (management method, read-only) | Opens the calling connection's watch and answers `{}`; the call stays open and its `progress` carries the changes (§10): `{seq: 0, kind: "watching"}` first, then `{seq: n, kind: "runtime", name}` per committed change. A second watch from the same connection answers the first `{}` and takes over. A generation stop answers `operation_interrupted`; a disconnect ends the call with no reply. |
 | Client | `/runtime` in both terminal modes (the panel, and the typed `/runtime install|source|auto`), plus `dimcode runtime list`, `install <node|python|uv>` and `config NAME [--source …] [--auto …]` ([CLI commands](../../design/cli-commands.md#plugin-runtimes)). |
 
 ## 6. Release
@@ -208,7 +209,7 @@ RuntimeManager is not a Capability: it has no Timeline state, writes no Timeline
 
 | Rule | How this document complies |
 | --- | --- |
-| Principles §4 rule 1 (commands for others' state) | RuntimeManager owns its record and directories. PluginManager asks with `install`; plugin rows' state is rutis', and a runtime's `RuntimeStatus` is its connection row's, which RuntimeManager only reads. HostPlatform reads the installed bin and archive directories through `ToolchainSource` at each process start; the runtimes' directories stay RuntimeManager's, and no other part writes them. |
+| Principles §4 rule 1 (commands for others' state) | RuntimeManager owns its record and directories. PluginManager asks with `install`; plugin rows' state is rutis', and a runtime's `RuntimeStatus` is its connection row's, which RuntimeManager only reads and whose changes it forwards (§10). HostPlatform reads the installed bin and archive directories through `ToolchainSource` at each process start; the runtimes' directories stay RuntimeManager's, and no other part writes them. |
 | Principles §4 rule 2 (handover) | Not applicable. |
 | Principles §4 rule 3 (before callbacks only) | No intervention before a write. |
 | Principles §4 rule 4 (no business meaning in core) | The connection rows are rutis' form for a host's own connection; rutis gating carries no Dim meaning. |
@@ -236,3 +237,19 @@ None to rutis: a connection row starts its process only once its launch command 
 | Generic capability | PluginManager keeps `<home>/plugins/.python/<package>` links and names Python rows `py:<package>.<entry>` (§4), and calls `RuntimeService::install("python")` when it turns on a Python plugin while Python is off. |
 | Effect on sequence, batch, interrupt, reload | None on the Timeline. |
 | Owner and issue | PluginManager, [#3](https://github.com/arcships/dim/issues/3). |
+
+## 10. Client change notices
+
+RuntimeManager's records are process state with no Timeline fact, so a client that shows them reads `runtime.list` and otherwise polls. A client that needs changes without polling opens `runtime.watch {}`, which answers `{}` and stays open; the changes travel as that call's `progress` ([methods contract A.2](../contracts/session-boundary.md#a2-call-channel)):
+
+| Item | When |
+| --- | --- |
+| `{seq: 0, kind: "watching"}` | Once, when the watch is registered |
+| `{seq: n, kind: "runtime", name}` | After a committed change of that runtime's entry: the acquisition starts or completes, `runtime.configure` writes the configuration, or its connection row's status changes |
+
+- One item per committed change: `install` announces after the acquiring and plan commit and after the completion write, `configure` after its configuration write, and the row's status forwarder after each state the row writes (§1, §5). Nothing is coalesced; the client re-reads `runtime.list` for the named entry on every item, so a lost intermediate state costs nothing.
+- `seq` starts at 0 for each watch call and grows by one per item. Progress is best effort: the connection drops what it cannot take, so a gap tells the client to re-read every entry.
+- The client's rules: call `runtime.watch`; after `seq: 0` read `runtime.list`; re-read on each item; re-read every entry on a gap; call again on `operation_interrupted`. `service_reloading` is retryable.
+- One watch per connection: a second `runtime.watch` from the same connection takes over and the first call answers `{}`, so one change sends one item. A connection that closes ends its watch; nobody gets a reply.
+- A watch belongs to the generation that admitted it. When the RuntimeManager generation stops — a reload, a disable, shutdown — the open call answers `operation_interrupted`, and the client calls `runtime.watch` again; the namespace answers `service_reloading` until the new generation serves it. The stopping generation cannot announce the end through a notification: rutis cancels a generation's token before any task of the stopping generation can run, and its callers answer `gone` from then on (A.2).
+- `runtime.watch` declares `progress` and no notifications; the item sheet is additive, and a client that does not handle it ignores it.
