@@ -1,6 +1,6 @@
 # RuntimeManager
 
-RuntimeManager 提供插件代码运行所需的 Node 与 Python rutis 运行时（[#476](https://github.com/arcships/dim/issues/476)）。它是 App Server 的一个进程插件，占一行 loader 行。它获取每个开启的运行时（下载固定版本到 home，按官方校验文件校验，或使用机器上已安装的），把装了什么记在自己的文件里，然后提供运行时的启动命令。命令一到，运行时的连接行就启动进程；插件行按 rutis 的规则等待这个运行时的会话。
+RuntimeManager 提供插件代码运行所需的 Node 与 Python rutis 运行时（[#476](https://github.com/arcships/dim/issues/476)）。它是 App Server 的一个进程插件，占一行 loader 行。它获取每个开启的运行时（下载固定版本到 home，按官方校验文件校验，或使用机器上已安装的），把装了什么记在自己的文件里，然后提供运行时的启动命令。命令一到，运行时的连接行就启动进程；插件行按 rutis 的规则等待这个运行时的会话。它下载的运行时也作为兜底供 App Server 启动的进程使用——agent 的 `exec`、`!` shell 输入、hook 命令和 stdio MCP 服务器：它们的 bin 目录排在用户自己的 `PATH` 之后（§5）。
 
 发布包带可执行文件、默认配置文件和默认插件，不带运行时（[发布打包](../../../release/README.md#local-packaging)）。
 
@@ -163,6 +163,7 @@ rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.imp
 | 启动命令 | `nodeRuntime`、`pythonRuntime`：连接行 `session-node` 和 `py` 注入的只在 Rust 里的进程服务；运行时获取后提供。 |
 | `RuntimeStatus` | 每个连接行在以行名命名的只在 Rust 里的进程键上维护：`starting`、`ready`，或带原因的 `down`。RuntimeManager 读取它。 |
 | `RuntimeService`（Rust 进程服务） | `list() -> [RuntimeEntry]`；`install(name)`：开启运行时并开始获取；正在获取或正在运行时什么都不做；获取失败后再获取一次；连接 `down` 后重新提供启动命令。用可选依赖读取，所以 RuntimeManager reload 不会让调用方 reload。 |
+| `ToolchainSource`（Rust 端口，HostPlatform 读取） | `toolchains() -> [InstalledToolchain { bin, root }]`：按正在生效的 plan（§2.4）已安装的下载运行时，顺序固定为 node、python，每项带解释器所在的目录（`bin`）和它的归档目录（`root`）。`system` 解释器不贡献任何一项：它是用户自己的，用户的 `PATH` 已经能到达它。HostPlatform 在每次启动进程时读取，把 `bin` 接在子进程 `PATH` 中用户自己的目录和嵌入宿主目录之后，并把 `root` 作为受沙箱限制的进程的只读根（§7）。App Server 的 `ToolchainSource` 行通过可选依赖读取 `RuntimeService` 来作答，所以 RuntimeManager reload 既不会让 HostPlatform reload，也不会让它持有一个已被撤销的服务。没有这一行的宿主，启动的进程只有没有任何运行时时的那份 `PATH`。 |
 | `runtime.list`（管理方法） | `[{name, source, auto, version, path?, status, reason?}]`；`auto` 是正在生效的配置，客户端因此不必自己存一份；`path` 是该运行时所用解释器的绝对路径，只在 §2.4 的记录按正在生效的 plan 判定为已安装时出现——与跳过下载是同一条判断——路径不是合法 UTF-8 时省略，并由 `reason` 说明；`status` 是 `off`、`acquiring`、`failed`，或提供启动命令后连接的 `RuntimeStatus`：`starting`（连接行还没启动时也是）、`ready`，或带原因的 `down`。 |
 | `runtime.install {name}`（管理方法，有修改） | `RuntimeService::install`：重读配置，`source` 变化时通过重启连接行应用（§3.3），并立即回复当前状态；配置无法读取时该调用以 `runtime_configuration` 错误返回。 |
 | `runtime.configure {name, source?, auto?}`（管理方法，有修改） | 原子地写 `<home>/runtimes/config.json`，按运行时、按字段覆盖预置（§2.2），随后按 `runtime.install` 的方式应用；写不出或读不出时该调用以 `runtime_configuration` 错误返回。该运行时正在获取时拒绝，因为获取过程中它的 plan 不能变（§3.1）。 |
@@ -184,6 +185,7 @@ LICENSE  NOTICE  release-manifest.json
 ## 7. 安全
 
 - 每个下载的压缩包在解压或运行之前，都按官方发布方列出的 SHA-256 校验，这个 SHA-256 从固定的 HTTPS 地址读取；npm 和 pip 的包按仓库里固定的 lock 和 requirements 校验。下载源和镜像不增加信任。
+- 下载的 Python 是外部管理的（PEP 668）。获取时 RuntimeManager 在解释器的 stdlib 目录（`lib/python3.<minor>`，Windows 上是 `Lib`）写入 `EXTERNALLY-MANAGED`，位置在 `.partial` 目录里、改名之前；早于这个标记装好的下载会在下次启动时补上。它的 `[externally-managed]` 错误指向虚拟环境或 uv。`system` 解释器从不改动。RuntimeManager 自己的 `pip install --target` 不受阻挡：带 `--target` 时 pip 跳过 PEP 668 检查（pip 26.2.1，`pip/_internal/commands/install.py` 第 376-392 行）。
 - 压缩包条目只解压到它的目录里：拒绝绝对路径和 `..`，也拒绝目标离开目录的链接（Windows 上，目录内的链接解压为副本）；zip 包里的链接条目一律拒绝。不保留 setuid、setgid、sticky 位（Unix 上权限最多为 `rwxr-xr-x`）。
 - npm 带 `--ignore-scripts` 运行；pip 只装 wheel（`--only-binary :all:`），安装期间不运行任何包的代码。
 - RuntimeManager 只写 `<home>/runtimes/`。不使用也不保存任何凭据。
@@ -195,7 +197,7 @@ RuntimeManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 | 规则 | 本文如何满足 |
 | --- | --- |
-| 原则 §4 第 1 条（别人的状态用命令） | RuntimeManager 拥有自己的记录和目录。PluginManager 用 `install` 请求；插件行的状态是 rutis 的，运行时的 `RuntimeStatus` 是它的连接行的，RuntimeManager 只读取。 |
+| 原则 §4 第 1 条（别人的状态用命令） | RuntimeManager 拥有自己的记录和目录。PluginManager 用 `install` 请求；插件行的状态是 rutis 的，运行时的 `RuntimeStatus` 是它的连接行的，RuntimeManager 只读取。HostPlatform 在每次启动进程时通过 `ToolchainSource` 读取已安装的 bin 目录；运行时的目录仍归 RuntimeManager，其他部件不写它们。 |
 | 原则 §4 第 2 条（移交） | 不适用。 |
 | 原则 §4 第 3 条（只有 before 回调） | 写入前没有干预。 |
 | 原则 §4 第 4 条（核心不带业务含义） | 连接行是 rutis 给宿主自己的连接用的形式；rutis 的依赖等待不带 Dim 的含义。 |
