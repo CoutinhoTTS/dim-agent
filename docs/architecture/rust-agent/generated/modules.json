@@ -3214,6 +3214,7 @@
       "parent": null,
       "file": "crates/dim-cli/src/lib.rs",
       "unexpandedMacros": [
+        "env",
         "eprintln",
         "format",
         "matches",
@@ -3319,6 +3320,7 @@
       "unexpandedMacros": [
         "cfg",
         "env",
+        "eprintln",
         "format",
         "json",
         "matches",
@@ -3542,6 +3544,13 @@
         "format",
         "matches"
       ]
+    },
+    {
+      "id": "dim_cli::locale",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/locale.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_cli::login",
@@ -4729,7 +4738,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "assert_ne"
+        "assert_ne",
+        "vec"
       ]
     },
     {
@@ -5245,7 +5255,8 @@
         "assert",
         "assert_eq",
         "concat",
-        "format"
+        "format",
+        "vec"
       ]
     },
     {
@@ -6006,6 +6017,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "vec"
       ]
     },
@@ -20952,6 +20964,7 @@
         "path RpcError",
         "path RpcError::app",
         "path RpcError::closed",
+        "path RpcError::daemon_busy",
         "path RpcError::from",
         "path RpcError::invalid",
         "path RpcError::reloading",
@@ -26929,6 +26942,7 @@
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin",
         "use sqlite::Vacuumed",
+        "use sqlite::set_upgrade_report_delay",
         "use sqlite::vacuum_store"
       ]
     },
@@ -27436,6 +27450,13 @@
       "references": [
         "path SessionStore",
         "use super::SessionStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::opening_advanced"
       ]
     },
     {
@@ -28578,6 +28599,8 @@
       "references": [
         "mod client",
         "path client",
+        "path client::DaemonNotice",
+        "path client::StoreUpgrade",
         "path client::connect_inner",
         "path client::shutdown",
         "path client::stop",
@@ -28658,6 +28681,15 @@
       "to": "dim_cli::leaf",
       "references": [
         "mod leaf"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::locale",
+      "references": [
+        "mod locale",
+        "path locale",
+        "path locale::Locale"
       ]
     },
     {
@@ -28826,7 +28858,8 @@
       "to": "dim_cli::sanitize",
       "references": [
         "mod sanitize",
-        "path crate::sanitize::safe"
+        "path crate::sanitize::safe",
+        "path sanitize::safe"
       ]
     },
     {
@@ -28884,7 +28917,8 @@
         "path crate::ui::i18n::interface_locale",
         "path crate::ui::i18n::set",
         "path crate::ui::i18n::t",
-        "path crate::ui::i18n::tf"
+        "path crate::ui::i18n::tf",
+        "path crate::ui::i18n::tf_in"
       ]
     },
     {
@@ -29148,6 +29182,13 @@
     },
     {
       "from": "dim_cli::client",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::locale::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
       "to": "dim_cli::version",
       "references": [
         "path crate::version::RELEASE"
@@ -29162,6 +29203,7 @@
         "path ConnectionConfig",
         "path DaemonProfile::Configured",
         "path DaemonProfile::Product",
+        "path RpcError",
         "path Server",
         "path app_error",
         "use dim_client::Client",
@@ -29655,7 +29697,8 @@
         "path Goal",
         "path OBJECTIVE_KEY",
         "path Request::Objective",
-        "path STATUS_KEY"
+        "path STATUS_KEY",
+        "path objective"
       ]
     },
     {
@@ -29885,6 +29928,13 @@
     },
     {
       "from": "dim_cli::management",
+      "to": "dim_cli::locale",
+      "references": [
+        "path i18n::Locale::from_code"
+      ]
+    },
+    {
+      "from": "dim_cli::management",
       "to": "dim_cli::management::editor",
       "references": [
         "mod editor"
@@ -30040,7 +30090,6 @@
       "from": "dim_cli::management",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path i18n::Locale::from_code",
         "path i18n::set",
         "path t",
         "path tf",
@@ -31006,6 +31055,13 @@
     },
     {
       "from": "dim_cli::migration_command",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::locale::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
       "to": "dim_cli::sanitize",
       "references": [
         "use crate::sanitize::safe"
@@ -31914,7 +31970,8 @@
       "from": "dim_cli::plugins",
       "to": "dim_cli",
       "references": [
-        "path crate::Result"
+        "path crate::Result",
+        "path crate::daemon_notice"
       ]
     },
     {
@@ -31940,7 +31997,15 @@
         "path client",
         "path client::connect_inner",
         "path client::web_hint",
+        "path crate::client::DaemonNotice",
         "use crate::client"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::locale::Locale"
       ]
     },
     {
@@ -32312,6 +32377,14 @@
     },
     {
       "from": "dim_cli::projection::tests",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::ui::i18n::Locale::En",
+        "path crate::ui::i18n::Locale::ZhCn"
+      ]
+    },
+    {
+      "from": "dim_cli::projection::tests",
       "to": "dim_cli::model::view",
       "references": [
         "path CompactionState",
@@ -32331,8 +32404,6 @@
       "from": "dim_cli::projection::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::Locale::En",
-        "path crate::ui::i18n::Locale::ZhCn",
         "path crate::ui::i18n::active",
         "path crate::ui::i18n::set"
       ]
@@ -34354,6 +34425,14 @@
     },
     {
       "from": "dim_cli::ui::composer::palette::tests",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::ui::i18n::Locale::En",
+        "path crate::ui::i18n::Locale::ZhCn"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::commands",
       "references": [
         "path Context",
@@ -34376,8 +34455,6 @@
       "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::Locale::En",
-        "path crate::ui::i18n::Locale::ZhCn",
         "path crate::ui::i18n::set"
       ]
     },
@@ -34424,6 +34501,13 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::ui::i18n::Locale::ZhCn"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::model::session",
       "references": [
         "path DraftPart",
@@ -34454,7 +34538,6 @@
       "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::Locale::ZhCn",
         "path crate::ui::i18n::active",
         "path crate::ui::i18n::set"
       ]
@@ -34529,6 +34612,28 @@
         "path remove",
         "path text",
         "path write"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::locale",
+      "references": [
+        "path Locale",
+        "path Locale::De",
+        "path Locale::En",
+        "path Locale::Es",
+        "path Locale::Fr",
+        "path Locale::Id",
+        "path Locale::Ja",
+        "path Locale::Ko",
+        "path Locale::PtBr",
+        "path Locale::PtPt",
+        "path Locale::ZhCn",
+        "path Locale::ZhHant",
+        "path Locale::from_code",
+        "path Locale::from_env_value",
+        "use crate::locale::LOCALES",
+        "use crate::locale::Locale"
       ]
     },
     {
@@ -35082,7 +35187,16 @@
     },
     {
       "from": "dim_cli::ui::i18n::tests",
-      "to": "dim_cli::ui::i18n",
+      "to": "dim_cli",
+      "references": [
+        "path crate::DAEMON_BUSY",
+        "path crate::DAEMON_BUSY_COUNTS",
+        "path crate::DAEMON_UPGRADING"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::locale",
       "references": [
         "path LOCALES",
         "path Locale",
@@ -35097,7 +35211,13 @@
         "path Locale::PtPt",
         "path Locale::ZhCn",
         "path Locale::ZhHant",
-        "path Locale::from_env_value",
+        "path Locale::from_env_value"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
         "path active",
         "path set",
         "path tf"
@@ -35380,17 +35500,23 @@
     },
     {
       "from": "dim_cli::ui::language_panel",
-      "to": "dim_cli::ui::i18n",
+      "to": "dim_cli::locale",
       "references": [
         "path LOCALES",
         "path Locale",
         "path Locale::code",
         "path Locale::from_code",
+        "use crate::ui::i18n::LOCALES",
+        "use crate::ui::i18n::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::language_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
         "path i18n::system_locale",
         "path tf",
         "use crate::ui::i18n",
-        "use crate::ui::i18n::LOCALES",
-        "use crate::ui::i18n::Locale",
         "use crate::ui::i18n::tf"
       ]
     },
@@ -36809,6 +36935,13 @@
     },
     {
       "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::locale",
+      "references": [
+        "path crate::ui::i18n::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
       "to": "dim_cli::member_approval",
       "references": [
         "path crate::member_approval::DetailError",
@@ -36849,7 +36982,6 @@
       "from": "dim_cli::ui::prompts",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path crate::ui::i18n::Locale",
         "path t",
         "path tf",
         "use crate::ui::i18n::t",
@@ -37727,7 +37859,9 @@
         "path Frame",
         "path Frame::default",
         "path Screen",
-        "path Screen::new"
+        "path Screen::new",
+        "path visible_rows",
+        "path visible_tail"
       ]
     },
     {
@@ -40899,6 +41033,15 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::locale",
+      "references": [
+        "path i18n::LOCALES",
+        "path i18n::Locale::En",
+        "path i18n::Locale::ZhCn"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::management::editor",
       "references": [
         "path editor::Draft",
@@ -41026,9 +41169,6 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::i18n",
       "references": [
-        "path i18n::LOCALES",
-        "path i18n::Locale::En",
-        "path i18n::Locale::ZhCn",
         "path i18n::active",
         "path i18n::set",
         "path t"
@@ -41617,6 +41757,7 @@
       "references": [
         "mod branch",
         "path branch",
+        "path branch::Changes::default",
         "path branch::GoalBranch::new"
       ]
     },
@@ -41632,7 +41773,6 @@
       "to": "dim_goal::session",
       "references": [
         "mod session",
-        "path session",
         "path session::GoalSession::new"
       ]
     },
@@ -41704,6 +41844,7 @@
       "references": [
         "path AgentError",
         "path AgentError::BranchEnded",
+        "path AgentError::Reloading",
         "use dim_agent_runtime::AgentError"
       ]
     },
@@ -41744,24 +41885,29 @@
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
         "path EventKind::BranchEnded",
+        "path EventKind::BranchStart",
         "path EventKind::ExecEnded",
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::ModelStart",
+        "path EventKind::SessionForked",
         "path EventKind::StopInterrupt",
         "path EventKind::Text",
         "path EventKind::TurnEnd",
         "path ExecStatus::Cancelled",
         "path InputBlock::Raw",
+        "path InputMessageData",
         "path InterruptScope::Turn",
         "path TurnEndData",
         "path dim_agent_types::BranchCreateFailedData::Cancelled",
         "path dim_agent_types::BranchCreateFailedData::Failed",
+        "path dim_agent_types::InputMessageData",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::ExecStatus",
         "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InterruptScope",
         "use dim_agent_types::TurnEndData",
         "use dim_agent_types::TurnOutcome"
@@ -41796,6 +41942,7 @@
         "path fold::ConclusionKind::Failed",
         "path fold::Progress::NoToolCall",
         "path fold::Progress::ToolCall",
+        "path fold::change_of",
         "path fold::conclusion_of",
         "path fold::decide_conclusion",
         "path fold::decide_evaluated_continuation",
@@ -41820,20 +41967,42 @@
       "to": "dim_goal::text",
       "references": [
         "path GoalTexts",
+        "path Live",
+        "path Live::default",
         "path text",
+        "path text::Answered::Restated",
+        "path text::Answered::Sequence",
+        "path text::Answered::Trigger",
+        "path text::Judge",
+        "path text::Judge::Model",
+        "path text::Judge::of",
         "path text::OBJECTIVE_KEY",
+        "path text::STATE_KEY",
         "path text::STATUS_KEY",
-        "path text::automatic_pause",
+        "path text::State",
+        "path text::State::Active",
+        "path text::State::Blocked",
+        "path text::State::Completed",
+        "path text::State::None",
+        "path text::State::Paused",
+        "path text::clear",
         "path text::conclusion",
         "path text::continuation",
+        "path text::edit",
         "path text::evaluate_again",
-        "path text::evaluated",
         "path text::evaluated_continuation",
         "path text::evaluator_prompt",
         "path text::marker",
+        "path text::pause",
+        "path text::report",
+        "path text::resume",
+        "path text::set",
         "path text::start_clear",
+        "path text::state",
+        "path text::state_parts",
         "use crate::text",
-        "use crate::text::GoalTexts"
+        "use crate::text::GoalTexts",
+        "use crate::text::Live"
       ]
     },
     {
@@ -41892,15 +42061,24 @@
         "path Judge::of",
         "path Marker",
         "path OBJECTIVE_KEY",
-        "path STATUS_KEY",
+        "path STATE_KEY",
         "path text",
+        "path text::Live",
+        "path text::State",
+        "path text::State::Active",
+        "path text::State::Blocked",
+        "path text::State::Completed",
+        "path text::State::None",
+        "path text::State::Paused",
         "path text::body",
         "path text::marker",
+        "path text::state_parts",
         "path text::value",
         "use crate::text",
         "use crate::text::Judge",
         "use crate::text::Marker",
         "use crate::text::OBJECTIVE_KEY",
+        "use crate::text::STATE_KEY",
         "use crate::text::STATUS_KEY"
       ]
     },
@@ -41909,6 +42087,8 @@
       "to": "dim_agent_types::events",
       "references": [
         "path InputBlock::Raw",
+        "path dim_agent_types::AgentEvent",
+        "path dim_agent_types::EventKind::InputMessage",
         "use dim_agent_types::InputBlock"
       ]
     },
@@ -41917,8 +42097,10 @@
       "to": "dim_goal::fold",
       "references": [
         "path Conclusion",
+        "path Fold::default",
         "path conclusion_of",
         "use super::Conclusion",
+        "use super::Fold",
         "use super::conclusion_of"
       ]
     },
@@ -41927,7 +42109,14 @@
       "to": "dim_goal::text",
       "references": [
         "path text",
+        "path text::Answered::Sequence",
+        "path text::GoalTexts::default",
+        "path text::Judge::Model",
+        "path text::Live::default",
+        "path text::State::Completed",
         "path text::conclusion",
+        "path text::state",
+        "path text::state_parts",
         "use crate::text"
       ]
     },
@@ -42019,6 +42208,21 @@
     },
     {
       "from": "dim_goal::session",
+      "to": "dim_goal::branch",
+      "references": [
+        "path Change::Clear",
+        "path Change::Edit",
+        "path Change::Pause",
+        "path Change::Report",
+        "path Change::Resume",
+        "path Change::Set",
+        "path Changes",
+        "use crate::branch::Change",
+        "use crate::branch::Changes"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
       "to": "dim_goal::session::tests",
       "references": [
         "mod tests"
@@ -42028,7 +42232,6 @@
       "from": "dim_goal::session",
       "to": "dim_goal::text",
       "references": [
-        "path GoalTexts",
         "path OBJECTIVE_LIMIT",
         "path SUMMARY_LIMIT",
         "path text::ENTRY",
@@ -42036,15 +42239,8 @@
         "path text::Judge::Model",
         "path text::TOOL_DESCRIPTION",
         "path text::TOOL_INVALID",
-        "path text::clear",
-        "path text::edit",
-        "path text::pause",
-        "path text::report",
-        "path text::resume",
-        "path text::set",
         "path text::tool_schema",
         "use crate::text",
-        "use crate::text::GoalTexts",
         "use crate::text::OBJECTIVE_LIMIT",
         "use crate::text::SUMMARY_LIMIT"
       ]
