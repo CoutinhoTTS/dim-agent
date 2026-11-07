@@ -4508,6 +4508,10 @@ async fn cancel_stops_a_running_helper() {
     assert_ok(&cancelled);
     let done = wait_terminal(&mut client, &task_id).await;
     assert_eq!(state_of(&done), "cancelled", "{done}");
+    assert!(
+        done["executor"]["confined"].is_null(),
+        "a started helper that returned no result records no confinement result: {done}"
+    );
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         let alive = std::process::Command::new("/bin/kill")

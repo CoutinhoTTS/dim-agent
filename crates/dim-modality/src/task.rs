@@ -96,8 +96,10 @@ pub enum Executor {
     Host {
         node: Option<String>,
         target: HostTarget,
-        /// Whether the helper ran under confinement: `true` or `false` once
-        /// it started, null while the helper has not started (A.4, A14).
+        /// The confinement result HostPlatform reported for the helper's
+        /// run (A.4, A14); null when none was recorded: the helper never
+        /// started, or its run ended without one, as when it is killed at
+        /// its timeout.
         #[serde(default)]
         confined: Option<bool>,
     },
