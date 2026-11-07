@@ -2344,7 +2344,9 @@ impl Shared {
     /// comes and dropped before the next file opens, so a publication holds
     /// one source reader at a time; the host path's `cap` adds each opened
     /// length to a running total and fails before copying the file that would
-    /// pass it, so the bytes published are exactly the bytes counted.
+    /// pass it, so the bytes published are exactly the bytes counted. Before
+    /// opening each file it reads the in-memory record, and once another
+    /// writer has settled the task it discards what it copied and returns.
     async fn settle_files(
         self: &Arc<Self>,
         slot: &Arc<Slot>,
@@ -2392,6 +2394,17 @@ impl Shared {
         let mut results: Vec<ResultFile> = Vec::new();
         let mut total: u64 = 0;
         for file in files {
+            // Before opening each file, stop once another writer has settled
+            // the task: a terminal record is what `finish` finally discards
+            // on, through the `Expect::NonTerminal` check `task::write`
+            // applies, while a plain revision move -- a progress update --
+            // is retried by `finish` rather than lost. Read from the
+            // in-memory mirror, so no storage read is added per file.
+            let current = self.record(slot);
+            if current.state.is_terminal() {
+                self.discard_results(&record.task_id, &written).await;
+                return;
+            }
             if !valid_file_name(&file.name) || !names.insert(file.name.clone()) {
                 self.discard_results(&record.task_id, &written).await;
                 self.fail_settled(

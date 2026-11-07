@@ -2314,6 +2314,12 @@ async fn a_cancel_racing_completion_yields_one_terminal_state() {
         .rpc("modality.task.cancel", json!({"task_id": task_id}))
         .await;
     assert_ok(&cancelled);
+    assert_eq!(
+        state_of(&cancelled["result"]["task"]),
+        "cancelled",
+        "{cancelled}"
+    );
+    let at_settled = count_results(&result_dir);
     let record = wait_terminal(&mut client, &task_id).await;
     assert_eq!(state_of(&record), "cancelled", "{record}");
     assert!(
@@ -2324,6 +2330,16 @@ async fn a_cancel_racing_completion_yields_one_terminal_state() {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let leftovers = count_results(&result_dir);
+        // The cancel replies only after `settled_cancelled` returned, and
+        // `finish` observes the terminal record before it returns, so the
+        // mirror is already terminal when the reply arrives. The copier
+        // checks that mirror before opening each file and copies one at a
+        // time, so past the reply it can add at most the one file it had
+        // already opened.
+        assert!(
+            leftovers <= at_settled + 1,
+            "the losing completion kept copying: {leftovers} files seen, {at_settled} when the cancel settled"
+        );
         if leftovers == 0 {
             break;
         }
