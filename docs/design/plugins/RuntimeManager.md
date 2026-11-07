@@ -240,7 +240,7 @@ None to rutis: a connection row starts its process only once its launch command 
 
 ## 10. Client change notices
 
-RuntimeManager's records are process state with no Timeline fact, so a client that shows them reads `runtime.list` and otherwise polls. A client that needs changes without polling opens `runtime.watch {}`, which answers `{}` and stays open; the changes travel as that call's `progress` ([methods contract A.2](../contracts/session-boundary.md#a2-call-channel)):
+RuntimeManager's records are process state with no Timeline fact, so a client that shows them reads `runtime.list` and otherwise polls. A client that needs changes without polling opens `runtime.watch {}`; the call stays open while the connection watches, and the changes travel as its `progress` ([methods contract A.2](../contracts/session-boundary.md#a2-call-channel)):
 
 | Item | When |
 | --- | --- |

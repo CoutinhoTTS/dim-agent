@@ -351,10 +351,11 @@ is best effort: a connection queues at most 256 progress frames and 4 MiB of
 them, beside the 1024 frames and 32 MiB of replies and notifications; it
 drops a notice that does not fit, so one over 4 MiB never arrives, and stays
 open. Management
-and Session methods share this path. `runtime.watch` is the first management
-method to declare `progress`: it answers `{}` and stays open for the life of
-the connection's watch, streaming one item per committed runtime change, and
-its generation's unload answers the open call `operation_interrupted`
+and Session methods share this path. `runtime.watch` declares `progress`: its
+call stays open while the connection watches, each item is one committed
+runtime change, and it is answered only when a later `runtime.watch` on the
+same connection takes over (`{}`) or its generation unloads
+(`operation_interrupted`)
 ([RuntimeManager §10](../plugins/RuntimeManager.md#10-client-change-notices)).
 Connection-bound notifications are the contract's `callChannel.notify`
 and `closed` ([A.2](../contracts/session-boundary.md#a2-call-channel)): a

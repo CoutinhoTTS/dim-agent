@@ -240,7 +240,7 @@ RuntimeManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 ## 10. 客户端变更通知
 
-RuntimeManager 的记录是没有 Timeline fact 的进程状态，所以展示它们的客户端读取 `runtime.list`，否则只能轮询。需要免轮询得知变化的客户端打开 `runtime.watch {}`：它回答 `{}` 并保持打开，变化作为这次调用的 `progress` 下发（[方法契约 A.2](../contracts/session-boundary.md#a2-调用通道)）：
+RuntimeManager 的记录是没有 Timeline fact 的进程状态，所以展示它们的客户端读取 `runtime.list`，否则只能轮询。需要免轮询得知变化的客户端打开 `runtime.watch {}`：调用在连接 watch 期间保持打开，变化作为这次调用的 `progress` 下发（[方法契约 A.2](../contracts/session-boundary.md#a2-调用通道)）：
 
 | 条目 | 时机 |
 | --- | --- |
