@@ -157,9 +157,17 @@ async fn inline_text(modality: &mut Modality<'_>, id: &str, task: &Value) -> Res
     }
 }
 
-/// The written `text.txt` when it fits the inline rule.
+/// The written `text.txt` when it fits the inline rule. The read stops one
+/// byte past the inline limit, so a file above it is never read whole.
 fn inline_text_written(path: &Path) -> Result<Option<String>> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let file = std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(INLINE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if bytes.len() as u64 > INLINE_BYTES {
+        return Ok(None);
+    }
     Ok(fitting(&bytes))
 }
 
