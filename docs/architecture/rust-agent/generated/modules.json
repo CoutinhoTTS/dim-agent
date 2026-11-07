@@ -1373,7 +1373,9 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools",
       "file": "crates/dim-agent-capabilities/src/workspace_tools/mentions.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "json"
+      ]
     },
     {
       "id": "dim_agent_questions",
@@ -3215,6 +3217,16 @@
       "unexpandedMacros": [
         "format",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_app_server::workspace_files",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/workspace_files.rs",
+      "unexpandedMacros": [
+        "json",
+        "vec"
       ]
     },
     {
@@ -8073,6 +8085,13 @@
       "to": "dim_agent_capabilities::workspace_tools::file_reads",
       "references": [
         "path workspace_tools::file_reads::FileReads"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::workspace_tools::mentions",
+      "references": [
+        "path workspace_tools::mentions::MentionIndex"
       ]
     },
     {
@@ -14673,9 +14692,9 @@
       "references": [
         "mod mentions",
         "path mentions",
-        "path mentions::DEFAULT_LIMIT",
-        "path mentions::MAX_LIMIT",
-        "path mentions::MentionIndex::default"
+        "path mentions::MentionIndex",
+        "path mentions::MentionIndex::default",
+        "path mentions::parse_limit"
       ]
     },
     {
@@ -14727,7 +14746,11 @@
       "from": "dim_agent_capabilities::workspace_tools",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path dim_agent_runtime::Feature::new"
+        "path PartRegistry",
+        "path PartScope::Branch",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
       ]
     },
     {
@@ -18920,6 +18943,14 @@
       "to": "dim_app_server::web_entry",
       "references": [
         "mod web_entry"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::workspace_files",
+      "references": [
+        "mod workspace_files",
+        "path workspace_files::WorkspaceFilesPlugin::new"
       ]
     },
     {
@@ -28430,6 +28461,49 @@
       "references": [
         "path Site",
         "path error"
+      ]
+    },
+    {
+      "from": "dim_app_server::workspace_files",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path MethodCall",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::workspace_files",
+      "to": "dim_agent_capabilities::workspace_tools::mentions",
+      "references": [
+        "path MentionIndex",
+        "path mentions::parse_limit",
+        "use dim_agent_capabilities::workspace_tools::mentions",
+        "use dim_agent_capabilities::workspace_tools::mentions::MentionIndex"
+      ]
+    },
+    {
+      "from": "dim_app_server::workspace_files",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::workspace_files",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
       ]
     },
     {

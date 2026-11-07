@@ -40,6 +40,7 @@ mod ui_host;
 mod ui_leaf;
 pub mod web;
 mod web_entry;
+mod workspace_files;
 
 use agents::{AgentIndex, AgentsPlugin};
 pub use agents::{SessionPermissions, SessionRef, SessionsError};
@@ -706,6 +707,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(methods::ManagementMethodsPlugin::new(names)?))
     })?);
+    // The sessionless workspace file search reads the index the WorkspaceTools
+    // owner provides, so the row is assembled only where that part is.
+    if builder.requires_part("WorkspaceTools") {
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(workspace_files::WorkspaceFilesPlugin::new(names)?))
+        })?);
+    }
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(connection::CallChannelPlugin::new(names)?))
     })?);
