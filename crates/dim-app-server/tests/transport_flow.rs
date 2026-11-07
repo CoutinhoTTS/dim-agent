@@ -106,6 +106,9 @@ mod model_switch;
 #[path = "transport_flow/summaries.rs"]
 mod summaries;
 
+#[path = "transport_flow/shutdown_idle.rs"]
+mod shutdown_idle;
+
 #[path = "transport_flow/management.rs"]
 mod management;
 
@@ -165,6 +168,9 @@ mod sessions;
 
 #[path = "transport_flow/shell_input.rs"]
 mod shell_input;
+
+#[path = "transport_flow/workspace_files.rs"]
+mod workspace_files;
 
 #[path = "transport_flow/deletion.rs"]
 mod deletion;
