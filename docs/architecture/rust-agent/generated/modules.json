@@ -6268,6 +6268,13 @@
       ]
     },
     {
+      "id": "dim_ocr::plugin",
+      "crate": "dim_ocr",
+      "parent": "dim_ocr",
+      "file": "crates/dim-ocr/src/plugin.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_ocr::vision",
       "crate": "dim_ocr",
       "parent": "dim_ocr",
@@ -43251,6 +43258,16 @@
       ]
     },
     {
+      "from": "dim_modality",
+      "to": "dim_ocr::plugin",
+      "references": [
+        "path dim_ocr::HELPER_CONTRACT",
+        "path dim_ocr::HelperDescription",
+        "path dim_ocr::PLUGIN_MODEL",
+        "path dim_ocr::PLUGIN_PROVIDER"
+      ]
+    },
+    {
       "from": "dim_modality::adapter",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -43310,6 +43327,7 @@
         "path ConfinedOutput",
         "path ConfinedSpec",
         "path Confinement",
+        "path SystemServices::None",
         "path SystemServices::OnDeviceRecognition",
         "use dim_agent_capabilities::host_platform::ConfinedError",
         "use dim_agent_capabilities::host_platform::ConfinedOutput",
@@ -43358,16 +43376,19 @@
       "to": "dim_modality",
       "references": [
         "path Evaluation",
-        "path HostTargetSpec",
         "path ModalityAdapterService",
         "path catalog_category",
         "path crate::OperationRow",
+        "path crate::PluginTargetState::Absent",
+        "path crate::PluginTargetState::Outdated",
+        "path crate::PluginTargetState::Ready",
         "path crate::evaluate",
+        "path crate::host_target_for",
+        "path crate::plugin_target_state",
         "path crate::unknown_operation",
         "path host_target",
         "path is_understand",
         "use crate::Evaluation",
-        "use crate::HostTargetSpec",
         "use crate::ModalityAdapterService",
         "use crate::catalog_category",
         "use crate::host_target",
@@ -43480,6 +43501,15 @@
         "path dim_ocr::APPLE_VISION_MODEL",
         "path dim_ocr::APPLE_VISION_PROVIDER",
         "path dim_ocr::apple_vision_available"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
+      "to": "dim_ocr::plugin",
+      "references": [
+        "path dim_ocr::HelperDescription",
+        "path dim_ocr::PLUGIN_MODEL",
+        "path dim_ocr::PLUGIN_PROVIDER"
       ]
     },
     {
@@ -43601,6 +43631,18 @@
         "use platform::APPLE_VISION_PROVIDER",
         "use platform::apple_vision_available",
         "use platform::macos_version"
+      ]
+    },
+    {
+      "from": "dim_ocr",
+      "to": "dim_ocr::plugin",
+      "references": [
+        "mod plugin",
+        "use plugin::DescriptionTarget",
+        "use plugin::HELPER_CONTRACT",
+        "use plugin::HelperDescription",
+        "use plugin::PLUGIN_MODEL",
+        "use plugin::PLUGIN_PROVIDER"
       ]
     },
     {
@@ -45285,6 +45327,10 @@
     {
       "module": "dim_modality",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_modality",
+      "path": "ServiceValue::List"
     },
     {
       "module": "dim_ocr::contract",
