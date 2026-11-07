@@ -675,6 +675,23 @@ impl ProviderModel {
             .collect();
         (!operations.is_empty()).then_some(operations)
     }
+
+    /// The realtime transport this entry's `metadata.raw.realtime` declares,
+    /// parsed here where the catalog's external data enters (§3.6); `None`
+    /// when the entry declares none.
+    fn realtime(&self) -> Result<Option<RealtimeDeclaration>, String> {
+        let Some(value) = self.metadata.as_ref().and_then(|metadata| {
+            metadata
+                .raw
+                .get("realtime")
+                .filter(|value| !value.is_null())
+        }) else {
+            return Ok(None);
+        };
+        serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|_| "The model's realtime declaration needs a protocol and a path".to_owned())
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderSelection {
@@ -2329,6 +2346,26 @@ impl ConnectionUse<'_> {
         };
         request.metadata.as_ref()?.session_id.as_deref()
     }
+
+    /// The realtime transport the selected entry declares, for a `realtime.*`
+    /// operation only. A declaration that does not parse is an invalid request
+    /// naming the field, never a silent absence.
+    fn realtime(&self, model: &ProviderModel) -> Result<Option<RealtimeDeclaration>, HostError> {
+        match self {
+            Self::Modality { operation } if operation.starts_with("realtime.") => model
+                .realtime()
+                .map_err(|message| HostError::classified(HostErrorKind::InvalidRequest, message)),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// What one resolution produced: the connection both ports hand out, the route
+/// the catalog carries, and a Modality model's declared realtime transport.
+struct Resolution {
+    connection: ResolvedModelConnection,
+    protocol: ModelProtocol,
+    realtime: Option<RealtimeDeclaration>,
 }
 
 impl ProviderService {
@@ -2343,7 +2380,7 @@ impl ProviderService {
         model_id: &str,
         use_: ConnectionUse<'_>,
         cancel: &CancellationToken,
-    ) -> Result<(ResolvedModelConnection, ModelProtocol), HostError> {
+    ) -> Result<Resolution, HostError> {
         if !self
             .oauth
             .contains(provider_id, cancel)
@@ -2371,6 +2408,7 @@ impl ProviderService {
             let protocol = model
                 .endpoint
                 .ok_or_else(|| failure("Model is unavailable"))?;
+            let realtime = use_.realtime(model)?;
             if record.driver_kind == "new-api-router"
                 && use_
                     .adopted_protocol()
@@ -2391,14 +2429,15 @@ impl ProviderService {
                     lease,
                     record.network,
                 );
-                return Ok((
-                    ResolvedModelConnection {
+                return Ok(Resolution {
+                    connection: ResolvedModelConnection {
                         connection: recovered.connection,
                         recovery: Some(recovered.recovery),
                         failure_policy: None,
                     },
                     protocol,
-                ));
+                    realtime,
+                });
             }
             let credential = self
                 .credential(provider_id, &record.credential, &record.auth, cancel)
@@ -2450,8 +2489,8 @@ impl ProviderService {
                                 .ok_or_else(|| failure("Amazon Bedrock region is missing"))?,
                         },
                     };
-                    return Ok((
-                        ResolvedModelConnection {
+                    return Ok(Resolution {
+                        connection: ResolvedModelConnection {
                             connection: ModelConnection::Bedrock(BedrockModelConnection {
                                 base_url: record.base_url,
                                 network: record.network,
@@ -2462,7 +2501,8 @@ impl ProviderService {
                             recovery: None,
                         },
                         protocol,
-                    ));
+                        realtime,
+                    });
                 }
             }
             let mut connection =
@@ -2485,14 +2525,15 @@ impl ProviderService {
             }
             connection.bearer = bearer;
             connection.network = record.network;
-            return Ok((
-                ResolvedModelConnection {
+            return Ok(Resolution {
+                connection: ResolvedModelConnection {
                     connection: ModelConnection::Http(connection),
                     failure_policy: None,
                     recovery: None,
                 },
                 protocol,
-            ));
+                realtime,
+            });
         }
         let mut catalog = self
             .catalog(provider_id.to_owned(), cancel)
@@ -2502,6 +2543,7 @@ impl ProviderService {
             catalog.apply_startup_limits(Some(window), Some(output));
         }
         let model = use_.select(&catalog, model_id)?;
+        let realtime = use_.realtime(model)?;
         let lease = self
             .oauth
             .credential(provider_id, model_id, cancel)
@@ -2514,14 +2556,15 @@ impl ProviderService {
         }
         let protocol = lease.protocol;
         let recovered = plugin_connection(self.clone(), lease);
-        Ok((
-            ResolvedModelConnection {
+        Ok(Resolution {
+            connection: ResolvedModelConnection {
                 connection: recovered.connection,
                 recovery: Some(recovered.recovery),
                 failure_policy: None,
             },
             protocol,
-        ))
+            realtime,
+        })
     }
 }
 
@@ -2568,7 +2611,7 @@ impl ResolveModelConnection for ProductResolver {
                     &cancel,
                 )
                 .await
-                .map(|(resolved, _)| resolved)
+                .map(|resolution| resolution.connection)
         })
     }
 }
@@ -2580,7 +2623,7 @@ impl ResolveModalityConnection for ProductResolver {
     ) -> HostFuture<'_, ModalityConnection> {
         Box::pin(async move {
             self.0.check(&cancel)?;
-            let (resolved, protocol) = self
+            let resolution = self
                 .0
                 .resolve_connection(
                     &target.target.provider_id,
@@ -2592,9 +2635,10 @@ impl ResolveModalityConnection for ProductResolver {
                 )
                 .await?;
             Ok(ModalityConnection {
-                resolved,
-                protocol,
+                resolved: resolution.connection,
+                protocol: resolution.protocol,
                 model: target.target.model_id,
+                realtime: resolution.realtime,
             })
         })
     }
