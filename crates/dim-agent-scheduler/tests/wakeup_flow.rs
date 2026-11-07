@@ -1342,24 +1342,18 @@ fn wakeup_state(method: &str, params: &Value, wakeup_id: &str, state: &str) -> b
         && params["data"]["state"] == json!(state)
 }
 
-/// Whether a `session.event` notification is the wakeup input the pass wrote.
+/// Whether a `session.event` notification is the wakeup input the pass wrote,
+/// named by its submission id `wakeup:<wakeup_id>`.
 fn wakeup_input_event(method: &str, params: &Value, wakeup_id: &str) -> bool {
     method == "session.event"
         && params["event"]["type"] == json!("input")
         && params["event"]["name"] == json!("message")
-        && params["event"]["data"]["blocks"]
-            .as_array()
-            .is_some_and(|blocks| {
-                blocks.iter().any(|block| {
-                    block["text"].as_str().is_some_and(|text| {
-                        text.contains("dim-scheduler kind=\"wakeup\"") && text.contains(wakeup_id)
-                    })
-                })
-            })
+        && params["event"]["data"]["submission_id"] == json!(format!("wakeup:{wakeup_id}"))
 }
 
-/// A committed record change is announced as `session.notice`, and the fired
-/// notice follows the `input/message` the pass wrote.
+/// A committed record change is announced as `session.notice`. A `fired`
+/// notice is a committed-state notice, not ordered against the input's
+/// `session.event`; a client relates them by the input's submission id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wakeup_changes_reach_an_attached_client_as_session_notices() {
     let home = home();
@@ -1392,18 +1386,46 @@ async fn wakeup_changes_reach_an_attached_client_as_session_notices() {
     assert_eq!(scheduled["sessionId"], json!(session), "{scheduled}");
     assert_eq!(scheduled["data"]["branchId"], json!("main"), "{scheduled}");
 
-    let mut input_seen = false;
+    // The notice is not ordered against the input's event: collect both
+    // without assuming which arrives first.
+    let mut input_event = None;
     let fired = wait_notice(
         &mut client,
         "the fired notice",
-        |method, params| input_seen |= wakeup_input_event(method, params, &wakeup_id),
+        |method, params| {
+            if wakeup_input_event(method, params, &wakeup_id) {
+                input_event = Some(params.clone());
+            }
+        },
         |method, params| wakeup_state(method, params, &wakeup_id, "fired"),
     )
     .await;
-    assert!(
-        input_seen,
-        "the fired notice follows the input it wrote: {fired}"
+    assert_eq!(fired["data"]["state"], json!("fired"), "{fired}");
+    let input = match input_event {
+        Some(input) => input,
+        None => {
+            wait_notice(
+                &mut client,
+                "the input event",
+                |_, _| {},
+                |method, params| wakeup_input_event(method, params, &wakeup_id),
+            )
+            .await
+        }
+    };
+    assert_eq!(
+        input["event"]["data"]["submission_id"],
+        json!(format!("wakeup:{wakeup_id}")),
+        "{input}"
     );
+
+    // The notice reports the committed record; the owner's query is the truth
+    // once the notice has arrived.
+    let listed: Value = client
+        .rpc("session.wakeup.list", json!({"sessionId": session}))
+        .await
+        .unwrap();
+    assert_eq!(listed["wakeups"][0]["state"], json!("fired"), "{listed}");
 
     drop(client);
     server.shutdown();
