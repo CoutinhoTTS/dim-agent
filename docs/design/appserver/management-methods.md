@@ -32,10 +32,10 @@ table, not on any owner ([methods contract §3.2](../contracts/session-boundary.
 The table has no dependencies, so it reloads neither with Rpc nor with an owner.
 The owners register `account`, `account.codex`, `account.grok` and `provider`
 with a product home; `settings` (SettingsMethods) wherever Settings is assembled;
-`mcp`, `skills` and `permission` with local execution; and `workspace.files`
-(WorkspaceFiles), also with local execution, which injects the process file
-index WorkspaceTools provides and serves a sessionless working-directory file
-search. Adding an owner adds
+`storage` (StorageMethods) with native storage; `mcp`, `skills` and `permission`
+with local execution; and `workspace.files` (WorkspaceFiles), also with local
+execution, which injects the process file index WorkspaceTools provides and
+serves a sessionless working-directory file search. Adding an owner adds
 its row, whose `apply` registers its namespace; nothing else in the assembly
 changes. On each call Rpc reads the table for the namespace that holds the name
 and dispatches to its provider; it reads the status of the row that registered
@@ -54,6 +54,8 @@ BusinessDocument persistence and the declared sources of
 [the settings service](settings-service.md), not approvals, a method contribution or a configuration
 namespace; SettingsMethods, which depends on it, owns
 `settings.read`/`settings.update`/`settings.sources`/`settings.projects`.
+The store supplies its own bytes and free pages as a service; StorageMethods,
+which depends on it, owns `storage.report`.
 MCP owns its configuration types in `mcp/config.rs`; the Skills owner supplies
 the existing `SkillSettingsHost`. App Server's SkillsCatalog mounts the reusable catalog
 and publishes both catalog and management interfaces in one plugin, with the
