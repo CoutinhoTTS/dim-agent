@@ -13,6 +13,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, TypeKey};
 use serde_json::{Value, json};
 use std::{
+    collections::{HashMap, HashSet},
     path::Path,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -193,6 +194,113 @@ async fn run_states_reach_the_watcher_in_order() {
     assert_eq!(settled["state"], json!("completed"), "{settled}");
 
     drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Concurrent jobs and run sources keep one watch's items in `seq` order:
+/// several jobs are saved through Settings while runs that started together
+/// move through their states, and every item arrives with the next number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_sources_deliver_each_watch_item_in_sequence() {
+    const RUNS: usize = 6;
+    const SAVES: usize = 6;
+
+    let home = support::home();
+    let model = Arc::new(support::Script::default());
+    let server = support::start(home.path(), model).await;
+    let mut watcher = support::connect(&server).await;
+    let watch = watcher.send("schedule.watch", json!({})).await.unwrap();
+    wait_watching(&mut watcher, watch).await;
+
+    // The jobs the concurrent run tasks use; their items are read first.
+    let mut driver = support::connect(&server).await;
+    let mut jobs = Vec::new();
+    for name in ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"] {
+        jobs.push(save_job(&mut driver, name, home.path()).await);
+    }
+    for expected in 1..=jobs.len() as u64 {
+        let item = wait_item(&mut watcher, watch, "the setup jobs item").await;
+        assert_eq!(item, json!({"kind": "jobs", "seq": expected}), "{item}");
+    }
+
+    // The run tasks and the save driver start together, so the jobs source
+    // and the run sources emit concurrently on the same watch.
+    let mut run_clients = Vec::new();
+    for _ in 0..RUNS {
+        run_clients.push(support::connect(&server).await);
+    }
+    let save_client = support::connect(&server).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(RUNS + 1));
+    let mut writers = Vec::new();
+    for (client, job_id) in run_clients.into_iter().zip(jobs.iter().cloned()) {
+        let barrier = barrier.clone();
+        writers.push(tokio::spawn(async move {
+            let mut client = client;
+            barrier.wait().await;
+            let accepted: Value = client
+                .typed("schedule.run_now", json!({"job_id": job_id}))
+                .await
+                .unwrap();
+            Some(accepted["run_id"].as_str().unwrap().to_owned())
+        }));
+    }
+    {
+        let barrier = barrier.clone();
+        let cwd = home.path().to_owned();
+        writers.push(tokio::spawn(async move {
+            let mut client = save_client;
+            barrier.wait().await;
+            for index in 0..SAVES {
+                save_job(&mut client, &format!("extra-{index}"), &cwd).await;
+            }
+            None
+        }));
+    }
+
+    // Every item after the setup arrives in arrival order; its number must be
+    // exactly the next one, with no gap and no inversion.
+    let mut expected = jobs.len() as u64 + 1;
+    let mut jobs_items = 0;
+    let mut run_items = 0;
+    let mut runs: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    while jobs_items < SAVES || run_items < RUNS * 4 {
+        let item = wait_item(&mut watcher, watch, "the next concurrent item").await;
+        assert_eq!(item["seq"], json!(expected), "{item}");
+        expected += 1;
+        if item["kind"] == json!("jobs") {
+            jobs_items += 1;
+            continue;
+        }
+        assert_eq!(item["kind"], json!("run"), "{item}");
+        let run_id = item["runId"].as_str().unwrap().to_owned();
+        let state = item["state"].as_str().unwrap().to_owned();
+        let terminal = item["terminal"].as_bool().unwrap();
+        runs.entry(run_id).or_default().push((state, terminal));
+        run_items += 1;
+    }
+    assert_eq!(jobs_items, SAVES, "one item per saved job");
+    assert_eq!(runs.len(), RUNS, "one run per accepted run_now");
+    for (run_id, states) in &runs {
+        let names: Vec<&str> = states.iter().map(|(state, _)| state.as_str()).collect();
+        assert_eq!(
+            names,
+            ["launching", "submitted", "running", "completed"],
+            "run {run_id}: {states:?}"
+        );
+        let terminals: Vec<bool> = states.iter().map(|(_, terminal)| *terminal).collect();
+        assert_eq!(terminals, [false, false, false, true], "run {run_id}");
+    }
+
+    let mut replied = HashSet::new();
+    for writer in writers {
+        if let Some(run_id) = writer.await.unwrap() {
+            replied.insert(run_id);
+        }
+    }
+    assert_eq!(runs.keys().cloned().collect::<HashSet<_>>(), replied);
+
+    drop((watcher, driver));
     server.shutdown();
     server.join().await.unwrap();
 }

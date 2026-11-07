@@ -34,9 +34,14 @@ struct Watch {
 }
 
 impl Watch {
-    /// Sends one item on this watch's call, numbered in order. Progress is
-    /// best effort: an item the connection cannot take is dropped, which is
-    /// why every item carries its number.
+    /// Sends one item on this watch's call, numbered in order. The `seq`
+    /// guard spans the send, so numbering and delivery are one step and two
+    /// senders cannot deliver `1` after `2`. The sink is a non-blocking
+    /// offer, so the guard is held briefly and never across an await. The
+    /// lock order is `Watchers` map -> [`Watch::seq`] -> the `Progress`
+    /// mutex; `Progress::close` takes only its own mutex, so the order
+    /// cannot cycle. Progress is best effort: an item the connection cannot
+    /// take is dropped, which is why every item carries its number.
     fn send(&self, mut item: Value) {
         let Some(fields) = item.as_object_mut() else {
             return;
@@ -44,7 +49,6 @@ impl Watch {
         let mut seq = self.seq.lock().unwrap();
         fields.insert("seq".into(), json!(*seq));
         *seq += 1;
-        drop(seq);
         self.progress.send(item);
     }
 }
