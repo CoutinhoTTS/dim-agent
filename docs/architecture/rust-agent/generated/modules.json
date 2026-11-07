@@ -1275,6 +1275,15 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools::file_reads",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::workspace_tools::files",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools",
@@ -14991,6 +15000,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::file_reads",
+      "to": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path Timeline",
@@ -15027,6 +15043,73 @@
         "path EventKind::ContextCompaction",
         "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_capabilities::workspace_tools::file_reads",
+      "references": [
+        "path COMPACTION_PAGE",
+        "path FileReads::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig::default",
+        "use dim_agent_runtime::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "path Timeline::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_runtime::memory_timeline_store",
+      "references": [
+        "path MemoryTimelineStore::default",
+        "use dim_agent_runtime::MemoryTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineKey",
+        "use dim_agent_runtime::TimelineKey",
+        "use dim_agent_runtime::TimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ContextCompactionData",
+        "path ContextCompactionResult::Cancelled",
+        "path ContextCompactionResult::Completed",
+        "path EventKind",
+        "path EventKind::ContextCompaction",
+        "use dim_agent_types::ContextCompactionData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads::tests",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path CompactionDiagnosticsRecord",
+        "path CompactionReason::Auto",
+        "path CompactionStrategyRecord",
+        "path CompactionTrigger::Threshold",
+        "use dim_agent_types::CompactionDiagnosticsRecord",
+        "use dim_agent_types::CompactionReason",
+        "use dim_agent_types::CompactionStrategyRecord",
+        "use dim_agent_types::CompactionTrigger"
       ]
     },
     {
