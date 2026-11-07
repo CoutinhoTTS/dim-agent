@@ -8,7 +8,9 @@
 //! to the plugin's generation: the scheduler and the running tasks are
 //! `ctx.effect` work that stops with the plugin.
 use crate::ModalityAdapterService;
-use crate::adapter::{AdapterOutput, AdapterProgress, Job, JobFile, ProgressSink, RemoteCancel};
+use crate::adapter::{
+    AdapterOperation, AdapterOutput, AdapterProgress, Job, JobFile, ProgressSink, RemoteCancel,
+};
 use crate::task::{
     self, Executor, Expect, InputFile, ResultFile, TaskError, TaskRecord, TaskResult, TaskState,
     Write,
@@ -89,13 +91,13 @@ fn rfc3339(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
-fn invalid_input(detail: impl Into<String>) -> RpcError {
+pub(crate) fn invalid_input(detail: impl Into<String>) -> RpcError {
     RpcError::app(-32602, "invalid_input", detail)
 }
-fn not_found(detail: impl Into<String>) -> RpcError {
+pub(crate) fn not_found(detail: impl Into<String>) -> RpcError {
     RpcError::app(-32000, "not_found", detail)
 }
-fn unavailable(detail: impl Into<String>) -> RpcError {
+pub(crate) fn unavailable(detail: impl Into<String>) -> RpcError {
     RpcError::app(-32000, "unavailable", detail)
 }
 fn storage_error(detail: impl Into<String>) -> RpcError {
@@ -174,6 +176,25 @@ pub(crate) fn resolve_task_model(
             row.id(category)
         ))),
     }
+}
+
+/// Validates an operation's parameters against the schema its adapter
+/// declares (A.2, decision 3), once per submission or session.
+pub(crate) fn check_spec_params(
+    spec: &AdapterOperation,
+    params: &Value,
+    name: &str,
+) -> Result<(), RpcError> {
+    let validator = jsonschema::draft202012::new(&spec.params_schema).map_err(|error| {
+        RpcError::app(
+            -32000,
+            "provider_error",
+            format!("The adapter's parameter schema is invalid: {error}"),
+        )
+    })?;
+    validator
+        .validate(params)
+        .map_err(|error| invalid_input(format!("Invalid {name} parameters: {error}")))
 }
 
 /// `modality.task.submit` (A.3).
@@ -631,10 +652,9 @@ impl ModalityTasks {
                     category.name, params.operation
                 ))
             })?;
-        // Operations that are not tasks (decision 6).
-        if is_understand(category.name, row.operation)
-            || row.id(category.name) == "realtime.connect"
-        {
+        // Operations that are not tasks (decision 6): understanding is a
+        // selection, and every `realtime.*` operation is a session.
+        if is_understand(category.name, row.operation) || crate::is_realtime(category.name) {
             return Err(crate::unknown_operation(format!(
                 "{} is not a task",
                 row.id(category.name)
@@ -698,19 +718,7 @@ impl ModalityTasks {
                 row.id(category.name)
             )));
         };
-        let validator = jsonschema::draft202012::new(&spec.params_schema).map_err(|error| {
-            RpcError::app(
-                -32000,
-                "provider_error",
-                format!("The adapter's parameter schema is invalid: {error}"),
-            )
-        })?;
-        if let Err(error) = validator.validate(&params.params) {
-            return Err(invalid_input(format!(
-                "Invalid {} parameters: {error}",
-                row.id(category.name)
-            )));
-        }
+        check_spec_params(&spec, &params.params, &row.id(category.name))?;
         // Boundary: names, media types and sizes (decision 1, decision 2).
         let allowed = allowed_media_types(category.name, row.operation);
         let mut inline_bytes: u64 = 0;
