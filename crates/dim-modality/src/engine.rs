@@ -16,7 +16,7 @@ use crate::task::{
 use crate::{Evaluation, HostTargetSpec, catalog_category, host_target, is_understand};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
-use dim_agent_capabilities::file_storage::EntryKind;
+use dim_agent_capabilities::file_storage::{EntryKind, FileReader};
 use dim_agent_capabilities::host::{
     ModalityConnection, ModalityConnectionHost, ModalityTarget, ModelSelectionHost,
     SelectableModelsHost,
@@ -35,8 +35,8 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::io::Read;
-use std::path::Path;
 use std::path::PathBuf;
+use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -2142,13 +2142,93 @@ impl Shared {
     /// Publishes the artifacts one successful call wrote: `result.json`,
     /// `text.txt` and the rasterized page images, with `data.pages` read
     /// from `result.json` and bounded by [`MAX_DATA_TEXT_BYTES`] (decision 8).
+    /// Every artifact is opened through the plugin files storage first: that
+    /// walk never follows a link and accepts only a regular file, so a FIFO
+    /// left at an artifact name cannot block the read and a link cannot point
+    /// it outside the work directory. The opened lengths are checked against
+    /// [`dim_ocr::MAX_ARTIFACT_BYTES`] before any byte is read.
     async fn publish_host(self: &Arc<Self>, slot: &Arc<Slot>, work: &Path) {
-        let result = work.join(dim_ocr::RESULT_FILE);
-        let text = work.join(dim_ocr::TEXT_FILE);
-        let parsed = {
-            let result = result.clone();
-            tokio::task::spawn_blocking(move || dim_ocr::read_pages(&result, MAX_DATA_TEXT_BYTES))
+        let record = self.record(slot);
+        let work_name = task::work_name(&record.task_id);
+        let result_reader = match self.open_work_file(&work_name, dim_ocr::RESULT_FILE).await {
+            Ok(Some(reader)) => reader,
+            Ok(None) => {
+                self.fail(
+                    slot,
+                    "executor_error",
+                    "The OCR helper wrote no readable result",
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                self.fail(slot, "executor_error", error).await;
+                return;
+            }
+        };
+        let text_reader = match self.open_work_file(&work_name, dim_ocr::TEXT_FILE).await {
+            Ok(Some(reader)) => reader,
+            Ok(None) => {
+                self.fail(slot, "executor_error", "The OCR helper wrote no text")
+                    .await;
+                return;
+            }
+            Err(error) => {
+                self.fail(slot, "executor_error", error).await;
+                return;
+            }
+        };
+        let listed = match self.files.list(&work_name).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.fail(slot, "executor_error", error.to_string()).await;
+                return;
+            }
+        };
+        let prefix = format!("{work_name}/");
+        let mut images = Vec::new();
+        for entry in listed {
+            let Some(leaf) = entry.name.strip_prefix(&prefix) else {
+                continue;
+            };
+            if leaf.starts_with(dim_ocr::PAGE_IMAGE_PREFIX) && leaf.ends_with(".png") {
+                images.push(leaf.to_owned());
+            }
         }
+        images.sort();
+        let mut total = result_reader.len().saturating_add(text_reader.len());
+        let mut image_readers = Vec::new();
+        for name in &images {
+            let reader = match self.open_work_file(&work_name, name).await {
+                Ok(Some(reader)) => reader,
+                Ok(None) => {
+                    self.fail(slot, "executor_error", "The OCR artifacts cannot be read")
+                        .await;
+                    return;
+                }
+                Err(error) => {
+                    self.fail(slot, "executor_error", error).await;
+                    return;
+                }
+            };
+            total = total.saturating_add(reader.len());
+            image_readers.push(reader);
+        }
+        if total > dim_ocr::MAX_ARTIFACT_BYTES {
+            self.fail(
+                slot,
+                "executor_error",
+                format!(
+                    "The OCR artifacts exceed {} bytes",
+                    dim_ocr::MAX_ARTIFACT_BYTES
+                ),
+            )
+            .await;
+            return;
+        }
+        let parsed = tokio::task::spawn_blocking(move || {
+            dim_ocr::read_pages(ReaderSource::new(result_reader), MAX_DATA_TEXT_BYTES)
+        })
         .await;
         let Ok(Ok(pages)) = parsed else {
             self.fail(
@@ -2159,34 +2239,16 @@ impl Shared {
             .await;
             return;
         };
-        if !text.is_file() {
-            self.fail(slot, "executor_error", "The OCR helper wrote no text")
-                .await;
-            return;
-        }
-        let listed = {
-            let work = work.to_owned();
-            tokio::task::spawn_blocking(move || page_images(&work))
-        }
-        .await;
-        let images = match listed {
-            Ok(Ok(images)) => images,
-            _ => {
-                self.fail(slot, "executor_error", "The OCR artifacts cannot be read")
-                    .await;
-                return;
-            }
-        };
         let mut files = vec![
             JobFile {
                 name: dim_ocr::RESULT_FILE.to_owned(),
                 media_type: "application/json".to_owned(),
-                path: result,
+                path: work.join(dim_ocr::RESULT_FILE),
             },
             JobFile {
                 name: dim_ocr::TEXT_FILE.to_owned(),
                 media_type: "text/plain".to_owned(),
-                path: text,
+                path: work.join(dim_ocr::TEXT_FILE),
             },
         ];
         for name in images {
@@ -2196,6 +2258,7 @@ impl Shared {
                 path: work.join(name),
             });
         }
+        drop(image_readers);
         let mut data = json!({ "pages": pages.pages });
         if pages.text_truncated {
             // The record carries no more page text than MAX_DATA_TEXT_BYTES;
@@ -2207,6 +2270,20 @@ impl Shared {
             data: Some(data),
         };
         self.settle_output(slot, output).await;
+    }
+
+    /// Opens one file of the task's work directory through the plugin files
+    /// storage: `None` when it is absent, an error when it is a link, not a
+    /// regular file or unreadable. Nothing is followed and nothing blocks.
+    async fn open_work_file(
+        &self,
+        work_name: &str,
+        name: &str,
+    ) -> Result<Option<FileReader>, String> {
+        self.files
+            .open_read(&format!("{work_name}/{name}"))
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Streams the adapter's output files into `result/` and writes the
@@ -2231,19 +2308,7 @@ impl Shared {
                 return;
             }
         };
-        let canonical_work = match tokio::task::spawn_blocking({
-            let work = work.clone();
-            move || std::fs::canonicalize(work)
-        })
-        .await
-        {
-            Ok(Ok(path)) => path,
-            _ => {
-                self.fail(slot, "provider_error", "The work directory is unavailable")
-                    .await;
-                return;
-            }
-        };
+        let work_name = task::work_name(&record.task_id);
         if let Err(error) = self
             .files
             .directory(&task::result_dir_name(&record.task_id))
@@ -2268,25 +2333,19 @@ impl Shared {
                 .await;
                 return;
             }
-            let path = file.path.clone();
-            let probe = {
-                let canonical_work = canonical_work.clone();
-                tokio::task::spawn_blocking(move || {
-                    let metadata = std::fs::symlink_metadata(&path)?;
-                    if !metadata.file_type().is_file() {
-                        return Ok::<_, std::io::Error>(None);
-                    }
-                    let canonical = std::fs::canonicalize(&path)?;
-                    if !canonical.starts_with(&canonical_work) || canonical == canonical_work {
-                        return Ok(None);
-                    }
-                    Ok(Some(canonical))
-                })
-                .await
+            let Some(relative) = work_relative_name(&work, &file.path) else {
+                self.discard_results(&record.task_id, &written).await;
+                self.fail(
+                    slot,
+                    "provider_error",
+                    "The adapter returned a file outside its work directory",
+                )
+                .await;
+                return;
             };
-            let canonical = match probe {
-                Ok(Ok(Some(path))) => path,
-                _ => {
+            let source = match self.open_work_file(&work_name, &relative).await {
+                Ok(Some(source)) => source,
+                Ok(None) => {
                     self.discard_results(&record.task_id, &written).await;
                     self.fail(
                         slot,
@@ -2296,24 +2355,27 @@ impl Shared {
                     .await;
                     return;
                 }
-            };
-            let source = match tokio::fs::File::open(&canonical).await {
-                Ok(source) => source.into_std().await,
                 Err(error) => {
                     self.discard_results(&record.task_id, &written).await;
-                    self.fail(slot, "provider_error", error.to_string()).await;
+                    self.fail(slot, "provider_error", error).await;
                     return;
                 }
             };
-            let (bytes, sha256) =
-                match task::write_result(&self.files, &record.task_id, &file.name, source).await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        self.discard_results(&record.task_id, &written).await;
-                        self.fail(slot, "storage_error", error.to_string()).await;
-                        return;
-                    }
-                };
+            let (bytes, sha256) = match task::write_result(
+                &self.files,
+                &record.task_id,
+                &file.name,
+                ReaderSource::new(source),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    self.discard_results(&record.task_id, &written).await;
+                    self.fail(slot, "storage_error", error.to_string()).await;
+                    return;
+                }
+            };
             written.push(file.name.clone());
             files.push(ResultFile {
                 name: file.name.clone(),
@@ -2430,15 +2492,60 @@ fn confinement_code(error: &ConfinedError) -> &'static str {
     }
 }
 
-/// The page images a layout-mode call wrote, in page order.
-fn page_images(work: &Path) -> std::io::Result<Vec<String>> {
-    let mut names: Vec<String> = std::fs::read_dir(work)?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
-        .filter(|name| name.starts_with(dim_ocr::PAGE_IMAGE_PREFIX) && name.ends_with(".png"))
-        .collect();
-    names.sort();
-    Ok(names)
+/// The work-relative name of a `JobFile` path: the lexical remainder after the
+/// work directory, accepted only when it is non-empty and every component is
+/// normal. No filesystem call is made, so a work directory replaced by a link
+/// after the adapter ran cannot move the path this checks against.
+fn work_relative_name(work: &Path, path: &Path) -> Option<String> {
+    let mut name = String::new();
+    for component in path.strip_prefix(work).ok()?.components() {
+        let Component::Normal(part) = component else {
+            return None;
+        };
+        let part = part.to_str()?;
+        if !name.is_empty() {
+            name.push('/');
+        }
+        name.push_str(part);
+    }
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// A synchronous [`Read`] over a pinned [`FileReader`]: each read blocks the
+/// calling thread on the storage's asynchronous read. Only used inside
+/// `spawn_blocking`, never on a runtime worker.
+struct ReaderSource {
+    reader: FileReader,
+    handle: tokio::runtime::Handle,
+    cancel: CancellationToken,
+    offset: u64,
+}
+
+impl ReaderSource {
+    fn new(reader: FileReader) -> Self {
+        Self {
+            reader,
+            handle: tokio::runtime::Handle::current(),
+            cancel: CancellationToken::new(),
+            offset: 0,
+        }
+    }
+}
+
+impl Read for ReaderSource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let chunk = self
+            .handle
+            .block_on(self.reader.read_at(self.offset, buffer.len(), &self.cancel))
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let count = chunk.len().min(buffer.len());
+        buffer[..count].copy_from_slice(&chunk[..count]);
+        self.offset += count as u64;
+        Ok(count)
+    }
 }
 
 /// The tail of a helper's standard error, for a failure message.

@@ -142,7 +142,11 @@ fn layout_writes_the_rasterized_pages() {
     // The native text layer wins over the recognized one for page one.
     assert!(document.pages[0].text.contains("Native page one"));
     assert!(!document.pages[0].regions.is_empty());
-    let pages = read_pages(&artifacts.join("result.json"), u64::MAX).unwrap();
+    let pages = read_pages(
+        std::fs::File::open(artifacts.join("result.json")).unwrap(),
+        u64::MAX,
+    )
+    .unwrap();
     assert_eq!(pages.pages.len(), 2);
     std::fs::remove_dir_all(artifacts).unwrap();
 }

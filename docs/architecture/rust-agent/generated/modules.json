@@ -43004,7 +43004,9 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path EntryKind::Directory",
-        "use dim_agent_capabilities::file_storage::EntryKind"
+        "path FileReader",
+        "use dim_agent_capabilities::file_storage::EntryKind",
+        "use dim_agent_capabilities::file_storage::FileReader"
       ]
     },
     {
@@ -43196,6 +43198,7 @@
         "path dim_ocr::HelperErrorCode::LocalRuntimeFailed",
         "path dim_ocr::HelperErrorCode::LocalRuntimeUnavailable",
         "path dim_ocr::HelperErrorCode::ResourceLimitExceeded",
+        "path dim_ocr::MAX_ARTIFACT_BYTES",
         "path dim_ocr::OutputMode",
         "path dim_ocr::PAGE_IMAGE_PREFIX",
         "path dim_ocr::RESULT_FILE",

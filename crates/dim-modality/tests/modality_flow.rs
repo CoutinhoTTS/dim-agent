@@ -199,6 +199,8 @@ struct Behavior {
     reverse_completion: bool,
     /// A path outside the work directory to return instead of writing.
     outside: Option<std::path::PathBuf>,
+    /// A name inside the work directory to leave as a link to the given path.
+    link: Option<(String, std::path::PathBuf)>,
     remote_cancel: RemoteCancel,
 }
 impl Default for Behavior {
@@ -219,6 +221,7 @@ impl Default for Behavior {
             named_output: false,
             reverse_completion: false,
             outside: None,
+            link: None,
             remote_cancel: RemoteCancel::Cancelled,
         }
     }
@@ -457,6 +460,19 @@ impl ModalityAdapter for FixtureAdapter {
                         name: "outside.bin".into(),
                         media_type: "image/png".into(),
                         path: outside,
+                    }],
+                    data: None,
+                });
+            }
+            if let Some((name, target)) = &behavior.link {
+                let path = job.work_dir.join(name);
+                let _ = std::fs::remove_file(&path);
+                std::os::unix::fs::symlink(target, &path).expect("fixture link");
+                return Ok(AdapterOutput {
+                    files: vec![JobFile {
+                        name: name.clone(),
+                        media_type: "image/png".into(),
+                        path,
                     }],
                     data: None,
                 });
@@ -2405,6 +2421,39 @@ async fn a_result_outside_the_work_directory_fails_the_task() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_result_that_is_a_link_fails_the_task() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-link").await;
+    let outside = home.join("outside.bin");
+    std::fs::write(&outside, b"stolen").unwrap();
+    fixture.set_behavior(Behavior {
+        link: Some(("out.bin".into(), outside)),
+        ..Default::default()
+    });
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "o"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let record = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&record), "failed", "{record}");
+    assert_eq!(record["error"]["code"], "provider_error", "{record}");
+    assert!(record["result"].is_null(), "no result is written");
+    assert!(!record.to_string().contains("stolen"), "{record}");
+    let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
+    let leftovers = std::fs::read_dir(&result_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(leftovers, 0);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn progress_is_streamed_to_wait_and_written_at_most_once_per_second() {
     let fixture = Arc::new(FixtureAdapter::default());
     let gate = CancellationToken::new();
@@ -3247,6 +3296,35 @@ case "$name" in
     printf '%s' "$text" > "$artifacts/text.txt"
     printf '%s\n' '{"ok":true,"pageCount":3}'
     exit 0 ;;
+  fifo.png)
+    mkfifo "$artifacts/result.json"
+    printf '%s\n' '{"ok":true,"pageCount":1}'
+    exit 0 ;;
+  link.png)
+    printf '%s' '{"text":"OUTSIDE-MARKER","pageCount":1,"pages":[{"page":1,"text":"OUTSIDE-MARKER","width":10,"height":10,"regions":[]}]}' > "$TMPDIR/outside.json"
+    ln -s "$TMPDIR/outside.json" "$artifacts/result.json"
+    printf 'hello' > "$artifacts/text.txt"
+    printf '%s\n' '{"ok":true,"pageCount":1}'
+    exit 0 ;;
+  textlink.png)
+    printf '%s' '{"text":"hello","pageCount":1,"pages":[{"page":1,"text":"hello","width":10,"height":10,"regions":[]}]}' > "$artifacts/result.json"
+    printf 'stolen' > "$TMPDIR/outside.txt"
+    ln -s "$TMPDIR/outside.txt" "$artifacts/text.txt"
+    printf '%s\n' '{"ok":true,"pageCount":1}'
+    exit 0 ;;
+  imagelink.png)
+    printf '%s' '{"text":"hello","pageCount":1,"pages":[{"page":1,"text":"hello","width":10,"height":10,"regions":[]}]}' > "$artifacts/result.json"
+    printf 'hello' > "$artifacts/text.txt"
+    printf 'PNG' > "$TMPDIR/outside.png"
+    ln -s "$TMPDIR/outside.png" "$artifacts/page-0001.png"
+    printf '%s\n' '{"ok":true,"pageCount":1}'
+    exit 0 ;;
+  oversized.png)
+    printf '%s' '{"text":"hello","pageCount":1,"pages":[{"page":1,"text":"hello","width":10,"height":10,"regions":[]}]}' > "$artifacts/result.json"
+    printf 'hello' > "$artifacts/text.txt"
+    dd if=/dev/null of="$artifacts/page-0001.png" bs=1 seek=1073741825 2>/dev/null
+    printf '%s\n' '{"ok":true,"pageCount":1}'
+    exit 0 ;;
 esac
 printf '%s' '{"text":"hello\n\nworld","pageCount":2,"pages":[{"page":1,"text":"hello","width":10,"height":10,"regions":[]},{"page":2,"text":"world","width":10,"height":10,"regions":[]}]}' > "$artifacts/result.json"
 printf 'hello\n\nworld' > "$artifacts/text.txt"
@@ -3450,6 +3528,73 @@ async fn a_layout_task_publishes_the_page_image() {
         result_bytes(&mut client, &task_id, "page-0001.png", 65536).await,
         b"PNG"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_artifacts_that_are_not_regular_files_are_refused_without_blocking() {
+    let home = home("dm-ocr");
+    let helper = fake_helper(&home);
+    let server = start_with_helper(home.clone(), helper).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for (name, mode) in [
+        ("fifo.png", "text"),
+        ("link.png", "text"),
+        ("textlink.png", "text"),
+        ("imagelink.png", "layout"),
+    ] {
+        let started = std::time::Instant::now();
+        let task = submit_task(&mut client, ocr_submit(name, mode)).await;
+        let task_id = task["task_id"].as_str().unwrap().to_owned();
+        let done = wait_terminal(&mut client, &task_id).await;
+        assert_eq!(state_of(&done), "failed", "{name}: {done}");
+        assert_eq!(done["error"]["code"], "executor_error", "{name}: {done}");
+        assert!(done["result"].is_null(), "{name}: no result is written");
+        let fetched = task_status(&mut client, &task_id).await;
+        for record in [&done, &fetched] {
+            let text = record.to_string();
+            assert!(!text.contains("OUTSIDE-MARKER"), "{name}: {text}");
+            assert!(!text.contains("stolen"), "{name}: {text}");
+        }
+        let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
+        let leftovers = std::fs::read_dir(&result_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0, "{name}: {leftovers} result files");
+        if name == "fifo.png" {
+            // A FIFO left at the artifact name must not block the read.
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the FIFO blocked the daemon for {:?}",
+                started.elapsed()
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversized_helper_result_is_refused_before_it_is_read() {
+    let home = home("dm-ocr");
+    let helper = fake_helper(&home);
+    let server = start_with_helper(home.clone(), helper).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = submit_task(&mut client, ocr_submit("oversized.png", "text")).await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let done = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&done), "failed", "{done}");
+    assert_eq!(done["error"]["code"], "executor_error", "{done}");
+    assert!(
+        done["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("exceed"),
+        "{done}"
+    );
+    assert!(done["result"].is_null(), "no result is written");
+    let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
+    let leftovers = std::fs::read_dir(&result_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(leftovers, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

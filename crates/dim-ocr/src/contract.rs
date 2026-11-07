@@ -2,7 +2,7 @@
 //! helper writes as `result.json`, and the typed error every exit 2 carries.
 use serde::de::DeserializeSeed;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::io::Read;
 
 /// The helper's result document in the artifacts directory.
 pub const RESULT_FILE: &str = "result.json";
@@ -172,11 +172,10 @@ pub struct PageText {
 /// reader parses incrementally, the region members and the document `text`
 /// member are skipped, and the page texts kept add up to at most `text_limit`
 /// bytes. A page whose text would cross the budget keeps its number without a
-/// text, and `text_truncated` says so.
-pub fn read_pages(path: &Path, text_limit: u64) -> Result<DocumentText, HelperError> {
-    let file = std::fs::File::open(path)
-        .map_err(|error| HelperError::failed(format!("The OCR result is unreadable: {error}")))?;
-    let mut deserializer = serde_json::Deserializer::from_reader(std::io::BufReader::new(file));
+/// text, and `text_truncated` says so. The caller opens the source, so a
+/// daemon can hand over a reader that never followed a link.
+pub fn read_pages<R: Read>(source: R, text_limit: u64) -> Result<DocumentText, HelperError> {
+    let mut deserializer = serde_json::Deserializer::from_reader(std::io::BufReader::new(source));
     let document = DocumentSeed { text_limit }
         .deserialize(&mut deserializer)
         .map_err(|error| HelperError::failed(format!("The OCR result is invalid: {error}")))?;
