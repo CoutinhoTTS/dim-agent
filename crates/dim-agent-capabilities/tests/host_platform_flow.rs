@@ -405,6 +405,7 @@ async fn confined(
                 timeout,
                 stdout_limit: 64 * 1024,
                 stderr_limit: 64 * 1024,
+                services: SystemServices::None,
             },
             CancellationToken::new(),
         )
@@ -482,6 +483,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
                 timeout: Duration::from_secs(30),
                 stdout_limit: 64 * 1024,
                 stderr_limit: 64 * 1024,
+                services: SystemServices::None,
             },
             CancellationToken::new(),
         )
@@ -551,6 +553,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
                 timeout: Duration::from_secs(30),
                 stdout_limit: 64 * 1024,
                 stderr_limit: 64 * 1024,
+                services: SystemServices::None,
             },
             CancellationToken::new(),
         )
@@ -613,6 +616,7 @@ async fn a_confined_helper_stdout_cap_kills_the_tree() {
                 timeout: Duration::from_secs(30),
                 stdout_limit: 1024,
                 stderr_limit: 64 * 1024,
+                services: SystemServices::None,
             },
             CancellationToken::new(),
         )
@@ -659,6 +663,7 @@ async fn a_confined_helper_cancel_kills_the_tree() {
                 timeout: Duration::from_secs(30),
                 stdout_limit: 64 * 1024,
                 stderr_limit: 64 * 1024,
+                services: SystemServices::None,
             },
             cancel.clone(),
         ),
@@ -701,6 +706,7 @@ async fn a_confined_helper_refuses_relative_and_missing_paths() {
             timeout: Duration::from_secs(5),
             stdout_limit: 1024,
             stderr_limit: 1024,
+            services: SystemServices::None,
         },
         Confinement {
             read: vec![missing],
@@ -708,6 +714,7 @@ async fn a_confined_helper_refuses_relative_and_missing_paths() {
             timeout: Duration::from_secs(5),
             stdout_limit: 1024,
             stderr_limit: 1024,
+            services: SystemServices::None,
         },
         Confinement {
             read: vec![],
@@ -715,6 +722,7 @@ async fn a_confined_helper_refuses_relative_and_missing_paths() {
             timeout: Duration::from_secs(5),
             stdout_limit: 1024,
             stderr_limit: 1024,
+            services: SystemServices::None,
         },
     ];
     for confinement in cases {
@@ -761,6 +769,7 @@ async fn a_host_without_bubblewrap_runs_the_confined_helper_unconfined() {
                 timeout: Duration::from_secs(30),
                 stdout_limit: 64 * 1024,
                 stderr_limit: 64 * 1024,
+                services: SystemServices::None,
             },
             CancellationToken::new(),
         )
@@ -813,6 +822,7 @@ async fn the_isolation_switch_does_not_change_a_confined_helper() {
                 timeout: Duration::from_secs(30),
                 stdout_limit: 64 * 1024,
                 stderr_limit: 64 * 1024,
+                services: SystemServices::None,
             },
             CancellationToken::new(),
         )
@@ -975,6 +985,7 @@ async fn a_confined_helper_stderr_cap_kills_the_tree() {
                 timeout: Duration::from_secs(30),
                 stdout_limit: 64 * 1024,
                 stderr_limit: 1024,
+                services: SystemServices::None,
             },
             CancellationToken::new(),
         )
@@ -1034,6 +1045,7 @@ async fn a_confined_helper_gets_the_allowlist_plus_its_own_environment() {
                 timeout: Duration::from_secs(30),
                 stdout_limit: 64 * 1024,
                 stderr_limit: 64 * 1024,
+                services: SystemServices::None,
             },
             CancellationToken::new(),
         )

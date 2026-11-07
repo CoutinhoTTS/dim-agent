@@ -605,10 +605,18 @@ flowchart LR
   m601["dim_modality"]
   m602["dim_modality::adapter"]
   m603["dim_modality::engine"]
-  m604["dim_modality::realtime"]
-  m605["dim_modality::task"]
-  m606["dim_modality::task::tests"]
-  m607["dim_session_title"]
+  m604["dim_modality::engine::tests"]
+  m605["dim_modality::realtime"]
+  m606["dim_modality::task"]
+  m607["dim_modality::task::tests"]
+  m608["dim_ocr"]
+  m609["dim_ocr::args"]
+  m610["dim_ocr::contract"]
+  m611["dim_ocr::helper"]
+  m612["dim_ocr::pdf"]
+  m613["dim_ocr::platform"]
+  m614["dim_ocr::vision"]
+  m615["dim_session_title"]
   m0 --> m1
   m0 -.-> m2
   m0 -.-> m3
@@ -1056,6 +1064,7 @@ flowchart LR
   m61 --> m64
   m61 --> m65
   m62 --> m59
+  m62 --> m60
   m63 --> m44
   m63 --> m59
   m63 --> m108
@@ -4073,6 +4082,7 @@ flowchart LR
   m599 --> m585
   m600 --> m585
   m601 --> m58
+  m601 --> m59
   m601 --> m69
   m601 --> m88
   m601 --> m127
@@ -4085,42 +4095,64 @@ flowchart LR
   m601 --> m264
   m601 --> m602
   m601 --> m603
-  m601 --> m604
   m601 --> m605
+  m601 --> m606
+  m601 --> m613
   m602 --> m58
   m602 --> m173
   m603 --> m48
   m603 --> m58
+  m603 --> m59
+  m603 --> m60
   m603 --> m69
   m603 --> m173
   m603 --> m238
   m603 --> m264
   m603 --> m601
   m603 --> m602
-  m603 --> m605
-  m604 --> m58
-  m604 --> m69
-  m604 --> m173
-  m604 --> m601
-  m604 --> m602
+  m603 -.-> m604
+  m603 --> m606
+  m603 --> m610
+  m603 --> m613
+  m604 --> m60
   m604 --> m603
+  m605 --> m58
+  m605 --> m69
   m605 --> m173
-  m605 --> m238
+  m605 --> m601
   m605 --> m602
-  m605 -.-> m606
-  m606 --> m605
-  m607 --> m58
-  m607 --> m69
-  m607 --> m86
-  m607 --> m88
-  m607 --> m127
-  m607 --> m129
-  m607 --> m139
-  m607 --> m141
-  m607 --> m162
-  m607 --> m164
-  m607 --> m173
-  m607 --> m264
-  m607 --> m265
-  m607 --> m278
-  m607 --> m281
+  m605 --> m603
+  m606 --> m173
+  m606 --> m238
+  m606 --> m602
+  m606 -.-> m607
+  m607 --> m606
+  m608 --> m609
+  m608 --> m610
+  m608 --> m611
+  m608 -.-> m612
+  m608 --> m613
+  m608 -.-> m614
+  m609 --> m610
+  m611 --> m609
+  m611 --> m610
+  m611 --> m612
+  m611 --> m614
+  m612 --> m610
+  m614 --> m610
+  m614 --> m613
+  m615 --> m58
+  m615 --> m69
+  m615 --> m86
+  m615 --> m88
+  m615 --> m127
+  m615 --> m129
+  m615 --> m139
+  m615 --> m141
+  m615 --> m162
+  m615 --> m164
+  m615 --> m173
+  m615 --> m264
+  m615 --> m265
+  m615 --> m278
+  m615 --> m281
