@@ -712,7 +712,6 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "cfg",
         "format",
         "tokio::join",
         "vec"

@@ -2336,8 +2336,12 @@ mod tests {
         InstalledToolchain { bin, root }
     }
 
-    fn separator() -> &'static str {
-        if cfg!(windows) { ";" } else { ":" }
+    /// `entries` as a PATH, in the platform's own separator.
+    fn joined(entries: &[&str]) -> String {
+        std::env::join_paths(entries)
+            .expect("the entries are PATH components")
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]
@@ -2349,19 +2353,19 @@ mod tests {
                 toolchain("/runtimes/python/bin"),
             ]),
         );
+        let base = joined(&["/base/a", "/base/b"]);
         let composed = platform
-            .child_path(&["/host/bin".into()], OsStr::new("/base/a:/base/b"))
+            .child_path(&["/host/bin".into()], OsStr::new(&base))
             .unwrap();
         assert_eq!(
             composed.to_str().unwrap(),
-            [
+            joined(&[
                 "/host/bin",
                 "/base/a",
                 "/base/b",
                 "/runtimes/node/bin",
                 "/runtimes/python/bin"
-            ]
-            .join(separator())
+            ])
         );
     }
 
@@ -2371,18 +2375,16 @@ mod tests {
             &[],
             Some(vec![toolchain("/base/a"), toolchain("/runtimes/node/bin")]),
         );
-        let composed = platform
-            .child_path(&[], OsStr::new("/base/a:/base/b"))
-            .unwrap();
+        let base = joined(&["/base/a", "/base/b"]);
+        let composed = platform.child_path(&[], OsStr::new(&base)).unwrap();
         assert_eq!(
             composed.to_str().unwrap(),
-            ["/base/a", "/base/b", "/runtimes/node/bin"].join(separator())
+            joined(&["/base/a", "/base/b", "/runtimes/node/bin"])
         );
+        let base = joined(&["/base", "/runtimes/node/bin"]);
         let installed = host_with(&[], Some(vec![toolchain("/runtimes/node/bin")]));
         assert!(
-            installed
-                .child_path(&[], OsStr::new("/base:/runtimes/node/bin"))
-                .is_none(),
+            installed.child_path(&[], OsStr::new(&base)).is_none(),
             "a runtime already on the PATH changes nothing"
         );
     }
