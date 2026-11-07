@@ -879,6 +879,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。凡是按 ID 指名一个已存条目的命令（`login`、`logout`、`disconnect`、`enable`、`disable`）都接受可选的 `--source SOURCE`，与 `dimcode mcp` 相同；多个 source 列出同一 id 时必须指定。 |
 | `dimcode modality [--json]` | 经 `modality.capabilities` 列出每个 Modality 类别与操作的表格（[Modality](plugins/Modality.md#a5-cli)）：可用性、owner 的 `dimension: detail` 原因行、默认与生效模型；`--json` 原样打印回复。守护进程不公布该方法时提示它不提供 Modality 并以 1 退出。 |
 | `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | 经 `modality.configure` 写入一个操作默认值：revision 取紧邻写入前读到的，`modality_conflict` 后重读并重试一次；`--clear` 发送 `model: null`；打印该操作的行，`--json` 下打印回复。 |
+| `dimcode image generate\|edit PROMPT [FILE...]`、`image enhance MODE [FILE...]`、`video generate\|edit\|enhance PROMPT [FILE...]`、`speech synthesize TEXT`、`speech transcribe FILE`、`music\|audio\|motion generate PROMPT`、`asset generate PROMPT [FILE...]` | 经 `modality.task.submit` 提交一个任务（[Modality](plugins/Modality.md#a5-cli)）：`--mask` 把 mask 作为名为 `params.mask` 的输入文件发送，`--param KEY=VALUE` 添加一个适配器参数（能解析为 JSON 时按 JSON，否则按字符串），输入整体不超过 8 MiB 时内联发送，超过则用 `node_path`。等待并把结果文件写到 `--out`（目录，默认 `.`），已有的文件绝不覆盖；`--no-wait` 打印 id，`--json` 打印记录。 |
 
 | `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
 | `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |

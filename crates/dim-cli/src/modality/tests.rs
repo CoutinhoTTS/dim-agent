@@ -182,14 +182,39 @@ pub(super) fn parse(home: &Path, args: &[&str]) -> Options {
     Options::parse(raw(home, args).into_iter()).unwrap()
 }
 
-/// Runs the parsed Modality command, returning its exit code and stdout.
-pub(super) async fn invoke(client: &mut Client, options: &Options) -> crate::Result<(i32, String)> {
+/// Runs the parsed Modality command, returning its exit code and streams.
+pub(super) async fn invoke(
+    client: &mut Client,
+    options: &Options,
+) -> crate::Result<(i32, String, String)> {
+    invoke_with(client, options, false).await
+}
+
+/// [`invoke`], with the progress rule as a terminal would set it.
+pub(super) async fn invoke_with(
+    client: &mut Client,
+    options: &Options,
+    progress: bool,
+) -> crate::Result<(i32, String, String)> {
     let Action::Modality(command) = &options.action else {
         panic!("not a Modality command");
     };
     let mut out = Vec::new();
-    let code = run(client, options, command, &mut out).await?;
-    Ok((code, String::from_utf8(out).unwrap()))
+    let mut err = Vec::new();
+    let code = {
+        let mut output = super::task::Output {
+            out: &mut out,
+            err: &mut err,
+            json: options.json,
+            progress,
+        };
+        run(client, options, command, &mut output).await?
+    };
+    Ok((
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    ))
 }
 
 fn operation(category: &str, operation: &str, available: bool) -> Value {
@@ -248,7 +273,7 @@ async fn the_listing_renders_every_operation_with_its_reasons() {
     });
     let mut client = script.client().await;
     let options = parse(script.home(), &["modality"]);
-    let (code, out) = invoke(&mut client, &options).await.unwrap();
+    let (code, out, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -281,7 +306,7 @@ async fn json_prints_the_snapshot_unchanged() {
     });
     let mut client = script.client().await;
     let options = parse(script.home(), &["modality", "--json"]);
-    let (code, out) = invoke(&mut client, &options).await.unwrap();
+    let (code, out, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 0);
     let printed: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(printed, snapshot("native:user/modality:3"));
@@ -320,7 +345,7 @@ async fn set_default_writes_the_revision_it_read() {
             "openai/gpt-image-2",
         ],
     );
-    let (code, out) = invoke(&mut client, &options).await.unwrap();
+    let (code, out, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], "Set image.generate to openai/gpt-image-2.");
@@ -353,7 +378,7 @@ async fn clear_sends_a_null_model() {
         script.home(),
         &["modality", "set-default", "image", "--clear"],
     );
-    let (code, out) = invoke(&mut client, &options).await.unwrap();
+    let (code, out, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 0);
     assert!(out.starts_with("Cleared image.\n"), "{out}");
     script.join();
@@ -391,7 +416,7 @@ async fn a_conflict_is_reread_and_retried_once() {
             "openai/gpt-image-2",
         ],
     );
-    let (code, _) = invoke(&mut client, &options).await.unwrap();
+    let (code, _, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 0);
     script.join();
 }
@@ -511,4 +536,409 @@ fn the_command_lines_parse_to_their_commands() {
         )
         .is_err()
     );
+}
+
+/// The record a daemon answers with (A.4), in `state`.
+fn record(task_id: &str, state: &str) -> Value {
+    json!({
+        "task": {
+            "version": 1,
+            "task_id": task_id,
+            "client_task_id": null,
+            "revision": 1,
+            "category": "image",
+            "operation": "generate",
+            "executor": {
+                "kind": "provider",
+                "provider": {"providerId": "openai", "modelId": "gpt-image-2"},
+                "adapter": "aimux",
+            },
+            "params": {"prompt": "a cat"},
+            "state": state,
+            "remote_handle": null,
+            "progress": null,
+            "result": null,
+            "error": null,
+            "remote_cancel": null,
+            "created_at": "2026-11-07T00:00:00Z",
+            "updated_at": "2026-11-07T00:00:00Z",
+            "finished_at": null,
+        },
+    })
+}
+
+/// A succeeded record whose one result file is `name`.
+fn succeeded(task_id: &str, name: &str, bytes: u64) -> Value {
+    let mut record = record(task_id, "succeeded");
+    record["task"]["result"] = json!({
+        "files": [{"name": name, "media_type": "image/png", "bytes": bytes, "sha256": "00"}],
+        "data": null,
+    });
+    record
+}
+
+/// Writes `bytes` to `dir/name` and returns the path.
+fn input(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// `image generate` inlines its input, waits out a non-terminal reply, and
+/// fetches the result in two chunks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_submission_inlines_its_input_and_fetches_the_result() {
+    let payload = b"hello world";
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        assert_eq!(submit["method"], "modality.task.submit");
+        assert_eq!(submit["params"]["category"], "image");
+        assert_eq!(submit["params"]["operation"], "generate");
+        assert_eq!(submit["params"]["params"], json!({"prompt": "a cat"}));
+        let file = &submit["params"]["files"][0];
+        assert_eq!(file["name"], "cat.png");
+        assert_eq!(file["media_type"], "image/png");
+        assert_eq!(file["data_base64"], "aGVsbG8gd29ybGQ=");
+        assert!(file["node_path"].is_null(), "an inline input names no path");
+        wire.reply(&submit, record("task-1", "queued"));
+
+        let wait = wire.frame();
+        assert_eq!(wait["method"], "modality.task.wait");
+        assert_eq!(
+            wait["params"],
+            json!({"task_id": "task-1", "timeout_ms": 600000})
+        );
+        wire.send(json!({"jsonrpc": "2.0", "method": "management.progress",
+            "params": {"id": wait["id"], "method": "modality.task.wait",
+                       "data": {"fraction": 0.5, "message": "Halfway"}}}));
+        wire.reply(&wait, record("task-1", "running"));
+
+        let wait = wire.frame();
+        assert_eq!(wait["method"], "modality.task.wait");
+        wire.reply(
+            &wait,
+            succeeded("task-1", "image-1.png", payload.len() as u64),
+        );
+
+        let result = wire.frame();
+        assert_eq!(result["method"], "modality.task.result");
+        assert_eq!(
+            result["params"],
+            json!({"task_id": "task-1", "name": "image-1.png", "offset": 0, "length": 4194304})
+        );
+        wire.reply(&result, json!({"data_base64": "aGVsbG8g", "eof": false}));
+        let result = wire.frame();
+        assert_eq!(result["params"]["offset"], 6);
+        wire.reply(&result, json!({"data_base64": "d29ybGQ=", "eof": true}));
+    });
+    let home = tempfile::tempdir().unwrap();
+    let image = input(script.home(), "cat.png", payload);
+    let out = home.path().join("results");
+    let mut client = script.client().await;
+    let options = parse(
+        script.home(),
+        &[
+            "image",
+            "generate",
+            "a cat",
+            image.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let (code, stdout, stderr) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(stdout, format!("{}\n", out.join("image-1.png").display()));
+    assert_eq!(
+        stderr, "",
+        "no progress is drawn when stderr is no terminal"
+    );
+    assert_eq!(std::fs::read(out.join("image-1.png")).unwrap(), payload);
+    script.join();
+}
+
+/// A submission larger than 8 MiB in total names every input by its
+/// canonical `node_path` instead of inlining any of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_submission_above_the_inline_total_names_its_files_by_path() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        assert_eq!(submit["method"], "modality.task.submit");
+        let file = &submit["params"]["files"][0];
+        assert!(
+            file["data_base64"].is_null(),
+            "a large input is not inlined"
+        );
+        let path = file["node_path"].as_str().unwrap();
+        assert!(path.starts_with('/'), "{path} is not absolute");
+        assert_eq!(std::fs::canonicalize(path).unwrap().to_str().unwrap(), path);
+        wire.reply(&submit, record("task-2", "queued"));
+    });
+    let large = vec![0u8; 8 * 1024 * 1024 + 1];
+    let image = input(script.home(), "large.png", &large);
+    let mut client = script.client().await;
+    let options = parse(
+        script.home(),
+        &[
+            "image",
+            "generate",
+            "a cat",
+            image.to_str().unwrap(),
+            "--no-wait",
+        ],
+    );
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "task-2\n");
+    script.join();
+}
+
+/// `image edit --mask` sends the mask as an input file and names it in
+/// `params.mask` (A.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mask_is_an_input_file_named_by_its_parameter() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        assert_eq!(submit["params"]["params"]["mask"], "mask.png");
+        let names: Vec<&str> = submit["params"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["photo.png", "mask.png"]);
+        wire.reply(&submit, record("task-3", "queued"));
+    });
+    let photo = input(script.home(), "photo.png", b"photo");
+    let mask = input(script.home(), "mask.png", b"mask");
+    let mut client = script.client().await;
+    let options = parse(
+        script.home(),
+        &[
+            "image",
+            "edit",
+            "add a hat",
+            photo.to_str().unwrap(),
+            "--mask",
+            mask.to_str().unwrap(),
+            "--no-wait",
+        ],
+    );
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "task-3\n");
+    script.join();
+}
+
+/// `--json --no-wait` prints the queued record, and without `--json` the id
+/// alone (D5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn json_no_wait_prints_the_queued_record() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-4", "queued"));
+    });
+    let mut client = script.client().await;
+    let options = parse(
+        script.home(),
+        &["music", "generate", "a tune", "--no-wait", "--json"],
+    );
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 0);
+    let printed: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(printed, record("task-4", "queued"));
+    script.join();
+}
+
+/// An existing target refuses every write before the first one, names the
+/// files, and says how to fetch them elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_existing_target_refuses_to_write_anything() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-5", "queued"));
+        let wait = wire.frame();
+        wire.reply(&wait, succeeded("task-5", "image-1.png", 5));
+        // No `modality.task.result` arrives: the CLI refused before reading.
+        assert!(wire.next_frame().is_none(), "the transfer must not start");
+    });
+    let mut client = script.client().await;
+    let out = tempfile::tempdir().unwrap();
+    std::fs::write(out.path().join("image-1.png"), b"mine").unwrap();
+    let options = parse(
+        script.home(),
+        &[
+            "image",
+            "generate",
+            "a cat",
+            "--out",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    let error = invoke(&mut client, &options)
+        .await
+        .expect_err("an existing target is refused");
+    let message = error.to_string();
+    assert!(message.contains("image-1.png already exists"), "{message}");
+    assert!(
+        message.contains("dimcode modality task wait task-5 --out <dir>"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("image-1.png")).unwrap(),
+        b"mine"
+    );
+    assert_eq!(
+        std::fs::read_dir(out.path()).unwrap().count(),
+        1,
+        "nothing else is written beside it"
+    );
+    drop(client);
+    script.join();
+}
+
+/// The owner's refusal reaches the CLI unchanged, so its reason lines are
+/// what the user reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unavailable_operation_prints_the_owner_message_verbatim() {
+    let message = "image.generate is unavailable.\n\
+                   adapter: No image adapter in this build";
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.error(&submit, "unavailable", message);
+    });
+    let mut client = script.client().await;
+    let options = parse(script.home(), &["image", "generate", "a cat"]);
+    let error = invoke(&mut client, &options)
+        .await
+        .expect_err("an unavailable operation fails");
+    assert_eq!(error.to_string(), message);
+    script.join();
+}
+
+/// A failed task exits 2 and prints the owner's error line; a cancelled one
+/// exits 130.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_task_exits_two_and_a_cancelled_task_exits_130() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-6", "queued"));
+        let wait = wire.frame();
+        let mut failed = record("task-6", "failed");
+        failed["task"]["error"] =
+            json!({"code": "provider_error", "message": "The provider refused the job"});
+        wire.reply(&wait, failed);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-7", "queued"));
+        let wait = wire.frame();
+        wire.reply(&wait, record("task-7", "cancelled"));
+    });
+    let mut client = script.client().await;
+    let options = parse(script.home(), &["image", "generate", "a cat"]);
+    let (code, stdout, stderr) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 2);
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        "task-6 failed: provider_error: The provider refused the job\n"
+    );
+    let options = parse(script.home(), &["image", "generate", "a cat"]);
+    let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
+    assert_eq!(code, 130);
+    assert_eq!(stdout, "Cancelled task-7.\n");
+    script.join();
+}
+
+/// A target that appears while the transfer runs is refused, not replaced:
+/// it keeps its bytes and the temporary is removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_target_created_during_the_transfer_is_not_replaced() {
+    let out = tempfile::tempdir().unwrap();
+    let target = out.path().join("image-1.png");
+    let creating = target.clone();
+    let mut script = Script::start(move |wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-1", "queued"));
+        let wait = wire.frame();
+        wire.reply(&wait, succeeded("task-1", "image-1.png", 5));
+        // The request proves the pre-write check passed; the file appears
+        // here, after that check and before the transfer is placed.
+        let result = wire.frame();
+        assert_eq!(result["method"], "modality.task.result");
+        std::fs::write(&creating, b"mine").unwrap();
+        wire.reply(&result, json!({"data_base64": "aGVsbG8=", "eof": true}));
+    });
+    let mut client = script.client().await;
+    let options = parse(
+        script.home(),
+        &[
+            "image",
+            "generate",
+            "a cat",
+            "--out",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    let error = invoke(&mut client, &options)
+        .await
+        .expect_err("a target that appeared during the transfer is refused");
+    assert!(
+        error.to_string().contains("image-1.png already exists"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+    assert_eq!(
+        std::fs::read_dir(out.path()).unwrap().count(),
+        1,
+        "the temporary is removed"
+    );
+    script.join();
+}
+
+/// A result name that is not exactly one path component is refused before
+/// anything is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_result_name_that_is_not_one_component_is_refused() {
+    let mut script = Script::start(|wire| {
+        wire.hello(&[CAPABILITIES]);
+        let submit = wire.frame();
+        wire.reply(&submit, record("task-1", "queued"));
+        let wait = wire.frame();
+        // An absolute name would replace `out` when joined.
+        wire.reply(&wait, succeeded("task-1", "/etc/escape.png", 5));
+        assert!(
+            wire.next_frame().is_none(),
+            "no transfer starts for a name that is not one component"
+        );
+    });
+    let mut client = script.client().await;
+    let out = tempfile::tempdir().unwrap();
+    let options = parse(
+        script.home(),
+        &[
+            "image",
+            "generate",
+            "a cat",
+            "--out",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    let error = invoke(&mut client, &options)
+        .await
+        .expect_err("an absolute result name is refused");
+    assert!(
+        error.to_string().contains("is not a result file name"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+    drop(client);
+    script.join();
 }

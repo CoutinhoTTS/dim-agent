@@ -206,96 +206,85 @@ fn a_daemon_without_modality_says_so_and_exits_one() {
     );
 }
 
-/// One operation of a `modality.capabilities` reply.
-fn listed<'a>(snapshot: &'a Value, category: &str, name: &str) -> &'a Value {
-    snapshot["categories"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["category"] == category)
-        .and_then(|entry| {
-            entry["operations"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|operation| operation["operation"] == name)
-        })
-        .unwrap()
+/// The record a daemon answers with (A.4), in `state`.
+fn record(task_id: &str, state: &str) -> Value {
+    json!({
+        "version": 1,
+        "task_id": task_id,
+        "client_task_id": null,
+        "revision": 1,
+        "category": "ocr",
+        "operation": "recognize",
+        "executor": {
+            "kind": "host",
+            "node": null,
+            "target": {"providerId": "local", "modelId": "apple-vision"},
+        },
+        "params": {"outputMode": "text"},
+        "state": state,
+        "remote_handle": null,
+        "progress": null,
+        "result": null,
+        "error": null,
+        "remote_cancel": null,
+        "created_at": "2026-11-07T00:00:00Z",
+        "updated_at": "2026-11-07T00:00:00Z",
+        "finished_at": null,
+    })
 }
 
-/// `set-default` against the product daemon: the OCR operation's host target
-/// is the model this build's snapshot accepts without a provider.
+/// A result transfer is stopped by the first Ctrl+C: no target and no
+/// temporary remain, the id is printed, and the command exits 130.
 #[test]
-fn product_set_default_writes_and_clears_the_ocr_default() {
+fn the_first_interrupt_stops_a_result_transfer() {
+    use std::sync::mpsc;
     let home = Home::new();
-    let listing = home
+    let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("modality-transfer-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&out).unwrap();
+    let (waiting, waiting_rx) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["modality.capabilities", "modality.task.submit"]);
+        let submit = wire.read("modality.task.submit");
+        wire.reply(&submit, json!({"task": record("ocr-3", "queued")}));
+        let wait = wire.read("modality.task.wait");
+        let mut done = record("ocr-3", "succeeded");
+        done["result"] = json!({"files": [
+            {"name": "image-1.png", "media_type": "image/png", "bytes": 4, "sha256": "00"},
+        ], "data": null});
+        wire.reply(&wait, json!({"task": done}));
+        let result = wire.read("modality.task.result");
+        assert_eq!(result["params"]["name"], "image-1.png");
+        waiting.send(()).unwrap();
+        // Left unanswered: the interrupt arrives inside the transfer.
+        assert!(wire.trailing_request().is_none());
+    });
+    let child = home
         .command()
-        .args(["modality", "--json"])
-        .output()
+        .args(["image", "generate", "a cat", "--out", out.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    waiting_rx.recv_timeout(HANG_GUARD).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let output = child.wait_with_output().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "ocr-3\n");
     assert!(
-        listing.status.success(),
-        "{}",
-        String::from_utf8_lossy(&listing.stderr)
-    );
-    let snapshot: Value = serde_json::from_slice(&listing.stdout).unwrap();
-    let recognize = listed(&snapshot, "ocr", "recognize");
-    let option = &recognize["options"][0];
-    let model = format!(
-        "{}/{}",
-        option["providerId"].as_str().unwrap(),
-        option["modelId"].as_str().unwrap()
-    );
-    let output = home
-        .command()
-        .args(["modality", "set-default", "ocr.recognize", &model])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .starts_with(&format!("Set ocr.recognize to {model}.")),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let listing = home
-        .command()
-        .args(["modality", "--json"])
-        .output()
-        .unwrap();
-    let written: Value = serde_json::from_slice(&listing.stdout).unwrap();
-    let recognize = listed(&written, "ocr", "recognize");
-    assert_eq!(
-        recognize["default"]["providerId"], option["providerId"],
-        "{recognize}"
-    );
-    assert_eq!(
-        recognize["default"]["modelId"], option["modelId"],
-        "{recognize}"
-    );
-    assert_eq!(recognize["effective"]["source"], "default", "{recognize}");
-
-    let output = home
-        .command()
-        .args(["modality", "set-default", "ocr.recognize", "--clear"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).contains(
+            "Stopped; the task keeps its results. Fetch them with: \
+             dimcode modality task wait ocr-3 --out <dir>"
+        ),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("Cleared ocr.recognize."));
-    let listing = home
-        .command()
-        .args(["modality", "--json"])
-        .output()
-        .unwrap();
-    let cleared: Value = serde_json::from_slice(&listing.stdout).unwrap();
-    let recognize = listed(&cleared, "ocr", "recognize");
-    assert_eq!(recognize["default"], Value::Null, "{recognize}");
+    assert_eq!(
+        fs::read_dir(&out).unwrap().count(),
+        0,
+        "neither the target nor a temporary exists"
+    );
+    fs::remove_dir_all(&out).unwrap();
 }

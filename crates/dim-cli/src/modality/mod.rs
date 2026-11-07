@@ -12,6 +12,8 @@
 //! the owner's own message.
 
 pub(crate) mod command;
+pub(crate) mod media;
+pub(crate) mod task;
 
 #[cfg(test)]
 mod tests;
@@ -39,6 +41,8 @@ pub(crate) enum Command {
         model: Option<String>,
         clear: bool,
     },
+    /// `image|video|speech|music|audio|asset|motion ...`: one submission.
+    Submit(media::Submit),
 }
 
 /// The `modality` method client.
@@ -74,6 +78,18 @@ impl<'a> Modality<'a> {
     /// availability, its reasons, its default and its effective model.
     pub(crate) async fn capabilities(&mut self) -> Result<Value> {
         self.call(CAPABILITIES, json!({})).await
+    }
+
+    /// `modality.task.submit`: the queued record.
+    pub(crate) async fn submit(&mut self, params: Value) -> Result<Value> {
+        self.call("modality.task.submit", params)
+            .await
+            .map_err(refusal)
+    }
+
+    /// The connection, for the calls that read their progress as it arrives.
+    pub(crate) fn client(&mut self) -> &mut Client {
+        self.client
     }
 }
 
@@ -199,13 +215,12 @@ pub(crate) fn row_of(snapshot: &Value, key: &str) -> Option<String> {
     Some(row(category, operation))
 }
 
-/// Runs one parsed Modality command, writing the answer to `out`, and returns
-/// the process's exit code.
-pub(crate) async fn run<W: std::io::Write>(
+/// Runs one parsed Modality command and returns the process's exit code.
+pub(crate) async fn run(
     client: &mut Client,
     options: &Options,
     command: &Command,
-    out: &mut W,
+    output: &mut task::Output<'_>,
 ) -> Result<i32> {
-    command::run(client, options, command, out).await
+    command::run(client, options, command, output).await
 }

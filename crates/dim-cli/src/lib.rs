@@ -709,7 +709,16 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             plugin_command::run(&mut client, method, params.clone()).await
         }
         Action::Modality(command) => {
-            modality::run(&mut client, &options, command, &mut std::io::stdout()).await
+            let mut stdout = std::io::stdout();
+            let mut stderr = std::io::stderr();
+            let progress = stderr.is_terminal();
+            let mut output = modality::task::Output {
+                out: &mut stdout,
+                err: &mut stderr,
+                json: options.json,
+                progress,
+            };
+            modality::run(&mut client, &options, command, &mut output).await
         }
         Action::RuntimeList => {
             runtime_list(&mut client).await?;

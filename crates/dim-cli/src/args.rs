@@ -115,6 +115,21 @@ Commands:\n\
                                    Set one operation's default model\n\
   modality set-default <category>[.<operation>] --clear\n\
                                    Clear it, restoring automatic resolution\n\
+  image generate|edit PROMPT [FILE...] [--mask PATH]\n\
+  image enhance MODE [FILE...]     Submit an image task\n\
+  video generate|edit|enhance PROMPT [FILE...]\n\
+  speech synthesize TEXT\n\
+  speech transcribe FILE\n\
+  music|audio|motion generate PROMPT\n\
+  asset generate PROMPT [FILE...]\n\
+                                   Submit a task and write its results to\n\
+                                   --out (the current directory by default);\n\
+                                   --no-wait prints the task id only\n\
+                                   --param KEY=VALUE passes one adapter\n\
+                                   parameter: JSON when it parses as JSON,\n\
+                                   a string otherwise, so a string that\n\
+                                   would parse as JSON is written quoted\n\
+                                   (--param 'label=\"true\"')\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
@@ -237,9 +252,9 @@ Account commands sign in to every Provider the daemon describes with a login\n\
   method. A build without the Dim account provider says so and offers API-key\n\
   Providers instead.\n\
 Exit codes: 0 success, 1 configuration/transport error, a delete that removed\n\
-            nothing or a cleanup in which a delete failed, 2 model/turn\n\
-            failure, 3 interactive approval or answer required, 130\n\
-            interrupted.\n";
+            nothing, a cleanup in which a delete failed or a result file that\n\
+            already exists, 2 model/turn failure or a failed Modality task,\n\
+            3 interactive approval or answer required, 130 interrupted.\n";
 
 /// What `dimcode modality` names.
 const USAGE_MODALITY: &str = "Use modality, modality set-default \
@@ -427,6 +442,16 @@ impl Workspace {
     }
 }
 
+/// The flags a Modality command takes (Modality A.5).
+#[derive(Clone, Debug, Default)]
+pub struct ModalityFlags {
+    /// `--out DIR`: where results are written; the current directory when
+    /// absent.
+    pub out: Option<PathBuf>,
+    /// `--no-wait`: stop after the submission and print the id.
+    pub no_wait: bool,
+}
+
 #[derive(Clone)]
 pub struct Options {
     pub action: Action,
@@ -436,6 +461,8 @@ pub struct Options {
     pub resume: Option<String>,
     pub home: PathBuf,
     pub home_explicit: bool,
+    /// The flags of a Modality command (A.5).
+    pub modality: ModalityFlags,
     /// The launch directory: where the daemon starts and what the client's
     /// own file system work resolves against. Requests carry [`Self::workspace`]
     /// instead.
@@ -483,6 +510,7 @@ impl Options {
             resume: None,
             home: default_home(),
             home_explicit: false,
+            modality: ModalityFlags::default(),
             cwd: std::env::current_dir()?,
             workspace: None,
             server: None,
@@ -833,6 +861,18 @@ impl Options {
                         }
                         Some(_) => return Err(USAGE_MODALITY.into()),
                     });
+                }
+                "image" | "video" | "speech" | "music" | "audio" | "asset" | "motion"
+                    if matches!(options.action, Action::Chat) =>
+                {
+                    let category = arg.clone();
+                    let submit = crate::modality::media::parse(
+                        &category,
+                        &mut args,
+                        &mut options.json,
+                        &mut options.modality,
+                    )?;
+                    options.action = Action::Modality(crate::modality::Command::Submit(submit));
                 }
                 "migration" if matches!(options.action, Action::Chat) => {
                     options.action = crate::migration_command::parse(&mut args)?;

@@ -1,35 +1,38 @@
-//! `dimcode modality`: the capability table and `set-default` (Modality A.5).
+//! `dimcode modality`: the capability table, `set-default`, and the category
+//! submissions `image`, `video`, `speech`, `music`, `audio`, `asset` and
+//! `motion` (Modality A.5).
 
-use super::{Command, Modality, model_reference, operation_key, refusal, row_of, table};
+use super::task::Output;
+use super::{Command, Modality, media, model_reference, operation_key, refusal, row_of, table};
 use crate::client::{Client, app_error};
 use crate::{Result, args::Options};
 use serde_json::{Value, json};
-use std::io::Write;
 
-pub(crate) async fn run<W: std::io::Write>(
+pub(crate) async fn run(
     client: &mut Client,
     options: &Options,
     command: &Command,
-    out: &mut W,
+    output: &mut Output<'_>,
 ) -> Result<i32> {
     match command {
-        Command::List => list(client, options, out).await,
+        Command::List => list(client, options, output).await,
         Command::SetDefault {
             operation,
             model,
             clear,
-        } => set_default(client, options, operation, model.as_deref(), *clear, out).await,
+        } => set_default(client, options, operation, model.as_deref(), *clear, output).await,
+        Command::Submit(submit) => media::run(client, submit, options, output).await,
     }
 }
 
 /// `dimcode modality`: the whole snapshot, as a table or unchanged.
-async fn list(client: &mut Client, options: &Options, out: &mut impl Write) -> Result<i32> {
+async fn list(client: &mut Client, options: &Options, output: &mut Output<'_>) -> Result<i32> {
     let mut modality = Modality::open(client)?;
     let snapshot = modality.capabilities().await?;
     if options.json {
-        writeln!(out, "{}", serde_json::to_string(&snapshot)?)?;
+        writeln!(output.out, "{}", serde_json::to_string(&snapshot)?)?;
     } else {
-        write!(out, "{}", table(&snapshot))?;
+        write!(output.out, "{}", table(&snapshot))?;
     }
     Ok(0)
 }
@@ -44,7 +47,7 @@ async fn set_default(
     key: &str,
     reference: Option<&str>,
     clear: bool,
-    out: &mut impl Write,
+    output: &mut Output<'_>,
 ) -> Result<i32> {
     let (category, operation) = operation_key(key);
     if category.is_empty() || operation == Some("") {
@@ -78,15 +81,15 @@ async fn set_default(
             Err(error) => return Err(refusal(error)),
         };
         if options.json {
-            writeln!(out, "{}", serde_json::to_string(&reply)?)?;
+            writeln!(output.out, "{}", serde_json::to_string(&reply)?)?;
             return Ok(0);
         }
         match reference {
-            Some(reference) => writeln!(out, "Set {key} to {reference}.")?,
-            None => writeln!(out, "Cleared {key}.")?,
+            Some(reference) => writeln!(output.out, "Set {key} to {reference}.")?,
+            None => writeln!(output.out, "Cleared {key}.")?,
         }
         if let Some(row) = row_of(&reply, key) {
-            writeln!(out, "{row}")?;
+            writeln!(output.out, "{row}")?;
         }
         return Ok(0);
     }
