@@ -10,11 +10,12 @@ use dim_agent_capabilities::host::{
 };
 use dim_agent_types::ModelId;
 use dim_modality::{AdapterErrorCode, Job, JobFile, ModalityAdapter, ProgressSink};
-use dim_modality_aimux::MediaAdapter;
+use dim_modality_aimux::{MAX_VIDEO_WAIT, MediaAdapter};
 use http::{HeaderMap, Method, StatusCode};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 const CREDENTIAL: &str = "test-credential";
@@ -136,6 +137,15 @@ fn connection(base_url: &str, model: &str) -> ModalityConnection {
         protocol: ModelProtocol::OpenaiCompatible,
         model: model.to_owned(),
     }
+}
+
+/// The same connection with a request timeout, as a provider record sets one.
+fn connection_with_timeout(base_url: &str, model: &str, timeout_ms: u64) -> ModalityConnection {
+    let mut connection = connection(base_url, model);
+    if let ModelConnection::Http(http) = &mut connection.resolved.connection {
+        http.network.timeout_ms = Some(timeout_ms);
+    }
+    connection
 }
 
 fn work_dir(name: &str) -> PathBuf {
@@ -1193,6 +1203,101 @@ async fn video_stores_the_operation_and_downloads_the_result() {
             ),
             "download carried {name}: {value}"
         );
+    }
+}
+
+/// A status request that never answers fails at the job's hour bound, not at
+/// the connection's much longer request timeout.
+#[tokio::test]
+async fn a_stalled_status_request_fails_at_the_job_hour() {
+    let server = stalled_video_server().await;
+    let adapter = MediaAdapter::new();
+    let connect = || {
+        connection_with_timeout(
+            &format!("{}/v1", server.base),
+            "grok-imagine-video",
+            600_000,
+        )
+    };
+
+    let dir = work_dir("video-hour");
+    let task = job(
+        "xai",
+        "grok-imagine-video",
+        "video",
+        "generate",
+        json!({"prompt": "a cat"}),
+        Vec::new(),
+        &dir,
+    );
+    let task_id = task.task_id.clone();
+    let handle = adapter
+        .submit(task, connect(), CancellationToken::new())
+        .await
+        .unwrap()
+        .remote_handle
+        .expect("video returns a handle");
+
+    // The stored handle is two seconds short of its hour.
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - MAX_VIDEO_WAIT.as_secs()
+        + 2;
+    let mut handle: Value = serde_json::from_str(&handle).unwrap();
+    handle["started_at"] = json!(started_at);
+    let handle = handle.to_string();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        adapter.wait(
+            &task_id,
+            Some(&handle),
+            connect(),
+            ProgressSink::none(),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("the status request is bounded by the job's hour");
+    let error = outcome.unwrap_err();
+    assert_eq!(error.code, AdapterErrorCode::ProviderError);
+    assert_eq!(
+        error.message,
+        "the provider did not finish the job within 1 hour"
+    );
+}
+
+/// A provider whose start answers at once and whose status never does.
+struct StalledVideo {
+    base: String,
+}
+
+async fn stalled_video_server() -> StalledVideo {
+    use axum::Router;
+    use axum::routing::{get, post};
+    let app = Router::new()
+        .route(
+            "/v1/videos/generations",
+            post(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    r#"{"request_id":"req_1"}"#,
+                )
+            }),
+        )
+        .route(
+            "/v1/videos/req_1",
+            get(|| async { std::future::pending::<axum::response::Response>().await }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    StalledVideo {
+        base: format!("http://{address}"),
     }
 }
 
