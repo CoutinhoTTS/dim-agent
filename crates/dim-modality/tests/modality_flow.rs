@@ -4080,6 +4080,14 @@ case "$name" in
     dd if=/dev/null of="$artifacts/page-0001.png" bs=1 seek=1073741825 2>/dev/null
     printf '%s\n' '{"ok":true,"pageCount":1}'
     exit 0 ;;
+  noresult.png)
+    printf 'orphan text' > "$artifacts/text.txt"
+    printf '%s\n' '{"ok":true,"pageCount":1}'
+    exit 0 ;;
+  notext.png)
+    printf '%s' '{"text":"hello","pageCount":1,"pages":[{"page":1,"text":"hello","width":10,"height":10,"regions":[]}]}' > "$artifacts/result.json"
+    printf '%s\n' '{"ok":true,"pageCount":1}'
+    exit 0 ;;
 esac
 printf '%s' '{"text":"hello\n\nworld","pageCount":2,"pages":[{"page":1,"text":"hello","width":10,"height":10,"regions":[]},{"page":2,"text":"world","width":10,"height":10,"regions":[]}]}' > "$artifacts/result.json"
 printf 'hello\n\nworld' > "$artifacts/text.txt"
@@ -4396,6 +4404,34 @@ async fn an_oversized_helper_result_is_refused_before_it_is_read() {
         })
         .unwrap_or(0);
     assert_eq!(leftovers, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_host_task_removes_its_work_directory() {
+    let home = home("dm-ocr");
+    let helper = fake_helper(&home);
+    let server = start_with_helper(home.clone(), helper).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for (name, message) in [
+        ("noresult.png", "The OCR helper wrote no readable result"),
+        ("notext.png", "The OCR helper wrote no text"),
+    ] {
+        let task = submit_task(&mut client, ocr_submit(name, "text")).await;
+        let task_id = task["task_id"].as_str().unwrap().to_owned();
+        let done = wait_terminal(&mut client, &task_id).await;
+        assert_eq!(state_of(&done), "failed", "{name}: {done}");
+        assert_eq!(done["error"]["code"], "executor_error", "{name}: {done}");
+        assert_eq!(done["error"]["message"], message, "{name}: {done}");
+        assert!(done["result"].is_null(), "{name}: no result is written");
+        let work_dir = home.join(format!("modality/tasks/{task_id}/work"));
+        assert!(
+            !work_dir.exists(),
+            "{name}: the failed task kept its work directory"
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 /// The count hook of the flow below: after a work file is opened and counted,
