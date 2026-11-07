@@ -15,6 +15,8 @@ light-ocr 是一个第一方插件，提供 Modality 的 `local/pp-ocr` OCR 目�
 | 针对 fixture 引擎的测试，不下载（附录 C） | 是 | |
 | 唯一一次真实受限运行（附录 C） | 验收，由人手动运行 | |
 
+在设计的三阶段中，Phase 2 拥有 `plugin.list` 中未安装的可选项、enable/disable/reload 指名它时的 `plugin_not_found` 拒绝、`dim-cli` 解码测试与客户端的 Install 动作；插件目录、行与 helper 属于 Phase 3。
+
 ## 1. 结构
 
 ```text

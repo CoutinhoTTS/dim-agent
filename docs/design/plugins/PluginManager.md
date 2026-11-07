@@ -184,7 +184,7 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 ```
 
 - `plugins` maps each default plugin's name to its directory, relative to this file. A default plugin is a plugin directory like any other (§2.1).
-- `optional` maps an optional plugin's name to its directory, relative to this file. An optional plugin is shipped but is not installed and not turned on: nothing reads it until the user installs it, and `plugin.list` shows it so a client can offer it (§3.6). `plugin.install {source: {optional: "<name>"}}` copies the directory — never `node_modules` — into `<home>/plugins/<id>/<version>+<suffix>` and installs its declared dependencies there (§3.2, §7); the shipped directory stays untouched and read-only. A newer release ships a new `version`: at the next start an installed copy is re-acquired in the background (§3.1), the old copy stays in use and on disk until that succeeds, and the next start after the switch deletes it. `enable` defaults to true, `plugin.enable` and `plugin.disable` then work as for any installed plugin, and a name with no installed entry has no `off` state.
+- `optional` maps an optional plugin's name to its directory, relative to this file. An optional plugin is shipped but is not installed and not turned on: nothing reads it until the user installs it, and `plugin.list` shows it so a client can offer it (§3.6). `plugin.install {source: {optional: "<name>"}}` copies the directory — never `node_modules` — into `<home>/plugins/<id>/<version>+<suffix>` and installs its declared dependencies there (§3.2, §7); the shipped directory stays untouched and read-only. A newer release ships a new `version`: at the next start an installed copy is re-acquired in the background (§3.1), the old copy stays in use and on disk until that succeeds, and the next start after the switch deletes it. `enable` defaults to true, `plugin.enable` and `plugin.disable` then work as for any installed plugin, and a name with no installed entry records no `off` state: `plugin.list` reports it off (§3.6).
 - Built-in SessionTitle, Scheduler and Goal are installed by the native product profile and have no entry in this file.
 - `locked` lists names that cannot be turned off and whose plugin cannot be switched. Other plugins of a locked name may still be installed. Locking is product configuration; PluginManager applies it.
 
@@ -248,6 +248,7 @@ A local-path plugin is used in place and its declared dependencies are not insta
 
 - `plugin.enable {name, use?}`: `use` is an installed id, `"builtin"` or `"default"`; absent, the name's current `use`. Refused for a locked name when `use` changes (`plugin_locked`). Writes `names.<name>` (clears `off`, sets `use`), then reconciles the derived layer (§3). When this call turns on a plugin whose runtime is off, it requests the runtime (§2.5); the startup reconcile never does.
 - `plugin.disable {name}`: refused for a locked name. Writes `off: true`, then reconciles the derived layer.
+- `plugin.enable`, `plugin.disable` and `plugin.reload` naming a name with no installed entry are refused with `plugin_not_found`; for an optional plugin the message names `plugin.install {source: {optional: "<name>"}}`. Nothing is installed and the call requests no runtime: installing is always an explicit `plugin.install`, and `enable` turns on what is installed; it never acquires (§2.5).
 
 When a content owner itself is turned on (Hooks, for example), PluginManager registers the content of every plugin in use that carries that kind (§3.7).
 
@@ -269,7 +270,7 @@ A name using a built-in Rust plugin cannot be reloaded (`not_reloadable`): it ne
 ### 3.6 Remove and list
 
 - `plugin.remove {id}`: if a name uses it, the name stops using it: when the name has a built-in or default plugin, `names.<name>.use` is dropped and the name goes back to that plugin (still `off` if it was off); otherwise the `names.<name>` entry is removed and nothing runs under that name. Remove the entry from `plugins.json`; its Git or optional directory is left in place and the next start's cleanup deletes it (`<home>/plugins/<id>/` keeps no more than the copies one process's history produced). A local directory is never deleted. Built-in and default plugins cannot be removed (`not_removable`); they can be turned off.
-- `plugin.list {}`: one item per name, built from `plugins.json`, the default configuration file (`plugins` and `optional`) and the `assembly` rows, with each candidate and the one in use; status comes from `Loader::get` at the time of the call. An optional plugin that is not installed has its own item: `{name, optional: true, locked: false, candidates: []}`, with no `use`, `off` or status, so a client can offer it; once installed, its item is like any installed name's and the optional marker stays only as provenance. An installed optional plugin whose shipped version differs carries `update: {version, error?}`: `version` is the shipped version it is moving to, and `error` is the last re-acquisition failure.
+- `plugin.list {}`: one item per name, built from `plugins.json`, the default configuration file (`plugins` and `optional`) and the `assembly` rows, with each candidate and the one in use; status comes from `Loader::get` at the time of the call. An optional plugin that is not installed has its own item: `{name, use: null, off: true, locked: false, candidates: [], optional: true}`, with no status, so a client can offer it. `off` is a report, not a recorded state — nothing runs under the name and `plugins.json` holds nothing for it (§2.3) — and `off: true` keeps today's clients honest: with `off: false` they would render it as running and offer Disable and Reload, which fail, while `off: true` renders it inert and the TUI's toggle calls `plugin.enable`, refused with `plugin_not_found` (§3.3). Once installed, its item is like any installed name's and the optional marker stays only as provenance. An installed optional plugin whose shipped version differs carries `update: {version, error?}`: `version` is the shipped version it is moving to, and `error` is the last re-acquisition failure.
 
 ### 3.7 Content registration
 
@@ -403,7 +404,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.19.3.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `plugin.list` | `{}` | `[{name, use?, off?, locked, optional?, update?: {version, error?}, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?, refused?}]` |
+| `plugin.list` | `{}` | `[{name, use?, off, locked, optional?, update?: {version, error?}, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?, refused?}]` |
 | `plugin.install` | `{source: {path} \| {git, ref?} \| {optional: "<name>"}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], refused?: [{kind, error}], restartRequired?}` |
 | `plugin.enable` | `{name, use?}` | `{status?, skipped?, refused?, restartRequired?}` |
 | `plugin.disable` | `{name}` | `{}` |
@@ -475,6 +476,7 @@ shows the generic one.
 | `instanceNames` not in the running catalog | Configuration recorded, `restartRequired`; row created at next start | PluginManager |
 | Process stops during a Git install | Staging directory deleted at next start; `plugins.json` was not written | PluginManager |
 | Install of an optional plugin the file does not ship | `optional_not_found`; nothing is created | PluginManager |
+| Enable, disable or reload a name with no installed entry | `plugin_not_found`; for an optional plugin the message names `plugin.install {source: {optional: <name>}}`; nothing is installed and no runtime is requested | PluginManager |
 | An installed optional plugin's shipped version changes | Re-acquired in the background; the record switches only when the new copy is ready, the old copy serves and stays on disk until the next start's cleanup | PluginManager |
 | Background re-acquisition or an optional `plugin.update` fails | Old copy stays and serves; `plugin.list` shows `update.error`; retried at the next start or by `plugin.update {id}` | PluginManager |
 | Update or remove while a task holds a description | The old directory stays until the next start; the task keeps reading it | PluginManager |
@@ -504,6 +506,9 @@ shows the generic one.
 17. The shipped version of an installed optional fixture changes between two starts: the second start re-acquires it in the background into a new `<version>+<suffix>` directory, the record and `dir` switch, and the plugin keeps serving from the old copy; both directories exist until the next start, whose cleanup deletes the old one; with a failing dependency install the old copy stays and `plugin.list` shows `update.error` until the next start or `plugin.update <id>` repairs it.
 18. `plugin.update <id>` of an optional fixture at an unchanged version creates a second `<version>+<suffix>` directory and switches the record; the old directory is untouched until the next start's cleanup.
 19. A remove followed in the same process by an install of the same version gets a new `<version>+<suffix>` directory; both exist until the next start, whose cleanup deletes only the one no entry refers to.
+20. `plugin.enable`, `plugin.disable` and `plugin.reload` naming an uninstalled optional fixture are refused with `plugin_not_found`; the message names `plugin.install {source: {optional: "<name>"}}`; nothing is installed and no runtime is requested.
+21. The Phase 2 `dim-cli` test deserializes a `plugin.list` response carrying the uninstalled optional fixture's item — `{name, use: null, off: true, locked: false, candidates: [], optional: true}` — into today's `PluginItem`, proving the shape stays decodable.
+22. The TUI `/plugins` panel and the web settings page offer an Install action for an item with `optional: true`, calling `plugin.install {source: {optional: "<name>"}}`; the TUI's toggle on such an item calls `plugin.enable` and shows the refusal from 20; Desktop decodes the same additive fields and needs no change.
 
 ## Appendix D. Open questions
 

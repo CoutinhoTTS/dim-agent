@@ -15,6 +15,8 @@ light-ocr is a first-party plugin that supplies Modality's `local/pp-ocr` OCR ta
 | Tests against a fixture engine, no download (Appendix C) | yes | |
 | The one real confined run (Appendix C) | acceptance, run by hand | |
 
+In the design's three phases, Phase 2 owns the uninstalled optional item in `plugin.list`, the `plugin_not_found` refusal of enable, disable and reload naming it, the `dim-cli` decode test and the clients' Install action; the plugin directory, row and helper are Phase 3.
+
 ## 1. Structure
 
 ```text
