@@ -172,30 +172,157 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
     }
 }
 
-/// Delegates to the in-memory store and holds the first armed request input
-/// inside `append`, which is the span between a request joining
-/// `state.requests` and its `input` returning.
+/// What an armed [`InputHoldStore`] waits for.
+#[derive(Clone, Default)]
+enum HoldKind {
+    /// The first request input's `input/message`: the span between a request
+    /// joining `state.requests` and its `input` returning.
+    #[default]
+    RequestInput,
+    /// The first `input/applied` on this Session's branch: the span between
+    /// InputQueue handing an input to Loop and the turn that consumes it.
+    Applied(String),
+    /// The read of this Session's `input/consumed` after the cancel's own: the
+    /// (S) wait's check, which decides when the stop is written.
+    Consumed(String),
+}
+
+/// Delegates to the in-memory store and holds the next armed append or read of
+/// the configured kind, so a test decides the window by facts.
 struct InputHoldStore {
     memory: dim_agent_runtime::MemoryTimelineStore,
+    hold: std::sync::Mutex<HoldKind>,
+    /// Whether a matching read or append holds now.
     armed: std::sync::atomic::AtomicBool,
+    /// Whether the window waits for the cancel's withdrawal to arm it: a
+    /// `Consumed` window holds only reads made after the withdrawal, whose
+    /// own check must pass.
+    pending: std::sync::atomic::AtomicBool,
     entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    read_release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Tells the test that the matching read a `Consumed` window lets pass
+    /// (the cancel's own check) has happened, so the append that check must
+    /// follow can be released after it.
+    check: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
+/// Releases a held window: an append blocks its thread, a read awaits.
+enum Release {
+    Append(std::sync::mpsc::Sender<()>),
+    Read(tokio::sync::oneshot::Sender<()>),
+}
+impl Release {
+    fn release(self) {
+        match self {
+            Release::Append(release) => {
+                let _ = release.send(());
+            }
+            Release::Read(release) => {
+                let _ = release.send(());
+            }
+        }
+    }
+}
+
 impl InputHoldStore {
+    /// Installs the first window's signal and release, so a flow that arms by
+    /// setting `armed` keeps working; `arm` installs the next window's.
     fn new() -> (
         Arc<Self>,
         tokio::sync::oneshot::Receiver<()>,
         std::sync::mpsc::Sender<()>,
     ) {
         let (entered, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
         let store = Arc::new(Self {
             memory: Default::default(),
+            hold: Default::default(),
             armed: Default::default(),
+            pending: Default::default(),
             entered: std::sync::Mutex::new(Some(entered)),
-            release: std::sync::Mutex::new(release),
+            release: std::sync::Mutex::new(Some(release_rx)),
+            read_release: Default::default(),
+            check: Default::default(),
         });
-        (store, entered_rx, release_tx)
+        (store, entered_rx, release)
+    }
+    /// Holds the next matching append or read: answers `entered` when it is
+    /// held, then waits for the release.
+    fn arm(
+        &self,
+        hold: HoldKind,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        Release,
+        Option<tokio::sync::oneshot::Receiver<()>>,
+    ) {
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        *self.entered.lock().unwrap() = Some(entered);
+        let mut check = None;
+        let release = match hold {
+            HoldKind::Consumed(_) => {
+                let (release, release_rx) = tokio::sync::oneshot::channel();
+                *self.read_release.lock().unwrap() = Some(release_rx);
+                let (checked, checked_rx) = tokio::sync::oneshot::channel();
+                *self.check.lock().unwrap() = Some(checked);
+                check = Some(checked_rx);
+                Release::Read(release)
+            }
+            _ => {
+                let (release, release_rx) = std::sync::mpsc::channel();
+                *self.release.lock().unwrap() = Some(release_rx);
+                Release::Append(release)
+            }
+        };
+        let consumed = matches!(hold, HoldKind::Consumed(_));
+        self.pending.store(consumed, Ordering::SeqCst);
+        self.armed.store(!consumed, Ordering::SeqCst);
+        *self.hold.lock().unwrap() = hold;
+        (entered_rx, release, check)
+    }
+    /// Whether this match holds now; the armed window is one shot. A window
+    /// still waiting for the withdrawal lets the cancel's own check pass and
+    /// tells the test it happened.
+    fn holds(&self, matching: bool) -> bool {
+        if !matching {
+            return false;
+        }
+        if self.pending.load(Ordering::SeqCst) {
+            if let Some(check) = self.check.lock().unwrap().take() {
+                let _ = check.send(());
+            }
+            return false;
+        }
+        if !self.armed.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.armed.store(false, Ordering::SeqCst);
+        true
+    }
+    /// Signals the caller the window is held, then blocks until it is
+    /// released, leaving the store ready for the next arm.
+    fn hold(&self) {
+        // Both slots are taken before the window is announced, so a test that
+        // arms the next window as it wakes cannot replace this one's.
+        let entered = self.entered.lock().unwrap().take();
+        let release = self.release.lock().unwrap().take();
+        if let Some(entered) = entered {
+            let _ = entered.send(());
+        }
+        if let Some(release) = release {
+            let _ = release.recv();
+        }
+    }
+    /// The read window's hold: awaited, so it never blocks an executor.
+    async fn read_hold(&self) {
+        let entered = self.entered.lock().unwrap().take();
+        let release = self.read_release.lock().unwrap().take();
+        if let Some(entered) = entered {
+            let _ = entered.send(());
+        }
+        if let Some(release) = release {
+            let _ = release.await;
+        }
     }
 }
 impl dim_agent_runtime::TimelineStore for InputHoldStore {
@@ -255,18 +382,26 @@ impl dim_agent_runtime::TimelineStore for InputHoldStore {
         events: Vec<dim_agent_runtime::StoredEvent>,
         publish: dim_agent_runtime::PublishCallback,
     ) -> dim_agent_runtime::Result<()> {
-        let request_input = events.iter().any(|stored| {
-            matches!(&stored.event.kind, EventKind::InputMessage(data)
-                if data.blocks.first().is_some_and(|block| matches!(
-                    block, InputBlock::Raw { text, .. }
-                        if text.starts_with("<dim-agent-message "))))
-        });
-        if request_input && self.armed.swap(false, Ordering::SeqCst) {
+        let held = match &*self.hold.lock().unwrap() {
+            HoldKind::RequestInput => events.iter().any(|stored| {
+                matches!(&stored.event.kind, EventKind::InputMessage(data)
+                    if data.blocks.first().is_some_and(|block| matches!(
+                        block, InputBlock::Raw { text, .. }
+                            if text.starts_with("<dim-agent-message "))))
+            }),
+            HoldKind::Applied(session) => {
+                key.session_id == *session
+                    && events
+                        .iter()
+                        .any(|stored| matches!(&stored.event.kind, EventKind::InputApplied(_)))
+            }
+        };
+        if held && self.armed.swap(false, Ordering::SeqCst) {
             if let Some(entered) = self.entered.lock().unwrap().take() {
                 let _ = entered.send(());
             }
-            // The hold itself: blocking this worker leaves the request in
-            // `state.requests` with its `input` unreturned until released.
+            // The hold itself: blocking this worker leaves the held commit
+            // open until released, so the test decides the window.
             let _ = self.release.lock().unwrap().recv();
         }
         self.memory.append(key, events, publish)
