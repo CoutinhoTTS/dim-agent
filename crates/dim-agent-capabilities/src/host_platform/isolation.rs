@@ -100,9 +100,12 @@ impl HostPlatform {
         if !settings.sandbox {
             return Ok((spec, None, None));
         }
-        let read_only_paths = baseline_read_paths(self, &spec.env)
+        let mut read_only_paths = baseline_read_paths(self, &spec.env)
             .await
             .map_err(invalid)?;
+        read_only_paths.extend(toolchain_roots(self));
+        read_only_paths.sort();
+        read_only_paths.dedup();
         #[cfg(target_os = "macos")]
         let default_files = git_configuration(ENVIRONMENT, &spec.env).await;
         #[cfg(not(target_os = "macos"))]
@@ -147,6 +150,25 @@ impl HostPlatform {
         )?;
         Ok((spec, temporary, Some(Isolation)))
     }
+}
+
+/// The archive directory of each downloaded runtime: the read-only roots a
+/// confined command needs to run it. They are never the reported home, its
+/// `runtimes` directory, or writable; a `system` interpreter contributes none,
+/// because the user's own `PATH` already reaches it.
+fn toolchain_roots(platform: &HostPlatform) -> Vec<PathBuf> {
+    let runtimes = platform.home.join("runtimes");
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for toolchain in platform.installed_toolchains() {
+        let root = toolchain.root;
+        if root == platform.home || root == runtimes || !root.is_dir() {
+            continue;
+        }
+        if !roots.iter().any(|known| known == &root) {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 /// The system roots installed on this host, with the developer directory that

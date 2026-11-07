@@ -1,22 +1,32 @@
 //! Modality image slice through the management methods: the owner's snapshot,
 //! resolution order and CAS, with a fixture adapter in the process.
 #![cfg(unix)]
+use dim_agent_capabilities::host::ModalityConnection;
 use dim_agent_capabilities::{adapters::MockTools, defaults, host::ToolDriver};
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::{CatalogCapabilities, ModelId};
 use dim_app_server::{RunningServer, ServerConfig, serve};
-use dim_modality::{AdapterOperation, ModalityAdapter, ModalityAdapterService};
+use dim_modality::{
+    AdapterError, AdapterFuture, AdapterOperation, AdapterOutput, AdapterProgress, Clock,
+    InstallOptions, Job, JobFile, ModalityAdapter, ModalityAdapterService, ProgressSink,
+    RealtimeConnection, RealtimeEnd, RealtimeEvent, RealtimeFrame, RealtimeLimits, RealtimeOpened,
+    RealtimeTransport, RemoteCancel, Submitted,
+};
 use futures_util::{SinkExt, StreamExt};
+use rutis::Disposer;
 use rutis::{Ctx, Plugin};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 
 enum Transport {
     Unix(BufReader<UnixStream>),
@@ -130,6 +140,7 @@ impl Client {
 async fn launch_with(
     tools: Arc<dyn ToolDriver>,
     mut config: ServerConfig,
+    options: Option<InstallOptions>,
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> RunningServer {
     config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
@@ -142,7 +153,10 @@ async fn launch_with(
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     dim_app_server::collaboration::install(&mut builder);
-    dim_modality::install(&mut builder);
+    match options {
+        Some(options) => dim_modality::install_with(&mut builder, options),
+        None => dim_modality::install(&mut builder),
+    }
     extra(&mut builder);
     serve(builder, config).await.unwrap()
 }
@@ -150,18 +164,136 @@ fn assert_ok(value: &Value) {
     assert!(value.get("error").is_none(), "{value}");
 }
 
-/// The first slice's only adapter: it serves the image operations a test
-/// declares per model id, and nothing else.
+/// The fixture `modalityAdapter`: it serves the image operations a test
+/// declares per model id, and its task behaviour is set before each
+/// submission (handle, delays, gate, progress, outputs, cancel support).
+#[derive(Clone, Debug, Default)]
+enum Handles {
+    /// A distinct handle per task, `handle-<task id>`.
+    #[default]
+    PerTask,
+    /// No handle: the adapter keys its in-flight work by `task_id`.
+    None,
+}
+
+#[derive(Clone, Debug)]
+struct Behavior {
+    handles: Handles,
+    submit_error: Option<AdapterError>,
+    /// When set, `submit` blocks until it fires, then returns its handle.
+    submit_gate: Option<CancellationToken>,
+    wait_error: Option<AdapterError>,
+    /// name, media type, bytes written into the work directory.
+    files: Vec<(String, String, Vec<u8>)>,
+    /// Returned as the operation's structured data.
+    data: Option<Value>,
+    /// Progress reports sent before the gate.
+    progress: Vec<AdapterProgress>,
+    /// When set, `wait` blocks until it fires.
+    gate: Option<CancellationToken>,
+    /// The output file's bytes are the job's own task id.
+    named_output: bool,
+    /// Complete later submissions before earlier ones.
+    reverse_completion: bool,
+    /// A path outside the work directory to return instead of writing.
+    outside: Option<std::path::PathBuf>,
+    remote_cancel: RemoteCancel,
+}
+impl Default for Behavior {
+    fn default() -> Self {
+        Self {
+            handles: Handles::PerTask,
+            submit_error: None,
+            submit_gate: None,
+            wait_error: None,
+            files: vec![(
+                "out.bin".into(),
+                "image/png".into(),
+                b"fixture result".to_vec(),
+            )],
+            data: None,
+            progress: Vec::new(),
+            gate: None,
+            named_output: false,
+            reverse_completion: false,
+            outside: None,
+            remote_cancel: RemoteCancel::Cancelled,
+        }
+    }
+}
+
+/// How the fixture serves one `open` (A.2 `realtimeOpen`).
+#[derive(Clone, Debug, Default)]
+struct RealtimeBehavior {
+    /// Serve `direct` with a short-lived connection instead of a relay.
+    direct: bool,
+    /// The connection's `expires_at`, this far in the future.
+    expires_in: Option<Duration>,
+    /// Fail the next `open` with this error.
+    open_error: Option<AdapterError>,
+}
+
+/// One session the fixture opened, and what it was given.
+struct RealtimeOpen {
+    channel: String,
+    params: Value,
+    protocol: Option<String>,
+    path: Option<String>,
+}
+
+/// The fixture's realtime side: what it serves and what reached it.
+#[derive(Default)]
+struct RealtimeState {
+    behavior: RealtimeBehavior,
+    opens: Vec<RealtimeOpen>,
+    /// The event sender of each open channel, so a test can emit an event.
+    events: HashMap<String, tokio::sync::mpsc::Sender<RealtimeEvent>>,
+    frames: Vec<(String, RealtimeFrame)>,
+    closes: Vec<String>,
+}
+
 struct FixtureAdapter {
     /// Model id to the operation ids it serves; `None` serves all three.
     served: Mutex<Option<BTreeMap<String, BTreeSet<String>>>>,
+    /// Operation id to its parameter schema.
+    schemas: Mutex<BTreeMap<String, Value>>,
     available: AtomicBool,
+    behavior: Mutex<Behavior>,
+    /// Task id to the job its submission carried.
+    jobs: Mutex<HashMap<String, Job>>,
+    /// Handle to task id.
+    handles: Mutex<HashMap<String, String>>,
+    /// Task ids of no-handle submissions, in submission order.
+    order: Mutex<Vec<String>>,
+    /// Task ids whose `wait` finished, for `reverse_completion`.
+    finished: Mutex<std::collections::HashSet<String>>,
+    finished_notify: tokio::sync::Notify,
+    /// Every task id a `wait` was given.
+    wait_ids: Mutex<Vec<String>>,
+    submits: AtomicUsize,
+    waits: AtomicUsize,
+    remote_cancels: AtomicUsize,
+    disposer: Mutex<Option<Disposer>>,
+    realtime: Mutex<RealtimeState>,
 }
 impl Default for FixtureAdapter {
     fn default() -> Self {
         Self {
             served: Mutex::new(None),
+            schemas: Mutex::new(BTreeMap::new()),
             available: AtomicBool::new(true),
+            behavior: Mutex::new(Behavior::default()),
+            realtime: Mutex::new(RealtimeState::default()),
+            jobs: Mutex::new(HashMap::new()),
+            handles: Mutex::new(HashMap::new()),
+            order: Mutex::new(Vec::new()),
+            finished: Mutex::new(std::collections::HashSet::new()),
+            finished_notify: tokio::sync::Notify::new(),
+            wait_ids: Mutex::new(Vec::new()),
+            submits: AtomicUsize::new(0),
+            waits: AtomicUsize::new(0),
+            remote_cancels: AtomicUsize::new(0),
+            disposer: Mutex::new(None),
         }
     }
 }
@@ -185,6 +317,80 @@ impl FixtureAdapter {
     fn set_available(&self, available: bool) {
         self.available.store(available, Ordering::SeqCst);
     }
+    fn set_behavior(&self, behavior: Behavior) {
+        *self.behavior.lock().unwrap() = behavior;
+    }
+    fn behavior(&self) -> Behavior {
+        self.behavior.lock().unwrap().clone()
+    }
+    fn set_schema(&self, operation: &str, schema: Value) {
+        self.schemas
+            .lock()
+            .unwrap()
+            .insert(operation.to_owned(), schema);
+    }
+    fn submits(&self) -> usize {
+        self.submits.load(Ordering::SeqCst)
+    }
+    fn waits(&self) -> usize {
+        self.waits.load(Ordering::SeqCst)
+    }
+    fn wait_ids(&self) -> Vec<String> {
+        self.wait_ids.lock().unwrap().clone()
+    }
+    fn remote_cancels(&self) -> usize {
+        self.remote_cancels.load(Ordering::SeqCst)
+    }
+    fn job(&self, task_id: &str) -> Option<Job> {
+        self.jobs.lock().unwrap().get(task_id).cloned()
+    }
+    /// Removes the adapter service from the process.
+    async fn remove(&self) {
+        let disposer = self.disposer.lock().unwrap().take();
+        if let Some(disposer) = disposer {
+            let _ = disposer.dispose().await;
+        }
+    }
+    fn set_realtime_behavior(&self, behavior: RealtimeBehavior) {
+        self.realtime.lock().unwrap().behavior = behavior;
+    }
+    fn realtime_opens(&self) -> usize {
+        self.realtime.lock().unwrap().opens.len()
+    }
+    /// The newest open's channel, params, and the declaration Modality's
+    /// connection carried.
+    fn realtime_open(&self) -> (String, Value, Option<String>, Option<String>) {
+        let state = self.realtime.lock().unwrap();
+        let open = state.opens.last().expect("the fixture opened a session");
+        (
+            open.channel.clone(),
+            open.params.clone(),
+            open.protocol.clone(),
+            open.path.clone(),
+        )
+    }
+    fn realtime_frames(&self) -> Vec<(String, RealtimeFrame)> {
+        self.realtime.lock().unwrap().frames.clone()
+    }
+    fn realtime_closes(&self) -> Vec<String> {
+        self.realtime.lock().unwrap().closes.clone()
+    }
+    /// Emits one provider event on the newest session.
+    fn emit(&self, event: Value) {
+        let state = self.realtime.lock().unwrap();
+        let open = state.opens.last().expect("the fixture opened a session");
+        state.events[&open.channel]
+            .try_send(RealtimeEvent::Event(event))
+            .expect("the fixture's session accepts an event");
+    }
+    /// Ends the newest session from the provider's side.
+    fn end(&self, end: RealtimeEnd) {
+        let state = self.realtime.lock().unwrap();
+        let open = state.opens.last().expect("the fixture opened a session");
+        state.events[&open.channel]
+            .try_send(RealtimeEvent::Ended(end))
+            .expect("the fixture's session accepts its end");
+    }
 }
 impl ModalityAdapter for FixtureAdapter {
     fn available(&self) -> bool {
@@ -199,13 +405,236 @@ impl ModalityAdapter for FixtureAdapter {
                 .map(str::to_owned)
                 .collect(),
         };
+        let schemas = self.schemas.lock().unwrap();
         operations
             .into_iter()
-            .map(|operation| AdapterOperation {
-                category: "image".into(),
-                operation,
+            .map(|id| {
+                // A bare name is an image operation; a qualified id names its
+                // category, as `realtime.voice` does.
+                let (category, operation) = id.split_once('.').unwrap_or(("image", id.as_str()));
+                AdapterOperation {
+                    params_schema: schemas.get(&id).cloned().unwrap_or_else(|| json!({})),
+                    category: category.to_owned(),
+                    operation: operation.to_owned(),
+                }
             })
             .collect()
+    }
+    fn submit(
+        &self,
+        job: Job,
+        _connection: ModalityConnection,
+        _cancel: CancellationToken,
+    ) -> AdapterFuture<'_, Submitted> {
+        self.submits.fetch_add(1, Ordering::SeqCst);
+        let behavior = self.behavior();
+        if let Some(error) = behavior.submit_error {
+            return Box::pin(async move { Err(error) });
+        }
+        let task_id = job.task_id.clone();
+        let handle = match &behavior.handles {
+            Handles::PerTask => Some(format!("handle-{task_id}")),
+            Handles::None => None,
+        };
+        match &handle {
+            Some(handle) => {
+                self.handles
+                    .lock()
+                    .unwrap()
+                    .insert(handle.clone(), task_id.clone());
+            }
+            None => self.order.lock().unwrap().push(task_id.clone()),
+        }
+        self.jobs.lock().unwrap().insert(task_id, job);
+        let submit_gate = behavior.submit_gate.clone();
+        Box::pin(async move {
+            if let Some(gate) = submit_gate {
+                gate.cancelled().await;
+            }
+            Ok(Submitted {
+                remote_handle: handle,
+            })
+        })
+    }
+    fn wait(
+        &self,
+        task_id: &str,
+        handle: Option<&str>,
+        _connection: ModalityConnection,
+        progress: ProgressSink,
+        _cancel: CancellationToken,
+    ) -> AdapterFuture<'_, AdapterOutput> {
+        self.waits.fetch_add(1, Ordering::SeqCst);
+        self.wait_ids.lock().unwrap().push(task_id.to_owned());
+        let behavior = self.behavior();
+        if let Some(handle) = handle {
+            let known = self.handles.lock().unwrap().get(handle).cloned();
+            if known.as_deref() != Some(task_id) {
+                return Box::pin(async {
+                    Err(AdapterError::provider_error(
+                        "the fixture was given a handle of another job",
+                    ))
+                });
+            }
+        }
+        let Some(job) = self.job(task_id) else {
+            return Box::pin(async {
+                Err(AdapterError::provider_error(
+                    "the fixture knows no such job",
+                ))
+            });
+        };
+        let task_id = task_id.to_owned();
+        let reverse = behavior.reverse_completion && handle.is_none();
+        let this = self;
+        Box::pin(async move {
+            for update in behavior.progress {
+                progress.send(update);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            if let Some(gate) = &behavior.gate {
+                gate.cancelled().await;
+            }
+            if reverse {
+                // Complete later submissions before earlier ones.
+                loop {
+                    let notified = this.finished_notify.notified();
+                    let blocked = {
+                        let order = this.order.lock().unwrap();
+                        let finished = this.finished.lock().unwrap();
+                        order
+                            .iter()
+                            .position(|id| id == &task_id)
+                            .is_some_and(|position| {
+                                order[position + 1..]
+                                    .iter()
+                                    .any(|id| !finished.contains(id))
+                            })
+                    };
+                    if !blocked {
+                        break;
+                    }
+                    notified.await;
+                }
+            }
+            if let Some(error) = behavior.wait_error {
+                return Err(error);
+            }
+            if let Some(outside) = behavior.outside {
+                return Ok(AdapterOutput {
+                    files: vec![JobFile {
+                        name: "outside.bin".into(),
+                        media_type: "image/png".into(),
+                        path: outside,
+                    }],
+                    data: None,
+                });
+            }
+            let files = if behavior.named_output {
+                let name = "out.bin".to_owned();
+                let bytes = task_id.clone().into_bytes();
+                std::fs::write(job.work_dir.join(&name), &bytes).expect("fixture output");
+                vec![JobFile {
+                    name,
+                    media_type: "image/png".into(),
+                    path: job.work_dir.join("out.bin"),
+                }]
+            } else {
+                let mut files = Vec::new();
+                for (name, media_type, bytes) in behavior.files {
+                    let path = job.work_dir.join(&name);
+                    std::fs::write(&path, &bytes).expect("fixture output");
+                    files.push(JobFile {
+                        name,
+                        media_type,
+                        path,
+                    });
+                }
+                files
+            };
+            if reverse {
+                this.finished.lock().unwrap().insert(task_id.clone());
+                this.finished_notify.notify_waiters();
+            }
+            Ok(AdapterOutput {
+                files,
+                data: behavior.data,
+            })
+        })
+    }
+    fn cancel_remote(
+        &self,
+        _handle: &str,
+        _connection: ModalityConnection,
+    ) -> AdapterFuture<'_, RemoteCancel> {
+        self.remote_cancels.fetch_add(1, Ordering::SeqCst);
+        let outcome = self.behavior().remote_cancel;
+        Box::pin(async move { Ok(outcome) })
+    }
+    fn realtime_open(
+        &self,
+        connection: ModalityConnection,
+        params: Value,
+        events: tokio::sync::mpsc::Sender<RealtimeEvent>,
+        _cancel: CancellationToken,
+    ) -> AdapterFuture<'_, RealtimeOpened> {
+        let behavior = self.realtime.lock().unwrap().behavior.clone();
+        if let Some(error) = behavior.open_error {
+            return Box::pin(async move { Err(error) });
+        }
+        let mut state = self.realtime.lock().unwrap();
+        let channel = format!("chan-{}", state.opens.len() + 1);
+        state.opens.push(RealtimeOpen {
+            channel: channel.clone(),
+            params,
+            protocol: connection.realtime.as_ref().map(|r| r.protocol.clone()),
+            path: connection.realtime.as_ref().map(|r| r.path.clone()),
+        });
+        state.events.insert(channel.clone(), events);
+        let opened = if behavior.direct {
+            RealtimeOpened {
+                channel_id: channel,
+                transport: RealtimeTransport::Direct,
+                connection: Some(RealtimeConnection {
+                    kind: "webrtc".into(),
+                    url: Some("https://realtime.invalid/session".into()),
+                    token: Some("ephemeral-session-token".into()),
+                    expires_at: behavior.expires_in.map(|after| {
+                        (chrono::Utc::now() + chrono::Duration::from_std(after).unwrap())
+                            .to_rfc3339()
+                    }),
+                    ..Default::default()
+                }),
+            }
+        } else {
+            RealtimeOpened {
+                channel_id: channel,
+                transport: RealtimeTransport::Relay,
+                connection: None,
+            }
+        };
+        Box::pin(async move { Ok(opened) })
+    }
+    fn realtime_send(
+        &self,
+        channel_id: &str,
+        frame: RealtimeFrame,
+        _cancel: CancellationToken,
+    ) -> AdapterFuture<'_, ()> {
+        self.realtime
+            .lock()
+            .unwrap()
+            .frames
+            .push((channel_id.to_owned(), frame));
+        Box::pin(async { Ok(()) })
+    }
+    fn realtime_close(&self, channel_id: &str) -> AdapterFuture<'_, ()> {
+        self.realtime
+            .lock()
+            .unwrap()
+            .closes
+            .push(channel_id.to_owned());
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -216,7 +645,8 @@ impl Plugin for FixturePlugin {
         "ModalityFixture"
     }
     async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
-        ctx.provide(ModalityAdapterService(self.0.clone()))?;
+        let disposer = ctx.provide(ModalityAdapterService(self.0.clone()))?;
+        *self.0.disposer.lock().unwrap() = Some(disposer);
         Ok(())
     }
 }
@@ -347,11 +777,66 @@ async fn start_in(home: std::path::PathBuf, fixture: Option<Arc<FixtureAdapter>>
         target_home: Some(home.join("native")),
         ..Default::default()
     };
-    launch_with(Arc::new(MockTools), config, |builder| {
+    launch_with(Arc::new(MockTools), config, None, |builder| {
         if let Some(fixture) = fixture.clone() {
             builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
         }
     })
+    .await
+}
+
+/// [`start_in`] with the clock a generation reads, for retention.
+async fn start_in_with_clock(
+    home: std::path::PathBuf,
+    fixture: Option<Arc<FixtureAdapter>>,
+    clock: Arc<dyn Clock>,
+) -> RunningServer {
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("native")),
+        ..Default::default()
+    };
+    launch_with(
+        Arc::new(MockTools),
+        config,
+        Some(InstallOptions {
+            clock,
+            ..Default::default()
+        }),
+        |builder| {
+            if let Some(fixture) = fixture.clone() {
+                builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
+            }
+        },
+    )
+    .await
+}
+
+/// [`start_in`] with the realtime bounds a generation reads, so a lifetime
+/// rule is observable in milliseconds.
+async fn start_in_with_limits(
+    home: std::path::PathBuf,
+    fixture: Option<Arc<FixtureAdapter>>,
+    realtime: RealtimeLimits,
+) -> RunningServer {
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("native")),
+        ..Default::default()
+    };
+    launch_with(
+        Arc::new(MockTools),
+        config,
+        Some(InstallOptions {
+            realtime,
+            ..Default::default()
+        }),
+        |builder| {
+            if let Some(fixture) = fixture.clone() {
+                builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
+            }
+        },
+    )
     .await
 }
 
@@ -964,10 +1449,18 @@ async fn every_a1_category_and_operation_is_reported_with_its_default_key() {
         ("audio", "generate", "modality.audio"),
         ("asset", "generate", "modality.asset"),
         ("motion", "generate", "modality.motion"),
-        ("realtime", "connect", "modality.realtime"),
     ] {
         assert_operations(categories, category, &[(operation, Some(key))]);
     }
+    assert_operations(
+        categories,
+        "realtime",
+        &[
+            ("voice", Some("modality.realtime")),
+            ("transcribe", Some("modality.realtime")),
+            ("avatar", Some("modality.realtime")),
+        ],
+    );
     assert_operations(categories, "ocr", &[("recognize", None)]);
     server.shutdown();
     server.join().await.unwrap();
@@ -1270,6 +1763,2104 @@ async fn effective_resolves_over_declared_options_and_stays_null_for_an_unavaila
         operation_in(&cleared, "video", "generate")["effective"],
         json!({"providerId": PROVIDER, "modelId": "media-option", "source": "automatic"})
     );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The task layer: modality.task.* through the real methods transport.
+// ---------------------------------------------------------------------------
+
+use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{DateTime, SecondsFormat, Utc};
+use sha2::{Digest, Sha256};
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A provider whose models declare the image adapter operations, with the
+/// global selection serving `image.generate`.
+async fn create_task_provider(client: &mut Client) {
+    create_provider_with(
+        client,
+        vec![
+            chat("alpha", &["image.generate", "image.edit", "image.enhance"]),
+            chat("beta", &["image.generate", "image.edit", "image.enhance"]),
+        ],
+    )
+    .await;
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId": PROVIDER, "modelId": "alpha"}),
+            )
+            .await,
+    );
+}
+
+fn state_of(task: &Value) -> &str {
+    task["state"].as_str().unwrap()
+}
+fn app_error(reply: &Value) -> &str {
+    reply["error"]["data"]["appError"]
+        .as_str()
+        .unwrap_or_default()
+}
+
+async fn submit_task(client: &mut Client, params: Value) -> Value {
+    let reply = client.rpc("modality.task.submit", params).await;
+    assert_ok(&reply);
+    reply["result"]["task"].clone()
+}
+
+async fn task_status(client: &mut Client, task_id: &str) -> Value {
+    let reply = client
+        .rpc("modality.task.status", json!({"task_id": task_id}))
+        .await;
+    assert_ok(&reply);
+    reply["result"]["task"].clone()
+}
+
+async fn wait_state(client: &mut Client, task_id: &str, wanted: &[&str]) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let task = task_status(client, task_id).await;
+        if wanted.contains(&state_of(&task)) {
+            return task;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task {task_id} never reached {wanted:?}: {task}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_handle(client: &mut Client, task_id: &str) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let task = task_status(client, task_id).await;
+        if task["remote_handle"].is_string() {
+            return task;
+        }
+        assert!(
+            !matches!(
+                state_of(&task),
+                "succeeded" | "failed" | "cancelled" | "interrupted"
+            ),
+            "task {task_id} ended without a handle: {task}"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task {task_id} never recorded a handle: {task}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_terminal(client: &mut Client, task_id: &str) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let reply = client
+            .rpc(
+                "modality.task.wait",
+                json!({"task_id": task_id, "timeout_ms": 1000}),
+            )
+            .await;
+        assert_ok(&reply);
+        let task = reply["result"]["task"].clone();
+        if !matches!(state_of(&task), "queued" | "running") {
+            return task;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task {task_id} never finished: {task}"
+        );
+    }
+}
+
+fn inline_file(name: &str, media_type: &str, bytes: &[u8]) -> Value {
+    json!({"name": name, "media_type": media_type, "data_base64": STANDARD.encode(bytes)})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tasks_run_through_the_methods_from_submit_to_result() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-task").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+
+    let input = b"inline image".to_vec();
+    let submitted = submit_task(
+        &mut client,
+        json!({
+            "category": "image", "operation": "generate",
+            "params": {"prompt": "a cat"},
+            "files": [inline_file("in.png", "image/png", &input)],
+            "client_task_id": "client-1"
+        }),
+    )
+    .await;
+    assert_eq!(state_of(&submitted), "queued");
+    assert_eq!(submitted["executor"]["kind"], "provider");
+    assert_eq!(
+        submitted["executor"]["provider"]["modelId"], "alpha",
+        "no model, no default: the global selection serves the operation"
+    );
+    assert_eq!(submitted["params"]["files"][0]["name"], "in.png");
+    assert_eq!(submitted["params"]["files"][0]["bytes"], input.len());
+    assert_eq!(submitted["params"]["files"][0]["sha256"], sha256(&input));
+    let task_id = submitted["task_id"].as_str().unwrap().to_owned();
+
+    let finished = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&finished), "succeeded", "{finished}");
+    let file = finished["result"]["files"][0].clone();
+    assert_eq!(file["name"], "out.bin");
+    assert_eq!(file["bytes"], 14);
+    assert_eq!(file["sha256"], sha256(b"fixture result"));
+    assert_eq!(task_status(&mut client, &task_id).await, finished);
+
+    let job = fixture.job(&task_id).expect("the adapter saw the job");
+    assert_eq!(job.category, "image");
+    assert_eq!(job.operation, "generate");
+    assert_eq!(job.model.model_id, "alpha");
+    assert_eq!(job.params["prompt"], "a cat");
+    assert!(job.files[0].path.is_absolute());
+    assert!(
+        job.files[0]
+            .path
+            .ends_with("modality/tasks/".to_owned() + &task_id + "/input/in.png"),
+        "{:?}",
+        job.files[0].path
+    );
+    assert!(job.work_dir.ends_with("work"));
+
+    // Chunked result through the streaming read.
+    let first = client
+        .rpc(
+            "modality.task.result",
+            json!({"task_id": task_id, "name": "out.bin", "offset": 0, "length": 7}),
+        )
+        .await;
+    assert_ok(&first);
+    assert_eq!(first["result"]["eof"], false);
+    let second = client
+        .rpc(
+            "modality.task.result",
+            json!({"task_id": task_id, "name": "out.bin", "offset": 7, "length": 100}),
+        )
+        .await;
+    assert_ok(&second);
+    assert_eq!(second["result"]["eof"], true);
+    let mut data = STANDARD
+        .decode(first["result"]["data_base64"].as_str().unwrap())
+        .unwrap();
+    data.extend(
+        STANDARD
+            .decode(second["result"]["data_base64"].as_str().unwrap())
+            .unwrap(),
+    );
+    assert_eq!(data, b"fixture result");
+    assert_eq!(sha256(&data), file["sha256"]);
+    let beyond = client
+        .rpc(
+            "modality.task.result",
+            json!({"task_id": task_id, "name": "out.bin", "offset": 0, "length": 5 * 1024 * 1024}),
+        )
+        .await;
+    assert_eq!(app_error(&beyond), "invalid_input");
+
+    // A duplicate client task id returns the same task.
+    let duplicate = submit_task(
+        &mut client,
+        json!({
+            "category": "image", "operation": "generate",
+            "params": {"prompt": "a cat"},
+            "files": [inline_file("in.png", "image/png", &input)],
+            "client_task_id": "client-1"
+        }),
+    )
+    .await;
+    assert_eq!(duplicate["task_id"], task_id);
+    assert_eq!(
+        fixture.submits(),
+        1,
+        "the duplicate never reached the adapter"
+    );
+
+    // Newest first, one page at a time.
+    for index in 0..2 {
+        let task = submit_task(
+            &mut client,
+            json!({
+                "category": "image", "operation": "edit",
+                "params": {"prompt": format!("edit {index}")}
+            }),
+        )
+        .await;
+        wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
+    }
+    let page = client.rpc("modality.task.list", json!({"limit": 2})).await;
+    assert_ok(&page);
+    assert_eq!(page["result"]["tasks"].as_array().unwrap().len(), 2);
+    let next = page["result"]["next"].as_str().unwrap().to_owned();
+    let rest = client
+        .rpc("modality.task.list", json!({"limit": 2, "after": next}))
+        .await;
+    assert_ok(&rest);
+    assert_eq!(rest["result"]["tasks"].as_array().unwrap().len(), 1);
+    assert!(rest["result"].get("next").is_none());
+    let all = client
+        .rpc("modality.task.list", json!({"state": "succeeded"}))
+        .await;
+    assert_eq!(all["result"]["tasks"].as_array().unwrap().len(), 3);
+    let none = client
+        .rpc("modality.task.list", json!({"state": "failed"}))
+        .await;
+    assert!(none["result"]["tasks"].as_array().unwrap().is_empty());
+    let too_many = client
+        .rpc("modality.task.list", json!({"limit": 101}))
+        .await;
+    assert_eq!(app_error(&too_many), "invalid_input");
+
+    // A task keeps the model it resolved after the default changes.
+    let capabilities = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "modality.configure",
+                json!({"expectedRevision": capabilities["result"]["revision"],
+                    "category": "image", "operation": "generate", "model": model("beta")}),
+            )
+            .await,
+    );
+    let beta_task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "b"}}),
+    )
+    .await;
+    assert_eq!(beta_task["executor"]["provider"]["modelId"], "beta");
+    let beta_id = beta_task["task_id"].as_str().unwrap().to_owned();
+    let beta_done = wait_terminal(&mut client, &beta_id).await;
+    assert_eq!(state_of(&beta_done), "succeeded");
+    assert_eq!(
+        beta_done["executor"]["provider"]["modelId"], "beta",
+        "the record keeps its resolved model"
+    );
+    let reread = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "modality.configure",
+                json!({"expectedRevision": reread["result"]["revision"],
+                    "category": "image", "operation": "generate", "model": model("alpha")}),
+            )
+            .await,
+    );
+    assert_eq!(
+        task_status(&mut client, &beta_id).await["executor"]["provider"]["modelId"],
+        "beta",
+        "changing the default later never rewrites a task"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_fifth_task_of_a_category_waits_queued() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-queue").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        let task = submit_task(
+            &mut client,
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "q"}}),
+        )
+        .await;
+        ids.push(task["task_id"].as_str().unwrap().to_owned());
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let states: Vec<String> = loop {
+        let mut states = Vec::new();
+        for id in &ids {
+            states.push(state_of(&task_status(&mut client, id).await).to_owned());
+        }
+        if states.iter().filter(|state| *state == "running").count() == 4
+            && states.iter().any(|state| state == "queued")
+        {
+            break states;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the queue never settled: {states:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(
+        states,
+        ["running", "running", "running", "running", "queued"],
+        "four run, the fifth waits in submission order"
+    );
+    assert_eq!(fixture.submits(), 4);
+    gate.cancel();
+    for id in &ids {
+        assert_eq!(state_of(&wait_terminal(&mut client, id).await), "succeeded");
+    }
+    assert_eq!(fixture.submits(), 5);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_covers_before_start_a_run_and_a_terminal_task() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-cancel").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+
+    // Before start: four tasks hold the category, the fifth is cancelled
+    // without contacting the executor.
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        let task = submit_task(
+            &mut client,
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "c"}}),
+        )
+        .await;
+        ids.push(task["task_id"].as_str().unwrap().to_owned());
+    }
+    let queued = wait_state(&mut client, &ids[4], &["queued"]).await;
+    assert_eq!(state_of(&queued), "queued");
+    let cancelled = client
+        .rpc("modality.task.cancel", json!({"task_id": ids[4]}))
+        .await;
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["task"]["state"], "cancelled");
+    assert_eq!(
+        fixture.submits(),
+        4,
+        "a cancelled queued task never reaches the adapter"
+    );
+    gate.cancel();
+    for id in &ids[..4] {
+        assert_eq!(state_of(&wait_terminal(&mut client, id).await), "succeeded");
+    }
+
+    // During a run with no handle: the local abort ends it, and no remote
+    // cancel is attempted.
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        handles: Handles::None,
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "r"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    wait_state(&mut client, &task_id, &["running"]).await;
+    let cancelled = client
+        .rpc("modality.task.cancel", json!({"task_id": task_id}))
+        .await;
+    assert_ok(&cancelled);
+    let record = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&record), "cancelled", "{record}");
+    assert!(record["remote_cancel"].is_null());
+    assert_eq!(fixture.remote_cancels(), 0);
+
+    // During a run with a handle: the executor is asked, and its answer is
+    // recorded.
+    for (outcome, wanted) in [
+        (RemoteCancel::Cancelled, "cancelled"),
+        (RemoteCancel::Unsupported, "unsupported"),
+    ] {
+        let gate = CancellationToken::new();
+        fixture.set_behavior(Behavior {
+            gate: Some(gate.clone()),
+            remote_cancel: outcome,
+            ..Default::default()
+        });
+        let task = submit_task(
+            &mut client,
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "h"}}),
+        )
+        .await;
+        let task_id = task["task_id"].as_str().unwrap().to_owned();
+        wait_handle(&mut client, &task_id).await;
+        let cancelled = client
+            .rpc("modality.task.cancel", json!({"task_id": task_id}))
+            .await;
+        assert_ok(&cancelled);
+        let record = wait_terminal(&mut client, &task_id).await;
+        assert_eq!(state_of(&record), "cancelled", "{record}");
+        assert_eq!(record["remote_cancel"], wanted);
+    }
+    assert_eq!(fixture.remote_cancels(), 2);
+
+    // On a terminal task: the record is unchanged.
+    fixture.set_behavior(Behavior::default());
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "t"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let finished = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&finished), "succeeded");
+    let again = client
+        .rpc("modality.task.cancel", json!({"task_id": task_id}))
+        .await;
+    assert_ok(&again);
+    assert_eq!(again["result"]["task"], finished);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_racing_completion_yields_one_terminal_state() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    let files: Vec<(String, String, Vec<u8>)> = (0..400)
+        .map(|index| {
+            (
+                format!("f{index:03}.bin"),
+                "image/png".to_owned(),
+                vec![7u8; 1024],
+            )
+        })
+        .collect();
+    fixture.set_behavior(Behavior {
+        gate: Some(gate.clone()),
+        files,
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-race").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "race"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    wait_state(&mut client, &task_id, &["running"]).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.waits() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was never asked to wait"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Let the completion start streaming its 400 files, then cancel while it
+    // is writing them: the cancel's terminal write wins.
+    gate.cancel();
+    let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
+    let count_results = |dir: &std::path::Path| {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while count_results(&result_dir) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the completion never started streaming"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let cancelled = client
+        .rpc("modality.task.cancel", json!({"task_id": task_id}))
+        .await;
+    assert_ok(&cancelled);
+    let record = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&record), "cancelled", "{record}");
+    assert!(
+        record["result"].is_null(),
+        "the losing completion wrote no result: {record}"
+    );
+    assert_eq!(record["remote_cancel"], "cancelled");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let leftovers = count_results(&result_dir);
+        if leftovers == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the discarded outcome removed its files: {leftovers} left"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let again = client
+        .rpc("modality.task.cancel", json!({"task_id": task_id}))
+        .await;
+    assert_eq!(again["result"]["task"], record, "one terminal state");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_duplicate_client_task_ids_create_one_task() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-duplicate").await;
+    let mut first = Client::new_version(&server, false, 3).await;
+    let mut second = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut first).await;
+    let params = json!({
+        "category": "image", "operation": "generate",
+        "params": {"prompt": "same"}, "client_task_id": "same-id"
+    });
+    let one = first.send("modality.task.submit", params.clone()).await;
+    let two = second.send("modality.task.submit", params).await;
+    let one = first.response(one).await;
+    let two = second.response(two).await;
+    assert_ok(&one);
+    assert_ok(&two);
+    assert_eq!(
+        one["result"]["task"]["task_id"], two["result"]["task"]["task_id"],
+        "two concurrent submissions are one task"
+    );
+    let list = first.rpc("modality.task.list", json!({})).await;
+    assert_ok(&list);
+    assert_eq!(list["result"]["tasks"].as_array().unwrap().len(), 1);
+    wait_terminal(
+        &mut first,
+        one["result"]["task"]["task_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(fixture.submits(), 1, "one task reached the adapter once");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removed_adapter_makes_a_new_submit_unavailable() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-removed").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "a"}}),
+    )
+    .await;
+    assert_eq!(
+        state_of(&wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await),
+        "succeeded"
+    );
+    fixture.remove().await;
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate",
+                "params": {"prompt": "b"}, "model": model("alpha")}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&refused),
+        "unavailable",
+        "a removed adapter makes a new submit unavailable: {refused}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submission_boundaries_refuse_invalid_inputs() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-boundaries").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+
+    let allowed = vec![0u8; 8 * 1024 * 1024];
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "big"},
+            "files": [inline_file("big.png", "image/png", &allowed)]}),
+    )
+    .await;
+    wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
+    let over = vec![0u8; 8 * 1024 * 1024 + 1];
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "big"},
+                "files": [inline_file("big.png", "image/png", &over)]}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&refused),
+        "invalid_input",
+        "one byte over the inline limit is refused: {refused}"
+    );
+
+    let wrong_type = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "v"},
+                "files": [inline_file("clip.mp4", "video/mp4", b"x")]}),
+        )
+        .await;
+    assert_eq!(app_error(&wrong_type), "invalid_input");
+
+    let duplicate_names = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "d"},
+                "files": [inline_file("a.png", "image/png", b"x"),
+                    inline_file("a.png", "image/png", b"y")]}),
+        )
+        .await;
+    assert_eq!(app_error(&duplicate_names), "invalid_input");
+
+    fixture.set_schema(
+        "generate",
+        json!({"type": "object", "required": ["prompt"],
+            "properties": {"prompt": {"type": "string"}},
+            "additionalProperties": false}),
+    );
+    let tasks_dir = home.join("modality/tasks");
+    let before = std::fs::read_dir(&tasks_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    let invalid = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {}}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&invalid),
+        "invalid_input",
+        "parameters are checked against the adapter's schema: {invalid}"
+    );
+    let after = std::fs::read_dir(&tasks_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(before, after, "an invalid submission writes nothing");
+
+    // `node_path` is accepted for a provider operation.
+    let node_path = home.join("node.png");
+    std::fs::write(&node_path, b"node bytes").unwrap();
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "n"},
+            "files": [{"name": "n.png", "media_type": "image/png",
+                "node_path": node_path.to_str().unwrap()}]}),
+    )
+    .await;
+    let canonical = std::fs::canonicalize(&node_path).unwrap();
+    let meta = &task["params"]["files"][0];
+    assert_eq!(meta["node_path"], canonical.to_str().unwrap());
+    assert_eq!(meta["bytes"], 10);
+    assert_eq!(meta["sha256"], sha256(b"node bytes"));
+    assert_eq!(
+        state_of(&wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await),
+        "succeeded"
+    );
+    let job = fixture.job(task["task_id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        job.files[0].path, canonical,
+        "the executor reads the canonical path; Modality never copies it"
+    );
+
+    let relative = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "r"},
+                "files": [{"name": "r.png", "media_type": "image/png", "node_path": "rel.png"}]}),
+        )
+        .await;
+    assert_eq!(app_error(&relative), "invalid_input");
+    #[cfg(unix)]
+    {
+        let link = home.join("link.png");
+        std::os::unix::fs::symlink(&node_path, &link).unwrap();
+        let refused = client
+            .rpc(
+                "modality.task.submit",
+                json!({"category": "image", "operation": "generate", "params": {"prompt": "l"},
+                    "files": [{"name": "l.png", "media_type": "image/png",
+                        "node_path": link.to_str().unwrap()}]}),
+            )
+            .await;
+        assert_eq!(
+            app_error(&refused),
+            "invalid_input",
+            "a link is not a node_path"
+        );
+    }
+    let directory = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "d"},
+                "files": [{"name": "d.png", "media_type": "image/png",
+                    "node_path": home.to_str().unwrap()}]}),
+        )
+        .await;
+    assert_eq!(app_error(&directory), "invalid_input");
+
+    let node = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "n"},
+                "node": "control"}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&node),
+        "invalid_input",
+        "node is refused for a provider category"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_result_outside_the_work_directory_fails_the_task() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-outside").await;
+    let outside = home.join("outside.bin");
+    std::fs::write(&outside, b"stolen").unwrap();
+    fixture.set_behavior(Behavior {
+        outside: Some(outside),
+        ..Default::default()
+    });
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "o"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let record = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&record), "failed", "{record}");
+    assert_eq!(record["error"]["code"], "provider_error");
+    assert!(record["result"].is_null(), "no result is written");
+    let result_dir = home.join(format!("modality/tasks/{task_id}/result"));
+    let leftovers = std::fs::read_dir(&result_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(leftovers, 0);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn progress_is_streamed_to_wait_and_written_at_most_once_per_second() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    let progress: Vec<AdapterProgress> = (0..10)
+        .map(|index| AdapterProgress {
+            fraction: Some(index as f64 / 10.0),
+            message: Some(format!("step {index}")),
+        })
+        .collect();
+    fixture.set_behavior(Behavior {
+        handles: Handles::None,
+        progress,
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-progress").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "p"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let id = client
+        .send(
+            "modality.task.wait",
+            json!({"task_id": task_id, "timeout_ms": 400}),
+        )
+        .await;
+    let mut notices = Vec::new();
+    loop {
+        let value = client.read("wait progress").await;
+        if value["method"] != "management.progress" {
+            client.notices.push(value);
+            continue;
+        }
+        assert_eq!(value["params"]["id"], id);
+        notices.push(value["params"]["data"].clone());
+        if notices.len() == 2 {
+            break;
+        }
+    }
+    assert!(
+        notices.iter().all(|notice| notice["message"].is_string()),
+        "progress carries fraction and message: {notices:?}"
+    );
+    let reply = client.response(id).await;
+    assert_ok(&reply);
+    assert_eq!(
+        state_of(&reply["result"]["task"]),
+        "running",
+        "a timeout is not an error and the task keeps running"
+    );
+    let record = task_status(&mut client, &task_id).await;
+    assert!(
+        record["progress"].is_object(),
+        "progress is persisted: {record}"
+    );
+    assert!(
+        record["revision"].as_u64().unwrap() <= 3,
+        "ten reports in 200 ms are written once: {record}"
+    );
+    gate.cancel();
+    assert_eq!(
+        state_of(&wait_terminal(&mut client, &task_id).await),
+        "succeeded"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unavailable_default_fails_submit() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture), "dm-default").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let capabilities = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "modality.configure",
+                json!({"expectedRevision": capabilities["result"]["revision"],
+                    "category": "image", "operation": "generate", "model": model("beta")}),
+            )
+            .await,
+    );
+    let catalog = client
+        .rpc("provider.catalog", json!({"providerId": PROVIDER}))
+        .await;
+    assert_ok(
+        &client
+            .rpc(
+                "provider.models.set_enabled",
+                json!({"providerId": PROVIDER,
+                    "expectedVersion": catalog["result"]["catalog"]["version"],
+                    "modelIds": ["alpha"]}),
+            )
+            .await,
+    );
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "d"}}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&refused),
+        "default_unavailable",
+        "an unavailable persisted default fails the task: {refused}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operations_that_are_not_tasks_answer_for_themselves() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture), "dm-nontask").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    for (category, operation, code) in [
+        ("image", "understand", "modality_unknown_operation"),
+        ("realtime", "voice", "modality_unknown_operation"),
+        ("realtime", "transcribe", "modality_unknown_operation"),
+        ("realtime", "avatar", "modality_unknown_operation"),
+        ("ocr", "recognize", "modality_unavailable"),
+    ] {
+        let refused = client
+            .rpc(
+                "modality.task.submit",
+                json!({"category": category, "operation": operation, "params": {}}),
+            )
+            .await;
+        assert_eq!(app_error(&refused), code, "{category}.{operation}");
+    }
+    let unknown = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "unknown", "params": {}}),
+        )
+        .await;
+    assert_eq!(app_error(&unknown), "invalid_input");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A non-chat model that declares one realtime operation, and its transport
+/// unless `declared` is false.
+fn realtime_model(model_id: &str, operation: &str, declared: bool) -> Value {
+    let mut raw = json!({"modalityCapabilities": [format!("realtime.{operation}")]});
+    if declared {
+        raw["realtime"] = json!({"protocol": "openai-realtime", "path": "/realtime"});
+    }
+    json!({
+        "modelId": model_id, "displayName": model_id, "status": "active",
+        "capabilities": {"modalities":["audio"],"toolCalling":false,"streaming":true,
+            "structuredOutput":false,"vision":false,"audio":true,"reasoning":false},
+        "metadata": {"raw": raw}
+    })
+}
+
+/// A provider with a bearer credential and the models a realtime flow needs.
+async fn create_realtime_provider(client: &mut Client, models: Vec<Value>) {
+    assert_ok(
+        &client
+            .rpc(
+                "provider.create",
+                json!({
+                    "providerId": PROVIDER,
+                    "displayName": "Fixture",
+                    "connection": {
+                        "driverKind": "openai-compatible",
+                        "baseUrl": "http://127.0.0.1:1/v1",
+                        "auth": {"type": "bearer"},
+                        "credential": {"action": "set", "value": REALTIME_CREDENTIAL}
+                    },
+                    "models": models,
+                    "enabled": true
+                }),
+            )
+            .await,
+    );
+}
+
+const REALTIME_CREDENTIAL: &str = "sk-realtime-secret-key";
+
+/// The next notification `method` names, buffering every other message.
+async fn notice(client: &mut Client, method: &str) -> Value {
+    if let Some(index) = client
+        .notices
+        .iter()
+        .position(|value| value["method"] == method)
+    {
+        return client.notices.remove(index);
+    }
+    loop {
+        let value = client.read(method).await;
+        if value["method"] == method {
+            return value;
+        }
+        client.notices.push(value);
+    }
+}
+
+/// Opens one session and returns the reply's result.
+async fn open_realtime(client: &mut Client, operation: &str, params: Value) -> Value {
+    let reply = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": operation, "model": model("voice"), "params": params}),
+        )
+        .await;
+    assert_ok(&reply);
+    reply["result"].clone()
+}
+
+/// A relay fixture that serves `realtime.voice` for the `voice` model with a
+/// params schema that accepts nothing (D7).
+fn realtime_fixture() -> Arc<FixtureAdapter> {
+    let fixture = Arc::new(FixtureAdapter::default());
+    fixture.serve(&[
+        ("voice", &["realtime.voice"]),
+        ("undeclared", &["realtime.voice"]),
+    ]);
+    fixture.set_schema(
+        "realtime.voice",
+        json!({"type": "object", "maxProperties": 0}),
+    );
+    fixture
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_realtime_session_relays_frames_and_events_to_its_owner() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let opened = open_realtime(&mut client, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("rc_"));
+    assert_eq!(opened["transport"], "relay");
+    assert!(
+        opened.get("connection").is_none(),
+        "a relay session has no connection object"
+    );
+    let (channel, params, protocol, path) = fixture.realtime_open();
+    assert_eq!(params, json!({}), "the relay's params are empty (D7)");
+    assert_eq!(protocol.as_deref(), Some("openai-realtime"));
+    assert_eq!(path.as_deref(), Some("/realtime"));
+
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "session.update", "session": {"instructions": "hi"}}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "audio", "data": "aGk="}}),
+        )
+        .await;
+    assert_ok(&sent);
+    let frames = fixture.realtime_frames();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].1.kind, dim_modality::RealtimeFrameKind::Text);
+    assert_eq!(frames[0].1.data["type"], "session.update");
+    assert_eq!(frames[1].1.kind, dim_modality::RealtimeFrameKind::Audio);
+    assert_eq!(frames[1].1.data, "aGk=", "an audio frame's data is base64");
+
+    fixture.emit(json!({"type": "response.text.delta", "delta": "hello"}));
+    let event = notice(&mut client, "modality.realtime.event").await;
+    assert_eq!(event["params"]["connectionId"], id);
+    assert_eq!(
+        event["params"]["event"],
+        json!({"type": "response.text.delta", "delta": "hello"})
+    );
+
+    let closed = client
+        .rpc("modality.realtime.close", json!({"connectionId": id}))
+        .await;
+    assert_ok(&closed);
+    let ended = notice(&mut client, "modality.realtime.ended").await;
+    assert_eq!(ended["params"]["connectionId"], id);
+    assert_eq!(ended["params"]["reason"], "closed");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while fixture.realtime_closes().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was not closed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        fixture.realtime_closes(),
+        [channel],
+        "the adapter saw its channel close"
+    );
+    for value in client.notices.iter().chain([&ended, &opened, &closed]) {
+        assert!(
+            !value.to_string().contains(REALTIME_CREDENTIAL),
+            "no reply or notice carries the credential: {value}"
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_realtime_session_ends_with_its_opening_connection() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-drop").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    open_realtime(&mut client, "voice", json!({})).await;
+    drop(client);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while fixture.realtime_closes().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped connection did not end its session"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_provider_ending_a_realtime_session_is_reported_once() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-provider").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let opened = open_realtime(&mut client, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    fixture.end(RealtimeEnd::Provider);
+    let ended = notice(&mut client, "modality.realtime.ended").await;
+    assert_eq!(ended["params"]["reason"], "provider");
+    let refused = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "x"}}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "not_found", "an ended session is gone");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversized_realtime_frame_is_refused_and_the_session_stays() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-frame").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let opened = open_realtime(&mut client, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    let oversized = "x".repeat(1024 * 1024 + 1024);
+    let refused = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "input_audio_buffer.append", "padding": oversized}}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "invalid_input");
+    assert!(
+        fixture.realtime_frames().is_empty(),
+        "the adapter saw nothing"
+    );
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "still.here"}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    assert_eq!(
+        fixture.realtime_frames().len(),
+        1,
+        "the session stayed open"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fifth_realtime_session_is_refused_before_the_adapter_is_called() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-cap").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let opened = open_realtime(&mut client, "voice", json!({})).await;
+        ids.push(opened["connectionId"].as_str().unwrap().to_owned());
+    }
+    let refused = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "voice", "model": model("voice"), "params": {}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "realtime_limit");
+    assert_eq!(
+        fixture.realtime_opens(),
+        4,
+        "the fifth never reached the adapter"
+    );
+    let closed = client
+        .rpc("modality.realtime.close", json!({"connectionId": ids[0]}))
+        .await;
+    assert_ok(&closed);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let opened = client
+            .rpc(
+                "modality.realtime.open",
+                json!({"operation": "voice", "model": model("voice"), "params": {}}),
+            )
+            .await;
+        if opened.get("error").is_none() {
+            break;
+        }
+        assert_eq!(app_error(&opened), "realtime_limit");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the closed slot never freed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_realtime_session_ends_after_its_bound() {
+    let fixture = realtime_fixture();
+    let home = home("dm-realtime-idle");
+    let server = start_in_with_limits(
+        home.clone(),
+        Some(fixture.clone()),
+        RealtimeLimits {
+            idle: Duration::from_millis(200),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    open_realtime(&mut client, "voice", json!({})).await;
+    let ended = notice(&mut client, "modality.realtime.ended").await;
+    assert_eq!(ended["params"]["reason"], "idle");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_opening_connection_may_send_or_close_a_realtime_session() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-owner").await;
+    let mut owner = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut owner, vec![realtime_model("voice", "voice", true)]).await;
+    let opened = open_realtime(&mut owner, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    let mut other = Client::new_version(&server, false, 3).await;
+    let refused = other
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "x"}}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "not_found");
+    let refused = other
+        .rpc("modality.realtime.close", json!({"connectionId": id}))
+        .await;
+    assert_eq!(app_error(&refused), "not_found");
+    assert!(fixture.realtime_frames().is_empty());
+    let sent = owner
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "text", "data": {"type": "mine"}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_capabilities_name_the_unserved_operations() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-caps").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(
+        &mut client,
+        vec![
+            realtime_model("voice", "voice", true),
+            realtime_model("undeclared", "voice", false),
+        ],
+    )
+    .await;
+    let snapshot = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&snapshot);
+    let voice = operation_in(&snapshot, "realtime", "voice");
+    assert_eq!(voice["available"], true);
+    assert_eq!(
+        voice["options"],
+        json!([
+            {"providerId": PROVIDER, "modelId": "voice", "available": true},
+            {"providerId": PROVIDER, "modelId": "undeclared", "available": true}
+        ])
+    );
+    for operation in ["transcribe", "avatar"] {
+        let unserved = operation_in(&snapshot, "realtime", operation);
+        assert_eq!(unserved["available"], false, "{operation}");
+        assert_eq!(unserved["reasons"][0]["dimension"], "adapter");
+        assert_eq!(
+            unserved["reasons"][0]["detail"],
+            format!("No available adapter serves realtime.{operation}")
+        );
+        assert!(unserved["options"].as_array().unwrap().is_empty());
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_realtime_model_without_a_declaration_cannot_open() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-undeclared").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(
+        &mut client,
+        vec![
+            realtime_model("voice", "voice", true),
+            realtime_model("undeclared", "voice", false),
+        ],
+    )
+    .await;
+    let refused = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "voice", "model": model("undeclared"), "params": {}}),
+        )
+        .await;
+    assert_eq!(app_error(&refused), "unavailable");
+    assert_eq!(
+        refused["error"]["message"],
+        "The model declares no realtime transport"
+    );
+    assert_eq!(fixture.realtime_opens(), 0, "no provider side was reached");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_open_refuses_unknown_operations_and_unserved_parameters() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-params").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    let unknown = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "connect", "model": model("voice"), "params": {}}),
+        )
+        .await;
+    assert_eq!(app_error(&unknown), "modality_unknown_operation");
+    let invalid = client
+        .rpc(
+            "modality.realtime.open",
+            json!({"operation": "voice", "model": model("voice"), "params": {"session": {}}}),
+        )
+        .await;
+    assert_eq!(app_error(&invalid), "invalid_input");
+    assert_eq!(fixture.realtime_opens(), 0);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_direct_realtime_session_passes_its_connection_through_and_expires() {
+    let fixture = realtime_fixture();
+    let (server, home) = start(Some(fixture.clone()), "dm-realtime-direct").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_realtime_provider(&mut client, vec![realtime_model("voice", "voice", true)]).await;
+    fixture.set_realtime_behavior(RealtimeBehavior {
+        direct: true,
+        expires_in: Some(Duration::from_millis(500)),
+        ..Default::default()
+    });
+    let opened = open_realtime(&mut client, "voice", json!({})).await;
+    let id = opened["connectionId"].as_str().unwrap().to_owned();
+    assert_eq!(opened["transport"], "direct");
+    let connection = &opened["connection"];
+    assert_eq!(connection["kind"], "webrtc");
+    assert_eq!(connection["url"], "https://realtime.invalid/session");
+    assert!(
+        connection.get("expiresAt").is_some(),
+        "a direct session states when it expires"
+    );
+    let sent = client
+        .rpc(
+            "modality.realtime.send",
+            json!({"connectionId": id, "frame": {"kind": "control", "data": {"type": "ice", "candidate": "c"}}}),
+        )
+        .await;
+    assert_ok(&sent);
+    let frames = fixture.realtime_frames();
+    assert_eq!(frames[0].1.kind, dim_modality::RealtimeFrameKind::Control);
+    let ended = notice(&mut client, "modality.realtime.ended").await;
+    assert_eq!(ended["params"]["reason"], "expired");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while fixture.realtime_closes().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was not closed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_task_leaves_every_session_untouched() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture), "dm-session").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let cwd = home.join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let created = client
+        .rpc("session.create", json!({"cwd": cwd, "tools": ["read"]}))
+        .await;
+    assert_ok(&created);
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "s"}}),
+    )
+    .await;
+    wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
+    let methods = client
+        .rpc("session.methods", json!({"sessionId": session_id}))
+        .await;
+    assert_ok(&methods);
+    assert!(
+        !methods["result"].to_string().contains("modality"),
+        "Modality contributes no Session method: {}",
+        methods["result"]
+    );
+    let after = client
+        .rpc(
+            "session.history",
+            json!({"sessionId": session_id, "branchId": "main", "after": 0, "limit": 256}),
+        )
+        .await;
+    assert_ok(&after);
+    let events = after["result"]["events"].to_string();
+    assert!(
+        !events.contains("modality") && !events.contains(task["task_id"].as_str().unwrap()),
+        "Modality writes no Timeline event: {after}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Startup, unload and retention (A.6, A.4).
+// ---------------------------------------------------------------------------
+
+/// A clock a test sets; retention reads it at `apply` and on every terminal
+/// write.
+struct FixedClock(Mutex<DateTime<Utc>>);
+impl FixedClock {
+    fn new(now: DateTime<Utc>) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(now)))
+    }
+}
+impl Clock for FixedClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap()
+    }
+}
+
+fn task_dir(home: &std::path::Path, task_id: &str) -> std::path::PathBuf {
+    home.join("modality/tasks").join(task_id)
+}
+
+fn write_task_record(home: &std::path::Path, record: &Value) {
+    let dir = task_dir(home, record["task_id"].as_str().unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let envelope = json!({"version": 1, "text": record.to_string()});
+    std::fs::write(dir.join("task.json"), envelope.to_string()).unwrap();
+}
+
+fn read_task_record(home: &std::path::Path, task_id: &str) -> Value {
+    let bytes = std::fs::read(task_dir(home, task_id).join("task.json")).unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(envelope["version"], 1);
+    serde_json::from_str(envelope["text"].as_str().unwrap()).unwrap()
+}
+
+fn seed_record(task_id: &str, state: &str, time: &str) -> Value {
+    json!({
+        "version": 1,
+        "task_id": task_id,
+        "client_task_id": null,
+        "revision": 2,
+        "category": "image",
+        "operation": "generate",
+        "executor": {"kind": "provider",
+            "provider": {"providerId": PROVIDER, "modelId": "alpha"},
+            "adapter": "modalityAdapter"},
+        "params": {"prompt": "seed"},
+        "state": state,
+        "remote_handle": null,
+        "progress": null,
+        "result": null,
+        "error": null,
+        "remote_cancel": null,
+        "created_at": time,
+        "updated_at": time,
+        "finished_at": if state == "queued" || state == "running" { Value::Null } else { json!(time) },
+    })
+}
+
+async fn wait_until_waits(fixture: &FixtureAdapter, wanted: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.waits() < wanted {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was not asked to wait {wanted} times"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_observes_a_running_task_it_never_submits_again() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-restart").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "r"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    wait_handle(&mut client, &task_id).await;
+    wait_until_waits(&fixture, 1).await;
+    server.shutdown();
+    server.join().await.unwrap();
+    assert_eq!(fixture.submits(), 1);
+    // A running task with a handle survives the unload (A.6).
+    let stored = read_task_record(&home, &task_id);
+    assert_eq!(stored["state"], "running", "{stored}");
+    assert_eq!(stored["remote_handle"], format!("handle-{task_id}"));
+
+    // The next generation waits on the stored handle and never submits.
+    let waits_before = fixture.waits();
+    let server = start_in(home.clone(), Some(fixture.clone())).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    wait_until_waits(&fixture, waits_before + 1).await;
+    assert_eq!(fixture.submits(), 1, "observation never submits again");
+    assert_eq!(
+        state_of(&task_status(&mut client, &task_id).await),
+        "running"
+    );
+
+    gate.cancel();
+    let finished = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&finished), "succeeded", "{finished}");
+    assert_eq!(
+        finished["result"]["files"][0]["sha256"],
+        sha256(b"fixture result")
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_interrupts_queued_and_unresumable_tasks() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        handles: Handles::None,
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-restart-settle").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "x"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    wait_until_waits(&fixture, 1).await;
+    server.shutdown();
+    server.join().await.unwrap();
+    // The unload interrupted the task that had no handle.
+    let stored = read_task_record(&home, &task_id);
+    assert_eq!(stored["state"], "interrupted", "{stored}");
+    assert!(stored["remote_handle"].is_null());
+
+    // Rewrite what a crash would have left: `running` without a handle and a
+    // `queued` task that never started. Startup settles both.
+    let running = seed_record(&task_id, "running", "2026-11-06T00:00:00Z");
+    write_task_record(&home, &running);
+    let queued_id = "mt_crashed_queued";
+    let queued = seed_record(queued_id, "queued", "2026-11-06T00:00:01Z");
+    write_task_record(&home, &queued);
+
+    let server = start_in(home.clone(), Some(fixture.clone())).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let running = task_status(&mut client, &task_id).await;
+    assert_eq!(state_of(&running), "interrupted", "{running}");
+    assert_eq!(running["error"]["message"], "did not survive recovery");
+    let queued = task_status(&mut client, queued_id).await;
+    assert_eq!(state_of(&queued), "interrupted", "{queued}");
+    assert!(queued["error"].is_null(), "{queued}");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_deletes_terminal_tasks_past_thirty_days() {
+    let now = DateTime::parse_from_rfc3339("2026-11-06T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let recent = now - chrono::Duration::days(10);
+    let old = now - chrono::Duration::days(31);
+    let format = |time: DateTime<Utc>| time.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let home = home("dm-retention-age");
+    let recent_id = "mt_recent";
+    let old_id = "mt_old";
+    write_task_record(&home, &seed_record(recent_id, "succeeded", &format(recent)));
+    write_task_record(&home, &seed_record(old_id, "succeeded", &format(old)));
+    for id in [old_id, recent_id] {
+        let result = task_dir(&home, id).join("result");
+        std::fs::create_dir_all(&result).unwrap();
+        std::fs::write(result.join("out.bin"), b"kept or deleted").unwrap();
+    }
+
+    let server = start_in_with_clock(home.clone(), None, FixedClock::new(now)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        state_of(&task_status(&mut client, recent_id).await),
+        "succeeded"
+    );
+    let gone = client
+        .rpc("modality.task.status", json!({"task_id": old_id}))
+        .await;
+    assert_eq!(app_error(&gone), "not_found");
+    assert!(
+        !task_dir(&home, old_id).exists(),
+        "retention deletes the task with its files"
+    );
+    assert!(task_dir(&home, recent_id).join("result/out.bin").exists());
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_keeps_the_newest_two_hundred_terminal_tasks() {
+    let now = DateTime::parse_from_rfc3339("2026-11-06T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let home = home("dm-retention-count");
+    let mut ids = Vec::new();
+    for index in 0..200 {
+        let id = format!("mt_seed_{index:03}");
+        let time = (now - chrono::Duration::minutes(index + 1))
+            .to_rfc3339_opts(SecondsFormat::Nanos, true);
+        write_task_record(&home, &seed_record(&id, "succeeded", &time));
+        ids.push(id);
+    }
+    // The oldest seeded task carries a result file that retention removes.
+    let oldest = ids.last().unwrap().clone();
+    let result = task_dir(&home, &oldest).join("result");
+    std::fs::create_dir_all(&result).unwrap();
+    std::fs::write(result.join("out.bin"), b"oldest").unwrap();
+    // A crash left this one queued; startup settles it `interrupted` before
+    // retention runs, so it counts toward the total in this same apply.
+    let crashed = "mt_crashed_queued";
+    write_task_record(
+        &home,
+        &seed_record(crashed, "queued", "2026-11-05T23:59:30.000000000Z"),
+    );
+
+    let fixture = Arc::new(FixtureAdapter::default());
+    let server =
+        start_in_with_clock(home.clone(), Some(fixture.clone()), FixedClock::new(now)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    // 200 terminal tasks plus the one startup interrupted: the oldest goes.
+    let gone = client
+        .rpc("modality.task.status", json!({"task_id": oldest}))
+        .await;
+    assert_eq!(app_error(&gone), "not_found", "startup retention ran");
+    assert!(
+        !task_dir(&home, &oldest).exists(),
+        "retention deletes the task with its files"
+    );
+    assert_eq!(
+        state_of(&task_status(&mut client, crashed).await),
+        "interrupted"
+    );
+    assert_eq!(
+        state_of(&task_status(&mut client, &ids[0]).await),
+        "succeeded"
+    );
+
+    // The next terminal task pushes the next oldest out (A.4).
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "n"}}),
+    )
+    .await;
+    let finished = wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
+    assert_eq!(state_of(&finished), "succeeded", "{finished}");
+    let next_oldest = &ids[198];
+    let gone = client
+        .rpc("modality.task.status", json!({"task_id": next_oldest}))
+        .await;
+    assert_eq!(app_error(&gone), "not_found");
+    assert!(!task_dir(&home, next_oldest).exists());
+    assert_eq!(
+        state_of(&task_status(&mut client, &ids[0]).await),
+        "succeeded"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_unhandled_tasks_receive_their_own_results() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        handles: Handles::None,
+        gate: Some(gate.clone()),
+        named_output: true,
+        reverse_completion: true,
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-unhandled").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let first = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "first"}}),
+    )
+    .await;
+    let second = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "second"}}),
+    )
+    .await;
+    let first_id = first["task_id"].as_str().unwrap().to_owned();
+    let second_id = second["task_id"].as_str().unwrap().to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.submits() < 2 || fixture.waits() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both jobs must reach the adapter's wait"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The second job completes before the first, and each wait gets its own
+    // task id, so no submission-order pairing can produce the right results.
+    gate.cancel();
+    for task_id in [&first_id, &second_id] {
+        let record = wait_terminal(&mut client, task_id).await;
+        assert_eq!(state_of(&record), "succeeded", "{record}");
+        let file = record["result"]["files"][0].clone();
+        assert_eq!(file["bytes"], task_id.len());
+        assert_eq!(file["sha256"], sha256(task_id.as_bytes()));
+        let chunk = client
+            .rpc(
+                "modality.task.result",
+                json!({"task_id": task_id, "name": "out.bin", "offset": 0, "length": 100}),
+            )
+            .await;
+        assert_ok(&chunk);
+        assert_eq!(
+            STANDARD
+                .decode(chunk["result"]["data_base64"].as_str().unwrap())
+                .unwrap(),
+            task_id.as_bytes(),
+            "the result names the task that produced it"
+        );
+    }
+    let mut received = fixture.wait_ids();
+    received.sort();
+    let mut wanted = vec![first_id, second_id];
+    wanted.sort();
+    assert_eq!(received, wanted, "every wait received its own task id");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_during_submit_reaches_the_accepted_job() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let submit_gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        submit_gate: Some(submit_gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-cancel-submit").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "s"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.submits() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was never asked to submit"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Cancel while `submit` is blocked, then let it return its handle.
+    let cancel_id = client
+        .send("modality.task.cancel", json!({"task_id": task_id}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    submit_gate.cancel();
+    let cancelled = client.response(cancel_id).await;
+    assert_ok(&cancelled);
+    assert_eq!(fixture.remote_cancels(), 1, "the executor was asked once");
+    let record = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&record), "cancelled", "{record}");
+    assert_eq!(record["remote_handle"], format!("handle-{task_id}"));
+    assert_eq!(record["remote_cancel"], "cancelled", "{record}");
+    assert_eq!(fixture.submits(), 1);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unload_during_submit_keeps_a_handle_for_the_next_generation() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let submit_gate = CancellationToken::new();
+    fixture.set_behavior(Behavior {
+        submit_gate: Some(submit_gate.clone()),
+        ..Default::default()
+    });
+    let (server, home) = start(Some(fixture.clone()), "dm-unload-submit").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "u"}}),
+    )
+    .await;
+    let task_id = task["task_id"].as_str().unwrap().to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fixture.submits() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter was never asked to submit"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The plugin unloads while `submit` is blocked; the adapter returns its
+    // handle within the grace.
+    let release = {
+        let submit_gate = submit_gate.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            submit_gate.cancel();
+        })
+    };
+    server.shutdown();
+    server.join().await.unwrap();
+    release.await.unwrap();
+    let stored = read_task_record(&home, &task_id);
+    assert_eq!(stored["state"], "running", "{stored}");
+    assert_eq!(stored["remote_handle"], format!("handle-{task_id}"));
+    assert_eq!(fixture.submits(), 1);
+
+    // The next generation observes it without submitting again.
+    let server = start_in(home.clone(), Some(fixture.clone())).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let finished = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(state_of(&finished), "succeeded", "{finished}");
+    assert_eq!(fixture.submits(), 1, "the observation never submits again");
+    assert!(fixture.wait_ids().contains(&task_id));
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-node-path").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+
+    // One byte over the submission budget is refused before the file is
+    // read, and nothing is written.
+    let big = home.join("big.bin");
+    let file = std::fs::File::create(&big).unwrap();
+    file.set_len(dim_modality::MAX_SUBMISSION_BYTES + 1)
+        .unwrap();
+    drop(file);
+    let tasks_dir = home.join("modality/tasks");
+    let count = || {
+        std::fs::read_dir(&tasks_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    let before = count();
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate", "params": {"prompt": "b"},
+                "files": [{"name": "big.png", "media_type": "image/png",
+                    "node_path": big.to_str().unwrap()}]}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&refused),
+        "invalid_input",
+        "one byte over the submission budget is refused: {refused}"
+    );
+    assert_eq!(count(), before, "an over-size node_path writes nothing");
+
+    // A `node_path` that goes through a linked directory is accepted; the
+    // record and the job both carry the canonical path.
+    let real = home.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let file = real.join("image.png");
+    std::fs::write(&file, b"through a linked directory").unwrap();
+    let link = home.join("link-dir");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let through = link.join("image.png");
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "l"},
+            "files": [{"name": "in.png", "media_type": "image/png",
+                "node_path": through.to_str().unwrap()}]}),
+    )
+    .await;
+    let canonical = std::fs::canonicalize(&file).unwrap();
+    assert_eq!(
+        task["params"]["files"][0]["node_path"],
+        canonical.to_str().unwrap()
+    );
+    assert_eq!(
+        task["params"]["files"][0]["sha256"],
+        sha256(b"through a linked directory")
+    );
+    assert_eq!(
+        state_of(&wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await),
+        "succeeded"
+    );
+    let job = fixture.job(task["task_id"].as_str().unwrap()).unwrap();
+    assert_eq!(job.files[0].path, canonical);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn params_files_is_reserved_for_the_validated_metadata() {
+    let fixture = Arc::new(FixtureAdapter::default());
+    let (server, home) = start(Some(fixture.clone()), "dm-reserved").await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    create_task_provider(&mut client).await;
+    let node_file = home.join("node.png");
+    std::fs::write(&node_file, b"node bytes").unwrap();
+    let link = home.join("link.png");
+    std::os::unix::fs::symlink(&node_file, &link).unwrap();
+    let tasks_dir = home.join("modality/tasks");
+    let count = || {
+        std::fs::read_dir(&tasks_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+
+    // A caller's `params.files` is refused before the adapter's schema and
+    // before anything is written or submitted.
+    let before = count();
+    let refused = client
+        .rpc(
+            "modality.task.submit",
+            json!({"category": "image", "operation": "generate",
+            "params": {"prompt": "p", "files": [
+                {"name": "../escape", "media_type": "image/png", "bytes": 1, "sha256": "00"},
+                {"name": "link.png", "media_type": "image/png", "bytes": 1, "sha256": "00",
+                    "node_path": link.to_str().unwrap()}
+            ]}}),
+        )
+        .await;
+    assert_eq!(
+        app_error(&refused),
+        "invalid_input",
+        "params.files is reserved: {refused}"
+    );
+    assert_eq!(count(), before, "a reserved params.files writes nothing");
+    assert_eq!(fixture.submits(), 0, "the adapter is never called");
+
+    // A real submission records exactly the validated metadata.
+    let inline = b"reserved inline bytes".to_vec();
+    let canonical = std::fs::canonicalize(&node_file).unwrap();
+    let task = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "m"},
+        "files": [
+            inline_file("in.png", "image/png", &inline),
+            {"name": "n.png", "media_type": "image/png", "node_path": node_file.to_str().unwrap()}
+        ]}),
+    )
+    .await;
+    let files = task["params"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "{task}");
+    assert_eq!(
+        files[0],
+        json!({"name": "in.png", "media_type": "image/png",
+            "bytes": inline.len(), "sha256": sha256(&inline)})
+    );
+    assert_eq!(files[1]["name"], "n.png");
+    assert_eq!(files[1]["bytes"], 10);
+    assert_eq!(files[1]["sha256"], sha256(b"node bytes"));
+    assert_eq!(files[1]["node_path"], canonical.to_str().unwrap());
+    wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
+
+    // No files: the record carries an empty array.
+    let empty = submit_task(
+        &mut client,
+        json!({"category": "image", "operation": "generate", "params": {"prompt": "e"}}),
+    )
+    .await;
+    assert_eq!(empty["params"]["files"], json!([]));
+    wait_terminal(&mut client, empty["task_id"].as_str().unwrap()).await;
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

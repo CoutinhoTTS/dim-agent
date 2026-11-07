@@ -206,10 +206,11 @@ No goal on main.
 不属于本契约。
 
 **读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
-`goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
+`goal:state` 记录就是目标；在记录出现之前写成的历史上，最新存活的 `goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
 被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
 先打印用法，再打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部。写入之后，客户端先折叠该次写入产生的事件再打印：
-行模式提示符会再读一次，终端界面则等待该线的实时事件。显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
+行模式提示符会再读一次，终端界面则等待该线的实时事件。报告在方法返回的 `sequence` 处释放，对所有守护进程一致：由 main 构建的守护进程返回同样的序号但发布旧 key，
+命令不能停在原地等待这种守护进程永远不会写出的记录。显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
 或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
 复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
 
@@ -324,17 +325,18 @@ fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
 
 ## 插件运行时
 
-RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeManager](plugins/RuntimeManager.md)）。
+RuntimeManager 提供插件代码运行的 Node 与 Python 运行时，以及启动 Python MCP 服务器的 uv 工具（[RuntimeManager](plugins/RuntimeManager.md)）。
 守护进程在动作应用配置的那一刻才读配置（RuntimeManager §3.3），所以客户端可以让用户打开运行时、
 选择它的来源、看它在做什么，而不必手改 `<home>/runtimes/config.json`，也不必重启任何东西。
 `/runtime` 在两种终端模式下打开同一个面板；行客户端与 CLI 里对应的区域是 `dimcode runtime`。
 
 ### 面板
 
-行是两个运行时，固定 node 在前、python 在后。每行显示名字、配置的来源（`download` 或 `system`）、
+行是两个运行时和 uv 工具，固定 node 在前、python 其次、uv 最后。每行显示名字、配置的来源（`download` 或 `system`）、
 正在生效的版本（`download` 是固定版本，`system` 是检查过的解释器版本，`off` 且从未检查时为空）、
 打开时的 `auto`，以及 `runtime.list` 给出的状态：`off`、`acquiring`、`starting`、`ready`、带原因的 `down`，或带
-原因（列出每个来源和它的错误）的 `failed`。
+原因（列出每个来源和它的错误）的 `failed`。uv 不启动运行时，所以它从不显示 `starting` 或 `down`：
+按正在生效的 plan 装好后就是 `ready`。
 
 行下方列出在等这个运行时的插件行——因为它是 `off` 或 `down` 而处于 Pending 的那些
 （[PluginManager §2.5](plugins/PluginManager.md#25-runtimes)）——这样"workflow 为什么不工作"和它的
@@ -345,6 +347,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ╭─ 插件运行时 ──────────────────────────────────────────────────────────────╮
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      未安装                          │
+│   uv        download  0.13.7     off                                      │
 │                                                                           │
 │   1 个插件在等 node：workflow                                             │
 ╰─ Enter 安装或应用 · s 来源 · a 自动 · r 重试 · Esc 关闭 ──────────────────╯
@@ -425,6 +428,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ```text
 /runtime                              在 scrollback 客户端里打印同样的行
 /runtime install node                 应用 node 的配置
+/runtime install uv                   安装 uv 工具
 /runtime source node system           把 node 换成系统解释器并应用
 /runtime auto python on               用配置打开 python 并应用
 ```
@@ -433,6 +437,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 $ dimcode runtime list
 node    download  24.21.0   ready
 python  system    3.12.15   off       未安装
+uv      download  0.13.7    off
 $ dimcode runtime install node
 node    download  24.21.0   acquiring
 $ dimcode runtime config python --source system --auto on
@@ -828,6 +833,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode tui [-p TEXT] [--image PATH ...]` | 打开现有的交互式滚动回显客户端；`-p` 把 TEXT 作为首条消息发送（[带首条消息启动](#带首条消息启动)）。 |
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | 运行文本和/或本地图片后退出；没有 `-p` 时读取重定向的 stdin。 |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | 用文本和/或图片继续指定的已持久化 Session。 |
+| `dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` | 打开一个实时会话并按 JSON 行流式输出（[实时会话](#realtime-会话)）：stdin 行是 text 帧，事件与结束打印到 stdout，EOF 或 Ctrl+C 关闭会话。 |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
 | `dimcode session rename SESSION TITLE` | 经 `session.rename` 设置该 Session 的手动标题，并打印服务端返回的标题。 |
 | `dimcode session rename SESSION --clear` | 清除手动标题，Session 回到无标题状态。 |
@@ -952,7 +958,18 @@ stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不
 没有匹配的说明时，内嵌守护进程保留现有的 `App Server exited (<status>); see ...`，
 `--server` 指定的程序则报出该选项必须指向独立的 `dim-app-server` 二进制。失败的启动读完后
 删除说明；连接成功也删除任何说明。CLI 从不打印 `daemon.log`，从不删除、重建、降级或
-改写库，并以 1 退出。开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
+改写库，并以 1 退出。
+
+格式升级运行期间，守护进程把同一份说明写成进度类型：首行
+`dimcode-startup-progress v1 pid=<pid>`，正文
+`store-upgrade from=<from> to=<to> progress=<n>`，最多每秒一次，并在每个升级步骤结束时
+再写一次；库新建或已是最新格式时不写。两个启动等待都读它：spawn 等待只认自己子进程的
+pid，start 锁等待认任意 pid；计数每增加一次，等待上限就向后推一个上限本身（spawn 10 秒，
+start 锁为一次验证过的 shutdown 加一次启动再加一段余量）。格式升级是会上报进展并推进上限的
+长阶段；启动的其他阶段都受客户端固定上限约束。第一次见到时在所有模式下向
+stderr 打印一次 `正在把本地库从格式 v<from> 升级到 v<to>；大库可能需要一段时间。`；
+stdout 和 JSON 输出不变。只认识失败类型的客户端忽略进度类型，退回上面的通用错误文本。
+开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
 构建或 `--home PATH` 两条路。
 
 ```text
@@ -1264,6 +1281,24 @@ JSON 模式下，stdout 每行一条紧凑的 JSON-RPC 通知，使用守护进�
 进度通知不是额外的持久文本事实。JSON 编码会转义控制字符；终端文本过滤不改写机器输出中的数据。
 CLI 不添加合成的生命周期事件或第二套事件模式。通知投递保持守护进程现有的尽力而为语义；需要
 固定完整记录的使用方应使用导出。
+
+## Realtime 会话
+
+`dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` 经 `modality.realtime.open` 打开一个会话，
+`params` 为 `{}`（[Modality A.3](plugins/Modality.md#a3-方法)）。操作默认 `voice`；`--model` 与 CLI 其他模型引用
+一样写 `PROVIDER/MODEL`。该命令不命名工作区。
+
+provider 会话由客户端配置，而非命令本身：stdin 每行是一个 JSON 值，经 `modality.realtime.send` 作为 text 帧
+发出，因此管道的第一行可以是 provider 自己的 `session.update`。空行跳过；不是 JSON 的行以退出码 1 结束
+命令。
+
+每个 `modality.realtime.event` 通知把其 `event` 打印为 stdout 上的一行紧凑 JSON，`modality.realtime.ended`
+打印其 params，因此消费者每行读到一个 JSON 值，并能在结束时读到 `reason`。错误不进 stdout：错误回复把
+消息打到 stderr，命令退出 1。
+
+stdin EOF 经 `modality.realtime.close` 关闭会话并退出 0；会话打开后按 Ctrl+C 同样如此。打开回复之前按
+Ctrl+C 退出 130，且不打开任何会话。`direct` 会话把 `connection` 对象打印为第一行后保持：调用方直接与
+provider 自己的传输交互，stdin 行被忽略，EOF 或 Ctrl+C 仍经 `modality.realtime.close` 关闭会话。
 
 ## 对话导出
 

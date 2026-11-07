@@ -46,6 +46,8 @@ pub struct ModelFailureFacts {
     /// Set only when the provider asked to wait longer than the budget left,
     /// which is why the request stopped.
     pub retry_after_stop: Option<std::time::Duration>,
+    /// The failure policy forbids retrying this failure.
+    pub retry_forbidden: bool,
 }
 impl ModelFailureFacts {
     /// A failure from a host with no provider boundary: nothing is known
@@ -64,6 +66,7 @@ impl ModelFailureFacts {
             attempts: 1,
             waited: std::time::Duration::ZERO,
             retry_after_stop: None,
+            retry_forbidden: false,
         }
     }
 }
@@ -576,6 +579,17 @@ pub struct ModalityTarget {
     pub operation: String,
 }
 
+/// The realtime transport a catalog model declares in its entry's
+/// `metadata.raw.realtime`: the protocol the adapter speaks and the path under
+/// the connection's base URL. The path is declared, never derived from the
+/// base URL.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RealtimeDeclaration {
+    pub protocol: String,
+    pub path: String,
+}
+
 /// A model's connection for one non-conversational call. The adapter holds it
 /// for that call only: its owner never persists it, never returns it to a
 /// client and never formats its credential material.
@@ -587,6 +601,10 @@ pub struct ModalityConnection {
     pub protocol: ModelProtocol,
     /// The model id a request sends to the provider.
     pub model: String,
+    /// The realtime transport the model's catalog entry declares, for a
+    /// `realtime.*` operation. `None` on every other use, and on a model that
+    /// declares no transport.
+    pub realtime: Option<RealtimeDeclaration>,
 }
 impl std::fmt::Debug for ModalityConnection {
     /// Redacted: only the identifying facts and whether a credential is
@@ -599,6 +617,7 @@ impl std::fmt::Debug for ModalityConnection {
             .field("connection", &RedactedConnection(&self.resolved.connection))
             .field("recovery", &self.resolved.recovery.is_some())
             .field("failure_policy", &self.resolved.failure_policy.is_some())
+            .field("realtime", &self.realtime)
             .finish()
     }
 }

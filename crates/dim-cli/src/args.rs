@@ -110,6 +110,9 @@ Commands:\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
+  realtime [--operation voice] [--model PROVIDER/MODEL]\n\
+                                   Open a realtime session; stdin lines are\n\
+                                   text frames and events print as JSON lines\n\
   plugin list                      List plugins by name, the one in use and its status\n\
   plugin install PATH|GIT_URL [--ref R] [--id ID] [--no-enable]\n\
                                    Install a plugin and turn it on\n\
@@ -119,7 +122,7 @@ Commands:\n\
   plugin update ID                 Load the latest commit of a Git plugin\n\
   plugin remove ID\n\
   runtime list                     List the plugin runtimes and their state\n\
-  runtime install node|python      Turn a plugin runtime on and acquire it\n\
+  runtime install node|python|uv   Turn a plugin runtime on and acquire it\n\
   runtime config NAME              Set a runtime's --source or --auto and apply it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   daemon vacuum [--database PATH]  Rewrite an offline database to reclaim\n\
@@ -353,6 +356,10 @@ pub enum Action {
     Plugin {
         method: String,
         params: serde_json::Value,
+    },
+    /// `realtime`: one realtime session, with the operation to open.
+    Realtime {
+        operation: Option<String>,
     },
     /// `runtime list`: the plugin runtimes and their state.
     RuntimeList,
@@ -789,6 +796,17 @@ impl Options {
                 "plugin" if matches!(options.action, Action::Chat) => {
                     let (method, params) = crate::plugin_command::parse(&mut args)?;
                     options.action = Action::Plugin { method, params };
+                }
+                "realtime" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Realtime { operation: None };
+                }
+                "--operation" => {
+                    let Action::Realtime { operation } = &mut options.action else {
+                        return Err("--operation requires realtime".into());
+                    };
+                    if operation.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --operation only once".into());
+                    }
                 }
                 "migration" if matches!(options.action, Action::Chat) => {
                     options.action = crate::migration_command::parse(&mut args)?;
@@ -1344,10 +1362,14 @@ impl Options {
         if options.provider.is_some() && options.model.is_none() {
             return Err("--provider requires --model or DIM_MODEL".into());
         }
+        // `--model` names the realtime session's model, and is a chat option
+        // for every other command.
+        let model_is_chat_option =
+            options.model.is_some() && !matches!(options.action, Action::Realtime { .. });
         if !matches!(options.action, Action::Chat | Action::Tui | Action::Exec)
             && (options.prompt.is_some()
                 || options.resume.is_some()
-                || options.model.is_some()
+                || model_is_chat_option
                 || options.effort.is_some()
                 || autocompact.is_some()
                 || options.permission.is_some())
@@ -1712,7 +1734,8 @@ impl Options {
             | Action::ManagementSet { area, .. }
             | Action::ManagementAdd { area, .. }
             | Action::ManagementStart { area, .. } => area.names_workspace(),
-            Action::Migration(_)
+            Action::Realtime { .. }
+            | Action::Migration(_)
             | Action::Acp { .. }
             | Action::Export { .. }
             | Action::SessionRename { .. }
@@ -1876,6 +1899,13 @@ mod workspace_tests {
             (vec!["hooks", "set", document], None, true),
             (vec!["workflow", "list"], None, true),
             (vec!["workflow", "start", "job"], None, true),
+            (vec!["realtime"], None, false),
+            (vec!["realtime", "--operation", "transcribe"], None, false),
+            (
+                vec!["realtime", "--model", "step-plan/stepaudio-2.5-realtime"],
+                None,
+                false,
+            ),
         ];
         for (arguments, piped, names_workspace) in cases {
             let args = ["--home", directory, "--cwd", directory]
@@ -1900,6 +1930,43 @@ mod workspace_tests {
             );
             assert_eq!(options.launch_dir(), Path::new(directory));
         }
+    }
+
+    /// `realtime [--operation voice] [--model PROVIDER/MODEL]`: the operation
+    /// is optional (the dispatcher opens `voice`), the model is the CLI's
+    /// usual reference, and `--operation` belongs to no other command.
+    #[test]
+    fn realtime_takes_one_operation_and_one_model() {
+        let parse = |arguments: &[&str]| {
+            Options::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+        };
+        let options = parse(&["realtime"]).unwrap();
+        assert!(
+            matches!(options.action, Action::Realtime { operation: None }),
+            "{:?}",
+            options.action
+        );
+        let options = parse(&["realtime", "--operation", "transcribe"]).unwrap();
+        let Action::Realtime { operation } = &options.action else {
+            panic!("{:?}", options.action);
+        };
+        assert_eq!(operation.as_deref(), Some("transcribe"));
+        let options = parse(&["realtime", "--model", "step-plan/stepaudio-2.5-realtime"]).unwrap();
+        assert!(
+            matches!(options.action, Action::Realtime { operation: None }),
+            "{:?}",
+            options.action
+        );
+        assert_eq!(
+            options.model.as_deref(),
+            Some("step-plan/stepaudio-2.5-realtime")
+        );
+        let error = parse(&["--operation", "transcribe"]).err().unwrap();
+        assert_eq!(error.to_string(), "--operation requires realtime");
+        let error = parse(&["realtime", "--operation", "voice", "--operation", "voice"])
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "Supply --operation only once");
     }
 
     #[cfg(any(unix, windows))]

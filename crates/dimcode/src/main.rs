@@ -29,6 +29,9 @@ fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
     dim_session_title::install(builder);
     dim_agent_scheduler::install(builder);
     dim_goal::install(builder);
+    // The adapter provides `modalityAdapter`; Modality reads it when it starts,
+    // so it is added first.
+    dim_modality_aimux::install(builder);
     dim_modality::install(builder);
 }
 

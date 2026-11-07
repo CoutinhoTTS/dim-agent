@@ -9,6 +9,7 @@ and tree-supervision primitives to local tools.
 | Service | Purpose |
 | --- | --- |
 | `P:ExecutionSettingsHost` | Read the user's `Sandbox`/`Network` switches at each process preparation. Required. |
+| `P:ToolchainSourceHost` | The downloaded runtimes installed under the plan in effect, each with the bin directory appended to a started child's `PATH` and the archive directory granted to a confined one. Required; an assembly that installs no runtimes provides `ToolchainSourceHost::fixed(vec![])`. |
 | `P:FileStorage` | Read the configured exec shell; enabled only when `exec_shell_file` is configured. |
 
 ## Events and lifetime
@@ -140,6 +141,55 @@ preferences (`EXEC_SHELL_CONFIG_INVALID`), unavailable shells
 (`EXEC_SHELL_UNAVAILABLE`), a network-share cwd with cmd
 (`EXEC_SHELL_CWD_UNSUPPORTED`), a missing cwd (`cwd_not_found`), or failed Git Bash
 path mapping (`EXEC_SHELL_PATH_MAPPING_FAILED`).
+
+## Child environment
+
+`HostPlatform` reads `P:ToolchainSourceHost` at each process start and appends
+the bin directories of the downloaded runtimes to the child's `PATH`.
+`child_path(embedding, base)` composes that value in a fixed order: the
+embedding host's own directories first, then `base` — the `PATH` the child
+would get with no installed runtime — then the toolchain bin directories not
+already in either, compared case-insensitively on Windows. An entry whose bin
+directory is not inside its archive directory is skipped. `None` means nothing
+is appended, so the child keeps the `PATH` it has today; a platform without the
+port, or one whose source returns no toolchain, starts every process that way.
+A `system` interpreter contributes nothing: it is the user's own, and the
+user's `PATH` already reaches it.
+
+The toolchain comes last on purpose. RuntimeManager's default source is
+`download` and a user installs a runtime to run a plugin; a directory first on
+the `PATH` would silently switch the interpreter of the user's own project
+commands (npm builds, native modules, virtual environments) on the next command.
+Last only fills a gap, so a process that already resolved a command never
+resolves it differently after an install: no running process or MCP server needs
+a restart, and no change notice is needed. A user who wants Dim's runtime even
+though they have their own writes `runtime.list`'s absolute `path` into the
+command or the MCP entry.
+
+`build_process_spec` applies it to agent exec, `!` shell input and hook
+commands: for a POSIX shell the prefix becomes
+`export PATH=<embedding>:"$PATH":<runtimes>` — Git Bash maps both lists through
+the same `cygpath` path — and for PowerShell and cmd the directories are
+appended to the child environment's `PATH` with `;`. A stdio MCP child takes the
+entry's own `PATH` when the entry sets one, otherwise the daemon's, with the
+same directories appended; its command is never rewritten to an absolute path.
+On Unix the program lookup reads the child's `PATH`, so a bare command resolves
+in an appended directory. On Windows Rust resolves the program itself before
+`CreateProcessW`: with a `PATH` set on the command, a bare name is searched in
+the child's `PATH` first, then the application's directory, the system and
+Windows directories, and the parent's `PATH`, with `.exe` appended to a name
+without an extension. A bare `node` therefore resolves `node.exe` in an
+appended runtime directory; a `.cmd` shim such as `npx.cmd` is found only by
+its full name.
+
+The embedding host's `DIMCODE_*_BIN` and `DIMCODE_PLUGIN_BIN_DIRS` keys stay its
+explicit choice and keep their first position.
+
+`prepare_isolated_process` adds each toolchain's archive directory to the
+command's read-only roots — the directory the port names, not a parent derived
+from the bin directory. It grants exactly those directories: never the reported
+home, its `runtimes` directory, or anything writable. A `system` interpreter
+contributes no root, so nobody's own tool directory is widened.
 
 ## Confined helpers
 
@@ -274,7 +324,7 @@ workspace, and the same command with the sandbox off.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 进程 |
-| 注入 | `P:ExecutionSettingsHost`、`P:FileStorage` |
+| 注入 | `P:ExecutionSettingsHost`、`P:FileStorage`、`P:ToolchainSourceHost` |
 | 提供 | `P:HostPlatform` |
 | 被注入于 | `HooksSession`、`PromptSources`、`ShellInput`、`SkillsCatalog`、`WorkspaceTools` |
 <!-- /generated -->
