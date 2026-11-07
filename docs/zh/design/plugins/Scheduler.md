@@ -111,7 +111,8 @@ sessionPermissions 与 sessions 由同一稳定 Agents 目录提供，按调用�
 的当前不可用提供者与重试合同，不固化其错误文本，也不假定具体的提供者重新接入路径。
 
 进程行注册的声明只有 A.3 的七个字面方法：list、history 和 watch 不修改状态并使用 report；
-其余四个修改方法使用 drain；全部 progress:false。结果与错误使用既有 MethodReply；
+其余四个修改方法使用 drain；除 watch 外都使用 progress:false，watch 声明 progress，
+其项就是这次观察的变化（§11.2、A.3）。结果与错误使用既有 MethodReply；
 工具把 A.2 回复放入 ToolResult.content 与 isError，不新增 App Server 方法。
 
 | 决定点 | 必需读取 |

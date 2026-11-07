@@ -131,8 +131,9 @@ provider reattachment path.
 
 The declarations the process row registers are A.3's seven literal methods. `list`,
 `history` and `watch` are non-mutating, `interruption:"report"`; the other four are
-mutating, `interruption:"drain"`. All use `progress:false`. Their JSON values
-and errors use existing `MethodReply`; the tool maps A.2's reply into
+mutating, `interruption:"drain"`. All but `watch` use `progress:false`; `watch`
+declares progress, and its items are the watch's changes (§11.2, A.3). Their JSON
+values and errors use existing `MethodReply`; the tool maps A.2's reply into
 `ToolResult.content` and `isError`. No new App Server method is added.
 
 Live-policy reads use the delivered generated interface directly:
