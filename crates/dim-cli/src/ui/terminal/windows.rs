@@ -85,8 +85,13 @@ pub fn enable_raw_mode() -> io::Result<()> {
         | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     // SAFETY: handles from GetStdHandle.
     unsafe {
-        if SetConsoleMode(input, raw_in) == 0 || SetConsoleMode(output, raw_out) == 0 {
+        if SetConsoleMode(input, raw_in) == 0 {
             return Err(io::Error::last_os_error());
+        }
+        if SetConsoleMode(output, raw_out) == 0 {
+            let error = io::Error::last_os_error();
+            SetConsoleMode(input, in_mode);
+            return Err(error);
         }
     }
     RAW_ON.store(true, Ordering::SeqCst);
