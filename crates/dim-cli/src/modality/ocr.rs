@@ -13,6 +13,7 @@ use super::task::{self, Output};
 use crate::Result;
 use crate::args::Options;
 use crate::client::Client;
+use crate::sanitize::{safe, safe_line};
 use serde_json::{Map, Value, json};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -118,7 +119,11 @@ async fn succeed(
                 Some(text) => print_text(output, &text)?,
                 None => {
                     print_text(output, &preview(&path)?)?;
-                    writeln!(output.out, "Full text: {}", path.display())?;
+                    writeln!(
+                        output.out,
+                        "Full text: {}",
+                        safe_line(&path.display().to_string())
+                    )?;
                 }
             }
         }
@@ -180,8 +185,11 @@ pub(super) fn fitting(bytes: &[u8]) -> Option<String> {
     (text.encode_utf16().count() <= INLINE_UNITS).then_some(text)
 }
 
-/// The text as it is, with a final newline of its own.
+/// The text with terminal controls removed, with a final newline of its own.
+/// Only the printed form is cleaned: the written `text.txt` and the `--json`
+/// record keep the exact bytes.
 fn print_text(output: &mut Output<'_>, text: &str) -> Result<()> {
+    let text = safe(text);
     write!(output.out, "{text}")?;
     if !text.ends_with('\n') {
         writeln!(output.out)?;
@@ -191,7 +199,7 @@ fn print_text(output: &mut Output<'_>, text: &str) -> Result<()> {
 
 fn print_paths(output: &mut Output<'_>, written: &[PathBuf]) -> Result<()> {
     for path in written {
-        writeln!(output.out, "{}", path.display())?;
+        writeln!(output.out, "{}", safe_line(&path.display().to_string()))?;
     }
     Ok(())
 }

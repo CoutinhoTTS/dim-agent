@@ -600,13 +600,14 @@ returned; an already-terminal task says it is unchanged. `--json` prints the rep
 all four.
 
 `dimcode ocr FILE [--output-mode text|layout] [--out DIR]` submits one `ocr.recognize` host task.
-In text mode, a `text.txt` of at most 64 KiB and at most 30,000 UTF-16 units is printed as it is
-and nothing is written, so the common case leaves no files behind. A longer text is written — to
-`--out` when it names a directory, to the current directory otherwise — and the command prints a
-2,000-character preview followed by `Full text: <path>`. `--out` with a short text asks for the
-result set beside the printed text, and `--output-mode layout` writes the rasterized page images
-and prints every written path. Writing follows the same rule as every Modality command: no target
-is ever replaced. `--json` prints the record and `--no-wait` the id.
+In text mode, a `text.txt` of at most 64 KiB and at most 30,000 UTF-16 units is printed and
+nothing is written, so the common case leaves no files behind; the printed text has terminal
+controls removed, while a written `text.txt` and the `--json` record keep the exact bytes. A longer
+text is written — to `--out` when it names a directory, to the current directory otherwise — and
+the command prints a 2,000-character preview followed by `Full text: <path>`. `--out` with a short
+text asks for the result set beside the printed text, and `--output-mode layout` writes the
+rasterized page images and prints every written path. Writing follows the same rule as every
+Modality command: no target is ever replaced. `--json` prints the record and `--no-wait` the id.
 
 ## Permission presets and approvals
 

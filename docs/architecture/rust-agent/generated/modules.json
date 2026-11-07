@@ -3840,6 +3840,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "format",
         "json",
         "matches",
         "panic",
@@ -31354,6 +31355,15 @@
     },
     {
       "from": "dim_cli::modality::ocr",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
+      ]
+    },
+    {
+      "from": "dim_cli::modality::ocr",
       "to": "dim_client",
       "references": [
         "path Client",
@@ -31392,7 +31402,9 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path safe",
-        "use crate::sanitize::safe"
+        "path safe_line",
+        "use crate::sanitize::safe",
+        "use crate::sanitize::safe_line"
       ]
     },
     {

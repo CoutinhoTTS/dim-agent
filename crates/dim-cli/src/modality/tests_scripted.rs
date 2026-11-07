@@ -756,8 +756,8 @@ async fn an_unavailable_operation_prints_the_owner_message_verbatim() {
     script.join();
 }
 
-/// A failed task exits 2 and prints the owner's error line; a cancelled one
-/// exits 130.
+/// A failed task exits 2 and prints the owner's error line with terminal
+/// controls removed; a cancelled one exits 130.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_task_exits_two_and_a_cancelled_task_exits_130() {
     let mut script = Script::start(|wire| {
@@ -766,8 +766,7 @@ async fn a_failed_task_exits_two_and_a_cancelled_task_exits_130() {
         wire.reply(&submit, record("task-6", "queued"));
         let wait = wire.frame();
         let mut failed = record("task-6", "failed");
-        failed["task"]["error"] =
-            json!({"code": "provider_error", "message": "The provider refused the job"});
+        failed["task"]["error"] = json!({"code": "provider_error", "message": "\u{1b}[2Jgone"});
         wire.reply(&wait, failed);
         let submit = wire.frame();
         wire.reply(&submit, record("task-7", "queued"));
@@ -779,10 +778,8 @@ async fn a_failed_task_exits_two_and_a_cancelled_task_exits_130() {
     let (code, stdout, stderr) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 2);
     assert_eq!(stdout, "");
-    assert_eq!(
-        stderr,
-        "task-6 failed: provider_error: The provider refused the job\n"
-    );
+    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+    assert_eq!(stderr, "task-6 failed: provider_error: gone\n");
     let options = parse(script.home(), &["image", "generate", "a cat"]);
     let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 130);
@@ -983,11 +980,11 @@ fn ocr_succeeded(task_id: &str, text_bytes: u64, layout: bool) -> Value {
     record
 }
 
-/// `dimcode ocr` submits one `ocr.recognize`, prints a short text inline and
-/// writes nothing at all.
+/// `dimcode ocr` submits one `ocr.recognize`, prints a short text inline with
+/// terminal controls removed and writes nothing at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ocr_prints_a_short_text_inline_and_writes_nothing() {
-    let text = "hello from ocr\n";
+    let text = "\u{1b}[2Jhello from ocr\n";
     let mut script = Script::start(move |wire| {
         wire.hello(&[CAPABILITIES]);
         let submit = wire.frame();
@@ -1019,17 +1016,19 @@ async fn ocr_prints_a_short_text_inline_and_writes_nothing() {
     let options = parse(script.home(), &["ocr", file.to_str().unwrap()]);
     let (code, stdout, stderr) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 0);
-    assert_eq!(stdout, text);
+    assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
+    assert_eq!(stdout, "hello from ocr\n");
     assert_eq!(stderr, "");
     drop(client);
     script.join();
 }
 
 /// A text above 64 KiB is written, and the command prints a 2,000-character
-/// preview and the file that holds the rest.
+/// preview with terminal controls removed and the file that holds the rest,
+/// whose bytes are the daemon's own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ocr_writes_a_long_text_and_prints_its_preview() {
-    let text = "a".repeat(70_000);
+    let text = format!("\u{1b}[2J{}", "a".repeat(70_000));
     let answering = text.clone();
     let mut script = Script::start(move |wire| {
         wire.hello(&[CAPABILITIES]);
@@ -1067,17 +1066,19 @@ async fn ocr_writes_a_long_text_and_prints_its_preview() {
     );
     let (code, stdout, _) = invoke(&mut client, &options).await.unwrap();
     assert_eq!(code, 0);
+    assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
     assert_eq!(
         stdout,
         format!(
             "{}\nFull text: {}\n",
-            "a".repeat(2000),
+            "a".repeat(1996),
             out.path().join("text.txt").display()
         )
     );
     assert_eq!(
         std::fs::read(out.path().join("text.txt")).unwrap(),
-        text.as_bytes()
+        text.as_bytes(),
+        "the written text keeps the daemon's exact bytes"
     );
     assert_eq!(
         std::fs::read(out.path().join("result.json")).unwrap(),

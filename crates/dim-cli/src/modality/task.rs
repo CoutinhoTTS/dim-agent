@@ -10,7 +10,7 @@
 use super::{Modality, refusal};
 use crate::Result;
 use crate::args::ModalityFlags;
-use crate::sanitize::safe;
+use crate::sanitize::{safe, safe_line};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dim_client::Message;
@@ -171,7 +171,7 @@ pub(crate) async fn finish(
                 Written::Files(paths) => {
                     if !output.json {
                         for path in paths {
-                            line(output.out, &path.display().to_string())?;
+                            line(output.out, &safe_line(&path.display().to_string()))?;
                         }
                     }
                     0
@@ -190,7 +190,7 @@ pub(crate) async fn finish(
             let message = error["message"].as_str().unwrap_or("The task failed");
             line(
                 output.err,
-                &format!("{id} failed: {}", nonempty(code, message)),
+                &format!("{id} failed: {}", safe_line(&nonempty(code, message))),
             )?;
             2
         }
