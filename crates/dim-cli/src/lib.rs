@@ -28,6 +28,7 @@ mod plugin_command;
 mod plugins;
 mod projection;
 mod question;
+mod realtime_command;
 mod recording;
 mod sanitize;
 mod session;
@@ -882,6 +883,14 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             .await
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
+        Action::Realtime { operation } => {
+            realtime_command::run(
+                &mut client,
+                &options,
+                operation.as_deref().unwrap_or("voice"),
+            )
+            .await
+        }
         Action::Chat | Action::Tui | Action::Exec => {
             let blocks = images.images.iter().map(|image| image.block()).collect();
             session::chat(&mut client, &options, blocks, images.notes).await

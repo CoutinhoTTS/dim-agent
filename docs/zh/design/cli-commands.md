@@ -829,6 +829,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode tui [-p TEXT] [--image PATH ...]` | 打开现有的交互式滚动回显客户端；`-p` 把 TEXT 作为首条消息发送（[带首条消息启动](#带首条消息启动)）。 |
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | 运行文本和/或本地图片后退出；没有 `-p` 时读取重定向的 stdin。 |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | 用文本和/或图片继续指定的已持久化 Session。 |
+| `dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` | 打开一个实时会话并按 JSON 行流式输出（[实时会话](#realtime-会话)）：stdin 行是 text 帧，事件与结束打印到 stdout，EOF 或 Ctrl+C 关闭会话。 |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
 | `dimcode session rename SESSION TITLE` | 经 `session.rename` 设置该 Session 的手动标题，并打印服务端返回的标题。 |
 | `dimcode session rename SESSION --clear` | 清除手动标题，Session 回到无标题状态。 |
@@ -1276,6 +1277,24 @@ JSON 模式下，stdout 每行一条紧凑的 JSON-RPC 通知，使用守护进�
 进度通知不是额外的持久文本事实。JSON 编码会转义控制字符；终端文本过滤不改写机器输出中的数据。
 CLI 不添加合成的生命周期事件或第二套事件模式。通知投递保持守护进程现有的尽力而为语义；需要
 固定完整记录的使用方应使用导出。
+
+## Realtime 会话
+
+`dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` 经 `modality.realtime.open` 打开一个会话，
+`params` 为 `{}`（[Modality A.3](plugins/Modality.md#a3-方法)）。操作默认 `voice`；`--model` 与 CLI 其他模型引用
+一样写 `PROVIDER/MODEL`。该命令不命名工作区。
+
+provider 会话由客户端配置，而非命令本身：stdin 每行是一个 JSON 值，经 `modality.realtime.send` 作为 text 帧
+发出，因此管道的第一行可以是 provider 自己的 `session.update`。空行跳过；不是 JSON 的行以退出码 1 结束
+命令。
+
+每个 `modality.realtime.event` 通知把其 `event` 打印为 stdout 上的一行紧凑 JSON，`modality.realtime.ended`
+打印其 params，因此消费者每行读到一个 JSON 值，并能在结束时读到 `reason`。错误不进 stdout：错误回复把
+消息打到 stderr，命令退出 1。
+
+stdin EOF 经 `modality.realtime.close` 关闭会话并退出 0；会话打开后按 Ctrl+C 同样如此。打开回复之前按
+Ctrl+C 退出 130，且不打开任何会话。`direct` 会话把 `connection` 对象打印为第一行后保持：调用方直接与
+provider 自己的传输交互，stdin 行被忽略，EOF 或 Ctrl+C 仍经 `modality.realtime.close` 关闭会话。
 
 ## 对话导出
 
