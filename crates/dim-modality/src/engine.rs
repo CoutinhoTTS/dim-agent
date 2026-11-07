@@ -601,6 +601,35 @@ impl Shared {
         Write::Discarded(Some(self.record(slot)))
     }
 
+    /// Fails a host task after its work directory exists: the directory is
+    /// removed first, so a failed host task leaves nothing behind.
+    async fn fail_host(
+        self: &Arc<Self>,
+        slot: &Arc<Slot>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        let record = self.record(slot);
+        let _ = task::remove_work(&self.files, &record.task_id).await;
+        self.fail(slot, code, message).await;
+    }
+
+    /// Fails a task from `settle_files`: the host call (`cap` set) removes
+    /// its work directory first, the adapter call (`cap` none) does not.
+    async fn fail_settled(
+        self: &Arc<Self>,
+        slot: &Arc<Slot>,
+        cap: Option<u64>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        if cap.is_some() {
+            let record = self.record(slot);
+            let _ = task::remove_work(&self.files, &record.task_id).await;
+        }
+        self.fail(slot, code, message).await;
+    }
+
     /// Fails a task whose outcome is still open.
     async fn fail(&self, slot: &Arc<Slot>, code: impl Into<String>, message: impl Into<String>) {
         let current = self.record(slot);
@@ -619,36 +648,6 @@ impl Shared {
                 record.finished_at = Some(finished.clone());
             })
             .await;
-    }
-
-    /// Fails a host task and removes its work directory before the terminal
-    /// write: a helper that failed or wrote unusable artifacts leaves nothing
-    /// for `wait` to publish (A.2.1, decision 7).
-    async fn fail_host(
-        &self,
-        slot: &Arc<Slot>,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) {
-        let _ = task::remove_work(&self.files, &slot.id).await;
-        self.fail(slot, code, message).await;
-    }
-
-    /// Fails a task `settle_files` was publishing (decision 7). The host call
-    /// is the one with an artifact cap (A.2.1), and its work directory is
-    /// removed before the terminal write; the adapter call had no such
-    /// cleanup before and keeps none.
-    async fn fail_settled(
-        &self,
-        slot: &Arc<Slot>,
-        cap: Option<u64>,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) {
-        if cap.is_some() {
-            let _ = task::remove_work(&self.files, &slot.id).await;
-        }
-        self.fail(slot, code, message).await;
     }
 
     /// Records whether the helper ran confined, on the task's host executor
@@ -2124,7 +2123,7 @@ impl Shared {
             Ok(paths) => paths,
             Err(error) => {
                 if !slot.cancel_requested() {
-                    self.fail(slot, "storage_error", error).await;
+                    self.fail_host(slot, "storage_error", error).await;
                 }
                 return;
             }
@@ -2399,7 +2398,9 @@ impl Shared {
     /// comes and dropped before the next file opens, so a publication holds
     /// one source reader at a time; the host path's `cap` adds each opened
     /// length to a running total and fails before copying the file that would
-    /// pass it, so the bytes published are exactly the bytes counted.
+    /// pass it, so the bytes published are exactly the bytes counted. Before
+    /// opening each file it reads the in-memory record, and once another
+    /// writer has settled the task it discards what it copied and returns.
     async fn settle_files(
         self: &Arc<Self>,
         slot: &Arc<Slot>,
@@ -2447,6 +2448,17 @@ impl Shared {
         let mut results: Vec<ResultFile> = Vec::new();
         let mut total: u64 = 0;
         for file in files {
+            // Before opening each file, stop once another writer has settled
+            // the task: a terminal record is what `finish` finally discards
+            // on, through the `Expect::NonTerminal` check `task::write`
+            // applies, while a plain revision move -- a progress update --
+            // is retried by `finish` rather than lost. Read from the
+            // in-memory mirror, so no storage read is added per file.
+            let current = self.record(slot);
+            if current.state.is_terminal() {
+                self.discard_results(&record.task_id, &written).await;
+                return;
+            }
             if !valid_file_name(&file.name) || !names.insert(file.name.clone()) {
                 self.discard_results(&record.task_id, &written).await;
                 self.fail_settled(
@@ -2514,16 +2526,16 @@ impl Shared {
                     }
                 }
             };
-            if let Some(cap) = cap {
+            if let Some(limit) = cap {
                 total = total.saturating_add(source.len());
-                if total > cap {
+                if total > limit {
                     drop(source);
                     self.discard_results(&record.task_id, &written).await;
                     self.fail_settled(
                         slot,
-                        Some(cap),
+                        cap,
                         "executor_error",
-                        format!("The OCR artifacts exceed {cap} bytes"),
+                        format!("The OCR artifacts exceed {limit} bytes"),
                     )
                     .await;
                     return;
