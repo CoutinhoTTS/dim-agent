@@ -8,6 +8,7 @@ use crate::session_typescript::{ForeignRuntime, RuntimeState, RuntimeStatus};
 use dim_agent_capabilities::methods::{
     Interruption, MethodCall, MethodDecl, RpcError, params, reply,
 };
+use dim_agent_capabilities::toolchain::{InstalledToolchain, ToolchainSource, ToolchainSourceHost};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::Disposer;
@@ -375,6 +376,60 @@ fn is_installed(plan: &Plan, version: &str, record: Option<&Record>) -> bool {
         && plan.packages.is_dir()
 }
 
+/// `plan` as HostPlatform sees it (§5): a downloaded runtime installed under
+/// the plan in effect contributes its interpreter's directory and the archive
+/// directory that contains it. A `system` plan has no archive and contributes
+/// nothing.
+fn installed_toolchain(plan: &Plan, record: Option<&Record>) -> Option<InstalledToolchain> {
+    let (_, root) = plan.archive.as_ref()?;
+    if !is_installed(plan, &plan.version, record) {
+        return None;
+    }
+    Some(InstalledToolchain {
+        bin: plan.interpreter.parent()?.to_path_buf(),
+        root: root.clone(),
+    })
+}
+
+/// The text of Python's PEP 668 marker (§7): pip refuses to install into an
+/// interpreter that carries it, and names a virtual environment or uv.
+const EXTERNALLY_MANAGED: &str = "[externally-managed]\nError=This Python runtime is managed by Dim and is replaced when Dim updates it. Create a virtual environment (python3 -m venv .venv) or use uv for project packages.\n";
+
+/// The interpreter's stdlib directory inside its archive directory
+/// (`sysconfig.get_path("stdlib")`): `lib/python3.<minor>` on Unix, `Lib` on
+/// Windows.
+fn python_stdlib(plan: &Plan) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return Some(PathBuf::from("Lib"));
+    }
+    let minor = plan.version.split('.').nth(1)?;
+    Some(PathBuf::from("lib").join(format!("python3.{minor}")))
+}
+
+/// The PEP 668 marker of a downloaded Python (§7). `system` interpreters are
+/// never touched, and every other runtime has none.
+fn externally_managed(plan: &Plan) -> Option<PathBuf> {
+    let (_, directory) = plan.archive.as_ref()?;
+    Some(
+        directory
+            .join(python_stdlib(plan)?)
+            .join("EXTERNALLY-MANAGED"),
+    )
+}
+
+/// Writes the marker when it is absent; one already there is left as it is.
+fn create_externally_managed(marker: &Path) -> Result<(), String> {
+    if marker.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    std::fs::write(marker, EXTERNALLY_MANAGED)
+        .map_err(|error| format!("{}: {error}", marker.display()))
+}
+
 /// A runtime's entry in `runtime.list` (design §5).
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct RuntimeEntry {
@@ -489,6 +544,22 @@ impl RuntimeService {
                     status,
                     reason,
                 }
+            })
+            .collect()
+    }
+
+    /// The downloaded runtimes installed under the plan in effect (§2.4), node
+    /// first: the directories HostPlatform appends to a started process's
+    /// `PATH` and grants a confined one read-only. A `system` interpreter is
+    /// the user's own and contributes nothing; the user's `PATH` already
+    /// reaches it.
+    pub fn toolchains(&self) -> Vec<InstalledToolchain> {
+        let records = read_records(&self.runtimes.lock().unwrap().record_file());
+        let plans = self.plans.lock().unwrap().clone();
+        Kind::ALL
+            .into_iter()
+            .filter_map(|kind| {
+                installed_toolchain(&plans[Self::index(kind)], records.get(kind.name()))
             })
             .collect()
     }
@@ -675,12 +746,22 @@ impl RuntimeService {
             Source::Download => plan.version.clone(),
             Source::System => check_system(kind, &plan.interpreter).await?,
         };
+        let marker = (kind == Kind::Python)
+            .then(|| externally_managed(&plan))
+            .flatten();
         let installed = is_installed(
             &plan,
             &version,
             read_records(&runtimes.record_file()).get(kind.name()),
         );
         if installed {
+            // A downloaded Python installed before the marker existed gets it
+            // at the next start (§7).
+            if let Some(marker) = &marker
+                && let Err(error) = create_externally_managed(marker)
+            {
+                tracing::warn!(runtime = kind.name(), %error, "externally-managed marker not written");
+            }
             return Ok(version);
         }
         std::fs::create_dir_all(&runtimes.root).map_err(|e| e.to_string())?;
@@ -689,7 +770,19 @@ impl RuntimeService {
                 let client = client()?;
                 let sha256 = checksum(&client, archive).await?;
                 if !directory.is_dir() {
-                    download(&client, &plan.sources, &archive.file, &sha256, directory).await?;
+                    let relative = marker
+                        .as_deref()
+                        .and_then(|marker| marker.strip_prefix(directory).ok())
+                        .map(Path::to_path_buf);
+                    download(
+                        &client,
+                        &plan.sources,
+                        &archive.file,
+                        &sha256,
+                        directory,
+                        relative,
+                    )
+                    .await?;
                 }
                 Some(sha256)
             }
@@ -701,6 +794,13 @@ impl RuntimeService {
                 Kind::Node => npm_ci(&plan).await?,
                 Kind::Python => pip_install(&plan).await?,
             }
+        }
+        // A Python directory that was already unpacked when this started gets
+        // the marker here, before the record marks it installed.
+        if let Some(marker) = &marker
+            && let Err(error) = create_externally_managed(marker)
+        {
+            tracing::warn!(runtime = kind.name(), %error, "externally-managed marker not written");
         }
         let _guard = self.record.lock().await;
         let path = runtimes.record_file();
@@ -777,6 +877,10 @@ async fn download(
     file: &str,
     sha256: &str,
     directory: &Path,
+    // The PEP 668 marker's path inside `directory`, written into the
+    // `.partial` directory before the rename so the archive directory never
+    // exists without it.
+    marker: Option<PathBuf>,
 ) -> Result<(), String> {
     let partial = sibling(directory, ".partial");
     let archive = sibling(directory, ".download");
@@ -798,9 +902,15 @@ async fn download(
     let _ = std::fs::remove_dir_all(&partial);
     let name = file.to_owned();
     let (from, to) = (archive.clone(), partial.clone());
-    let unpacked = tokio::task::spawn_blocking(move || unpack(&name, &from, &to))
-        .await
-        .map_err(|e| e.to_string())?;
+    let unpacked = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        unpack(&name, &from, &to)?;
+        if let Some(marker) = marker {
+            create_externally_managed(&to.join(marker))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&archive);
     if let Err(error) = unpacked {
         let _ = std::fs::remove_dir_all(&partial);
@@ -1138,6 +1248,51 @@ async fn pip_install(plan: &Plan) -> Result<(), String> {
     std::fs::rename(&partial, &plan.packages).map_err(|e| e.to_string())
 }
 
+/// The port HostPlatform reads: RuntimeService is resolved at each call
+/// through an optional dependency, so RuntimeManager's reload neither reloads
+/// HostPlatform nor leaves it holding a withdrawn service.
+struct RuntimeToolchain {
+    ctx: Ctx,
+    service: Key<RuntimeService>,
+}
+impl ToolchainSource for RuntimeToolchain {
+    fn toolchains(&self) -> Vec<InstalledToolchain> {
+        self.ctx
+            .get_at(&self.service)
+            .map(|service| service.toolchains())
+            .unwrap_or_default()
+    }
+}
+
+/// The process row `ToolchainSource`: provides the port that carries the
+/// installed runtimes' bin directories to HostPlatform. It reads
+/// RuntimeService optionally, so it exists on hosts without RuntimeManager.
+pub struct ToolchainSourcePlugin {
+    service: Key<RuntimeService>,
+}
+impl ToolchainSourcePlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            service: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ToolchainSourcePlugin {
+    fn name(&self) -> &str {
+        "ToolchainSource"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let port = RuntimeToolchain {
+                ctx: ctx.clone(),
+                service: self.service.clone(),
+            };
+            ctx.provide_as::<ToolchainSourceHost>(Arc::new(ToolchainSourceHost(Arc::new(port))))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
 /// The process row `RuntimeManager`.
 pub struct RuntimeManagerPlugin {
     methods: Key<ManagementMethods>,
@@ -1266,8 +1421,12 @@ impl DynPlugin for RuntimeManagerPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{Archive, PINS, Pins, checksum, client, download, unpack};
-    use std::path::Path;
+    use super::{
+        Archive, PINS, Pins, Plan, Record, Source, checksum, client, create_externally_managed,
+        download, externally_managed, hex, installed_toolchain, unpack,
+    };
+    use sha2::{Digest, Sha256};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn every_release_platform_has_an_archive_and_an_official_checksum() {
@@ -1351,6 +1510,7 @@ mod tests {
             "node.tar.gz",
             &published,
             &directory,
+            None,
         )
         .await
         .unwrap_err();
@@ -1501,6 +1661,166 @@ mod tests {
             assert!(error.contains("refusing"), "{name}: {error}");
         }
         assert!(!root.parent().unwrap().join("escape").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A fresh acquisition writes PEP 668's marker into the `.partial`
+    /// directory, so the archive directory never exists without it (§7).
+    #[tokio::test]
+    async fn an_acquired_python_carries_the_marker_before_its_directory_is_renamed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let root = scratch("marker-download");
+        let source = root.join("python.tar.gz");
+        archive(&source, |builder| {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_path("python/lib/python3.12/os.py").unwrap();
+            header.set_mode(0o644);
+            header.set_size(2);
+            header.set_cksum();
+            builder.append(&header, &b"ok"[..]).unwrap();
+        });
+        let bytes = std::fs::read(&source).unwrap();
+        let published = hex(&Sha256::digest(&bytes));
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await.unwrap_or(0);
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            bytes.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                let _ = stream.write_all(&bytes).await;
+            }
+        });
+        let directory = root.join("python-3.12-test");
+        download(
+            &client().unwrap(),
+            &[format!("http://{address}/{{file}}")],
+            "python.tar.gz",
+            &published,
+            &directory,
+            Some(PathBuf::from("lib/python3.12/EXTERNALLY-MANAGED")),
+        )
+        .await
+        .unwrap();
+        let marker = directory.join("lib/python3.12/EXTERNALLY-MANAGED");
+        let text = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            text.starts_with("[externally-managed]") && text.contains("Error="),
+            "{text}"
+        );
+        assert!(!root.join("python-3.12-test.partial").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A directory installed before the marker existed gets it at the next
+    /// start, and an existing marker is left as it is.
+    #[test]
+    fn an_installed_directory_gets_the_marker_only_when_it_is_missing() {
+        let root = scratch("marker-start");
+        let directory = root.join("python-3.12-test");
+        let marker = directory.join("lib/python3.12/EXTERNALLY-MANAGED");
+        create_externally_managed(&marker).unwrap();
+        assert!(
+            std::fs::read_to_string(&marker)
+                .unwrap()
+                .starts_with("[externally-managed]")
+        );
+        std::fs::write(&marker, "mine").unwrap();
+        create_externally_managed(&marker).unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "mine");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The marker path follows the archive's layout: the interpreter is at
+    /// `bin/python3`, so `sysconfig`'s stdlib is the sibling `lib/python3.12`.
+    #[cfg(unix)]
+    #[test]
+    fn the_marker_path_is_the_stdlib_directory_of_the_archive_layout() {
+        let root = PathBuf::from("/scratch");
+        let plan = Plan {
+            source: Source::Download,
+            auto: false,
+            version: "3.12.15+20261003".into(),
+            interpreter: root.join("python-3.12.15-test/bin/python3"),
+            archive: Some((
+                Archive {
+                    file: "python.tar.gz".into(),
+                    checksums: "https://example.invalid/SHA256SUMS".into(),
+                },
+                root.join("python-3.12.15-test"),
+            )),
+            sources: vec![],
+            packages: root.join("python-packages-test"),
+            indexes: vec![],
+        };
+        assert_eq!(
+            externally_managed(&plan),
+            Some(root.join("python-3.12.15-test/lib/python3.12/EXTERNALLY-MANAGED"))
+        );
+    }
+
+    /// Only a downloaded, installed runtime is a toolchain: its `bin` is the
+    /// interpreter's directory and its `root` is the archive directory. A
+    /// `system` interpreter is the user's own and contributes nothing.
+    #[test]
+    fn only_a_downloaded_runtime_is_a_toolchain() {
+        use dim_agent_capabilities::toolchain::InstalledToolchain;
+        let root = scratch("toolchain");
+        let archive = root.join("python-3.12.15-test");
+        std::fs::create_dir_all(archive.join("bin")).unwrap();
+        let packages = root.join("python-packages-test");
+        std::fs::create_dir_all(&packages).unwrap();
+        let plan = Plan {
+            source: Source::Download,
+            auto: false,
+            version: "3.12.15+20261003".into(),
+            interpreter: archive.join("bin/python3"),
+            archive: Some((
+                Archive {
+                    file: "python.tar.gz".into(),
+                    checksums: "https://example.invalid/SHA256SUMS".into(),
+                },
+                archive.clone(),
+            )),
+            sources: vec![],
+            packages,
+            indexes: vec![],
+        };
+        let record = Record::of(&plan, &plan.version, None);
+        assert_eq!(
+            installed_toolchain(&plan, Some(&record)),
+            Some(InstalledToolchain {
+                bin: archive.join("bin"),
+                root: archive.clone(),
+            })
+        );
+        assert_eq!(
+            installed_toolchain(&plan, None),
+            None,
+            "a runtime the record does not mark installed is not a toolchain"
+        );
+        let system = Plan {
+            source: Source::System,
+            archive: None,
+            interpreter: root.join("no-system-python"),
+            ..plan.clone()
+        };
+        let record = Record::of(&system, "3.12.9", None);
+        assert_eq!(
+            installed_toolchain(&system, Some(&record)),
+            None,
+            "a system interpreter contributes nothing"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

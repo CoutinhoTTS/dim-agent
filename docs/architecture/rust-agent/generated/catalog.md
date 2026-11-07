@@ -59,6 +59,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `settingsService` | process | Settings | Rust-only | — |
 | `skillsCatalog` | process | SkillsCatalog | Rust-only | — |
 | `sqliteStorage` | process | SqliteStorage | Rust-only | — |
+| `toolchainSourceHost` | process | ToolchainSource | Rust-only | — |
 | `uiExtensions` | process | UiExtensions | Rust-only | — |
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |

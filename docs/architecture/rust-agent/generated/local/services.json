@@ -2072,6 +2072,11 @@
             "service": "dim_agent_capabilities::file_storage::FileStorage",
             "scope": null,
             "status": "Ready"
+          },
+          {
+            "service": "dim_agent_capabilities::toolchain::ToolchainSourceHost",
+            "scope": null,
+            "status": "Ready"
           }
         ],
         "resolved": [
@@ -2086,11 +2091,23 @@
             "scope": null,
             "provider": 4,
             "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::toolchain::ToolchainSourceHost",
+            "scope": null,
+            "provider": 1,
+            "generation": 0
           }
         ],
         "reads": [
           {
             "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+            "provider": 1,
+            "declared": true,
+            "external": false
+          },
+          {
+            "service": "dim_agent_capabilities::toolchain::ToolchainSourceHost",
             "provider": 1,
             "declared": true,
             "external": false

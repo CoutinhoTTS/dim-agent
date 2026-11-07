@@ -513,3 +513,89 @@ async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// A `download` Python marks its interpreter as externally managed inside its
+/// own archive directory (RuntimeManager §7), so pip never installs into a
+/// runtime Dim replaces. It downloads the archive and installs its packages,
+/// so it runs only with the other ignored flows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "downloads the Python archive and installs its packages"]
+async fn python_runtime_manager_marks_the_downloaded_interpreter_as_externally_managed() {
+    let home = std::env::temp_dir().join(format!("drm-marker-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let defaults = home.join("default-plugins.json");
+    std::fs::write(
+        &defaults,
+        r#"{"runtimes": {"node": {"source": "system", "auto": false},
+                         "python": {"source": "download", "auto": false}}}"#,
+    )
+    .unwrap();
+    let runtimes = Arc::new(
+        Runtimes::load(
+            &home,
+            &dim_app_server::plugin_manager::Defaults::read(&defaults)
+                .unwrap()
+                .runtimes,
+        )
+        .unwrap(),
+    );
+    let python = runtimes.plan(Kind::Python).clone();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc("runtime.install", json!({"name": "python"}))
+            .await,
+    );
+    let ready = status(&mut client, 1, "ready").await;
+    assert_eq!(ready["source"], "download", "{ready}");
+    let archive = archive_directory(&python.interpreter);
+    let stdlib = if cfg!(windows) {
+        archive.join("Lib")
+    } else {
+        archive.join("lib").join(format!(
+            "python3.{}",
+            python.version.split('.').nth(1).expect("a pinned version")
+        ))
+    };
+    let marker = stdlib.join("EXTERNALLY-MANAGED");
+    let text = std::fs::read_to_string(&marker)
+        .unwrap_or_else(|error| panic!("{}: {error}", marker.display()));
+    assert!(
+        text.starts_with("[externally-managed]") && text.contains("Error="),
+        "{text}"
+    );
+    assert!(stdlib.is_dir(), "the marker is in the interpreter's stdlib");
+    let output = tokio::process::Command::new(&python.interpreter)
+        .args([
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('stdlib'))",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reported = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    assert_eq!(
+        std::fs::canonicalize(reported).unwrap(),
+        std::fs::canonicalize(&stdlib).unwrap(),
+        "the marker's directory is the interpreter's sysconfig stdlib"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
