@@ -637,6 +637,7 @@ async fn python_runtime_manager_marks_the_downloaded_interpreter_as_externally_m
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
+            None,
         )
         .unwrap(),
     );
