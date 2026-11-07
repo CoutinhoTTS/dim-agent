@@ -539,6 +539,12 @@ mod windows_flow {
             }
         });
         let (mut output, mut consumed) = (Vec::new(), 0);
+        // portable-pty creates the pseudoconsole with
+        // PSUEDOCONSOLE_INHERIT_CURSOR, so conhost first asks this terminal for
+        // the cursor position and renders nothing until the report arrives.
+        until(&receive, &mut output, &mut consumed, "\x1b[6n");
+        writer.write_all(b"\x1b[1;1R").unwrap();
+        writer.flush().unwrap();
         until(&receive, &mut output, &mut consumed, FRAME_LABEL);
         until(&receive, &mut output, &mut consumed, FRAME_CJK);
         until(&receive, &mut output, &mut consumed, MARKER_LABEL);
