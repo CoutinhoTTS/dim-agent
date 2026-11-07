@@ -823,6 +823,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 names,
             )?))
         })?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(runtime_manager::ToolchainSourcePlugin::new(
+                names,
+            )?))
+        })?);
         dim_agent_runtime::names::register::<
             dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost,
         >(builder.catalog_mut(), None);
@@ -840,6 +845,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                         names,
                         dim_agent_capabilities::host_platform::HostPlatformConfig {
                             execution: names.key()?,
+                            toolchain: names.key()?,
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
                             home: platform_home.clone(),
                         },
