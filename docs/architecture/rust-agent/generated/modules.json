@@ -42897,6 +42897,7 @@
         "path ModalityAdapterService",
         "path catalog_category",
         "path crate::OperationRow",
+        "path crate::Reason",
         "path crate::evaluate",
         "path crate::unknown_operation",
         "path host_target",

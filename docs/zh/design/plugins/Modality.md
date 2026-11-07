@@ -405,7 +405,7 @@ helper 的调用形式是 `dimcode ocr-helper --input <path> --artifacts <dir> -
 - `configure` 先校验操作以及模型在该操作的可选选项中（对 `image.understand`，可选视觉支持；对 `ocr.recognize`，本构建的宿主目标），再经 Settings 的所有者写入以 CAS 写入或清除该操作 key。它接受任何有默认 key 的 A.1 操作，且从不答复 `modality_unavailable`：配置是设置写入，不是运行时断言。未知类别或操作答复 `modality_unknown_operation`；操作有自己的 key 时（image、speech、OCR）`operation` 必填，只有按类别划分 key 的类别可以省略。`model: null` 清除该 key（对 OCR 即 `modality.ocr`）；清除即恢复自动解析；缺少 `model` 为 `invalid_params`。写入在回复发出之前完成，因此成功即表示默认值已持久化，且该回复与紧随其后的 `modality.capabilities` 读到的一致（除非 Provider 在此期间变化）。
 - 可配置性与可用性是两个不同的属性：前者属于设置，后者属于运行时。已持久化的默认值可以指向本构建不能运行的操作的模型；快照通过保持该操作的 `available: false` 及其 `build` 或 `adapter` 原因保持诚实，而 `effective` 仍在选项上解析（默认值可用时用默认值，否则自动解析），客户端因此无需自行实现解析。
 
-边界校验：每次提交的内联输入合计至多 8 MiB，更大的输入使用 `node_path`——控制节点上已存在普通文件的绝对路径，最后一个组件不得是链接（更早的链接会被解析）；读取前先将其长度与 100 MiB 提交预算的剩余量比较，记录的是规范路径，执行方在该路径读取，Modality 从不复制；每次提交的输入文件合计至多 100 MiB（A5）。媒体类型遵循 A.1 的输入列：图像操作接受 `image/*`，视频操作接受 `image/*` 与 `video/*`，`speech.transcribe` 接受 `audio/*`，`asset` 接受 `image/*`；输入不指名文件的操作拒绝文件。每个文件名是单个组件、合法的 pluginFiles 名称，且在提交内互不相同。`node` 对提供方类别以 `invalid_input` 拒绝，对宿主类别则指明执行节点，即控制节点（A15）。参数在提交时按适配器的 `params_schema` 校验；非法参数以 `invalid_input` 失败且不写入任何内容。模型选择：显式 `model`；否则操作默认值；否则自动解析；否则 `no_default_model`。不可选的显式模型以 `model_unavailable` 失败，不可用的默认值以 `default_unavailable` 失败，解析出的模型没有可用适配器服务时以 `unavailable` 失败；都不回退到其他模型。解析出的模型固定在记录中。`image.understand` 与 `realtime.connect` 不是任务：为它们提交会以 `modality_unknown_operation` 失败。`ocr.recognize` 是宿主任务（§3.2）：只接受一个输入文件，`image/*` 或 `application/pdf`，接受 `params.outputMode` `"text"`（默认）或 `"layout"`，不校验适配器 schema。其选项是宿主目标，其默认值是 `modality.ocr`；显式指定 `local`/`apple-vision` 之外的模型以 `model_unavailable` 失败，本宿主无法运行该目标时 `submit` 以 `unavailable` 失败并带该操作的 `platform` 或 `build` 原因。指明控制节点以外节点的任务以 `node_unavailable` 失败。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
+边界校验：每次提交的内联输入合计至多 8 MiB，更大的输入使用 `node_path`——控制节点上已存在普通文件的绝对路径，最后一个组件不得是链接（更早的链接会被解析）；读取前先将其长度与 100 MiB 提交预算的剩余量比较，记录的是规范路径，执行方在该路径读取，Modality 从不复制；每次提交的输入文件合计至多 100 MiB（A5）。媒体类型遵循 A.1 的输入列：图像操作接受 `image/*`，视频操作接受 `image/*` 与 `video/*`，`speech.transcribe` 接受 `audio/*`，`asset` 接受 `image/*`；输入不指名文件的操作拒绝文件。每个文件名是单个组件、合法的 pluginFiles 名称，且在提交内互不相同。`node` 对提供方类别以 `invalid_input` 拒绝，对宿主类别则指明执行节点，即控制节点（A15）。参数在提交时按适配器的 `params_schema` 校验；非法参数以 `invalid_input` 失败且不写入任何内容。可用性检查先于模型解析：本构建无法运行的操作会带着 `modality.capabilities` 中该操作的原因失败（附录 C），因此缺失适配器不会被报成缺失模型。模型选择：显式 `model`；否则操作默认值；否则自动解析；否则 `no_default_model`。不可选的显式模型以 `model_unavailable` 失败，不可用的默认值以 `default_unavailable` 失败，解析出的模型没有可用适配器服务时以 `unavailable` 失败；都不回退到其他模型。解析出的模型固定在记录中。`image.understand` 与 `realtime.connect` 不是任务：为它们提交会以 `modality_unknown_operation` 失败。`ocr.recognize` 是宿主任务（§3.2）：只接受一个输入文件，`image/*` 或 `application/pdf`，接受 `params.outputMode` `"text"`（默认）或 `"layout"`，不校验适配器 schema。其选项是宿主目标，其默认值是 `modality.ocr`；显式指定 `local`/`apple-vision` 之外的模型以 `model_unavailable` 失败，本宿主无法运行该目标时 `submit` 以 `unavailable` 失败并带该操作的 `platform` 或 `build` 原因。指明控制节点以外节点的任务以 `node_unavailable` 失败。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
 
 ### A.4 任务记录（`pluginFiles`（扩展），格式版本 1）
 
@@ -487,14 +487,14 @@ helper 的调用形式是 `dimcode ocr-helper --input <path> --artifacts <dir> -
 | 代码 | 含义 |
 | --- | --- |
 | `invalid_input` | 未知类别或操作、参数或文件违规 |
-| `unavailable` | 类别或操作不可用；附带来自 `modality.capabilities` 的 `reasons` |
+| `unavailable` | 类别或操作不可用；消息点名该操作，并逐行给出 `modality.capabilities` 中每个原因，形如 `dimension: detail`；客户端只显示、从不解析 |
 | `no_default_model` | 无显式模型、无操作默认值，且自动解析没有找到可服务的模型 |
 | `default_unavailable` | 已持久化的操作默认值不再可选；清除或替换它 |
 | `model_unavailable` | 显式模型不可选 |
 | `modality_conflict` | 设置 revision 已过期；重新读取后重试 |
 | `modality_invalid_selection` | 模型不可经 Provider 选择、没有可用适配器服务该操作，或 `image.understand` 指定的模型没有视觉能力；回复带原因 |
 | `modality_unknown_operation` | 未知操作或默认值 key |
-| `modality_unavailable` | 由 `modality.task.submit` 对已知但本构建未实现的类别或操作答复（A.3）；`modality.capabilities` 中带有其 `build` 原因 |
+| `modality_unavailable` | 由 `modality.task.submit` 对已知但本构建未实现的类别或操作答复：其 `modality.capabilities` 原因中有一个是 `build` 维度，消息点名该操作并逐行给出每个原因，形如 `dimension: detail`（A.3） |
 | `modality_failed` | 读写所有者配置时 Settings 或 Provider 的意外失败 |
 | `node_unavailable` | 请求的节点不是控制节点，其 HostPlatform 是唯一可达的 |
 | `provider_error` | 适配器或提供方失败；消息已去除秘密 |
