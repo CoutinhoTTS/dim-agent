@@ -34,7 +34,7 @@ Modality（Rust）                     插件行（Node）                 helpe
 
 ## 2. 插件包
 
-`runtime/plugins/light-ocr/` 通过默认配置文件的 `optional` 映射随发布提供：安装时该目录被复制到 `<home>/plugins/light-ocr/<version>`，依赖也在那里安装。映射的值相对于 `runtime/default-plugins.json`，因此条目写作 `"light-ocr": "plugins/light-ocr"`。
+`runtime/plugins/light-ocr/` 通过默认配置文件的 `optional` 映射随发布提供：安装时该目录被复制到 `<home>/plugins/light-ocr/<version>+<suffix>`，依赖也在那里安装。映射的值相对于 `runtime/default-plugins.json`，因此条目写作 `"light-ocr": "plugins/light-ocr"`。
 
 ```text
 runtime/plugins/light-ocr/
@@ -126,8 +126,8 @@ CPU 路径已在 `HostPlatform::spawn_confined` 于 macOS arm64 构建的配置�
 
 - 每个任务一个 helper 进程，任务开始时启动，取消、超时、Modality 卸载与进程退出时杀死。任务之间没有 OCR 状态；重启像任何宿主任务一样中断运行中的任务（Modality §A.6）。
 - 并发由 Modality 决定：每个类别至多 4 个运行中的 OCR 任务。每个都是带自己引擎的进程，因此两个 helper 除了 CPU 之外不共享任何东西。
-- 行没有在途工作：重载或卸载插件只影响之后的调用，已开始的任务保留它读到的描述和自己的进程。
-- 卸载插件会删除它的副本与 `node_modules`；无法再从中开始新任务。在 Unix 上，正在运行的 helper 的脚本与库已被映射，因此它能正常结束且文件可删除；在 Windows 上，打开的文件会阻止删除，因此 PluginManager 把该目录留给启动清理，helper 从该副本正常结束（[PluginManager §3.6](PluginManager.md#36-移除和列出)）。
+- 行没有在途工作：重载、更新、重新获取或卸载插件都只影响之后的调用。任务保留它开始时读到的描述，而 PluginManager 在进程运行期间不删除任何已安装副本（[PluginManager §7](PluginManager.md#7-安全)），因此描述所指名的目录会存在到进程退出。若该副本在 helper 启动时仍然不可读——例如用户手工删除了它——helper 在加载时失败，任务按意外的 helper 退出结算为 `local_runtime_failed`，其工作目录被删除。
+- 因此卸载插件影响的是之后的调用，而不是已接纳的任务：它的副本留在原处，由下次启动的清理删除（[PluginManager §3.1](PluginManager.md#31-启动)）。代价是磁盘——对 light-ocr 而言，一个被替换的副本约 124 MB，保留到下次启动。
 
 ## 7. 安全
 
@@ -220,11 +220,11 @@ lock 以 `integrity` 锁定 facade、它的 runtime、模型与平台包，以�
 
 ## 附录 D. 验收
 
-1. 安装前，`plugin.list` 以 `optional: true` 显示 `light-ocr`；`dimcode plugin install --optional light-ocr` 把它复制到 `<home>/plugins/light-ocr/<version>`，在那里安装其锁定依赖并打开它；随发行的目录没有 `node_modules` 且未被修改。
+1. 安装前，`plugin.list` 以 `optional: true` 显示 `light-ocr`；`dimcode plugin install --optional light-ocr` 把它复制到 `<home>/plugins/light-ocr/<version>+<suffix>`，在那里安装其锁定依赖并打开它；随发行的目录没有 `node_modules` 且未被修改。
 2. 插件已安装且行在运行时，`modality.capabilities` 在 `local/apple-vision` 之外列出 `local/pp-ocr`；插件关闭、Pending 或移除后，只列出 `local/apple-vision`，其余不变。
 3. 图像任务返回文本与区域；`layout` 任务返回相同的区域，且图像输入没有页面图像；PDF 任务每页返回一页；两页 PDF 在 `layout` 模式下返回 `page-0001.png` 与 `page-0002.png`。
 4. 上限生效：501 页的 PDF 和超过 100 MiB 的输入是 `resource_limit_exceeded`；加密 PDF 是 `encrypted_pdf`；损坏的图像是 `invalid_input`。
 5. 取消与超时会杀死 helper；任务结算为 cancelled 或 failed，工作目录被删除。
 6. macOS 上 `confined: true`；Windows 与没有 `bubblewrap` 的 Linux 上 `confined: false`。
-7. 新发行的副本在下次启动时于后台重新获取已安装插件：只有新副本就绪后才切换记录与 `dir`，旧目录被删除，目标无需再 `enable` 一次即可继续工作；失败的重新获取保留旧副本，并在 `plugin.list` 中显示，直到 `plugin.update` 修复。
+7. 新发行的副本在下次启动时把已安装插件后台重新获取到新的 `<version>+<suffix>` 目录：只有新副本就绪后才切换记录与 `dir`，旧副本继续服务并留在磁盘上直到下次启动的清理，目标无需再 `enable` 一次即可继续工作；失败的重新获取保留旧副本，并在 `plugin.list` 中显示，直到 `plugin.update` 修复。
 8. 仓库中没有任何测试会下载、安装或加载真实引擎；fixture 引擎与桩 `ocrHelper` 提供方覆盖 Modality 的流程。

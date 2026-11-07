@@ -34,7 +34,7 @@ Modality (Rust)                       plugin row (Node)                helper (o
 
 ## 2. The plugin package
 
-`runtime/plugins/light-ocr/` ships with the release through the `optional` map of the default configuration file, which copies the directory into `<home>/plugins/light-ocr/<version>` at install time and installs its dependencies there. The map's value is relative to `runtime/default-plugins.json`, so its entry reads `"light-ocr": "plugins/light-ocr"`.
+`runtime/plugins/light-ocr/` ships with the release through the `optional` map of the default configuration file, which copies the directory into `<home>/plugins/light-ocr/<version>+<suffix>` at install time and installs its dependencies there. The map's value is relative to `runtime/default-plugins.json`, so its entry reads `"light-ocr": "plugins/light-ocr"`.
 
 ```text
 runtime/plugins/light-ocr/
@@ -126,8 +126,8 @@ Enabling Core ML later requires two things: a measured confined run of the Core 
 
 - One helper process per task, started when the task starts and killed on cancel, on timeout, on Modality's unload and on process exit. No OCR state survives a task; a restart interrupts a running task as any host task (Modality §A.6).
 - Concurrency is Modality's: at most 4 running OCR tasks per category. Each is one process with its own engine, so two helpers share nothing but the CPU.
-- The row has no work in flight: a reload or uninstall of the plugin affects only later calls, and a task already started keeps the description it read and its own process.
-- Uninstalling the plugin deletes its copy and `node_modules`; no new task can start from it. On Unix a running helper's script and libraries are already mapped, so it finishes normally and the files delete; on Windows the open files block deletion, so PluginManager leaves the directory to its startup cleanup and the helper finishes from that copy ([PluginManager §3.6](PluginManager.md#36-remove-and-list)).
+- The row has no work in flight: a reload, an update, a re-acquisition or an uninstall of the plugin affects only later calls. A task keeps the description it read at its start, and PluginManager deletes no installed copy while the process runs ([PluginManager §7](PluginManager.md#7-security)), so the directory that description names exists until the process exits. If that copy is nevertheless unreadable when the helper starts — for example, a user deleted it by hand — the helper fails at load, the task settles `local_runtime_failed` as an unexpected helper exit, and its work directory is removed.
+- Uninstalling the plugin therefore affects later calls, not tasks already admitted: its copy is left in place, and the next start's cleanup deletes it ([PluginManager §3.1](PluginManager.md#31-startup)). That costs disk — for light-ocr, a replaced copy is about 124 MB, held until the next start.
 
 ## 7. Security
 
@@ -220,11 +220,11 @@ No automated test downloads, installs or loads the real engine.
 
 ## Appendix D. Acceptance
 
-1. `plugin.list` shows `light-ocr` with `optional: true` before it is installed; `dimcode plugin install --optional light-ocr` copies it to `<home>/plugins/light-ocr/<version>`, installs its locked dependencies there, and turns it on; the shipped directory has no `node_modules` and is unchanged.
+1. `plugin.list` shows `light-ocr` with `optional: true` before it is installed; `dimcode plugin install --optional light-ocr` copies it to `<home>/plugins/light-ocr/<version>+<suffix>`, installs its locked dependencies there, and turns it on; the shipped directory has no `node_modules` and is unchanged.
 2. With the plugin installed and the row running, `modality.capabilities` lists `local/pp-ocr` beside `local/apple-vision`; with the plugin off, Pending or removed, it lists only `local/apple-vision` and nothing else changes.
 3. An image task returns text and regions; a layout task returns the same regions and no page image for an image input; a PDF task returns one page per page; a two-page PDF in layout mode returns `page-0001.png` and `page-0002.png`.
 4. The limits are enforced: a 501-page PDF and an input over 100 MiB are `resource_limit_exceeded`; an encrypted PDF is `encrypted_pdf`; a corrupt image is `invalid_input`.
 5. Cancel and timeout kill the helper; the task settles cancelled or failed, and the work directory is removed.
 6. `confined: true` on macOS; `confined: false` on Windows and on Linux without `bubblewrap`.
-7. A newer release's copy re-acquires the installed plugin in the background at the next start: the record and `dir` switch only when the new copy is ready, the old directory is deleted, and the target keeps working without a second `enable`; a failed re-acquisition keeps the old copy and shows in `plugin.list` until `plugin.update` repairs it.
+7. A newer release's copy re-acquires the installed plugin in the background at the next start into a new `<version>+<suffix>` directory: the record and `dir` switch only when the new copy is ready, the old copy keeps serving and stays on disk until the next start's cleanup, and the target keeps working without a second `enable`; a failed re-acquisition keeps the old copy and shows in `plugin.list` until `plugin.update` repairs it.
 8. No test in the repository downloads, installs or loads the real engine; the fixture engine and a stub `ocrHelper` provider cover Modality's flows.

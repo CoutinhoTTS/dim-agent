@@ -152,7 +152,7 @@ A Dim version with new fixed versions acquires into new directories (their names
 
 ## 4. Python import of a plugin installed from a directory
 
-The rutis Python runtime is one process; a row `py:<module>` is imported with `importlib.import_module` from the runtime's `sys.path`, which holds its project directory. A plugin directory may be anywhere (a local path is used in place; a Git install is `<home>/plugins/<id>/<commit>`).
+The rutis Python runtime is one process; a row `py:<module>` is imported with `importlib.import_module` from the runtime's `sys.path`, which holds its project directory. A plugin directory may be anywhere (a local path is used in place; a Git install is `<home>/plugins/<id>/<commit>+<suffix>`, and an older record may name it without the suffix).
 
 - The Python runtime's project directory is `<home>/plugins/.python/`, which PluginManager owns; the App Server creates it at startup so the runtime's import path exists before the first plugin.
 - When a Python plugin is turned on, PluginManager creates there a directory link `<package>` to the plugin directory (`<package>` is the plugin id with `-` replaced by `_`; a junction on Windows), and creates the row `py:<package>.<entry module>`. A new plugin is importable by the running process without a restart.

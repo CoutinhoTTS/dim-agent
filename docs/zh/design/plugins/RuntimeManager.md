@@ -152,7 +152,7 @@ Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginMana
 
 ## 4. 从目录安装的 Python 插件如何导入
 
-rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.import_module` 从运行时的 `sys.path` 导入，`sys.path` 里有它的 project 目录。插件目录可以在任何位置（本地路径原地使用；Git 安装在 `<home>/plugins/<id>/<commit>`）。
+rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.import_module` 从运行时的 `sys.path` 导入，`sys.path` 里有它的 project 目录。插件目录可以在任何位置（本地路径原地使用；Git 安装在 `<home>/plugins/<id>/<commit>+<suffix>`，较旧的记录可能不带后缀）。
 
 - Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginManager；App Server 启动时创建它，让运行时的导入路径在第一个插件之前就存在。
 - 开启一个 Python 插件时，PluginManager 在那里建一个目录链接 `<包名>` 指向插件目录（`<包名>` 是插件 id 把 `-` 换成 `_`；Windows 上用 junction），并建行 `py:<包名>.<入口模块>`。正在运行的进程不重启就能导入新插件。
