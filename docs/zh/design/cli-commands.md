@@ -325,17 +325,18 @@ fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
 
 ## 插件运行时
 
-RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeManager](plugins/RuntimeManager.md)）。
+RuntimeManager 提供插件代码运行的 Node 与 Python 运行时，以及启动 Python MCP 服务器的 uv 工具（[RuntimeManager](plugins/RuntimeManager.md)）。
 守护进程在动作应用配置的那一刻才读配置（RuntimeManager §3.3），所以客户端可以让用户打开运行时、
 选择它的来源、看它在做什么，而不必手改 `<home>/runtimes/config.json`，也不必重启任何东西。
 `/runtime` 在两种终端模式下打开同一个面板；行客户端与 CLI 里对应的区域是 `dimcode runtime`。
 
 ### 面板
 
-行是两个运行时，固定 node 在前、python 在后。每行显示名字、配置的来源（`download` 或 `system`）、
+行是两个运行时和 uv 工具，固定 node 在前、python 其次、uv 最后。每行显示名字、配置的来源（`download` 或 `system`）、
 正在生效的版本（`download` 是固定版本，`system` 是检查过的解释器版本，`off` 且从未检查时为空）、
 打开时的 `auto`，以及 `runtime.list` 给出的状态：`off`、`acquiring`、`starting`、`ready`、带原因的 `down`，或带
-原因（列出每个来源和它的错误）的 `failed`。
+原因（列出每个来源和它的错误）的 `failed`。uv 不启动运行时，所以它从不显示 `starting` 或 `down`：
+按正在生效的 plan 装好后就是 `ready`。
 
 行下方列出在等这个运行时的插件行——因为它是 `off` 或 `down` 而处于 Pending 的那些
 （[PluginManager §2.5](plugins/PluginManager.md#25-runtimes)）——这样"workflow 为什么不工作"和它的
@@ -346,6 +347,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ╭─ 插件运行时 ──────────────────────────────────────────────────────────────╮
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      未安装                          │
+│   uv        download  0.13.7     off                                      │
 │                                                                           │
 │   1 个插件在等 node：workflow                                             │
 ╰─ Enter 安装或应用 · s 来源 · a 自动 · r 重试 · Esc 关闭 ──────────────────╯
@@ -426,6 +428,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ```text
 /runtime                              在 scrollback 客户端里打印同样的行
 /runtime install node                 应用 node 的配置
+/runtime install uv                   安装 uv 工具
 /runtime source node system           把 node 换成系统解释器并应用
 /runtime auto python on               用配置打开 python 并应用
 ```
@@ -434,6 +437,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 $ dimcode runtime list
 node    download  24.21.0   ready
 python  system    3.12.15   off       未安装
+uv      download  0.13.7    off
 $ dimcode runtime install node
 node    download  24.21.0   acquiring
 $ dimcode runtime config python --source system --auto on

@@ -26268,6 +26268,7 @@
         "path hex",
         "path unpack",
         "use super::Archive",
+        "use super::Kind",
         "use super::PINS",
         "use super::Pins",
         "use super::Plan",

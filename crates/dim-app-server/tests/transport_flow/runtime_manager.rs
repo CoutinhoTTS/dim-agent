@@ -86,9 +86,16 @@ async fn runtime_list_reports_a_path_only_while_its_record_matches_the_plan() {
         .unwrap(),
     );
     let node = runtimes.plan(Kind::Node).clone();
-    std::fs::create_dir_all(&node.packages).unwrap();
+    std::fs::create_dir_all(node.packages.as_ref().expect("Node packages")).unwrap();
     std::fs::create_dir_all(archive_directory(&node.interpreter)).unwrap();
-    let packages = node.packages.file_name().unwrap().to_str().unwrap();
+    let packages = node
+        .packages
+        .as_ref()
+        .expect("Node packages")
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
     std::fs::write(
         home.join("runtimes/runtimes.json"),
         json!({"node": {"source": "download", "version": &node.version, "packages": packages}})
@@ -190,7 +197,14 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
         )
         .unwrap(),
     );
-    std::fs::create_dir_all(&runtimes.plan(Kind::Node).packages).unwrap();
+    std::fs::create_dir_all(
+        runtimes
+            .plan(Kind::Node)
+            .packages
+            .as_ref()
+            .expect("Node packages"),
+    )
+    .unwrap();
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -226,6 +240,435 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
         Path::new(path).canonicalize().unwrap(),
         node.canonicalize().unwrap(),
         "the reported path names the fixture: {entry}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Fixture `uv` and `uvx` pairs in directories a search path points at,
+/// removed on drop; the process environment is never changed.
+struct FixtureUv {
+    /// The first directory: the uv the plan starts with.
+    directory: PathBuf,
+    /// Directories after it on the search path. A reload resolves the first
+    /// of these once the first directory has no uv.
+    fallbacks: Vec<PathBuf>,
+}
+
+impl FixtureUv {
+    fn new(version: &str) -> Self {
+        Self::with_fallback(version, None)
+    }
+
+    /// `A:B`: `A` holds the `version` uv and `B` one that reports
+    /// `fallback`, so removing `A`'s uv leaves the reload resolving `B`
+    /// before any uv installed on the host.
+    fn with_fallback(version: &str, fallback: Option<&str>) -> Self {
+        let directory = Self::fixture(version);
+        let fallbacks: Vec<PathBuf> = fallback.into_iter().map(Self::fixture).collect();
+        Self {
+            directory,
+            fallbacks,
+        }
+    }
+
+    /// The search path the runtimes resolve uv on: the fixture directories in
+    /// order, so a reload resolves the one written first and then the
+    /// fallback. The process environment is not involved.
+    fn search_path(&self) -> std::ffi::OsString {
+        std::env::join_paths(std::iter::once(&self.directory).chain(&self.fallbacks)).unwrap()
+    }
+
+    /// One fixture directory: `uv` reporting `version`, and `uvx`.
+    fn fixture(version: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("dm-uv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        write_script(&directory, "uv", &format!("echo \"uv {version}\""));
+        write_script(&directory, "uvx", "exit 0");
+        directory
+    }
+
+    fn restore_uv(&self, version: &str) {
+        write_script(&self.directory, "uv", &format!("echo \"uv {version}\""));
+    }
+}
+
+fn write_script(directory: &Path, name: &str, body: &str) {
+    let file = directory.join(name);
+    std::fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+impl Drop for FixtureUv {
+    fn drop(&mut self) {
+        for directory in std::iter::once(&self.directory).chain(&self.fallbacks) {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}
+
+fn write_defaults(home: &Path, runtimes: &str) -> PathBuf {
+    let path = home.join("default-plugins.json");
+    std::fs::write(&path, format!(r#"{{"runtimes": {runtimes}}}"#)).unwrap();
+    path
+}
+
+fn load_runtimes(
+    home: &Path,
+    defaults: &Path,
+    search_path: Option<std::ffi::OsString>,
+) -> Arc<Runtimes> {
+    Arc::new(
+        Runtimes::load(
+            home,
+            &dim_app_server::plugin_manager::Defaults::read(defaults)
+                .unwrap()
+                .runtimes,
+            search_path,
+        )
+        .unwrap(),
+    )
+}
+
+/// `runtime.list` shows the uv tool, off until it is installed, after the two
+/// runtimes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runtime_list_shows_the_uv_tool_off() {
+    let home = std::env::temp_dir().join(format!("drm-uv-off-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "download", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults, None);
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_ok(&listed);
+    assert_eq!(listed["result"].as_array().unwrap().len(), 3, "{listed}");
+    let uv = &listed["result"][2];
+    assert_eq!(uv["name"], "uv", "{listed}");
+    assert_eq!(uv["source"], "download", "{listed}");
+    assert_eq!(uv["version"], "0.13.7", "{listed}");
+    assert_eq!(uv["status"], "off", "{listed}");
+    assert!(uv["path"].is_null(), "{listed}");
+    assert_eq!(listed["result"][0]["status"], "off", "{listed}");
+    assert_eq!(listed["result"][1]["status"], "off", "{listed}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A `system` source resolves uv on `PATH`, accepts 0.11.0 or later with
+/// `uvx` beside it, and reads ready once installed, its path the fixture; the
+/// node and python runtimes are untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_system_uv_fixture_reads_ready_with_its_own_path() {
+    let fixture = FixtureUv::new("0.13.7");
+    let home = std::env::temp_dir().join(format!("drm-uv-system-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    assert_eq!(
+        runtimes.plan(Kind::Uv).interpreter,
+        fixture.directory.join("uv"),
+        "a system uv is the fixture the PATH names"
+    );
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let before = client.rpc("runtime.list", json!({})).await;
+    assert_ok(&before);
+    assert_eq!(before["result"][2]["status"], "off", "{before}");
+
+    let install = client.rpc("runtime.install", json!({"name": "uv"})).await;
+    assert_ok(&install);
+    let ready = status(&mut client, 2, "ready").await;
+    assert_eq!(ready["source"], "system", "{ready}");
+    assert_eq!(ready["version"], "0.13.7", "{ready}");
+    assert_eq!(
+        ready["path"],
+        fixture.directory.join("uv").to_str().unwrap(),
+        "the checked fixture is the path: {ready}"
+    );
+    let records: Value =
+        serde_json::from_slice(&std::fs::read(home.join("runtimes/runtimes.json")).unwrap())
+            .unwrap();
+    assert_eq!(records["uv"]["source"], "system", "{records}");
+    assert_eq!(records["uv"]["version"], "0.13.7", "{records}");
+    assert!(
+        records["uv"].get("packages").is_none(),
+        "a tool has no packages: {records}"
+    );
+    let after = client.rpc("runtime.list", json!({})).await;
+    assert_ok(&after);
+    assert_eq!(
+        after["result"][0], before["result"][0],
+        "installing uv leaves node alone: {after}"
+    );
+    assert_eq!(
+        after["result"][1], before["result"][1],
+        "installing uv leaves python alone: {after}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A removed `system` uv reads off, and `runtime.install` acquires again:
+/// `runtime.list` and `install` ask the one installed predicate, which for a
+/// tool includes its executable, so a tool cannot stay off while install says
+/// it is installed. The reload then resolves the second fixture directory,
+/// whose uv is below the floor, so the acquisition fails with its version
+/// rather than with a missing file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_system_uv_reads_off_and_installs_again() {
+    let fixture = FixtureUv::with_fallback("0.13.7", Some("0.10.9"));
+    let home = std::env::temp_dir().join(format!("drm-uv-removed-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    status(&mut client, 2, "ready").await;
+
+    std::fs::remove_file(fixture.directory.join("uv")).unwrap();
+    let off = client.rpc("runtime.list", json!({})).await;
+    assert_ok(&off);
+    assert_eq!(off["result"][2]["status"], "off", "{off}");
+    assert!(
+        off["result"][2]["path"].is_null(),
+        "an installed tool whose executable is gone reports no path: {off}"
+    );
+
+    // Not installed under the shared predicate, so the call acquires again;
+    // the reload resolves the fallback fixture, which is below the floor.
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    let failed = status(&mut client, 2, "failed").await;
+    let reason = failed["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("0.10.9"), "{failed}");
+    assert!(reason.contains("0.11"), "{failed}");
+
+    // Restoring it lets the same call reach ready again.
+    fixture.restore_uv("0.13.7");
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    let ready = status(&mut client, 2, "ready").await;
+    assert_eq!(ready["version"], "0.13.7", "{ready}");
+    assert_eq!(
+        ready["path"],
+        fixture.directory.join("uv").to_str().unwrap(),
+        "{ready}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A `system` uv below 0.11.0 is that tool's failure, with the version in the
+/// reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_system_uv_below_the_floor_fails_with_its_version() {
+    let _fixture = FixtureUv::new("0.10.9");
+    let home = std::env::temp_dir().join(format!("drm-uv-old-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "system", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    let failed = status(&mut client, 2, "failed").await;
+    let reason = failed["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("0.10.9"), "{failed}");
+    assert!(reason.contains("0.11"), "{failed}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// `runtime.configure uv` writes the merge over the preset and applies it,
+/// without a launch command to withdraw or provide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configuring_uv_writes_the_merged_file_and_applies_it() {
+    let fixture = FixtureUv::new("0.13.7");
+    let home = std::env::temp_dir().join(format!("drm-uv-configure-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "download", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "download", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let configured = client
+        .rpc(
+            "runtime.configure",
+            json!({"name": "uv", "source": "system"}),
+        )
+        .await;
+    assert_ok(&configured);
+    assert_eq!(configured["result"]["source"], "system", "{configured}");
+    let ready = status(&mut client, 2, "ready").await;
+    assert_eq!(
+        ready["path"],
+        fixture.directory.join("uv").to_str().unwrap(),
+        "{ready}"
+    );
+    let file: Value =
+        serde_json::from_slice(&std::fs::read(home.join("runtimes/config.json")).unwrap()).unwrap();
+    assert_eq!(file["uv"]["source"], "system", "{file}");
+    assert!(
+        file["uv"]["auto"].is_null(),
+        "the merge keeps the fields it was not given unset: {file}"
+    );
+
+    let configured = client
+        .rpc("runtime.configure", json!({"name": "uv", "auto": true}))
+        .await;
+    assert_ok(&configured);
+    assert_eq!(configured["result"]["auto"], true, "{configured}");
+    assert_eq!(configured["result"]["status"], "ready", "{configured}");
+    let file: Value =
+        serde_json::from_slice(&std::fs::read(home.join("runtimes/config.json")).unwrap()).unwrap();
+    assert_eq!(file["uv"]["source"], "system", "{file}");
+    assert_eq!(file["uv"]["auto"], true, "{file}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The pinned uv downloads, verifies, unpacks and runs; it has no packages
+/// directory and no connection row. It downloads the archive, so it runs only
+/// with the other ignored flows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "downloads the uv archive"]
+async fn uv_runtime_manager_downloads_the_pinned_tool() {
+    let home = std::env::temp_dir().join(format!("drm-uv-download-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "system", "auto": false},
+            "python": {"source": "system", "auto": false},
+            "uv": {"source": "download", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults, None);
+    let uv = runtimes.plan(Kind::Uv).clone();
+    assert!(
+        uv.interpreter.to_string_lossy().contains("uv-0.13.7-"),
+        "the pinned version names the archive directory: {}",
+        uv.interpreter.display()
+    );
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.clone()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
+    let ready = status(&mut client, 2, "ready").await;
+    assert_eq!(ready["source"], "download", "{ready}");
+    assert_eq!(ready["version"], "0.13.7", "{ready}");
+    assert_eq!(ready["path"], uv.interpreter.to_str().unwrap(), "{ready}");
+    let output = tokio::process::Command::new(&uv.interpreter)
+        .arg("--version")
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let version = String::from_utf8_lossy(&output.stdout);
+    assert!(version.contains("uv 0.13.7"), "{version}");
+    let uvx = uv
+        .interpreter
+        .with_file_name(if cfg!(windows) { "uvx.exe" } else { "uvx" });
+    assert!(uvx.is_file(), "uvx sits beside uv: {}", uvx.display());
+    let records: Value =
+        serde_json::from_slice(&std::fs::read(home.join("runtimes/runtimes.json")).unwrap())
+            .unwrap();
+    assert!(
+        records["uv"].get("packages").is_none(),
+        "a tool has no packages: {records}"
+    );
+    assert!(
+        records["uv"]["sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.len() == 64),
+        "the record carries the verified digest: {records}"
     );
 
     drop(client);

@@ -116,7 +116,7 @@ impl SessionTypeScriptConfig {
             python: Some(PythonConfig {
                 interpreter: python.interpreter.clone(),
                 project: home.join("plugins").join(".python"),
-                packages: Some(python.packages.clone()),
+                packages: python.packages.clone(),
             }),
             acquire: Some(runtimes),
             rows,
