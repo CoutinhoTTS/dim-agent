@@ -339,6 +339,66 @@ fn retry_forbidden_roundtrips_and_rejects_invalid_contracts() {
 }
 
 #[test]
+fn handover_roundtrips_and_rejects_invalid_contracts() {
+    use std::sync::Arc;
+    // The frozen fixtures hold `input/message` records only in the v1
+    // {text, mode} shape, so the old record below is written in the
+    // internal shape by hand. A binary without `handover` cannot decode a
+    // record that carries it: `InputMessageData` denies unknown fields.
+    let old = json!({
+        "id": "event-1",
+        "sequence": 1,
+        "create_at": 1790000000123u64,
+        "type": "input",
+        "name": "message",
+        "data": {
+            "user": {"content": [{"type": "text", "text": "handover"}]},
+            "mode": "queue"
+        }
+    });
+    let old_event: AgentEvent = serde_json::from_value(old.clone()).unwrap();
+    equal_json(&serde_json::to_value(old_event).unwrap(), &old);
+
+    let mut event = old.clone();
+    event["data"]["handover"] = json!({"turn_id": "turn-2", "request_id": "request-3"});
+    let decoded: AgentEvent = serde_json::from_value(event.clone()).unwrap();
+    equal_json(&serde_json::to_value(&decoded).unwrap(), &event);
+    let outbound = serde_json::to_value(v1::SharedEvent::new(Arc::new(decoded)).unwrap()).unwrap();
+    assert!(outbound["data"].get("handover").is_none(), "{outbound}");
+
+    // The v1 inbound view knows only text and mode, so it refuses the
+    // field like every field it does not know.
+    let mut v1_event = json!({
+        "id": "event-1",
+        "sequence": 1,
+        "create_at": 1790000000123u64,
+        "type": "input",
+        "name": "message",
+        "data": {"text": "handover", "mode": "queue"}
+    });
+    assert!(serde_json::from_value::<v1::AgentEvent>(v1_event.clone()).is_ok());
+    v1_event["data"]["handover"] = json!({"turn_id": "turn-2", "request_id": "request-3"});
+    assert!(
+        serde_json::from_value::<v1::AgentEvent>(v1_event.clone()).is_err(),
+        "{v1_event}"
+    );
+
+    for handover in [
+        json!(null),
+        json!({"turn_id": "turn-2"}),
+        json!({"turn_id": 2, "request_id": "request-3"}),
+        json!({"turn_id": "turn-2", "request_id": "request-3", "unexpected": true}),
+    ] {
+        let mut invalid = old.clone();
+        invalid["data"]["handover"] = handover;
+        assert!(
+            serde_json::from_value::<AgentEvent>(invalid.clone()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn omitted_modes_and_safe_integer_limits_keep_the_contract() {
     let mut value = fixture("input/message", None);
     value["sequence"] = json!(JS_MAX_SAFE_INTEGER);

@@ -131,6 +131,15 @@ pub struct ExecEndedData {
     pub result: ToolResult,
 }
 
+/// The handover one input is addressed to: only the continuation of that
+/// handover consumes it, and InputQueue deletes it otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputHandover {
+    pub turn_id: String,
+    pub request_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputMessageData {
@@ -150,6 +159,12 @@ pub struct InputMessageData {
         deserialize_with = "crate::optional_non_null"
     )]
     pub mode: Option<InputMode>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub handover: Option<InputHandover>,
 }
 
 impl InputMessageData {
