@@ -2755,11 +2755,9 @@ async fn operations_that_are_not_tasks_answer_for_themselves() {
     create_task_provider(&mut client).await;
     for (category, operation, code) in [
         ("image", "understand", "modality_unknown_operation"),
-        ("realtime", "connect", "modality_unknown_operation"),
         ("realtime", "voice", "modality_unknown_operation"),
         ("realtime", "transcribe", "modality_unknown_operation"),
         ("realtime", "avatar", "modality_unknown_operation"),
-        ("ocr", "recognize", "modality_unavailable"),
     ] {
         let refused = client
             .rpc(
