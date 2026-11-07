@@ -925,20 +925,20 @@ async fn web_fetch_blocks_untrusted_targets_and_follows_same_host_redirects() {
             "searchService":{"kind":"brave","endpoint":format!("http://{authority}/search"),"apiKey":"fixture-key"}}),
     )
     .await;
-    for url in [
-        "http://127.0.0.1/",
-        "http://198.18.0.1/",
-        "http://[::ffff:127.0.0.1]/",
-        "http://localhost/",
-        "http://sub.localhost./",
+    for (url, expected) in [
+        ("http://127.0.0.1/", "blocked_address"),
+        (
+            "http://198.18.0.1/",
+            "blocked_address: Reserved benchmark addresses are blocked. Proxy DNS applies only to hostname targets.",
+        ),
+        ("http://[::ffff:127.0.0.1]/", "blocked_address"),
+        ("http://localhost/", "blocked_address"),
+        ("http://sub.localhost./", "blocked_address"),
     ] {
         submit(&mut client, &id, "web_fetch", json!({"url": url})).await;
         idle(&mut client, &id).await;
         let blocked = result(&session).await;
-        assert!(
-            text(&blocked).contains("blocked_address"),
-            "{url}: {blocked:?}"
-        );
+        assert!(text(&blocked).contains(expected), "{url}: {blocked:?}");
     }
     assert_eq!(tunnels.lock().unwrap().len(), 1);
     for (name, args, expected) in [

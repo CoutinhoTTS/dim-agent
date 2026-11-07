@@ -311,7 +311,7 @@ impl Policy {
         })
     }
 
-    fn check(&self, addresses: &[IpAddr]) -> Result<(), WebError> {
+    fn check(&self, addresses: &[IpAddr], hostname: bool) -> Result<(), WebError> {
         for &address in addresses {
             let eff = effective_ip(address);
             let permitted = self.allowed_host
@@ -323,7 +323,11 @@ impl Policy {
                 if BENCHMARK_V4.matches(eff) {
                     return Err(WebError::new(
                         "blocked_address",
-                        "Reserved benchmark addresses are blocked. If using Fake-IP DNS, enable proxyDns with a trusted proxy, use real-address DNS answers, or configure an explicit trusted-host exception. See docs/design/plugins/Web.md (Address policy).",
+                        if hostname {
+                            "Reserved benchmark addresses are blocked. If using Fake-IP DNS, enable proxyDns with a trusted proxy, use real-address DNS answers, or configure an explicit trusted-host exception. See docs/design/plugins/Web.md (Address policy)."
+                        } else {
+                            "Reserved benchmark addresses are blocked. Proxy DNS applies only to hostname targets. See docs/design/plugins/Web.md (Address policy)."
+                        },
                     ));
                 }
                 return Err(WebError::new(
@@ -766,7 +770,7 @@ pub async fn get(
             return secure(stream).await;
         }
         let ips = resolve_addresses(&host, cancel).await?;
-        policy.check(&ips)?;
+        policy.check(&ips, matches!(url.host(), Some(url::Host::Domain(_))))?;
         let mut last_err = WebError::new("connect_failed", "The connection failed.");
         for ip in ips {
             let attempt = async {
@@ -1084,6 +1088,7 @@ mod tests {
         };
         assert_eq!(err.code, "blocked_address", "{err}");
         assert!(err.message.contains("benchmark"), "{err}");
+        assert!(err.message.contains("enable proxyDns"), "{err}");
         assert!(targets.lock().unwrap().is_empty(), "{targets:?}");
         stop.cancel();
         task.await.unwrap();
