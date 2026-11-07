@@ -8,12 +8,12 @@ light-ocr is a first-party plugin that supplies Modality's `local/pp-ocr` OCR ta
 
 | Part | M1 | Later |
 | --- | --- | --- |
-| The plugin directory `plugins/light-ocr/` in this repository, listed under `optional` in `runtime/default-plugins.json` (§2) | yes | |
+| The plugin directory `runtime/plugins/light-ocr/` in this repository, listed under `optional` in `runtime/default-plugins.json` (§2) | yes | |
 | The row's `ocrHelper` service and `describe` (§3) | yes | |
 | The helper: argv, engine, images, PDFs, artifacts, error mapping (§4, Appendix A) | yes | |
 | CPU provider on every platform (§5) | yes | Core ML once a confined run measures it |
 | Tests against a fixture engine, no download (Appendix C) | yes | |
-| The one real confined run (Appendix C) | acceptance, with the user's authorization | |
+| The one real confined run (Appendix C) | acceptance, run by hand | |
 
 ## 1. Structure
 
@@ -34,10 +34,10 @@ Modality (Rust)                       plugin row (Node)                helper (o
 
 ## 2. The plugin package
 
-`plugins/light-ocr/` ships with the release through the `optional` map of the default configuration file, which copies the directory into `<home>/plugins/light-ocr/<version>` at install time and installs its dependencies there:
+`runtime/plugins/light-ocr/` ships with the release through the `optional` map of the default configuration file, which copies the directory into `<home>/plugins/light-ocr/<version>` at install time and installs its dependencies there. The map's value is relative to `runtime/default-plugins.json`, so its entry reads `"light-ocr": "plugins/light-ocr"`.
 
 ```text
-plugins/light-ocr/
+runtime/plugins/light-ocr/
   dim-plugin.json       name, version, code (entry index.ts, provides ocrHelper), dependencies "npm"
   index.ts              the row: provides ocrHelper; describe()
   helper.cjs            the OCR helper (Appendix A)
@@ -48,7 +48,7 @@ plugins/light-ocr/
 - `dim-plugin.json` declares `"dependencies": "npm"` and `"version"`; both members are PluginManager's ([PluginManager §2.1](PluginManager.md#21-the-plugin-directory-and-its-manifest)). The copy, never the shipped directory, is what runs.
 - `package.json` declares two dependencies: `@arcships/light-ocr` at exactly `0.5.9`, and `@arcships/rutis` at the version `runtime/package-lock.json` pins, because a default or installed plugin resolves `@arcships/rutis` from its own `node_modules` ([RuntimeManager §6](RuntimeManager.md#6-release)).
 - `package-lock.json` pins every package with npm `integrity`, including the facade's own pins — runtime `0.1.9`, model `light-ocr-model-ppocrv6-small` `0.3.4` and the platform packages — because the facade declares them as its dependencies. The lock, not a version range, decides what runs, as `runtime/package-lock.json` does for the runtime packages.
-- A bump of light-ocr is a Dim change: a new lock in this plugin, reviewed like any dependency change. Users receive it with a Dim release and install the new version over the old ([PluginManager §3.2](PluginManager.md#32-install)); the running copy is untouched until they do.
+- A bump of light-ocr is a Dim change: a new lock in this plugin, reviewed like any dependency change. A newer release ships a new `version`: at the next start an installed copy is re-acquired in the background and the record switches only when the new copy is ready, so the old copy keeps serving until then ([PluginManager §3.1](PluginManager.md#31-startup)). The same path repairs a failed re-acquisition through `plugin.update`, and a plugin whose `@arcships/rutis` no longer matches the runtime is replaced the same way.
 - The shipped directory carries no `node_modules` and no build output: `scripts/stage-plugins.mjs` copies it without running `npm ci` ([RuntimeManager §6](RuntimeManager.md#6-release)). No package lifecycle script runs at install, because the install uses `--ignore-scripts`.
 
 ## 3. The row and `ocrHelper`
@@ -57,14 +57,14 @@ Service `ocrHelper`, scope process, no key, provided by the `light-ocr` row's `p
 
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
-| `describe` | sync | `{}` | `{target: {providerId: "local", modelId: "pp-ocr"}, label, executable, args, read, env?}` or `null` |
+| `describe` | sync | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, label, executable, args, read}` or `null` |
 
+- `contract` is the helper-contract version this plugin implements, `1`. Modality offers the target only when it equals the version Modality implements; an older copy that is still running marks the target unavailable with "the PP-OCR plugin needs an update" until its re-acquisition lands (Modality §A.2.1).
 - `target` is `{providerId: "local", modelId: "pp-ocr"}`, so Modality lists the target as `local/pp-ocr`.
 - `label` is English display text for clients: `PP-OCR (local)`.
 - `executable` is `process.execPath`: the Node installation that runs the row. With `source: system` it is the interpreter on `PATH`; either way Modality records nothing and trusts the description at each call.
 - `args` is `[<plugin directory>/helper.cjs]`, an absolute path. Modality appends `--input`, `--artifacts` and `--output-mode` and nothing else.
-- `read` is `[<Node installation root>, <plugin directory>]`. Modality adds the task's input to it, so the helper can load its own script and `node_modules`, the Node addon in the platform package, and the input.
-- `env` is absent today. If a future light-ocr release needs an environment variable, it is added here rather than read from the daemon's environment, so the confined helper's environment stays an explicit list.
+- `read` is the canonical Node installation root and the canonical plugin directory, each derived through `fs.realpathSync` — of the executable and of the plugin directory — so a symlinked `node` (a package manager's `bin` link) grants the directory the binary really lives in. Modality adds the task's input to these paths, so the helper can load its own script and `node_modules`, the Node addon in the platform package, and the input.
 
 The row never answers a request by doing OCR itself and never inspects the input. `describe` returns the same value for the life of the process; Modality may call it on every task.
 
@@ -90,11 +90,11 @@ An image input is read once and recognized with `createEngine({execution: {provi
 
 ### 4.3 PDFs
 
-A PDF is opened with `createDocumentEngine({engineOptions: {execution: {provider: "cpu"}}}).recognizeDocument(bytes, options)` and its pages are iterated in order. Every page is rasterized and recognized; there is no native-text path, so a PDF's embedded text layer is ignored. The options carry Modality's limits: `maxPages: 500`, `maxPagePixels: 25_000_000`, `maxTotalPixels: 12_500_000_000` (500 pages × 25,000,000, so the total bound never refuses a document Modality's limits accept), `maxFileBytes: 104_857_600` and `dpi: 150`.
+A PDF is opened with `createDocumentEngine({engineOptions: {execution: {provider: "cpu"}}}).recognizeDocument(bytes, options)` and its pages are iterated in order. Every page is rasterized and recognized; there is no native-text path, so a PDF's embedded text layer is ignored. The options carry Modality's limits: `maxPages: 500`, `maxPagePixels: 25_000_000`, `maxTotalPixels: 12_500_000_000` (500 pages × 25,000,000, so the total bound never refuses a document Modality's limits accept), `maxFileBytes: 104_857_600` and `dpi: 150`. Every value is inside the facade's own option validation (`packages/light-ocr/src/document.cjs` at 0.5.9: `positiveInteger` at line 73 defaults its maximum to `Number.MAX_SAFE_INTEGER`; `normalizeOptions` lines 81–124, with the option fields at 87–103, caps `maxPages` at 10,000 and `dpi` at 36–600). 12,500,000,000 is below 2^53, so the engine accepts it exactly, and the helper enforces no limit of its own beyond passing these options.
 
 In `layout` mode the helper renders each page a second time, through the platform package's `pdfium` export — the renderer the document engine loads for itself — at the same `dpi`, and writes the bytes as `page-NNNN.png`, setting that page's `imagePath`. The second render is the only way to obtain the page image: the document API returns lines and dimensions, not pixels. A render failure there is `local_runtime_failed`. In `text` mode no page image is rendered beyond the recognition itself.
 
-The document engine has no code for an encrypted PDF: the rasterizer reports a password or permission failure when the document loads. The helper reports that failure as `encrypted_pdf`; any other load or render failure is `invalid_input` with the renderer's message.
+The document engine has no code for an encrypted PDF: the rasterizer reports a password or permission failure when the document loads. The binding light-ocr loads, `pdfium-native` 0.6.1, maps PDFium's `FPDF_ERR_PASSWORD` to `PASSWORD:Password required or incorrect` and `FPDF_ERR_SECURITY` to `SECURITY:Unsupported security scheme` (`src/napi_helpers.h`, `GetPdfiumErrorMessage`, lines 24–55, the two cases at 37–44), and `src/pdfium_addon.cc:57` rejects the load with that message. The helper reports a load rejection whose message starts with `PASSWORD:` or `SECURITY:` as `encrypted_pdf`; any other load or render failure is `invalid_input` with the renderer's message.
 
 ### 4.4 Result and error mapping
 
@@ -118,6 +118,8 @@ The helper's own failures follow the same five codes: a missing argument is `inv
 
 Every engine is created with `execution: {provider: "cpu"}`, on every platform. CPU is the one provider light-ocr publishes for every platform it supports; Core ML exists only for `darwin-arm64` and its confined behaviour has not been measured, and WebGPU exists only for Linux x64 and Windows x64. `execution.provider` is fixed in the helper, not configurable by a task, so a request can never select a provider the confinement profile does not cover.
 
+The CPU path was measured in the profile `HostPlatform::spawn_confined` builds on macOS arm64: the read set {canonical Node installation root, canonical plugin directory, input}, the task's work directory as the only write path, no network and `SystemServices::None` are sufficient. A PNG and two PDFs — one with a text layer, one scanned — recognized with identical lines, boxes and confidences to the unconfined run, about 0.8 s per PNG, the work directory empty after every run and no Core ML cache created.
+
 Enabling Core ML later requires two things: a measured confined run of the Core ML path under the confinement profile, and `OnDeviceRecognition` added to that profile's `SystemServices` ([HostPlatform](../../architecture/rust-agent/plugins/HostPlatform.md)); both are prerequisites, not work this design schedules. light-ocr's own rule keeps `darwin-x64` CPU-only.
 
 ## 6. Timing and conflicts
@@ -125,15 +127,15 @@ Enabling Core ML later requires two things: a measured confined run of the Core 
 - One helper process per task, started when the task starts and killed on cancel, on timeout, on Modality's unload and on process exit. No OCR state survives a task; a restart interrupts a running task as any host task (Modality §A.6).
 - Concurrency is Modality's: at most 4 running OCR tasks per category. Each is one process with its own engine, so two helpers share nothing but the CPU.
 - The row has no work in flight: a reload or uninstall of the plugin affects only later calls, and a task already started keeps the description it read and its own process.
-- Uninstalling the plugin deletes its copy and `node_modules`; a running helper's script and libraries are already mapped, so it finishes normally, and no new task can start.
+- Uninstalling the plugin deletes its copy and `node_modules`; no new task can start from it. On Unix a running helper's script and libraries are already mapped, so it finishes normally and the files delete; on Windows the open files block deletion, so PluginManager leaves the directory to its startup cleanup and the helper finishes from that copy ([PluginManager §3.6](PluginManager.md#36-remove-and-list)).
 
 ## 7. Security
 
 - **Trust anchor.** The plugin's `package-lock.json` is the only source of packages, installed by RuntimeManager with `npm ci --omit=dev --ignore-scripts --no-audit --no-fund`; npm verifies every package against the lock's `integrity`, and no lifecycle script runs ([RuntimeManager §3.2](RuntimeManager.md#32-acquire), §7). The registry is RuntimeManager's rule; a mirror adds no trust. The shipped plugin directory is never modified.
 - **Untrusted input.** The input document is parsed only inside the confined helper. Modality and the daemon never open it, never parse it and never hand its content to any other process. This is the reason OCR is a host task and not an adapter (Modality §A.2).
-- **Confinement.** The helper runs under `HostPlatform::spawn_confined` with `SystemServices::None`: the Node installation root, the plugin directory and the input readable; the task's work directory writable; no network. On a platform that confines nothing — Windows, and Linux without `bubblewrap` — the helper runs unconfined and Modality records `confined: false` on the task (Modality A14); the plugin makes no claim of its own and detects nothing.
+- **Confinement.** The helper runs under `HostPlatform::spawn_confined` with `SystemServices::None`: the Node installation root, the plugin directory and the input readable; the task's work directory writable; no network. Measured on macOS arm64 with the CPU provider: nothing is written outside the work directory — the directory is empty after each run — and no Core ML cache is created. On a platform that confines nothing — Windows, and Linux without `bubblewrap` — the helper runs unconfined and Modality records `confined: false` on the task (Modality A14); the plugin makes no claim of its own and detects nothing.
 - **No download at run time.** The helper loads only the pinned packages already on disk. It has no network and no updater; a missing or corrupt package is `local_runtime_unavailable`.
-- **No secrets.** The helper reads no credentials and contacts no service. Its environment is Modality's allowlist plus the description's `env`.
+- **No secrets.** The helper reads no credentials and contacts no service. Its environment is Modality's allowlist, and the description carries no environment additions.
 - **No model context.** Nothing the helper returns enters a model's context; a user moves the result into a Session by ordinary means (Modality §5).
 
 ## 8. Rule check
@@ -213,7 +215,8 @@ No automated test downloads, installs or loads the real engine.
 - **Helper unit tests.** A fixture `node_modules/@arcships/light-ocr` in the test tree exports `createEngine`, `createDocumentEngine`, `getVersion`, `hasPdfSupport` and `OcrError`, with results and failures the test controls. The helper is run as a child process over fixture inputs, and the tests assert argv parsing, artifact names and shapes, `text.txt` content, the polygon conversion, the limit checks, every error mapping in §4.4, and that a refusal writes no partial artifact past the bound. Nothing is fetched; the fixture is a directory in the repository.
 - **Row and plugin tests.** The row is loaded with the fixture engine and `describe` is asserted against Modality's A.2.1 shape — `target`, `label`, `executable` = `process.execPath`, `args`, `read`. Presence, absence and removal of the service are Modality's acceptance flows, run with a stub provider (Modality Appendix D item 9); the plugin's own tests cover only the description it publishes.
 - **Install tests.** With a fixture plugin that declares `dependencies`, PluginManager's acquisition copies it, installs its locked dependencies from a local fixture registry and renames it into place; the shipped directory is unchanged (PluginManager Appendix C item 13).
-- **The one real run.** A single end-to-end acceptance, not in CI, on macOS arm64: install the plugin from the release's optional directory with the real lock from the public registry, run `modality.ocr.recognize` on a one-page PNG and on a two-page PDF in both output modes, and assert the text, the page count, `page-NNNN.png` in layout mode, exit 0, `confined: true`, and that the helper wrote nothing outside its work directory. It needs the user's authorization because it installs and loads downloaded native code in a confined process; it never runs as part of a normal test suite.
+- **The one real run.** A single end-to-end acceptance, not in CI, on macOS arm64: install the plugin from the release's optional directory with the real lock from the public registry, run `modality.ocr.recognize` on a one-page PNG and on a two-page PDF in both output modes, and assert the text, the page count, `page-NNNN.png` in layout mode, exit 0, `confined: true`, and that the helper wrote nothing outside its work directory. It installs and loads downloaded native code, so it is run by hand and never as part of a normal test suite.
+- **Harness.** Any confined test or harness starts the helper with pipes for stdout and stderr, as `spawn_confined` does. Redirecting them to files outside the granted roots makes Node abort while it initializes (measured: exit 250, five times out of five); a harness that must use files puts them inside a write root.
 
 ## Appendix D. Acceptance
 
@@ -223,5 +226,5 @@ No automated test downloads, installs or loads the real engine.
 4. The limits are enforced: a 501-page PDF and an input over 100 MiB are `resource_limit_exceeded`; an encrypted PDF is `encrypted_pdf`; a corrupt image is `invalid_input`.
 5. Cancel and timeout kill the helper; the task settles cancelled or failed, and the work directory is removed.
 6. `confined: true` on macOS; `confined: false` on Windows and on Linux without `bubblewrap`.
-7. Installing a newer release's copy of the plugin replaces the old directory and its dependencies, and the target keeps working without a second `enable`.
+7. A newer release's copy re-acquires the installed plugin in the background at the next start: the record and `dir` switch only when the new copy is ready, the old directory is deleted, and the target keeps working without a second `enable`; a failed re-acquisition keeps the old copy and shows in `plugin.list` until `plugin.update` repairs it.
 8. No test in the repository downloads, installs or loads the real engine; the fixture engine and a stub `ocrHelper` provider cover Modality's flows.
