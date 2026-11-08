@@ -21256,6 +21256,7 @@
       "from": "dim_app_server::collaboration::tests",
       "to": "dim_app_server::collaboration",
       "references": [
+        "path CANCELLED_BY_CLIENT",
         "path INTERRUPTED",
         "path NOT_STARTED",
         "path cancel_rpc"
