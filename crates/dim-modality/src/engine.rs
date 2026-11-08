@@ -15,7 +15,7 @@ use crate::task::{
     self, Executor, Expect, InputFile, ResultFile, TaskError, TaskRecord, TaskResult, TaskState,
     Write,
 };
-use crate::{Evaluation, HostTargetSpec, catalog_category, host_target, is_understand};
+use crate::{Evaluation, catalog_category, host_target, is_understand};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use dim_agent_capabilities::file_storage::{EntryKind, FileReader};
@@ -80,6 +80,13 @@ const OCR_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const OCR_STDOUT_LIMIT: usize = 64 * 1024;
 /// The most bytes the OCR helper may write to standard error.
 const OCR_STDERR_LIMIT: usize = 64 * 1024;
+
+/// What one host task starts (A.2.1): the build's own helper, or the
+/// description a plugin's `ocrHelper` returned at the task's start.
+enum HostHelper {
+    AppleVision(PathBuf),
+    Plugin(dim_ocr::HelperDescription),
+}
 /// The most page text `data.pages` carries in one task record; later pages
 /// keep their number only and `data.textTruncated` points at `text.txt`.
 const MAX_DATA_TEXT_BYTES: u64 = 1024 * 1024;
@@ -208,28 +215,24 @@ pub(crate) fn resolve_task_model(
     }
 }
 
-/// The model a host task runs (decision 4): the build's own target, which the
-/// caller may name explicitly and which the persisted default must also name.
+/// The model a host task runs (decision 4, A.2.1): one of the operation's
+/// host targets, which the caller may name explicitly and which the persisted
+/// default must also name.
 pub(crate) fn resolve_host_model(
     evaluation: &Evaluation,
     category: &str,
     row: &crate::OperationRow,
-    target: &HostTargetSpec,
     explicit: Option<&ModelId>,
 ) -> Result<ModelId, RpcError> {
-    let model = ModelId {
-        provider_id: target.provider_id.to_owned(),
-        model_id: target.model_id.to_owned(),
-    };
     if let Some(explicit) = explicit {
-        if explicit != &model {
+        if crate::host_target_for(category, row.operation, explicit).is_none() {
             let reason =
                 evaluation.unavailable_reason(explicit, category, row.operation, &row.id(category));
             return Err(model_unavailable(reason.detail));
         }
-        return match evaluation.host_reason() {
+        return match evaluation.host_target_reason(explicit) {
             Some(reason) => Err(unavailable(reason.detail)),
-            None => Ok(model),
+            None => Ok(explicit.clone()),
         };
     }
     let snapshot = evaluation.operation(category, row);
@@ -253,10 +256,15 @@ pub(crate) fn resolve_host_model(
             provider_id: effective.provider_id.clone(),
             model_id: effective.model_id.clone(),
         }),
-        None => Err(match evaluation.host_reason() {
-            Some(reason) => unavailable(reason.detail),
-            None => no_default_model(format!("No model serves {}", row.id(category))),
-        }),
+        None => Err(
+            match evaluation
+                .host_reason()
+                .or_else(|| evaluation.plugin_reason())
+            {
+                Some(reason) => unavailable(reason.detail),
+                None => no_default_model(format!("No model serves {}", row.id(category))),
+            },
+        ),
     }
 }
 
@@ -642,6 +650,21 @@ impl Shared {
             .await;
     }
 
+    /// Records whether the helper ran confined, on the task's host executor
+    /// (A.4, A14), before the terminal write.
+    async fn record_confined(&self, slot: &Arc<Slot>, confined: bool) {
+        let _ = self
+            .put(slot, ExpectKind::NonTerminal, |record| {
+                if let Executor::Host {
+                    confined: recorded, ..
+                } = &mut record.executor
+                {
+                    *recorded = Some(confined);
+                }
+            })
+            .await;
+    }
+
     /// Writes `cancelled`, if this generation's cancel gets there first.
     async fn settled_cancelled(
         &self,
@@ -820,8 +843,8 @@ impl ModalityTasks {
                 row.id(category.name)
             )));
         }
-        let target = host_target(category.name, row.operation);
-        if params.node.is_some() && target.is_none() {
+        let host = host_target(category.name, row.operation).is_some();
+        if params.node.is_some() && !host {
             return Err(invalid_input(format!(
                 "node is only for host-executed categories, not {}",
                 category.name
@@ -863,19 +886,26 @@ impl ModalityTasks {
             &shared.ctx,
             shared.ocr_helper.as_deref(),
             cancel,
+            // Only a submit that resolves to a host OCR operation reaches the
+            // plugin-supplied target (A.2.1).
+            if host {
+                crate::OcrLookup::Read
+            } else {
+                crate::OcrLookup::Skip
+            },
         )
         .await?;
-        let model = match target {
-            Some(target) => resolve_host_model(
-                &evaluation,
-                category.name,
-                row,
-                target,
-                params.model.as_ref(),
-            )?,
-            None => resolve_task_model(&evaluation, category.name, row, params.model.as_ref())?,
+        let model = if host {
+            resolve_host_model(&evaluation, category.name, row, params.model.as_ref())?
+        } else {
+            resolve_task_model(&evaluation, category.name, row, params.model.as_ref())?
         };
-        if target.is_some() {
+        let host_target = if host {
+            crate::host_target_for(category.name, row.operation, &model)
+        } else {
+            None
+        };
+        if host_target.is_some() {
             // A host operation validates its own parameters; there is no
             // adapter schema (decision 4).
             ocr_params(&params.params)?;
@@ -964,7 +994,7 @@ impl ModalityTasks {
                 "Files are at most {MAX_SUBMISSION_BYTES} bytes per submission"
             )));
         }
-        if target.is_some() && inputs.len() != 1 {
+        if host_target.is_some() && inputs.len() != 1 {
             return Err(invalid_input(format!(
                 "{} takes one input file",
                 row.id(category.name)
@@ -994,13 +1024,14 @@ impl ModalityTasks {
             revision: 0,
             category: category.name.to_owned(),
             operation: row.operation.to_owned(),
-            executor: match target {
+            executor: match &host_target {
                 Some(target) => Executor::Host {
                     node: params.node.clone(),
                     target: task::HostTarget {
                         provider_id: target.provider_id.to_owned(),
                         model_id: target.model_id.to_owned(),
                     },
+                    confined: None,
                 },
                 None => Executor::Provider {
                     provider: model,
@@ -1993,7 +2024,7 @@ impl Shared {
     /// helper under its confinement, then the terminal write its exit status
     /// and artifacts decide (decision 7).
     async fn run_host(self: &Arc<Self>, slot: &Arc<Slot>, record: &TaskRecord) {
-        let Executor::Host { node, target } = &record.executor else {
+        let Executor::Host { node, target, .. } = &record.executor else {
             return;
         };
         if node.is_some() {
@@ -2014,23 +2045,55 @@ impl Shared {
             }
             return;
         };
-        let Some(helper) = self.ocr_helper.clone() else {
-            if !slot.cancel_requested() {
-                self.fail(slot, "unavailable", "No OCR helper in this build")
-                    .await;
-            }
-            return;
-        };
-        if !dim_ocr::apple_vision_available()
-            || target.provider_id != dim_ocr::APPLE_VISION_PROVIDER
-            || target.model_id != dim_ocr::APPLE_VISION_MODEL
+        let plugin_target = target.provider_id == dim_ocr::PLUGIN_PROVIDER
+            && target.model_id == dim_ocr::PLUGIN_MODEL;
+        // What to start for this target (A.2.1): the build's own helper, or
+        // the description the plugin service returns at this task's start.
+        let helper = if target.provider_id == dim_ocr::APPLE_VISION_PROVIDER
+            && target.model_id == dim_ocr::APPLE_VISION_MODEL
         {
+            if !dim_ocr::apple_vision_available() {
+                if !slot.cancel_requested() {
+                    self.fail(slot, "unavailable", "The host target is unavailable")
+                        .await;
+                }
+                return;
+            }
+            let Some(helper) = self.ocr_helper.clone() else {
+                if !slot.cancel_requested() {
+                    self.fail(slot, "unavailable", "No OCR helper in this build")
+                        .await;
+                }
+                return;
+            };
+            HostHelper::AppleVision(helper)
+        } else if plugin_target {
+            // The description the service returns at this task's start; the
+            // task's own cancel interrupts a read still pending (A.2.1).
+            match crate::plugin_target_state(&self.ctx, &slot.cancel).await {
+                crate::PluginTargetState::Ready(description) => HostHelper::Plugin(description),
+                crate::PluginTargetState::Outdated => {
+                    if !slot.cancel_requested() {
+                        self.fail(slot, "unavailable", "The PP-OCR plugin needs an update")
+                            .await;
+                    }
+                    return;
+                }
+                crate::PluginTargetState::Absent => {
+                    if !slot.cancel_requested() {
+                        self.fail(slot, "unavailable", "The PP-OCR plugin is not running")
+                            .await;
+                    }
+                    return;
+                }
+            }
+        } else {
             if !slot.cancel_requested() {
                 self.fail(slot, "unavailable", "The host target is unavailable")
                     .await;
             }
             return;
-        }
+        };
         let params = match ocr_params(&record.params) {
             Ok(params) => params,
             Err(error) => {
@@ -2065,48 +2128,88 @@ impl Shared {
                 return;
             }
         };
-        // The framework resolves its cache through the user home, so the
-        // helper's HOME is the plugin's own cache directory (decision 1).
+        let (executable, mut args, env, read, write, services) = match helper {
+            HostHelper::AppleVision(executable) => (
+                executable,
+                vec![OsString::from("ocr-helper")],
+                vec![
+                    (OsString::from("HOME"), cache.clone().into_os_string()),
+                    (
+                        OsString::from("CFFIXED_USER_HOME"),
+                        cache.clone().into_os_string(),
+                    ),
+                    (OsString::from("TMPDIR"), tmp.clone().into_os_string()),
+                ],
+                vec![input.path.clone()],
+                vec![work.clone(), tmp, cache],
+                SystemServices::OnDeviceRecognition,
+            ),
+            HostHelper::Plugin(description) => (
+                description.executable,
+                description.args.into_iter().map(OsString::from).collect(),
+                Vec::new(),
+                description
+                    .read
+                    .into_iter()
+                    .chain(std::iter::once(input.path.clone()))
+                    .collect(),
+                vec![work.clone()],
+                SystemServices::None,
+            ),
+        };
+        args.extend([
+            OsString::from("--input"),
+            input.path.clone().into_os_string(),
+            OsString::from("--artifacts"),
+            work.clone().into_os_string(),
+            OsString::from("--output-mode"),
+            OsString::from(params.output_mode.as_str()),
+        ]);
         let spec = ConfinedSpec {
-            executable: helper,
-            args: vec![
-                OsString::from("ocr-helper"),
-                OsString::from("--input"),
-                input.path.clone().into_os_string(),
-                OsString::from("--artifacts"),
-                work.clone().into_os_string(),
-                OsString::from("--output-mode"),
-                OsString::from(params.output_mode.as_str()),
-            ],
-            env: vec![
-                (OsString::from("HOME"), cache.clone().into_os_string()),
-                (
-                    OsString::from("CFFIXED_USER_HOME"),
-                    cache.clone().into_os_string(),
-                ),
-                (OsString::from("TMPDIR"), tmp.clone().into_os_string()),
-            ],
+            executable,
+            args,
+            env,
         };
         let confinement = Confinement {
-            read: vec![input.path.clone()],
-            write: vec![work.clone(), tmp, cache],
+            read,
+            write,
             timeout: OCR_TIMEOUT,
             stdout_limit: OCR_STDOUT_LIMIT,
             stderr_limit: OCR_STDERR_LIMIT,
-            services: SystemServices::OnDeviceRecognition,
+            services,
         };
         let outcome = platform
             .spawn_confined(spec, confinement, slot.cancel.child_token())
             .await;
         if slot.cancel_requested() {
+            // The helper was killed: nothing it wrote is published (A.2.1).
+            let _ = task::remove_work(&self.files, &record.task_id).await;
             return;
         }
         let output = match outcome {
-            Ok(output) => output,
-            Err(ConfinedError::Cancelled) => return,
+            Ok(output) => {
+                self.record_confined(slot, output.confined).await;
+                output
+            }
+            Err(ConfinedError::Cancelled) => {
+                let _ = task::remove_work(&self.files, &record.task_id).await;
+                return;
+            }
             Err(error) => {
-                self.fail_host(slot, confinement_code(&error), error.to_string())
-                    .await;
+                // A path the description names that no longer exists is the
+                // copy becoming unreadable, not a request error (A.2.1).
+                let (code, message) = match &error {
+                    ConfinedError::InvalidPath { path, .. }
+                        if plugin_target && path != &input.path =>
+                    {
+                        (
+                            "executor_error",
+                            format!("The OCR helper's copy is unreadable: {path:?}"),
+                        )
+                    }
+                    _ => (confinement_code(&error), error.to_string()),
+                };
+                self.fail_host(slot, code, message).await;
                 return;
             }
         };

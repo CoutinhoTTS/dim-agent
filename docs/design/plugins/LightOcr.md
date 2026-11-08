@@ -68,16 +68,15 @@ Service `ocrHelper`, scope process, no key, provided by the `light-ocr` row's `p
 
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
-| `describe` | sync | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, label, executable, args, read}` or `null` |
+| `describe` | async | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, executable, args, read}` or `null` |
 
 - `contract` is the helper-contract version this plugin implements, `1`. Modality offers the target only when it equals the version Modality implements; an older copy that is still running marks the target unavailable with "the PP-OCR plugin needs an update" until its re-acquisition lands (Modality §A.2.1).
 - `target` is `{providerId: "local", modelId: "pp-ocr"}`, so Modality lists the target as `local/pp-ocr`.
-- `label` is English display text for clients: `PP-OCR (local)`.
 - `executable` is `process.execPath`: the Node installation that runs the row. With `source: system` it is the interpreter on `PATH`; either way Modality records nothing and trusts the description at each call.
 - `args` is `[<plugin directory>/helper.cjs]`, an absolute path. Modality appends `--input`, `--artifacts` and `--output-mode` and nothing else.
 - `read` is the canonical Node installation root and the canonical plugin directory, each derived through `fs.realpathSync` — of the executable and of the plugin directory — so a symlinked `node` (a package manager's `bin` link) grants the directory the binary really lives in. Modality adds the task's input to these paths, so the helper can load its own script and `node_modules`, the Node addon in the platform package, and the input.
 
-The row never answers a request by doing OCR itself and never inspects the input. `describe` returns the same value for the life of the process; Modality may call it on every task.
+The row never answers a request by doing OCR itself and never inspects the input. `describe` is declared `async`, so starting it never blocks the caller; Modality reads the declared kind before calling, never calls a `describe` declared with any other kind, and reads that target as needing an update (Modality §A.2.1). Modality bounds its wait, and a row that stops answering reads as absent. It returns the same value for the life of the process; Modality may call it on every task.
 
 ## 4. The helper
 
@@ -137,7 +136,7 @@ Enabling Core ML later requires two things: a measured confined run of the Core 
 
 - One helper process per task, started when the task starts and killed on cancel, on timeout, on Modality's unload and on process exit. No OCR state survives a task; a restart interrupts a running task as any host task (Modality §A.6).
 - Concurrency is Modality's: at most 4 running OCR tasks per category. Each is one process with its own engine, so two helpers share nothing but the CPU.
-- The row has no work in flight: a reload, an update, a re-acquisition or an uninstall of the plugin affects only later calls. A task keeps the description it read at its start, and PluginManager deletes no installed copy while the process runs ([PluginManager §7](PluginManager.md#7-security)), so the directory that description names exists until the process exits. If that copy is nevertheless unreadable when the helper starts — for example, a user deleted it by hand — the helper fails at load, the task settles `local_runtime_failed` as an unexpected helper exit, and its work directory is removed.
+- The row has no work in flight: a reload, an update, a re-acquisition or an uninstall of the plugin affects only later calls. A task keeps the description it read at its start, and PluginManager deletes no installed copy while the process runs ([PluginManager §7](PluginManager.md#7-security)), so the directory that description names exists until the process exits. If that copy is nevertheless unreadable when the helper starts — for example, a user deleted it by hand — the spawn refuses the vanished path, the task settles `executor_error`, and its work directory is removed.
 - Uninstalling the plugin therefore affects later calls, not tasks already admitted: its copy is left in place, and the next start's cleanup deletes it ([PluginManager §3.1](PluginManager.md#31-startup)). That costs disk — for light-ocr, a replaced copy is about 124 MB, held until the next start.
 
 ## 7. Security
@@ -188,7 +187,7 @@ HostPlatform's `spawn_confined` with `Confinement` already exists; this plugin a
 - **Input.** One regular file, at most 100 MiB, PNG, JPEG or PDF by its first bytes. The declared media type is never used.
 - **Directories.** The helper creates nothing outside `--artifacts`; Modality creates that directory inside the task's work directory.
 - **Artifacts.** `result.json` (always), `text.txt` (always), `page-NNNN.png` (layout mode, one per rendered PDF page, `NNNN` zero-padded to four digits). Every name is one component.
-- **Exit.** 0 with `{"ok": true, "pageCount": N}`; 2 with `{"ok": false, "error": {"code", "message"}}`; any other code is a failure, and Modality reports `local_runtime_failed`.
+- **Exit.** 0 with `{"ok": true, "pageCount": N}`; 2 with `{"ok": false, "error": {"code", "message"}}`; any other code is a failure, and Modality reports the task's `executor_error`.
 - **Limits.** 500 pages, 25,000,000 pixels per page, 100 MiB input, 1 GiB of artifacts per task.
 - **No state.** One process, one task, no cache and no lock file. The engine is closed before exit.
 
@@ -199,7 +198,7 @@ HostPlatform's `spawn_confined` with `Confinement` already exists; this plugin a
   "name": "light-ocr",
   "version": "<plugin version>",
   "description": "Local PP-OCR for Modality through light-ocr",
-  "code": { "entry": "index.ts", "provides": { "ocrHelper": { "call": "sync" } } },
+  "code": { "entry": "index.ts", "provides": { "ocrHelper": { "describe": "async" } } },
   "dependencies": "npm"
 }
 ```
@@ -224,7 +223,7 @@ The lock pins the facade, its runtime, model and platform packages, and `@arcshi
 No automated test downloads, installs or loads the real engine.
 
 - **Helper unit tests.** A fixture `node_modules/@arcships/light-ocr` in the test tree exports `createEngine`, `createDocumentEngine`, `getVersion`, `hasPdfSupport` and `OcrError`, with results and failures the test controls. The helper is run as a child process over fixture inputs, and the tests assert argv parsing, artifact names and shapes, `text.txt` content, the polygon conversion, the limit checks, every error mapping in §4.4, and that a refusal writes no partial artifact past the bound. Nothing is fetched; the fixture is a directory in the repository.
-- **Row and plugin tests.** The row is loaded with the fixture engine and `describe` is asserted against Modality's A.2.1 shape — `target`, `label`, `executable` = `process.execPath`, `args`, `read`. Presence, absence and removal of the service are Modality's acceptance flows, run with a stub provider (Modality Appendix D item 9); the plugin's own tests cover only the description it publishes.
+- **Row and plugin tests.** The row is loaded with the fixture engine and `describe` is asserted against Modality's A.2.1 shape — `target`, `executable` = `process.execPath`, `args`, `read`. Presence, absence and removal of the service are Modality's acceptance flows, run with a stub provider (Modality Appendix D item 9); the plugin's own tests cover only the description it publishes.
 - **Install tests.** With a fixture plugin that declares `dependencies`, PluginManager's acquisition copies it, installs its locked dependencies from a local fixture registry and renames it into place; the shipped directory is unchanged (PluginManager Appendix C item 13).
 - **The one real run.** A single end-to-end acceptance, not in CI, on macOS arm64: install the plugin from the release's optional directory with the real lock from the public registry, run `modality.ocr.recognize` on a one-page PNG and on a two-page PDF in both output modes, and assert the text, the page count, `page-NNNN.png` in layout mode, exit 0, `confined: true`, and that the helper wrote nothing outside its work directory. It installs and loads downloaded native code, so it is run by hand and never as part of a normal test suite.
 - **Harness.** Any confined test or harness starts the helper with pipes for stdout and stderr, as `spawn_confined` does. Redirecting them to files outside the granted roots makes Node abort while it initializes (measured: exit 250, five times out of five); a harness that must use files puts them inside a write root.

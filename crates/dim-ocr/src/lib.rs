@@ -10,6 +10,7 @@ pub mod args;
 pub mod contract;
 pub mod helper;
 pub mod platform;
+pub mod plugin;
 
 #[cfg(target_os = "macos")]
 mod pdf;
@@ -25,4 +26,8 @@ pub use contract::{
 pub use helper::{helper_main, helper_main_with_budget};
 pub use platform::{
     APPLE_VISION_MODEL, APPLE_VISION_PROVIDER, apple_vision_available, macos_version,
+};
+pub use plugin::{
+    DescriptionTarget, HELPER_CONTRACT, HelperDescription, HelperVersion, PLUGIN_MODEL,
+    PLUGIN_PROVIDER,
 };
