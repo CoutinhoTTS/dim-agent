@@ -35,7 +35,7 @@ pub use model::{
     TypeDeclaration, UnsubscribeRequest,
 };
 pub use store::{LastFailure, SUBSCRIPTIONS_FILE, Subscription};
-pub use text::ENTRY;
+pub use text::{ENTRY, EventHubTexts};
 
 /// The process bus event that says the `eventHub` service is provided and
 /// readable in this generation (design §2.1, §6). A producer registers its
@@ -83,9 +83,18 @@ impl DynPlugin for ReadyAnnouncer {
 /// an unreadable subscription file, still starts and opens Sessions; only the
 /// `eventHub` name, `eventhub.*` and the entry are unavailable.
 pub fn install(builder: &mut AgentBuilder) {
+    install_with(builder, EventHubTexts::default());
+}
+
+/// [`install`] with `texts` in place of the shipped guide entry: a candidate
+/// replaces it at the factory, so the code keeps no second copy (design A.6,
+/// model-prompts §8.1).
+pub fn install_with(builder: &mut AgentBuilder, texts: EventHubTexts) {
     dim_agent_runtime::names::register::<EventHub>(builder.catalog_mut(), None);
-    builder
-        .optional_plugin(|names| Ok(Box::new(EventHubPlugin::new(names)?) as Box<dyn DynPlugin>));
+    let texts = Arc::new(texts);
+    builder.optional_plugin(move |names| {
+        Ok(Box::new(EventHubPlugin::new(names, texts.clone())?) as Box<dyn DynPlugin>)
+    });
 }
 
 pub struct EventHubPlugin {
@@ -101,10 +110,13 @@ pub struct EventHubPlugin {
     /// previous generation still serializes with the new generation's
     /// (design §3.3).
     creation: Arc<tokio::sync::Mutex<()>>,
+    /// The guide entry the Session part registers (design A.6), from the
+    /// row's factory configuration.
+    texts: Arc<EventHubTexts>,
 }
 
 impl EventHubPlugin {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>, texts: Arc<EventHubTexts>) -> rutis::Result<Self> {
         Ok(Self {
             files: names.key()?,
             methods: names.key()?,
@@ -113,6 +125,7 @@ impl EventHubPlugin {
             hub: names.key()?,
             catalog: Arc::new(Catalog::default()),
             creation: Arc::new(tokio::sync::Mutex::new(())),
+            texts,
         })
     }
 }
@@ -179,13 +192,15 @@ impl DynPlugin for EventHubPlugin {
                         }
                     })?;
             }
+            let texts = self.texts.clone();
             ctx.require_at(&self.parts)?.register(
                 ctx,
                 PartScope::Session,
                 "EventHubSession",
-                |mount| {
+                move |mount| {
                     Ok(Some(Box::new(crate::session::EventHubSession::new(
                         mount.names,
+                        texts.clone(),
                     )?)))
                 },
             )?;

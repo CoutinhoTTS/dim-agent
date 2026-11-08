@@ -453,11 +453,17 @@ impl Fixture {
             }))
                 .await
                 .unwrap();
-            let hub = root.plugin(EventHubPlugin::new(&names).unwrap());
+            let hub = root.plugin(
+                EventHubPlugin::new(&names, Arc::new(dim_event_hub::EventHubTexts::default()))
+                    .unwrap(),
+            );
             (&hub).await.unwrap();
             hub
         } else {
-            let hub = root.plugin(EventHubPlugin::new(&names).unwrap());
+            let hub = root.plugin(
+                EventHubPlugin::new(&names, Arc::new(dim_event_hub::EventHubTexts::default()))
+                    .unwrap(),
+            );
             (&hub).await.unwrap();
             (&root.plugin(ProducerPart {
                 name: "EventHubFixtureProducer".into(),

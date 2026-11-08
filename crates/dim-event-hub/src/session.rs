@@ -1,19 +1,24 @@
 //! The Session part: the guide entry for the markers EventHub writes
 //! (design A.6).
-use crate::text::ENTRY;
+use crate::text::EventHubTexts;
 use dim_agent_capabilities::prompt_guide::{GuideEntries, GuideEntry, GuideScope};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use std::sync::Arc;
 
 pub struct EventHubSession {
     guide: Key<GuideEntries>,
+    /// The entry the row's factory configuration carries, the product's
+    /// [`ENTRY`](crate::text::ENTRY) by default (design A.6).
+    texts: Arc<EventHubTexts>,
 }
 
 impl EventHubSession {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>, texts: Arc<EventHubTexts>) -> rutis::Result<Self> {
         Ok(Self {
             guide: names.key()?,
+            texts,
         })
     }
 }
@@ -33,7 +38,7 @@ impl DynPlugin for EventHubSession {
                 GuideEntry {
                     markers: vec!["dim-event".into(), "dim-event-guide".into()],
                     order: 130,
-                    text: ENTRY.into(),
+                    text: self.texts.entry.clone(),
                 },
             )?;
             Ok(Effect::Done)
