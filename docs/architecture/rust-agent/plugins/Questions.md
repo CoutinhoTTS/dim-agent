@@ -2,7 +2,7 @@
 
 Owner: [dim-agent-questions](../../../../crates/dim-agent-questions/src/lib.rs).
 Registers the `ask_user` tool with ToolRegistry and the Session method
-namespace `session.question` (`session.question.respond`) with `sessionMethods`. The
+namespace `session.question` (`respond` and `pending`) with `sessionMethods`. The
 model asks the user 1 to 4 multiple-choice questions and waits; a client
 answers or declines. The question is the pending tool call and the answer is
 its `ToolResult`, so Questions writes no events. Design:
@@ -15,6 +15,7 @@ its `ToolResult`, so Questions writes no events. Design:
 | `S:SessionConfig` | `interactive`, read on each call: a non-interactive Session gets an error result at once. |
 | `S:ToolRegistry` | Register `ask_user`, until this part unloads. |
 | `S:SessionMethods` | Register the `session.question` namespace, until this part unloads. |
+| `S:TreeCommands` | Resolve the branch facade for pending-question queries. |
 
 ## Tool
 
@@ -65,7 +66,7 @@ the `sessionId`; the answer is checked here, against the call it answers.
 
 ## Events and lifetime
 
-No Timeline events, no `StateCell`, no Dispatcher subscription. The Session
+No Timeline writes, no `StateCell`, no Dispatcher subscription. The Session
 part keeps one table, `(branchId, requestId, callId) -> {questions, sender}`,
 under a mutex. An entry lives exactly as long as its handler waits, and whoever
 removes it under the lock decides the call's output:
@@ -105,6 +106,15 @@ The key therefore holds the branch and the `request_id` of the call's batch
 finds nothing (`question_not_pending`) and never reaches a later call that
 reuses its id.
 
+## Pending reads
+
+`session.question.pending` resolves the branch through `TreeCommands` and queries
+unsettled `step/tool-call` identities at a fixed published cutoff. It reads the
+arguments of only the selected `ask_user` array elements and returns up to 128
+batches plus a continuation. The result is independent of the transcript window
+and of the private waiter table; a batch stays pending until its terminal fact.
+See [Questions §3.5](../../../design/plugins/Questions.md#35-pending-question-read).
+
 ## Installation
 
 `dim_agent_questions::install` records the tool name and the namespace and
@@ -143,19 +153,19 @@ Rules: [principles](../principles.md) §1 and §4,
 
 | Rule | Answer |
 | --- | --- |
-| §1 Bounded Capability | One Session Capability in its own crate, registered by its feature and required by `install` (`require_feature`). `Deps` is `(Keyed<SessionConfig>, Keyed<ToolRegistry>, Keyed<SessionMethods>)`, keyed by name for each Session (`names.part`); `apply` registers the unload disposer with `ctx.effect` before it registers the tool and the method, and starts no background work. Rpc and ToolExecutor hold no Questions logic. |
+| §1 Bounded Capability | One Session Capability in its own crate, registered by its feature and required by `install` (`require_feature`). Dependencies are `SessionConfig`, `ToolRegistry`, `SessionMethods` and `TreeCommands`, keyed by name for each Session (`names.part`); `apply` registers the unload disposer with `ctx.effect` before it registers the tool and the method, and starts no background work. Rpc and ToolExecutor hold no Questions logic. |
 | §4.1 Command events for others' state | Not applicable: Questions changes no other module's state. The answer is the output of its own tool; ToolExecutor writes the call's terminal fact. A `respond` that finds nothing writes nothing; its reply says why. |
 | §4.2 No recall after handoff | The answer is handed to the waiting handler once, under the lock, and is never withdrawn; a later cancel does not replace it. |
 | §4.3 Before callbacks | Not applicable: no before callback. Rpc checks shape and `sessionId`; Questions checks the answer as the feature owner. |
 | §4.4 No business meaning in core | Timeline, Dispatcher, ToolExecutor, ToolRegistry and Rpc are unchanged and have no Questions case. |
-| §4.5 Atomic batches | Not applicable: Questions writes and consumes no events. The answer commits with its batch in ToolExecutor's `step/tool-result`. |
+| §4.5 Atomic batches | Not applicable: Questions writes no events. The answer commits with its batch in ToolExecutor's `step/tool-result`. |
 | §4.6 Context from handed-off events | The model reads the answer only as the call's tool result. |
-| §4.7 Public events and services | Questions reads `SessionConfig` and the cancel token its tool contract passes; it reads no other plugin's state and calls no other plugin. |
+| §4.7 Public events and services | Questions reads configuration and public tool-call/result facts through the branch facade; it reads no private owner state. |
 | §4.8 Infrastructure unchanged | No change to Timeline, Dispatcher, envelope, assembly or facades; no requirement raised. |
 | §4.9 Only facts later decisions use | No event added. Other clients close their prompt at the batch's `step/tool-result`; no earlier notice is sent. |
 | ADR 002 D1 Scope | Tool, method and waiters belong to the Session part: a waiter is the handler's own call, which the Session's tool contribution runs. Branch lifecycle reaches it through ToolExecutor's batch token. The ADR's assignment table lists a branch part; the design removed it, and this follows the design. |
 | ADR 002 D2 No wiring modules | ToolRegistry and Rpc collect the two services by name; there is no adapter. |
-| ADR 002 D3 Dependencies toward the core | Questions depends only on `SessionConfig`; nothing depends on Questions. Its reload fails the turns that were waiting, an accepted cost. |
+| ADR 002 D3 Dependencies toward the core | Questions declares its Session configuration, registries and branch facade provider; nothing core depends on Questions. Its reload fails the turns that were waiting, an accepted cost. |
 | ADR 002 D4 Configuration | Not applicable: Questions has no configuration. `interactive` is Session creation data read per call. |
 | ADR 002 D5 Language-neutral contracts | The tool and the method are JSON shapes with documented error codes; this crate and `install` are the Rust binding. |
 | ADR 003 Approval scope | `ask_user` is a model tool call that Permission admits under risk `session`; Questions adds no approval and runs nothing from configuration. |
@@ -164,7 +174,7 @@ Rules: [principles](../principles.md) §1 and §4,
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:SessionConfig`、`S:SessionMethods`、`S:ToolRegistry` |
+| 注入 | `S:SessionConfig`、`S:SessionMethods`、`S:ToolRegistry`、`S:TreeCommands` |
 | 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->

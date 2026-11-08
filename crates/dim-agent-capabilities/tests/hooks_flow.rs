@@ -3553,6 +3553,15 @@ async fn matchers_keep_selecting_tools_with_an_adopted_tool_part() {
     turn(&session, "tool:lookup {\"query\":\"x\"}").await;
     wait_file(&mcp, "the MCP alias did not select lookup").await;
     assert_eq!(last_result(&session).await.is_error, None);
+    let id = session.id().to_owned();
+    session.close().await.unwrap();
+    let restored = env.agent.restore_session(id).await.unwrap();
+    std::fs::remove_file(&bash).unwrap();
+    std::fs::remove_file(&mcp).unwrap();
+    turn(&restored, "tool:exec {\"command\":\"true\"}").await;
+    wait_file(&bash, "restored Bash alias did not select exec").await;
+    turn(&restored, "tool:lookup {\"query\":\"restored\"}").await;
+    wait_file(&mcp, "restored MCP alias did not select lookup").await;
     env.close().await;
 }
 

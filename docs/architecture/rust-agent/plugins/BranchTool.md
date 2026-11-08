@@ -84,7 +84,7 @@ creation and at restore.
 | Service | Purpose |
 | --- | --- |
 | `B:Dispatcher` | Consume the line's own facts in order after the rebuild. |
-| `B:Timeline` | Read the line's facts of the kinds its fold uses, with the unpublished tail, for the rebuild. |
+| `B:Timeline` | Read the fields the line's fold uses at one committed cutoff, including the unpublished tail. |
 | `B:TimelineIdentity` | The line's own id. |
 | `B:BranchLifecycle` | Wait for the branch to be Active before resolving its role and writing. |
 | `S:TreeCommands` | `info` for the role and its lines; `head`, the crate-internal `turn_ends` and the parent's new-activity check for the parent block; `input` for every write. |
@@ -122,7 +122,10 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
 - **Ended notice.** On `main`, the roster update and `<dim-branch-ended>` in one
   Steer, for any end of a tool line other than the line's own `end`.
 
-The rebuild reads the line's facts of the kinds its fold uses and writes
+The rebuild pages through branch lifecycle fields, input identities and modes,
+roster and parent blocks, branch tool routing fields, and result success/cursor
+fields. It keeps the resulting line state, not the input pages. It reads no
+user content, unrelated tool arguments or tool result content, and writes
 nothing; each write follows a live event, except one heal of a load that writes
 a roster a crash left missing and at most one parent block a restore finds due.
 A

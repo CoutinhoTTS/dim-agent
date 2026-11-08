@@ -409,7 +409,11 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
             {"name": "session.agent.update", "mutating": true},
             {"name": "session.collaboration.approval.get", "mutating": false},
             {"name": "session.collaboration.cancel", "mutating": true},
+            {"name": "session.collaboration.pending", "mutating": false},
+            {"name": "session.input.pending", "mutating": false},
             {"name": "session.input.withdraw", "mutating": true},
+            {"name": "session.tool.get", "mutating": false},
+            {"name": "session.turn.get", "mutating": false},
         ]})
     );
     let mut remote = Client::new_version(&server, true, 3).await;
@@ -489,7 +493,12 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
         client
             .rpc("session.methods", json!({"sessionId": sid}))
             .await["result"],
-        json!({"methods": [{"name": "session.agent.get", "mutating": false}, {"name": "session.agent.update", "mutating": true}, {"name": "session.collaboration.approval.get", "mutating": false}, {"name": "session.collaboration.cancel", "mutating": true}, {"name": "session.input.withdraw", "mutating": true}]})
+        json!({"methods": [{"name": "session.agent.get", "mutating": false}, {"name": "session.agent.update", "mutating": true}, {"name": "session.collaboration.approval.get", "mutating": false},
+            {"name": "session.collaboration.cancel", "mutating": true},
+            {"name": "session.collaboration.pending", "mutating": false},
+            {"name": "session.input.pending", "mutating": false}, {"name": "session.input.withdraw", "mutating": true},
+            {"name": "session.tool.get", "mutating": false},
+            {"name": "session.turn.get", "mutating": false}]})
     );
     gate.notify_one();
     restart.await.unwrap();
@@ -771,4 +780,87 @@ async fn input_withdraw_answers_through_the_session_and_writes_only_commands() {
         !names.iter().any(|name| name == "input/deleted"),
         "{names:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_origin_reads_complete_arguments_at_a_fixed_cut_without_executing_again() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created=client.rpc("session.create",json!({"cwd":std::env::temp_dir(),"tools":["echo","branch"],"permissionPolicy":{"allowedTools":["echo","branch"]}})).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap();
+    let session = agent.get_session(id).unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":r#"tool:echo {"text":"the original arguments"}"#}),
+            )
+            .await,
+    );
+    session.idle("main").await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
+    let origin = history
+        .iter()
+        .find(|event| matches!(event.kind, EventKind::ToolUse(_)))
+        .unwrap();
+    let EventKind::ToolUse(data) = &origin.kind else {
+        unreachable!()
+    };
+    let head = session.sequence("main").unwrap();
+    let params = json!({"sessionId":id,"branchId":"main","requestId":data.request_id,"callId":data.call.id,"through":head});
+    let read = client.rpc("session.tool.get", params.clone()).await;
+    assert_ok(&read);
+    assert_eq!(read["result"]["through"], head);
+    assert_eq!(read["result"]["call"], serde_json::to_value(data).unwrap());
+    let mut earlier = params.clone();
+    earlier["through"] = json!(origin.sequence - 1);
+    let read = client.rpc("session.tool.get", earlier).await;
+    assert_ok(&read);
+    assert!(read["result"]["call"].is_null());
+    let mut other = params;
+    other["requestId"] = json!("another-request");
+    let read = client.rpc("session.tool.get", other).await;
+    assert_ok(&read);
+    assert!(read["result"]["call"].is_null());
+    assert_eq!(
+        session.sequence("main").unwrap(),
+        head,
+        "origin reads are nonmutating"
+    );
+    let child=client.rpc("session.branch_create",json!({"sessionId":id,"parentBranchId":"main","at":head,"prompt":r#"tool:echo {"text":"child arguments"}"#})).await;
+    assert_ok(&child);
+    let child = child["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    session.idle(&child).await.unwrap();
+    let history = chain_events(&session, &child, ..).await.unwrap();
+    let data = history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolUse(data) => Some(data),
+            _ => None,
+        })
+        .unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":id,"branchId":child}),
+            )
+            .await,
+    );
+    let read=client.rpc("session.tool.get",json!({"sessionId":id,"branchId":child,"requestId":data.request_id,"callId":data.call.id})).await;
+    assert_ok(&read);
+    assert_eq!(
+        read["result"]["call"],
+        serde_json::to_value(data).unwrap(),
+        "an ended branch retains its committed call arguments"
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
 }

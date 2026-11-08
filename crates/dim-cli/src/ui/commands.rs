@@ -197,6 +197,7 @@ pub const COMMANDS: &[Command] = &[
         Needs::Session,
     ),
     slash("export", "export this conversation", &[], Needs::Session),
+    slash("earlier", "load earlier conversation", &[], Needs::Session),
     slash(
         "goal",
         "follow or change the shown line's goal",

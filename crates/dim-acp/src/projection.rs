@@ -114,6 +114,40 @@ fn preview(content: &ToolContent) -> String {
 }
 
 impl Projection {
+    pub(crate) fn active_output(&mut self, output: &dim_agent_types::ActiveOutput) {
+        for (cursors, count) in [
+            (&mut self.texts, output.text_characters),
+            (&mut self.thoughts, output.thinking_characters),
+        ] {
+            let cursor = cursors.entry(output.request_id.clone()).or_default();
+            cursor.committed = count;
+            cursor.emitted = count;
+        }
+    }
+
+    pub(crate) fn pending_input(&mut self, input: dim_agent_types::PendingInput) {
+        if !input.applied
+            && let Some(user) = input.user
+        {
+            self.inputs.insert(input.input_id, user);
+        }
+    }
+
+    pub(crate) fn pending_exec(&mut self, task: &dim_agent_types::PendingExec) -> Value {
+        let id = json!(["background", task.task_id]).to_string();
+        let mut updates = Vec::new();
+        self.tool(
+            id,
+            &task.description,
+            Value::Null,
+            "in_progress",
+            &mut updates,
+        );
+        let mut update = updates.pop().expect("task update");
+        update["_meta"] = json!({"lody":{"task":{"version":1,"taskId":task.task_id,"kind":"background","status":"in_progress","description":task.description,"parentToolCallId":tool_id("main", &task.request_id, &task.call_id),"startedAtEpochSeconds":task.started_at as f64 / 1000.}}});
+        update
+    }
+
     fn tool(
         &mut self,
         id: String,
@@ -127,6 +161,18 @@ impl Projection {
         } else {
             updates.push(json!({"sessionUpdate":"tool_call_update","toolCallId":id,"status":status,"rawInput":input}));
         }
+    }
+
+    pub(crate) fn tool_origin(&mut self, data: &dim_agent_types::ToolUseData) -> Vec<Value> {
+        let mut updates = Vec::new();
+        self.tool(
+            tool_id("main", &data.request_id, &data.call.id),
+            &data.call.name,
+            json!(data.call.input),
+            "pending",
+            &mut updates,
+        );
+        updates
     }
 
     pub(crate) fn event(&mut self, event: &Event) -> Vec<Value> {
@@ -188,6 +234,8 @@ impl Projection {
             EventContent::ToolStart(data) => updates.push(json!({"sessionUpdate":"tool_call_update","toolCallId":tool_id("main", &data.request_id, &data.call_id),"status":"in_progress"})),
             EventContent::ToolResult(data) => {
                 for call in &data.results {
+                    let id=tool_id("main",&data.request_id,&call.call_id);
+                    if !self.tools.contains(&id) { self.tool(id,&call.call_id,Value::Null,"pending",&mut updates); }
                     updates.push(json!({"sessionUpdate":"tool_call_update","toolCallId":tool_id("main", &data.request_id, &call.call_id),"status":if call.result.is_error == Some(true) {"failed"} else {"completed"},"content":[{"type":"content","content":{"type":"text","text":preview(&call.result.content)}}]}));
                 }
             }

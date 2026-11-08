@@ -211,6 +211,95 @@ async fn agent(tools: Arc<RiskTools>) -> MinimalHost {
     defaults::tool_host(&mut builder, tools);
     MinimalHost::start(&builder).await.unwrap()
 }
+
+#[tokio::test]
+async fn restore_cancels_only_unsettled_approvals_across_pages_without_running_tools() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("approval-recovery", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        rutis::Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "approval-recovery".into(),
+            branch_id: "main".into(),
+        },
+        Vec::new(),
+        store.clone(),
+    );
+    for index in 0..259 {
+        timeline
+            .append(
+                EventKind::ApprovalRequest(ApprovalRequestData {
+                    approval_id: format!("approval-{index}"),
+                    source: BranchSource::Host {
+                        operation_id: format!("operation-{index}"),
+                    },
+                    call: ApprovalCallData {
+                        name: "write".into(),
+                        input: JsonObject::from_iter([("unused".into(), "x".repeat(4096).into())]),
+                    },
+                    reason: "needs approval".into(),
+                })
+                .into(),
+            )
+            .unwrap();
+    }
+    timeline
+        .append(
+            EventKind::ApprovalRespond(ApprovalRespondData {
+                approval_id: "approval-0".into(),
+                decision: ApprovalDecision::Deny,
+            })
+            .into(),
+        )
+        .unwrap();
+    timeline
+        .append(
+            EventKind::ApprovalCancelled(ApprovalCancelledData {
+                approval_id: "approval-1".into(),
+                reason: "already cancelled".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    drop(timeline);
+    let tools = Arc::new(RiskTools::default());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(store);
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    defaults::tool_host(&mut builder, tools.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .restore_session("approval-recovery".into())
+        .await
+        .unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let cancelled = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ApprovalCancelled(data) => Some(data.approval_id.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(cancelled.len(), 258);
+    assert!(!cancelled.contains("approval-0"));
+    for index in 1..259 {
+        assert!(cancelled.contains(format!("approval-{index}").as_str()));
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ApprovalCancelled(_)))
+            .count(),
+        258,
+        "settlement writes during recovery do not change the selection or settle an approval twice"
+    );
+    assert_eq!(tools.calls.load(Ordering::SeqCst), 0);
+    agent.close().await.unwrap();
+}
 /// The default profile with `rules` bound in place of its empty host.
 async fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());

@@ -709,22 +709,37 @@ async fn goal_pending_input_and_interrupts() {
         .unwrap();
     wait_goal(&session, "main", r#"reason="interrupted""#).await;
     fixture.idle_on(&id, "main").await;
-    let interrupt = branch_events(&session, "main", ..)
-        .await
-        .unwrap()
+    let history = branch_events(&session, "main", ..).await.unwrap();
+    let interrupt = history
         .iter()
         .rev()
         .find(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
         .expect("the interrupt")
         .sequence;
+    let pause = goal_writes(&session, "main")
+        .await
+        .into_iter()
+        .find(|block| block.marker.contains(r#"reason="interrupted""#))
+        .expect("the interrupt pause");
+    let answered = after_of(&pause.marker).expect("the pause names its deciding fact");
+    assert!(
+        answered == interrupt
+            || history.iter().any(|event| {
+                event.sequence == answered
+                    && event.sequence > interrupt
+                    && event.sequence < pause.sequence
+                    && matches!(event.kind, EventKind::TurnEnd(_))
+            }),
+        "A.4 permits the interrupt or a later turn end to decide the pause: {pause:?}"
+    );
     assert_eq!(
-        goal_block(&session, "main", r#"reason="interrupted""#).await,
+        pause.text,
         texts::automatic_pause(
             "main",
             "ship",
             "interrupted",
             "the user interrupted the turn",
-            interrupt
+            answered
         )
     );
     let writes = goal_writes(&session, "main").await;
@@ -842,7 +857,35 @@ async fn goal_settings_resume_unload_and_fork() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn goal_on_a_line_behaves_as_on_main() {
-    let mut fixture = Fixture::start().await;
+    struct GatedEcho {
+        permits: tokio::sync::Semaphore,
+        calls: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+    }
+    impl ModelDriver for GatedEcho {
+        fn invoke(
+            &self,
+            request: Arc<ModelRequest>,
+            connection: ModelConnection,
+            cancel: CancellationToken,
+        ) -> HostFuture<'_, ModelStream> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.entered.notify_one();
+                tokio::select! {
+                    permit = self.permits.acquire() => permit.unwrap().forget(),
+                    _ = cancel.cancelled() => return Err(dim_agent_capabilities::host::HostError::Cancelled("model cancelled".into())),
+                }
+                EchoModel.invoke(request, connection, cancel).await
+            })
+        }
+    }
+    let model = Arc::new(GatedEcho {
+        permits: tokio::sync::Semaphore::new(1),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+    });
+    let mut fixture = Fixture::start_with(model.clone()).await;
     fixture.set_limit(1000).await;
     let id = fixture
         .new_session(&["goal_update", "wait", "branch"])
@@ -878,6 +921,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
         "line work",
         "the creator's prompt stays the opening input's words"
     );
+    model.permits.add_permits(1);
     let line_set = fixture
         .goal_on(
             &id,
@@ -903,7 +947,13 @@ async fn goal_on_a_line_behaves_as_on_main() {
     )
     .await;
     wait_goal(&session, &child, r#"count="1""#).await;
-    fixture.idle_on(&id, &child).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while model.calls.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+            model.entered.notified().await;
+        }
+    })
+    .await
+    .expect("the continuation's model request is running");
     let operator = session
         .submit(
             "keep going".into(),
@@ -913,6 +963,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
         .await
         .unwrap()
         .sequence;
+    model.permits.add_permits(2);
     let (reset, expected) = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let writes = goal_writes(&session, &child).await;
@@ -941,9 +992,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
         "the continuation after the operator input counts {expected}: {reset}"
     );
     let after = after_of(&reset).expect("the continuation's after");
-    // The operator's input restarts the count; the continuation after it
-    // states the streak as a literal, so a wrong streak fails here.
-    let idle = 2;
+    let idle = 0;
     assert_eq!(
         goal_block(&session, &child, &format!(r#"count="{expected}""#)).await,
         texts::continuation(&child, expected, Some(1000), idle, after),
@@ -955,6 +1004,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
         .await
         .unwrap();
     wait_goal(&session, &child, r#"op="pause""#).await;
+    model.permits.add_permits(1);
     fixture.idle_on(&id, &child).await;
     assert_eq!(
         goal_block(&session, &child, r#"op="pause""#).await,
@@ -1006,9 +1056,9 @@ async fn goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() {
     let (created, creation) = &creates[0];
     let evaluation = turn_ends(&session, "main")
         .await
-        .last()
-        .copied()
-        .expect("a turn end");
+        .into_iter()
+        .rfind(|sequence| sequence < created)
+        .expect("the turn end that requested evaluation");
     assert_eq!(
         creation.source,
         BranchSource::Host {
@@ -1028,8 +1078,9 @@ async fn goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() {
     assert!(
         writes
             .iter()
+            .filter(|block| block.sequence > request.sequence)
             .all(|block| !block.marker.contains("continuation")),
-        "{writes:#?}"
+        "a completion request must wait for its evaluator: {writes:#?}"
     );
     let child = &creation.branch;
     let prompt = first_user_text(&session, child).await;

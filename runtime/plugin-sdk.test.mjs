@@ -246,8 +246,9 @@ void branch.dispatcher.consume('counter', ['input/message'],
   async event => { void (event.sequence as number | bigint) });
 const cutoff: number | bigint = await branch.dispatcher.committed();
 const own: Awaited<ReturnType<Services['timeline']['query']>> = await branch.timeline.query({
-  scope: 'branch', include_publishing: true, from_sequence: 1n, order_by: 'sequence',
-  direction: 'ascending', limit: 1n, offset: 0n,
+  scope: 'branch', include_publishing: true, through: cutoff,
+  query: { select: { kind: 'fields', fields: ['id', 'kind'] } },
+  page: { limit: 1n },
 });
 void branch.treeCommands.input('main', { blocks: [{ type: 'raw', text: 'source marker' }], mode: 'queue' });
 void branch.treeCommands.create('main', cutoff, { prompt: 'child', source: { kind: 'host', operation_id: 'create-id' } }, cancelled);

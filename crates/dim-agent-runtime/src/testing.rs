@@ -334,85 +334,45 @@ async fn read<R: std::ops::RangeBounds<u64> + Send>(
         Bound::Excluded(end) => Some(end.saturating_sub(1)),
         Bound::Unbounded => None,
     };
+    let visible = match &log {
+        Log::Session(session, branch) => session.sequence(branch)?,
+        Log::Timeline(timeline) => timeline.committed(),
+    };
+    let through = end.unwrap_or(visible).min(visible);
+    if start > 1 && start > through {
+        return Ok(Vec::new());
+    }
     let mut query = TimelineQuery {
         scope,
-        from_event: None,
-        from_sequence: (start > 1).then_some(start),
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Ascending,
+        from: (start > 1).then(|| dim_agent_types::TimelinePosition {
+            branch_id: log.branch(),
+            sequence: start,
+        }),
+        through: Some(through),
         include_publishing: matches!(log, Log::Timeline(_)),
-        kinds: Vec::new(),
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: std::num::NonZeroU64::new(page).expect("a page keeps at least one fact"),
-        offset: 0,
+        query: QuerySpec {
+            filter: None,
+            select: QuerySelect::Events,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: std::num::NonZeroU64::new(page).expect("a page keeps at least one fact"),
+            after: None,
+        }),
     };
-    let own = log.branch();
-    let mut events: Vec<(
-        dim_agent_types::TimelinePosition,
-        Arc<dim_agent_types::AgentEvent>,
-    )> = Vec::new();
-    // The fact the last page ended at, when the next page begins there again:
-    // a chain read anchored by event id includes the fact it names, so that
-    // page asks for one fact more than it keeps.
-    let mut repeated = None;
-    let mut request = page;
+    let mut events = Vec::new();
     loop {
-        let mut reply = log.query(query.clone()).await?;
-        let short = (reply.events.len() as u64) < request;
-        if repeated.is_some() && repeated.as_ref() == reply.positions.first() {
-            reply.events.remove(0);
-            reply.positions.remove(0);
-        }
-        let last = reply.positions.last().cloned();
-        events.extend(reply.positions.into_iter().zip(reply.events));
-        if short {
-            break;
-        }
-        match last {
-            // A chain read's `from_sequence` is anchored on the queried branch,
-            // so a page that ended in an ancestor continues at that fact's id.
-            Some(last) if last.branch_id != own => {
-                let Some(id) = events.last().map(|(_, event)| event.id.clone()) else {
-                    break;
-                };
-                query.from_sequence = None;
-                query.from_event = Some(id);
-                request = page + 1;
-                query.limit =
-                    std::num::NonZeroU64::new(request).expect("a page keeps at least one fact");
-                repeated = Some(last);
-            }
-            Some(last) => {
-                query.from_event = None;
-                query.from_sequence = Some(last.sequence + 1);
-                request = page;
-                query.limit =
-                    std::num::NonZeroU64::new(request).expect("a page keeps at least one fact");
-                repeated = None;
-            }
-            None => break,
-        }
-        if end.is_some_and(|end| {
-            events.last().is_some_and(|(position, _)| {
-                // The end bounds the queried branch: a page that ends on an
-                // ancestor continues, since its sequence says nothing about
-                // the branch reaching the end.
-                position.branch_id == own && position.sequence >= end
-            })
-        }) {
+        let reply = log.query(query.clone()).await?;
+        let QueryOutput::Events { events: rows } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        events.extend(rows.into_iter().map(|row| row.event));
+        query.page.as_mut().unwrap().after = reply.next;
+        if query.page.as_ref().unwrap().after.is_none() {
             break;
         }
     }
-    Ok(events
-        .into_iter()
-        .filter(|(position, event)| match end {
-            // The end bounds the branch the range names; an ancestor is read
-            // to its cut.
-            Some(end) => position.branch_id != own || event.sequence <= end,
-            None => true,
-        })
-        .map(|(_, event)| event)
-        .collect())
+    Ok(events)
 }

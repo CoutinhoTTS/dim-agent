@@ -69,20 +69,20 @@ and it tells it in its own shape.
 
 Each call reads the calling branch's chain backwards through `branch.query()`: the
 chain scope, sequence order, the descending direction and the kinds the projection
-folds (§3.2), one page of `PAGE_EVENTS` events at a time, carrying the page's offset
+folds (§3.2), one page of `PAGE_EVENTS` events at a time, carrying the page's continuation
 into the next read until its answer is met (§5.3). The chain is the branch's own
 facts and its ancestors up to the fork point (the inherited prefix); for a forked
 Session's `main` it is the copied facts and then its `session/forked` and its own
 events. Both are history from before the fork, and Recall reads them like any other.
 
 The read fixes its selection before the first page: it reads the calling branch's
-published sequence once and starts every page at that sequence (`from_sequence`), so
-each page bounds that branch at the lesser of its head when the page runs and the
-sequence the call fixed. The bound comes from the branch itself, not from a position
+published sequence once and passes it as `through` on every page. Each page uses
+that same cutoff and the preceding page's continuation. The bound comes from the branch itself, not from a position
 among the returned facts, so it holds even when the first page holds no fact of that
-branch. The collected events are one contiguous suffix of the chain below that head: a
+branch. The transcript window is a contiguous suffix below that head; separately queried
+origins and joins also use that cutoff. A
 fact published while the read runs is outside the selection, never returned and never
-told out of order, and the page's offset keeps counting from the same place.
+told out of order, and continuation advances only within that fixed selection.
 Everything is computed from that one head, so a call never mixes two heads. An
 ancestor is still read to its cut. The pattern is the one `wait` already uses
 ([wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)): a Session tool that
@@ -90,24 +90,82 @@ resolves the calling branch from `ToolExecutionContext.branch_id` through
 `TreeCommands`. Recall does not apply compaction: it walks the whole pinned history the
 pages reach.
 
-The read does not fold while it pages. It stops when the collected pages reach the turn or the
-count the answer needs: the turn of the id it opens, 21 entries for the index, 21 candidate things
-for a search, or the start of the chain. It then folds the collected pages once. A search whose
-fold finds fewer matches than a page finishes the read without folding and folds the whole chain
-once more, so a call folds at most twice however many pages it reads; a search with no match reads
-the chain and folds twice, not once per page.
+Search has a separate candidate and verification path. It first selects origin
+positions and join identities, then reads only their required bodies and turn
+relationships. Recall renders each candidate with the rules below and checks every
+`about` word against that same thing's body. It releases rejected bodies as it goes
+and stops after one page plus one verified match. Candidate exhaustion, inherited
+history or a large candidate set must not switch to collecting the whole chain.
+
+The query/index requirements and the storage compatibility boundary are raised in
+[Timeline property-query design §6B](../timeline-property-query.md#6b-recall-的候选与正文).
+An event-level JSON text match is not sufficient: words can span deltas belonging
+to one reply, and rendered labels need not appear in the raw data. Without a proven
+superset index, search must enumerate complete candidates and report that linear
+cost; it cannot claim the indexed-search target from #1147. Index hits are never
+answers until this capability verifies their rendered bodies.
+
+Opening a thing resolves its origin id, the input consumption anchor if applicable, and its
+joins directly. Opening a turn first resolves its start and end positions, then pages origin
+properties within that interval; it reads bodies one batch at a time and stops after the requested
+offset plus one page and one extra visible thing. Missing ids do not trigger a history scan.
+The turn index stops at one page plus one entry. Required input origins are fetched by identity
+instead of extending a transcript suffix to find a much older message.
 
 A page cuts the oldest turn it holds. Recall folds the collected events in order and tells
 nothing from before that turn's `turn/end`, so the turn a page cuts is not reported and every
 later event is folded exactly as folding the whole history folds it. The `input/message` of an
 input consumed after that point is part of the page even when the message itself is older,
-because the join and the keyed liveness rule need it; while it is missing, the read takes one
-more page. A page inside the branch itself is after its own `branch/start`, and a page of the
+because the join and the keyed liveness rule need it; fetch it by `input_id` without
+reading the intervening history. A page inside the branch itself is after its own `branch/start`, and a page of the
 inherited prefix is before it: the two lines of §3.6 that depend on the branch start read
 accordingly.
 
 On a line while it is ending, `branch/end` is not told and the `end` call is told like any other
 call.
+
+
+Candidate queries return `position`, `kind`, `id` and the identities required by
+§3.2, not the body. For input things the candidate is `input/consumed`: its position
+is the ordering anchor and `input_id` names the origin. For the other things the
+candidate is the origin itself. A `tool` filter selects only tool-start candidates
+with that name. `before` resolves one anchor at the fixed cutoff and excludes
+candidates at or after it; it does not bound their later joined results.
+
+For each batch of at most `PAGE_EVENTS` candidates:
+
+1. Fetch input origins by id; fetch reply joins by request identity; fetch tool
+   joins by call identity, then the approval/task/collaboration identities those
+   joins name. Use a bounded `in`/array predicate for a batch of identities rather
+   than one query per historical event. All join queries keep the original cutoff
+   and ancestor limits, including when a join lies outside the candidate page.
+2. Read the required turn boundaries and first model-start as fields. These give
+   the containing turn, whether an input was consumed while working, and whether
+   a truncated parent turn continues on the parent. Do not infer these values
+   from a body page starting mid-turn.
+3. Determine current markers independently of the candidate page: select the
+   latest completed compaction and, for keys present in the candidate inputs,
+   read later block keys/retire flags and consumption identities. Fold those
+   fields under §3.5; do not load the later inputs' text just to find the latest
+   key. Thus an old candidate cannot become “current” because its replacement
+   lies outside the page.
+4. Render each thing with the same functions used by `open`, lowercase its full
+   rendered body with the existing Unicode rule and test all search words. Keep
+   at most `PAGE_ENTRIES + 1` verified hits in descending anchor order. Release
+   the batch's bodies and intermediate joins before reading another batch.
+
+The retained work is one candidate batch, its joined content and one answer page;
+a single large thing can still be large. Reading a short answer does not justify
+keeping unrelated history. Candidate pages with no verified match continue with
+their cursor. Exhaustion ends search, not a second whole-history fold.
+
+Flow acceptance compares candidate search with complete projection at the same
+head: words split across text deltas, final `model-content` replacing deltas,
+Unicode case folding, short words and CJK, rendered labels, a consumed input much
+older than its turn, later key retirement, later tool results, inherited history,
+sparse matches and no matches. The complete projection is a test oracle only;
+it is not a production fallback. SQL measurement must distinguish candidate scans
+from joined body reads, including the no-index full-candidate path.
 
 ### 3.2 Things: an origin event and what joins it
 
@@ -540,16 +598,14 @@ type change.
 
 ## 12. Requirements raised to mechanism owners
 
-- **A bounded, kind-filtered chain read on the facade.** Recall reads its pages through
-  `Branch::query` and a `TimelineQuery`: the runtime returns the newest events of the kinds
-  Recall names as one contiguous suffix of the branch chain, each with the branch and sequence it
-  was read from, and the page's offset continues the read. A chain read that names the calling
-  branch and a sequence in `from_sequence` starts that branch there and bounds it at the lesser
-  of its published head and the sequence, so every page keeps the selection the first page fixed;
-  the ancestors are still read to their cuts. The facade gains no cache and no projection rule;
-  the read is
-  [timeline storage §5](../../architecture/rust-agent/timeline-storage.md#有界读取与恢复扫描)'s,
-  and `TimelineStore::query` states its page and skip bounds.
+- **Property selection and bounded body reads on the facade.** Recall requires fixed-cut chain
+  queries that select origin positions and join identities before event bodies, with keyset
+  continuations. Every continuation and identity lookup uses the calling branch's captured
+  `through`; ancestor intervals retain their fork cuts. Array predicates select input keys and
+  result call identities. Tool joins use `(request_id, call_id)`, not `call_id` alone. The
+  facade supplies query results without retaining a reader cache or applying Recall's rendering.
+  Search acceleration and its no-false-negative requirement are specified in
+  [Timeline property-query design §6B](../timeline-property-query.md#6b-recall-的候选与正文).
 
 Considered and not needed:
 

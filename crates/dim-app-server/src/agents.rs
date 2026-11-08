@@ -8,11 +8,12 @@ use crate::{
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryScope,
+    NoConfig, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec,
+    QueryValue, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryScope,
+    TimelineReadScope, TimelineReadSegment,
 };
 pub use dim_agent_types::AgentProfile;
-use dim_agent_types::{ContentBlock, EventKind};
+use dim_agent_types::{EventKind, TimelinePosition};
 use rutis::host::{
     BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
@@ -371,12 +372,24 @@ async fn session_history_page(
         session.batch_end(branch, after).await?;
     }
     session.batch_end(branch, through).await?;
-    let mut events = session
-        .query(branch, history_page_query(after, limit))
-        .await?
-        .events;
-    events.retain(|event| event.sequence <= through);
-    while let Some(sequence) = events.last().map(|event| event.sequence) {
+    if after >= through || limit == 0 {
+        return Ok(vec![]);
+    }
+    let mut from = after + 1;
+    let mut wanted = limit;
+    let mut events = Vec::new();
+    loop {
+        let reply = session
+            .query(branch, history_page_query(branch, from, through, wanted))
+            .await?;
+        let QueryOutput::Events { events: rows } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        if rows.is_empty() {
+            break;
+        }
+        events.extend(rows.into_iter().map(|row| row.event));
+        let sequence = events.last().unwrap().sequence;
         if sequence >= through {
             break;
         }
@@ -385,14 +398,8 @@ async fn session_history_page(
             Err(AgentError::InvalidInput(_)) => {}
             Err(error) => return Err(error),
         }
-        let next = session
-            .query(branch, history_page_query(sequence, 1))
-            .await?
-            .events;
-        let Some(event) = next.into_iter().find(|event| event.sequence <= through) else {
-            break;
-        };
-        events.push(event);
+        from = sequence + 1;
+        wanted = 1;
     }
     Ok(events)
 }
@@ -414,21 +421,26 @@ async fn ended_page(
 }
 
 /// The facts after `after` a page asks for, up to `limit`.
-fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQuery {
-    dim_agent_runtime::TimelineQuery {
-        scope: dim_agent_runtime::TimelineQueryScope::Branch,
+fn history_page_query(branch: &str, from: u64, through: u64, limit: usize) -> TimelineQuery {
+    TimelineQuery {
+        scope: TimelineQueryScope::Branch,
         include_publishing: false,
-        from_event: None,
-        from_sequence: Some(after.saturating_add(1)),
-        order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
-        direction: dim_agent_runtime::TimelineQueryDirection::Ascending,
-        kinds: Vec::new(),
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: NonZeroU64::new(u64::try_from(limit).unwrap_or(u64::MAX).max(1))
-            .expect("a page keeps one fact"),
-        offset: 0,
+        from: Some(TimelinePosition {
+            branch_id: branch.into(),
+            sequence: from,
+        }),
+        through: Some(through),
+        query: QuerySpec {
+            filter: None,
+            select: QuerySelect::Events,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: NonZeroU64::new(limit as u64).expect("a page keeps one fact"),
+            after: None,
+        }),
     }
 }
 
@@ -443,24 +455,19 @@ async fn chain_through(
     at: u64,
     rest: &mut RestPoint,
 ) -> dim_agent_runtime::Result<()> {
-    let mut query = history_page_query(0, PREFIX_PAGE as usize);
-    query.scope = dim_agent_runtime::TimelineQueryScope::Chain;
+    let mut query = history_page_query("main", 1, at, PREFIX_PAGE as usize);
+    query.scope = TimelineQueryScope::Chain;
+    query.from = None;
     loop {
         let reply = session.query("main", query.clone()).await?;
-        let short = (reply.events.len() as u64) < PREFIX_PAGE;
-        let last = reply.positions.last().map(|position| position.sequence);
-        let cut = reply.events.partition_point(|event| event.sequence <= at);
-        rest.page(&reply.events[..cut]);
-        if reply
-            .events
-            .last()
-            .is_some_and(|event| event.sequence >= at)
-        {
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        let events: Vec<_> = events.into_iter().map(|row| row.event).collect();
+        rest.page(&events);
+        query.page.as_mut().unwrap().after = reply.next;
+        if query.page.as_ref().unwrap().after.is_none() {
             break;
-        }
-        match (short, last) {
-            (false, Some(last)) => query.from_sequence = Some(last + 1),
-            _ => break,
         }
     }
     Ok(())
@@ -1045,71 +1052,96 @@ impl AgentIndex {
         through: u64,
         created_at: u64,
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
-        let inputs = TimelineQuery {
+        let query = TimelineQuery {
             scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
             include_publishing: false,
-            from_event: None,
-            from_sequence: None,
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Ascending,
-            kinds: vec!["input/message".into()],
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT)
-                .expect("a summary scan keeps at least one input"),
-            offset: 0,
+            query: QuerySpec {
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec!["input/message".into()],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec![
+                        "data.user.content[].type".into(),
+                        "data.user.content[].text".into(),
+                    ],
+                },
+                group_by: vec![],
+                pick: None,
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT).unwrap(),
+                after: None,
+            }),
         };
         let loaded = match self.session(id) {
-            Some((_, session)) => match async {
-                let events = session.query("main", inputs.clone()).await?.events;
-                Ok::<_, AgentError>(events)
-            }
-            .await
-            {
-                Ok(events) => Some(events),
-                // Released under the read: the store holds every event it
-                // published (idle unload D8).
+            Some((_, session)) => match session.query("main", query.clone()).await {
+                Ok(reply) => Some(reply.result),
                 Err(_) if session.is_unloading() => None,
                 Err(error) => return Err(error),
             },
             None => None,
         };
-        let events = if let Some(events) = loaded {
-            events
-        } else {
-            let store = self
-                .session_store
-                .as_ref()
-                .ok_or_else(|| AgentError::Closed(id.into()))?;
-            let key = TimelineKey {
-                session_id: id.into(),
-                branch_id: "main".into(),
-            };
-            store
-                .timeline_store()
-                .query(&key, &inputs, 1, through)
-                .await?
-                .events
-        };
-        let preview = events
-            .iter()
-            .find_map(|event| {
-                let EventKind::InputMessage(data) = &event.kind else {
-                    return None;
+        let result = match loaded {
+            Some(result) => result,
+            None => {
+                let store = self
+                    .session_store
+                    .as_ref()
+                    .ok_or_else(|| AgentError::Closed(id.into()))?;
+                let scope = TimelineReadScope {
+                    key: TimelineKey {
+                        session_id: id.into(),
+                        branch_id: "main".into(),
+                    },
+                    through,
+                    segments: vec![TimelineReadSegment {
+                        branch_id: "main".into(),
+                        from: 1,
+                        through,
+                        stored_through: through,
+                        tail: vec![],
+                    }],
                 };
-                data.user.as_ref()
+                store
+                    .timeline_store()
+                    .query(&scope, &query.query, query.page.as_ref())
+                    .await?
+                    .result
+            }
+        };
+        let QueryOutput::Rows { rows } = result else {
+            unreachable!("field selection returns rows")
+        };
+        let preview = rows
+            .iter()
+            .find_map(|row| match row.values.as_slice() {
+                [QueryValue::Missing, QueryValue::Missing] => None,
+                [
+                    QueryValue::Elements { values: kinds },
+                    QueryValue::Elements { values: texts },
+                ] => Some((kinds, texts)),
+                _ => unreachable!("user content projections retain array positions"),
             })
-            .and_then(|user| {
-                let text = user
-                    .content
+            .and_then(|(kinds, texts)| {
+                let text = kinds
                     .iter()
-                    .filter_map(|block| {
-                        if let ContentBlock::Text { text } = block {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
+                    .zip(texts)
+                    .filter_map(|(kind, text)| match (kind, text) {
+                        (
+                            QueryValue::Value {
+                                value: serde_json::Value::String(kind),
+                            },
+                            QueryValue::Value {
+                                value: serde_json::Value::String(text),
+                            },
+                        ) if kind == "text" => Some(text.as_str()),
+                        _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -1119,86 +1151,112 @@ impl AgentIndex {
         let updated_at = self
             .latest_activity(id, through)
             .await?
-            .map_or(created_at, |event| event.create_at);
+            .unwrap_or(created_at);
         Ok((preview, updated_at))
     }
 
-    /// The newest Session-activity event on `main` at or before `through`,
-    /// or `None` when the branch holds none (issue #1099): the value the
-    /// summary's `updatedAt` derives from, selected by the same predicate
-    /// and kinds as the storage catalog, so the two listings cannot
-    /// disagree. A Session in memory answers from its published facts; an
-    /// unloading or absent one is read from the store.
-    ///
-    /// The query asks for the activity kinds descending, and rows whose kind
-    /// is activity but whose message is host-injected are skipped, so the
-    /// read walks only as far as the candidate run that trails the answer.
+    /// The newest Session activity timestamp on main through the fixed cutoff.
+    /// Idle unload falls back to persisted facts, which include all published facts.
     async fn latest_activity(
         &self,
         id: &str,
         through: u64,
-    ) -> dim_agent_runtime::Result<Option<Arc<dim_agent_types::AgentEvent>>> {
-        let mut to = through;
-        loop {
-            if to == 0 {
-                return Ok(None);
-            }
-            let query = |from_sequence: Option<u64>| TimelineQuery {
-                scope: TimelineQueryScope::Branch,
-                include_publishing: false,
-                from_event: None,
-                from_sequence,
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: crate::storage::ACTIVITY_KINDS
-                    .iter()
-                    .map(|kind| (*kind).into())
-                    .collect(),
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT)
-                    .expect("an activity page keeps at least one event"),
-                offset: 0,
-            };
-            let events = match self.session(id) {
-                Some((_, session)) => match session.query("main", query(Some(to))).await {
-                    Ok(page) => Some(page.events),
-                    // Released under the read: the store holds every event
-                    // it published (idle unload D8).
-                    Err(_) if session.is_unloading() => None,
-                    Err(error) => return Err(error),
+    ) -> dim_agent_runtime::Result<Option<u64>> {
+        let query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: false,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: crate::storage::ACTIVITY_KINDS
+                                .iter()
+                                .map(|kind| (*kind).into())
+                                .collect(),
+                        },
+                        QueryFilter::Or {
+                            conditions: vec![
+                                QueryFilter::Not {
+                                    condition: Box::new(QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "kind".into(),
+                                        },
+                                        values: vec!["input/message".into()],
+                                    }),
+                                },
+                                QueryFilter::Present {
+                                    value: QueryOperand::Field {
+                                        path: "data.user".into(),
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["create_at".into()],
                 },
-                None => None,
-            };
-            let events = if let Some(events) = events {
-                events
-            } else {
+                group_by: vec![],
+                pick: Some(QueryPick::Last),
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::MIN,
+                after: None,
+            }),
+        };
+        let loaded = match self.session(id) {
+            Some((_, session)) => match session.query("main", query.clone()).await {
+                Ok(reply) => Some(reply.result),
+                Err(_) if session.is_unloading() => None,
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
+        let result = match loaded {
+            Some(result) => result,
+            None => {
                 let store = self
                     .session_store
                     .as_ref()
                     .ok_or_else(|| AgentError::Closed(id.into()))?;
-                let key = TimelineKey {
-                    session_id: id.into(),
-                    branch_id: "main".into(),
+                let scope = TimelineReadScope {
+                    key: TimelineKey {
+                        session_id: id.into(),
+                        branch_id: "main".into(),
+                    },
+                    through,
+                    segments: vec![TimelineReadSegment {
+                        branch_id: "main".into(),
+                        from: 1,
+                        through,
+                        stored_through: through,
+                        tail: vec![],
+                    }],
                 };
                 store
                     .timeline_store()
-                    .query(&key, &query(None), 1, to)
+                    .query(&scope, &query.query, query.page.as_ref())
                     .await?
-                    .events
-            };
-            if let Some(event) = events
-                .iter()
-                .find(|event| crate::storage::activity(&event.kind))
-            {
-                return Ok(Some(event.clone()));
+                    .result
             }
-            let Some(last) = events.last() else {
-                return Ok(None);
+        };
+        let QueryOutput::Rows { rows } = result else {
+            unreachable!("field selection returns rows")
+        };
+        Ok(rows.first().map(|row| {
+            let [QueryValue::Value { value: timestamp }] = row.values.as_slice() else {
+                unreachable!("event has a creation timestamp")
             };
-            to = last.sequence.saturating_sub(1);
-        }
+            timestamp
+                .as_u64()
+                .expect("event creation timestamp is unsigned")
+        }))
     }
 
     pub(crate) async fn prepare_session(

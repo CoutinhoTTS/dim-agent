@@ -5,10 +5,17 @@ fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
-        wire.hello(&[]);
+        wire.hello(&["session.methods", "session.branch.get"]);
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
+        let methods = wire.read("session.methods");
+        wire.reply(&methods, json!({"methods":[
+            {"name":"session.input.pending","mutating":false},
+            {"name":"session.exec.pending","mutating":false},
+            {"name":"session.turn.get","mutating":false}
+        ]}));
         let history = wire.read("session.history");
+        assert_eq!(history["params"]["latestTurn"], true);
         let branches: Vec<_> = ["child-a", "child-b", "child-c"].iter().enumerate().map(|(i, branch)| {
             fact(branch, i as u64 + 1, 1000, "branch", "create", json!({
                 "branch":branch,"at":{"kind":"create"},
@@ -16,44 +23,63 @@ fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue
             }))
         }).collect();
         wire.reply(&history, json!({"events":branches,"through":8,"nextAfter":8,"done":true}));
-        let mut branches = ["child-a", "child-b", "child-c"].into_iter();
-        for _ in 0..5 {
+        let mut inventories = 0;
+        let mut context = false;
+        let mut accounts = false;
+        while inventories < 4 || !context || !accounts {
             let request = wire.read_any();
+            let branch = request["params"]["branchId"].as_str().unwrap_or("main");
+            let through = if branch == "main" { 8 } else { 2 };
             match request["method"].as_str().unwrap() {
-                "session.context.usage" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
-                "account.providers" => wire.reply(&request, json!([])),
-                "session.history" => {
-                    let branch = branches.next().expect("one discovery page per branch");
-                    assert_eq!(request["params"]["branchId"], branch);
-                    let text = fact(&format!("{branch}-text"), 2, 2000, "step", "text", json!({
-                        "turn_id":"turn","request_id":"request","delta":format!("saved transcript of {branch}"),
-                    }));
-                    wire.reply(&request, json!({"events":[text],"through":2,"nextAfter":2,"done":true}));
+                "session.context.usage" => {
+                    context = true;
+                    wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}}));
                 }
-                method => panic!("unexpected request {method}"),
+                "account.providers" => { accounts = true; wire.reply(&request, json!([])); }
+                "session.input.pending" => wire.reply(&request, json!({"branchId":branch,"through":through,"inputs":[],"next":null})),
+                "session.exec.pending" => wire.reply(&request, json!({"branchId":branch,"through":through,"tasks":[],"next":null})),
+                "session.turn.get" => {
+                    inventories += usize::from(request["params"]["through"].is_number());
+                    wire.reply(&request, json!({"branchId":branch,"through":through,"turn":null,"output":null}));
+                }
+                method => panic!("Unopened branches must not read a transcript: {method}"),
             }
         }
         ready.send(()).unwrap();
+        let detail = wire.read("session.branch.get");
+        assert_eq!(detail["params"], json!({"sessionId":"session","branchId":"child-a"}));
+        wire.reply(&detail, json!({"branchId":"child-a","parentBranchId":"main","branchPoint":1,"state":"open","head":2,"purpose":"owner supplied purpose","cutMessages":0,"end":null}));
         let history = wire.read("session.history");
-        assert_eq!(history["params"], json!({"sessionId":"session","branchId":"child-a","after":0,"limit":256}));
+        assert_eq!(history["params"], json!({"sessionId":"session","branchId":"child-a","latestTurn":true,"limit":256}));
         wire.reply(&history, json!({"events":[fact("child-a-text",2,2000,"step","text",json!({
             "turn_id":"turn","request_id":"request","delta":"saved transcript of child-a",
         }))],"through":2,"nextAfter":2,"done":true}));
         event(wire, "child-a", fact("child-a-live",3,3000,"step","text",json!({
             "turn_id":"turn","request_id":"request","delta":" and live continuation",
         })));
+        for (method, field) in [("session.input.pending", "inputs"), ("session.exec.pending", "tasks")] {
+            let request = wire.read(method);
+            wire.reply(&request, json!({"branchId":"child-a","through":2,field:[],"next":null}));
+        }
+        let request = wire.read("session.turn.get");
+        wire.reply(&request, json!({"branchId":"child-a","through":2,"turn":null,"output":null}));
         wire.hold();
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
-    readiness.recv_timeout(PATIENCE).unwrap();
+    assert!(
+        readiness.recv_timeout(PATIENCE).is_ok(),
+        "{}",
+        terminal.transcript
+    );
     terminal.write(b"/lines\r");
     terminal.until("the session itself");
     terminal.write(b"\x1b[B\r");
     terminal.until("saved transcript of child-a and live continuation");
     assert!(!terminal.transcript.contains("saved transcript of child-b"));
     assert!(!terminal.transcript.contains("saved transcript of child-c"));
+    terminal.write(b"/lines\r");
+    terminal.until("owner supplied purpose");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
@@ -349,6 +375,39 @@ fn command(id: &str, sequence: u64, at: u64, label: &str) -> Value {
     )
 }
 
+fn owner_request(wire: &mut Wire, method: &str, branch: &str) -> Value {
+    loop {
+        let request = wire.frame();
+        if request["method"] == method && request["params"]["branchId"] == branch {
+            return request;
+        }
+        assert!(
+            wire.empty_state(&request),
+            "unexpected request while reading {branch}: {request}"
+        );
+    }
+}
+
+fn pending_command(id: &str, sequence: u64, at: u64, label: &str) -> Value {
+    json!({"eventId":id,"sequence":sequence,"startedAt":at,"taskId":id,
+        "turnId":"turn","requestId":"request","callId":id,"description":label})
+}
+
+fn child_inventory(wire: &mut Wire, branch: &str, tasks: Value) {
+    let cut = owner_request(wire, "session.turn.get", branch);
+    wire.reply(
+        &cut,
+        json!({"branchId":branch,"through":8,"turn":null,"output":null}),
+    );
+    let request = owner_request(wire, "session.exec.pending", branch);
+    wire.reply(
+        &request,
+        json!({"branchId":branch,"through":8,"tasks":tasks,"next":null}),
+    );
+    let turn = owner_request(wire, "session.turn.get", branch);
+    wire.empty_state(&turn);
+}
+
 fn delegation(id: &str, sequence: u64, label: &str) -> Value {
     fact(
         id,
@@ -430,7 +489,13 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
                     "preview":"Paged history","model":{"providerId":"test","modelId":"restored-model"},"updatedAt":1}]));
             }
             if !resume_on_launch {
-                let detach = wire.read("session.detach");
+                let mut detach=wire.read_any();
+                while detach["method"]=="session.summaries" {
+                    wire.reply(&detach,json!([{"sessionId":"paged","cwd":workspace,
+                        "preview":"Paged history","model":{"providerId":"test","modelId":"restored-model"},"updatedAt":1}]));
+                    detach=wire.read_any();
+                }
+                assert_eq!(detach["method"],"session.detach");
                 assert_eq!(detach["params"], json!({"sessionId":"session"}));
                 wire.reply(&detach, json!({}));
             }
@@ -449,9 +514,9 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
             control.recv_timeout(Duration::from_secs(10)).unwrap();
             let mut request = first;
             for page in 0..2 {
-                let start = page * 75 + 1;
-                let after = if page == 0 { 0 } else { (start - 1) * 3 + 2 };
-                assert_eq!(request["params"]["after"], after);
+                let start = (1 - page) * 75 + 1;
+                if page == 0 { assert_eq!(request["params"]["latestTurn"], true); }
+                else { assert_eq!(request["params"]["before"], 228); }
                 let mut events = Vec::new();
                 for index in start..start + 75 {
                     events.push(fact(&format!("message-{index}"), index * 3, index * 3, "input", "message",
@@ -461,8 +526,9 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
                     events.push(fact(&format!("consumed-{index}"), index * 3 + 2, index * 3, "input", "consumed",
                         json!({"input_id": format!("message-{index}")})));
                 }
-                let last = if page == 0 { 227 } else { 452 };
-                wire.reply(&request, json!({"events":events,"through":452,"nextAfter":last,"done":page==1}));
+                let last = if page == 0 { 452 } else { 227 };
+                let before = if page == 0 { 228 } else { 1 };
+                wire.reply(&request, json!({"events":events,"through":452,"nextAfter":last,"nextBefore":before,"done":page==1}));
                 if page == 0 {
                     request = wire.read("session.history");
                     assert_eq!(request["params"]["through"], 452);
@@ -485,7 +551,7 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
             terminal.until("test / model");
             terminal.write(b"/resume\r");
             terminal.until("Paged history");
-            terminal.write(b"paged\r");
+            terminal.write(b"\r");
         }
         readiness.recv_timeout(Duration::from_secs(10)).unwrap();
         terminal.until("test / restored-model");
@@ -536,50 +602,31 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         state(wire, "child");
-        let child = wire.read("session.history");
-        assert_eq!(child["params"]["branchId"], "child");
-        assert_eq!(child["params"]["after"], 0);
+        let cut = owner_request(wire, "session.turn.get", "child");
+        wire.reply(&cut, json!({"branchId":"child","through":4,"turn":null,"output":null}));
+        let child = owner_request(wire, "session.exec.pending", "child");
         ready.send(()).unwrap();
         control.recv_timeout(Duration::from_secs(10)).unwrap();
-        state(wire, "nested");
-        state(wire, "child");
-        event(wire, "child", fact("child-end", 5, 9000, "exec", "ended", json!({
+        event(wire, "child", fact("child-end",5,9000,"exec","ended",json!({
             "task_id":"child-command","status":"failed","result":{"content":"real child terminal","structuredContent":{"exitCode":7}},
         })));
-        wire.quiet(Duration::from_millis(150));
-        wire.reply(&child, json!({"events":[command("child-command",1,1000,"restored child command")],"through":4,"nextAfter":2,"done":false}));
-        for _ in 0..2 {
-            let read = wire.read("session.history");
-            match read["params"]["branchId"].as_str().unwrap() {
-                "nested" => wire.reply(&read, json!({"events":[command("nested-command",1,2000,"restored nested command")],"through":1,"nextAfter":1,"done":true})),
-                "child" => {
-                    assert_eq!(read["params"]["after"], 2);
-                    assert_eq!(read["params"]["through"], 4);
-                    wire.reply(&read, json!({"events":[
-                        command("partial-page",3,3000,"must not adopt a partial page"),
-                        command("unordered",2,4000,"unordered event rejected"),
-                    ],"through":4,"nextAfter":4,"done":true}));
-                }
-                other => panic!("unexpected branch {other}"),
-            }
-        }
+        wire.reply(&child, json!({"branchId":"child","through":4,
+            "tasks":[pending_command("child-command",1,1000,"restored child command")],"next":"second"}));
+        let second = owner_request(wire, "session.exec.pending", "child");
+        assert_eq!(second["params"]["after"], "second");
+        wire.send(json!({"jsonrpc":"2.0","id":second["id"],"error":{"code":-32000,"message":"owner page unavailable"}}));
         state(wire, "child");
-        state(wire, "nested");
         wire.quiet(Duration::from_millis(200));
         event(wire, "child", command("failed-period-command",6,10000,"created while history failed"));
         ready.send(()).unwrap();
-        let retry = wire.read("session.history");
-        assert_eq!(retry["params"], json!({"sessionId":"session","branchId":"child","after":2,"through":4,"limit":256}));
+        let retry = owner_request(wire, "session.exec.pending", "child");
+        assert_eq!(retry["params"], json!({"sessionId":"session","branchId":"child","through":4}));
         ready.send(()).unwrap();
         control.recv_timeout(Duration::from_secs(10)).unwrap();
-        wire.quiet(Duration::from_millis(150));
-        wire.reply(&retry, json!({"events":[],"through":4,"nextAfter":4,"done":true}));
-        let catch_up = wire.read("session.history");
-        assert_eq!(catch_up["params"], json!({"sessionId":"session","branchId":"child","after":4,"limit":256}));
-        wire.reply(&catch_up, json!({"events":[
-            fact("child-end",5,9000,"exec","ended",json!({"task_id":"child-command","status":"failed","result":{"content":"real child terminal","structuredContent":{"exitCode":7}}})),
-            command("failed-period-command",6,10000,"created while history failed"),
-        ],"through":6,"nextAfter":6,"done":true}));
+        wire.reply(&retry, json!({"branchId":"child","through":4,
+            "tasks":[pending_command("child-command",1,1000,"restored child command")],"next":null}));
+        let turn = owner_request(wire, "session.turn.get", "child");
+        wire.empty_state(&turn);
         control.recv_timeout(Duration::from_secs(10)).unwrap();
         wire.quiet(Duration::from_millis(200));
         ready.send(()).unwrap();
@@ -639,12 +686,12 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         state(wire, "child");
-        let failed = wire.read("session.history");
+        let failed = owner_request(wire, "session.turn.get", "child");
         assert_eq!(failed["params"]["branchId"], "child");
         wire.send(json!({"jsonrpc":"2.0","id":failed["id"],
             "error":{"code":-32000,"message":"old child read unavailable"}}));
         state(wire, "nested");
-        let held = wire.read("session.history");
+        let held = owner_request(wire, "session.turn.get", "nested");
         assert_eq!(held["params"]["branchId"], "nested");
         ready.send(()).unwrap();
 
@@ -658,21 +705,25 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
                 "model":{"providerId":"test","modelId":"model"},"updatedAt":2},
         ]);
         let picker = wire.read("session.summaries");
-        wire.reply(&picker, summaries);
-        let attach = wire.read("session.attach");
+        wire.reply(&picker, summaries.clone());
+        let mut attach = wire.read_any();
+        while attach["method"] == "session.summaries" {
+            wire.reply(&attach, summaries.clone());
+            attach = wire.read_any();
+        }
+        assert_eq!(attach["method"], "session.attach");
         assert_eq!(attach["params"]["sessionId"], "session");
         wire.reply(&attach, attach_record(&attach));
         wire.no_context();
         wire.quiet(Duration::from_millis(150));
         wire.reply(
             &held,
-            json!({"events":[command("obsolete",1,1000,"obsolete page from old attachment")],
-            "through":1,"nextAfter":1,"done":true}),
+            json!({"branchId":"nested","through":1,"turn":null,"output":null}),
         );
         let main = wire.read("session.history");
         assert_eq!(
             main["params"],
-            json!({"sessionId":"session","branchId":"main","after":0,"limit":256})
+            json!({"sessionId":"session","branchId":"main","latestTurn":true,"limit":256})
         );
         wire.reply(
             &main,
@@ -680,15 +731,15 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
             "through":1,"nextAfter":1,"done":true}),
         );
         state(wire, "child");
-        let child = wire.read("session.history");
-        assert_eq!(
-            child["params"],
-            json!({"sessionId":"session","branchId":"child","after":0,"limit":256})
-        );
-        wire.reply(
-            &child,
-            json!({"events":[command("fresh-child",1,2000,"fresh child command")],
-            "through":1,"nextAfter":1,"done":true}),
+        child_inventory(
+            wire,
+            "child",
+            json!([pending_command(
+                "fresh-child",
+                1,
+                2000,
+                "fresh child command"
+            )]),
         );
         let mut stops = Vec::new();
         for _ in 0..2 {
@@ -738,7 +789,7 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         newest < older,
         "the resume picker must show the most recently updated session first"
     );
-    terminal.write(b"session\r");
+    terminal.write(b"\r");
     terminal.until("resumed session");
     terminal.write(b"/tasks\r");
     terminal.until("fresh child command");
@@ -778,8 +829,7 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
         wire.reply(&providers, json!([]));
         wire.send(json!({"jsonrpc":"2.0","id":observe["id"],"error":{"code":-32000,"message":"observation refused"}}));
         state(wire, "child");
-        let child = wire.read("session.history");
-        wire.reply(&child, json!({"events":[command("child-command",1,10000,"child running command")],"through":1,"nextAfter":1,"done":true}));
+        child_inventory(wire, "child", json!([pending_command("child-command",1,10000,"child running command")]));
         let first = wire.read("session.exec.stop");
         assert_eq!(first["params"], json!({"sessionId":"session","branchId":"main","taskId":"main-command"}));
         event(wire, "main", fact("leader-notice",9,9000,"input","message",json!({"mode":"append","user":{"content":[{"type":"text","text":"leader notification while stop waits"}]}})));
@@ -849,15 +899,12 @@ fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads(
         let stop = wire.read("session.exec.stop");
         assert_eq!(stop["params"], json!({"sessionId":"session","branchId":"main","taskId":"captured"}));
         state(wire, "late-child");
-        let late = wire.read("session.history");
-        assert_eq!(late["params"], json!({"sessionId":"session","branchId":"late-child","after":0,"limit":256}));
-        wire.reply(&late, json!({"events":[command("late",1,2000,"late restored command")],
-            "through":1,"nextAfter":1,"done":true}));
+        child_inventory(wire, "late-child", json!([pending_command("late",1,2000,"late restored command")]));
         event(wire, "main", fact("create",2,3000,"branch","create",json!({
             "branch":"failed-child","at":{"kind":"create"},
             "source":{"kind":"host","operation_id":"create-child"},"prompt":"child prompt",
         })));
-        let failed = wire.read("session.history");
+        let failed = owner_request(wire, "session.turn.get", "failed-child");
         assert_eq!(failed["params"]["branchId"], "failed-child");
         event(wire, "main", fact("create-failed",3,4000,"branch","create-failed",json!({
             "status":"failed","branch":"failed-child","createEvent":2,"error":"creation refused",
@@ -954,11 +1001,10 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         state(wire, "child");
-        let child = wire.read("session.history");
-        wire.reply(
-            &child,
-            json!({"events":[command("child",1,2000,"old child command")],
-            "through":1,"nextAfter":1,"done":true}),
+        child_inventory(
+            wire,
+            "child",
+            json!([pending_command("child", 1, 2000, "old child command")]),
         );
         let first = wire.read("session.exec.stop");
         assert_eq!(
@@ -1080,10 +1126,10 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         assert_eq!(attach["params"], json!({"sessionId":"member"}));
         wire.reply(&attach, attach_record(&attach));
         let first = wire.read("session.history");
-        assert_eq!(first["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
-        wire.reply(&first, json!({"events":[fact("member-input",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"member user\u{1b}]52;c;never-copy\u{7}"}]}})),fact("member-applied",2,1000,"input","applied",json!({"input_id":"member-input","mode":"queue"})),fact("member-consumed",3,1000,"input","consumed",json!({"input_id":"member-input"}))],"through":4,"nextAfter":3,"done":false}));
+        assert_eq!(first["params"], json!({"sessionId":"member","branchId":"main","latestTurn":true,"limit":256}));
+        wire.reply(&first, json!({"events":[fact("member-text",4,2000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":"member original"}))],"through":4,"nextAfter":4,"nextBefore":4,"done":true}));
         let second = wire.read("session.history");
-        assert_eq!(second["params"], json!({"sessionId":"member","branchId":"main","after":3,"through":4,"limit":256}));
+        assert_eq!(second["params"], json!({"sessionId":"member","branchId":"main","before":4,"through":4,"limit":256}));
         event(wire, "main", fact("leader-observation",3,3000,"input","message",json!({"mode":"append","user":{"content":[{"type":"text","text":"leader notice while reading"}]}})));
         event(wire, "main", fact("leader-observation-applied",4,3000,"input","applied",json!({"input_id":"leader-observation","mode":"append"})));
         let text = fact("member-live",5,3000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":" + live"}));
@@ -1092,7 +1138,7 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         wire.notice("session.event", json!({"sessionId":"member","branchId":"other","event":fact("other-member-branch",99,3000,"step","text",json!({"turn_id":"t","request_id":"wrong","delta":"wrong member branch"}))}));
         wire.notice("session.state", json!({"sessionId":"member","branchId":"main","running":true}));
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"child","requestId":"wrong-root","text":"","textOffset":0,"thinking":"wrong leader branch thought","thinkingOffset":0}));
-        wire.reply(&second, json!({"events":[fact("member-text",4,2000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":"member original"}))],"through":4,"nextAfter":4,"done":true}));
+wire.reply(&second, json!({"events":[fact("member-input",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"member user\u{1b}]52;c;never-copy\u{7}"}]}})),fact("member-applied",2,1000,"input","applied",json!({"input_id":"member-input","mode":"queue"})),fact("member-consumed",3,1000,"input","consumed",json!({"input_id":"member-input"}))],"through":4,"nextAfter":3,"nextBefore":3,"done":true,"nextBefore":1}));
         wire.notice("session.model.progress", json!({"sessionId":"member","branchId":"main","requestId":"member-model","text":"","textOffset":0,"thinking":"live member thought","thinkingOffset":0}));
         let stop = wire.read("session.stop");
         assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
@@ -1206,7 +1252,7 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             assert_eq!(detach["method"], "session.detach");
             assert_eq!(detach["params"], json!({"sessionId":"member"}));
             wire.reply(&detach, json!({}));
-            assert_eq!(history["params"], json!({"sessionId":"member-b","branchId":"main","after":0,"limit":256}));
+            assert_eq!(history["params"], json!({"sessionId":"member-b","branchId":"main","latestTurn":true,"limit":256}));
             wire.reply(&history, json!({"events":[fact("new-text",1,1000,"step","text",json!({"turn_id":"new","request_id":"new","delta":"only the new member"}))],"through":1,"nextAfter":1,"done":true}));
             let detach = wire.read("session.detach");
             assert_eq!(detach["params"], json!({"sessionId":"member-b"}));
@@ -1258,15 +1304,16 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             let history = wire.read("session.history");
             if outcome == 0 {
                 wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+                for _ in 0..2 { let request = wire.frame(); assert!(wire.empty_state(&request), "{request}"); }
                 control.recv_timeout(Duration::from_secs(10)).unwrap();
                 wire.notice("session.closed", json!({"sessionId":"member","reason":null}));
             } else {
-                wire.reply(&history, json!({"events":[fact("kept-prefix",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"retained member prefix"}]}})),fact("kept-prefix-applied",2,1000,"input","applied",json!({"input_id":"kept-prefix","mode":"queue"})),fact("kept-prefix-consumed",3,1000,"input","consumed",json!({"input_id":"kept-prefix"}))],"through":4,"nextAfter":3,"done":false}));
+                wire.reply(&history, json!({"events":[fact("kept-prefix",2,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"retained member prefix"}]}})),fact("kept-prefix-applied",3,1000,"input","applied",json!({"input_id":"kept-prefix","mode":"queue"})),fact("kept-prefix-consumed",4,1000,"input","consumed",json!({"input_id":"kept-prefix"}))],"through":5,"nextAfter":4,"nextBefore":2,"done":false}));
                 let page = wire.read("session.history");
                 if outcome == 1 {
                     wire.send(json!({"jsonrpc":"2.0","id":page["id"],"error":{"code":-32000,"message":"member page failed"}}));
                 } else {
-                    wire.reply(&page, json!({"events":[fact("invalid-tail",4,3000,"step","text",json!({"turn_id":"t","request_id":"r","delta":"must not adopt invalid tail"}))],"through":4,"nextAfter":3,"done":true}));
+                    wire.reply(&page, json!({"events":[fact("invalid-tail",4,3000,"step","text",json!({"turn_id":"t","request_id":"r","delta":"must not adopt invalid tail"}))],"through":4,"nextAfter":3,"nextBefore":3,"done":true}));
                 }
             }
             let detach = wire.read("session.detach");
@@ -1284,7 +1331,7 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
                 assert_eq!(attach["params"], json!({"sessionId":"member"}));
                 wire.reply(&attach, attach_record(&attach));
                 let history = wire.read("session.history");
-                assert_eq!(history["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
+                assert_eq!(history["params"], json!({"sessionId":"member","branchId":"main","latestTurn":true,"limit":256}));
                 wire.reply(&history, json!({"events":[fact("fresh-text",1,1000,"step","text",json!({"turn_id":"fresh","request_id":"fresh","delta":"fresh member after retry"}))],"through":1,"nextAfter":1,"done":true}));
                 let detach = wire.read("session.detach");
                 assert_eq!(detach["params"], json!({"sessionId":"member"}));
@@ -1311,7 +1358,10 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
         } else {
             terminal.until("Conversation unavailable");
             if outcome != 3 {
-                assert!(terminal.transcript.contains("retained member prefix"));
+                assert!(
+                    !terminal.transcript.contains("retained member prefix"),
+                    "an incomplete window was published"
+                );
             }
             readiness.recv_timeout(Duration::from_secs(10)).unwrap();
             terminal.write(b"\x1b[27u\r");
@@ -1402,7 +1452,7 @@ fn tui_main_history_failure_is_visible_and_disables_submission() {
             let history = wire.read("session.history");
             assert_eq!(history["params"]["branchId"],"main");
             if malformed {
-                wire.reply(&history,json!({"events":[],"through":8,"nextAfter":7,"done":true}));
+                wire.reply(&history,json!({"events":[],"through":8,"nextAfter":7,"nextBefore":9,"done":true}));
             } else {
                 wire.send(json!({"jsonrpc":"2.0","id":history["id"],"error":{"code":-32000,"message":"main store unreadable","data":{"appError":"storage_failed"}}}));
             }
@@ -1464,6 +1514,9 @@ fn next_request(wire: &mut Wire, record: &dyn Fn(&str) -> Value) -> Value {
         let mut line = String::new();
         wire.0.read_line(&mut line).unwrap();
         let request: Value = serde_json::from_str(&line).unwrap();
+        if wire.2 && wire.empty_state(&request) {
+            continue;
+        }
         match request["params"]["run_id"].as_str() {
             Some(id) if request["method"] == "workflow.status" => {
                 assert_eq!(id, "run-a", "a historic or unknown run was read");
@@ -1505,12 +1558,7 @@ fn workflow_facts(wire: &mut Wire) {
             }),
         ),
     );
-    let history = wire.read("session.history");
-    assert_eq!(history["params"]["branchId"], "same-call-line");
-    wire.reply(
-        &history,
-        json!({"events":[],"through":0,"nextAfter":0,"done":true}),
-    );
+    child_inventory(wire, "same-call-line", json!([]));
     event(
         wire,
         "main",
@@ -1851,7 +1899,10 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         wire.reply(&list, json!([{"agentId":"reviewer","default":false,"name":"Code Reviewer","description":"","sessions":1}]));
-        wire.reply(&attach_a, attach_record(&attach_a));
+        let mut attached = attach_record(&attach_a);
+        attached["model"] = json!({"providerId":"member-provider","modelId":"member-model"});
+        attached["sequence"] = json!(2);
+        wire.reply(&attach_a, attached);
         wire.reply(&attach_b, attach_record(&attach_b));
         for _ in 0..2 {
             let page = wire.read("session.history");
@@ -1868,6 +1919,10 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
             wire.reply(&page, json!({"events":events,"through":2,"nextAfter":2,"done":true}));
         }
         member_event(wire, "member-a", fact("configured-a2",3,3000,"context","configured",json!({"timeline":"main","revision":"a2","previous":"a","prompt":null,"provider_id":"member-provider","model_id":"member-model-2"})));
+        for _ in 0..2 {
+            let request = wire.frame();
+            assert!(wire.empty_state(&request), "{request}");
+        }
         wait_opened.recv_timeout(PATIENCE).unwrap();
         wire.quiet(Duration::from_millis(150));
         event(wire, "main", fact("leader-result",13,20000,"collaboration","result",json!({"request_event_id":"req-5","agent_id":"temporary-agent","session_id":"member-b","status":"completed","text":"Found two missing restart cases"})));

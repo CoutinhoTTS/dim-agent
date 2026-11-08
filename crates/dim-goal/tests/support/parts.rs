@@ -18,8 +18,7 @@ use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BoxFuture, BranchOptions, Dispatcher, Feature,
     LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session, SessionConfig,
-    StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPage, TimelineQueryScope,
+    StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQueryDirection,
     TimelineStore, TimelineTrace,
 };
 use dim_agent_types::{
@@ -275,25 +274,33 @@ impl Seed {
 
     /// Closes the seeding root; the facts stay in the store.
     pub async fn finish(self) {
+        for timeline in self.timelines.values() {
+            let through = timeline.committed();
+            let mut published = timeline.watch();
+            let state = published
+                .wait_for(|(sequence, closed)| *sequence >= through || *closed)
+                .await
+                .expect("seed publication remains observable");
+            assert!(
+                state.0 >= through,
+                "all seeded batches publish before restore"
+            );
+        }
         let _ = self.root.shutdown().await;
     }
 }
 
-/// One read a [`RefusingStore`] saw: the branch it was keyed on, the
-/// request's selection and page, and the window the caller bounded it to. The
-/// store is below the chain composition, so every read here is one branch's
-/// own facts; a chain read shows as one entry per branch read.
+/// The queried branch, projection and fixed bounds observed at the storage port.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Read {
+    pub select: dim_agent_runtime::QuerySelect,
     pub branch: String,
     pub kinds: Vec<String>,
     pub direction: TimelineQueryDirection,
-    pub include_publishing: bool,
     /// The first sequence the window admits.
     pub from: u64,
     /// The last sequence the window admits.
     pub through: u64,
-    pub offset: u64,
     pub limit: u64,
 }
 
@@ -332,7 +339,64 @@ impl RefusingStore {
     }
 }
 
+fn query_kinds(filter: Option<&dim_agent_runtime::QueryFilter>) -> Vec<String> {
+    use dim_agent_runtime::{QueryFilter, QueryOperand};
+    match filter {
+        Some(QueryFilter::Compare {
+            left: QueryOperand::Field { path },
+            comparison: dim_agent_runtime::QueryComparison::Eq,
+            right: QueryOperand::Value { value },
+        }) if path == "kind" => value.as_str().into_iter().map(str::to_owned).collect(),
+        Some(QueryFilter::In {
+            value: QueryOperand::Field { path },
+            values,
+        }) if path == "kind" => values
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect(),
+        Some(QueryFilter::And { conditions }) | Some(QueryFilter::Or { conditions }) => conditions
+            .iter()
+            .flat_map(|condition| query_kinds(Some(condition)))
+            .collect(),
+        _ => vec![],
+    }
+}
+
 impl TimelineStore for RefusingStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        let kinds = query_kinds(query.filter.as_ref());
+        let direction = query
+            .order_by
+            .first()
+            .map_or(TimelineQueryDirection::Ascending, |order| order.direction);
+        self.reads.lock().unwrap().push(Read {
+            select: query.select.clone(),
+            branch: scope.key.branch_id.clone(),
+            kinds: kinds.clone(),
+            direction,
+            from: scope.segments.first().map_or(1, |segment| segment.from),
+            through: scope.through,
+            limit: page.map_or(0, |page| page.limit.get()),
+        });
+        if self.armed.load(Ordering::SeqCst)
+            && self.branch.lock().unwrap().as_deref() == Some(scope.key.branch_id.as_str())
+            && kinds == ["input/message"]
+            && direction == TimelineQueryDirection::Descending
+        {
+            self.refused.fetch_add(1, Ordering::SeqCst);
+            return Box::pin(async {
+                Err(AgentError::Storage("the inherited read was refused".into()))
+            });
+        }
+        self.memory.query(scope, query, page)
+    }
+
     fn create_session<'a>(
         &'a self,
         session_id: &'a str,
@@ -382,37 +446,7 @@ impl TimelineStore for RefusingStore {
     ) -> BoxFuture<'a, dim_agent_runtime::Result<()>> {
         self.memory.batch_end(key, sequence)
     }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, dim_agent_runtime::Result<TimelineQueryPage>> {
-        self.reads.lock().unwrap().push(Read {
-            branch: key.branch_id.clone(),
-            kinds: query.kinds.clone(),
-            direction: query.direction,
-            include_publishing: query.include_publishing,
-            from,
-            through,
-            offset: query.offset,
-            limit: query.limit.get(),
-        });
-        // The branch command also reads the parent; only the inherited goal
-        // read has this shape (input messages, newest first).
-        let refused = self.armed.load(Ordering::SeqCst)
-            && self.branch.lock().unwrap().as_deref() == Some(key.branch_id.as_str())
-            && query.kinds == ["input/message".to_owned()]
-            && query.direction == TimelineQueryDirection::Descending;
-        if refused {
-            self.refused.fetch_add(1, Ordering::SeqCst);
-            return Box::pin(async move {
-                Err(AgentError::Storage("the inherited read was refused".into()))
-            });
-        }
-        self.memory.query(key, query, from, through)
-    }
+
     fn read_segments<'a>(
         &'a self,
         session_id: &'a str,
@@ -451,6 +485,7 @@ pub struct GatedStore {
     state: Arc<Mutex<Option<StateHold>>>,
     /// A read whose one kind matches, held until the case releases it.
     read: Mutex<Option<ReadHold>>,
+    fail_read: AtomicBool,
 }
 
 /// One held read: its kind selection, the one branch it must not be on, and
@@ -497,6 +532,10 @@ impl StateHold {
 }
 
 impl GatedStore {
+    pub fn fail_restore(&self) {
+        self.fail_read.store(true, Ordering::SeqCst);
+    }
+
     /// The case's ends of the gate: it waits on the first until the creation
     /// check runs, then writes its change and lets the second go once the
     /// Dispatcher consumed it.
@@ -600,6 +639,59 @@ impl GatedStore {
 }
 
 impl TimelineStore for GatedStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        if query_kinds(query.filter.as_ref()) == ["branch/start", "session/forked"]
+            && self.fail_read.swap(false, Ordering::SeqCst)
+        {
+            return Box::pin(async { Err(AgentError::Storage("Goal restore read failed".into())) });
+        }
+        let creation_check = query_kinds(query.filter.as_ref()) == ["branch/create"]
+            && matches!(query.select, dim_agent_runtime::QuerySelect::Exists);
+        let armed = creation_check
+            .then(|| {
+                (
+                    self.entered.lock().unwrap().take(),
+                    self.release.lock().unwrap().take(),
+                )
+            })
+            .and_then(|(entered, release)| entered.zip(release));
+        let held = {
+            let mut slot = self.read.lock().unwrap();
+            match slot.as_ref() {
+                Some(hold)
+                    if query_kinds(query.filter.as_ref()) == hold.kinds
+                        && hold
+                            .not_branch
+                            .as_ref()
+                            .is_none_or(|branch| branch != &scope.key.branch_id) =>
+                {
+                    slot.take()
+                }
+                _ => None,
+            }
+        };
+        Box::pin(async move {
+            if let Some((entered, release)) = armed {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+            if let Some(ReadHold {
+                entered, release, ..
+            }) = held
+            {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+            self.memory.query(scope, query, page).await
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         session_id: &'a str,
@@ -742,60 +834,7 @@ impl TimelineStore for GatedStore {
     ) -> BoxFuture<'a, dim_agent_runtime::Result<()>> {
         self.memory.batch_end(key, sequence)
     }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, dim_agent_runtime::Result<TimelineQueryPage>> {
-        let creation_check = query.kinds == ["branch/create".to_owned()]
-            && query
-                .predicate
-                .as_ref()
-                .is_some_and(|predicate| predicate.path == "source.operation_id");
-        let armed = creation_check
-            .then(|| {
-                (
-                    self.entered.lock().unwrap().take(),
-                    self.release.lock().unwrap().take(),
-                )
-            })
-            .and_then(|(entered, release)| entered.zip(release));
-        if let Some((entered, release)) = armed {
-            return Box::pin(async move {
-                let _ = entered.send(());
-                let _ = release.await;
-                self.memory.query(key, query, from, through).await
-            });
-        }
-        let held = {
-            let mut slot = self.read.lock().unwrap();
-            match slot.as_ref() {
-                Some(hold)
-                    if query.kinds == hold.kinds
-                        && hold
-                            .not_branch
-                            .as_ref()
-                            .is_none_or(|branch| branch != &key.branch_id) =>
-                {
-                    slot.take()
-                }
-                _ => None,
-            }
-        };
-        let Some(ReadHold {
-            entered, release, ..
-        }) = held
-        else {
-            return self.memory.query(key, query, from, through);
-        };
-        Box::pin(async move {
-            let _ = entered.send(());
-            let _ = release.await;
-            self.memory.query(key, query, from, through).await
-        })
-    }
+
     fn read_segments<'a>(
         &'a self,
         session_id: &'a str,
@@ -824,18 +863,18 @@ pub struct Env {
 
 impl Env {
     pub async fn start() -> Self {
-        Self::start_inner(None, None).await
+        Self::start_inner(None, None, None).await
     }
 
     /// [`Self::start`] on a store that records every read Goal issues and can
     /// refuse one branch's queries; nothing is refused unless a case arms it.
     pub async fn start_refusing() -> Self {
-        Self::start_inner(Some(Arc::new(RefusingStore::default())), None).await
+        Self::start_inner(Some(Arc::new(RefusingStore::default())), None, None).await
     }
 
     /// [`Self::start`] on a store that can hold Goal's creation check.
     pub async fn start_gated() -> Self {
-        Self::start_inner(None, Some(Arc::new(GatedStore::default()))).await
+        Self::start_inner(None, Some(Arc::new(GatedStore::default())), None).await
     }
 
     pub fn refusing(&self) -> &RefusingStore {
@@ -851,9 +890,14 @@ impl Env {
         self.gated.as_ref().expect("a gated store")
     }
 
+    pub async fn start_store(store: Arc<dyn TimelineStore>) -> Self {
+        Self::start_inner(None, None, Some(store)).await
+    }
+
     async fn start_inner(
         refusing: Option<Arc<RefusingStore>>,
         gated: Option<Arc<GatedStore>>,
+        store: Option<Arc<dyn TimelineStore>>,
     ) -> Self {
         let home = home();
         let probe = Arc::new(Probe::default());
@@ -905,6 +949,9 @@ impl Env {
             &mut builder,
             Arc::new(dim_agent_capabilities::adapters::MockTools),
         );
+        if let Some(store) = store {
+            builder.timeline_store(store);
+        }
         if let Some(store) = &refusing {
             builder.timeline_store(store.clone());
         }
@@ -1265,77 +1312,42 @@ impl Env {
     /// of each key on the branch's own segment, ascending by (sequence, block).
     /// Returns each key with its raw block text.
     pub async fn keys(&self, branch: &str) -> Vec<(String, String)> {
-        const PAGE: u64 = 256;
-        let timeline = self.timeline(branch);
         let mut found: HashMap<String, (u64, usize, String)> = HashMap::new();
         let mut closed: HashSet<String> = HashSet::new();
         let mut deleted: HashSet<String> = HashSet::new();
-        let mut from = timeline.sequence();
-        while from > 0 {
-            let query = TimelineQuery {
-                scope: TimelineQueryScope::Branch,
-                include_publishing: true,
-                from_event: None,
-                from_sequence: Some(from),
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: vec![
-                    "input/message".into(),
-                    "input/deleted".into(),
-                    "branch/start".into(),
-                    "session/forked".into(),
-                ],
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: std::num::NonZeroU64::new(PAGE).expect("a page keeps one event"),
-                offset: 0,
-            };
-            let reply = timeline.query(query).await.expect("the keyed read");
-            let exhausted = (reply.events.len() as u64) < PAGE;
-            let mut done = false;
-            for event in &reply.events {
-                match &event.kind {
-                    EventKind::BranchStart(_) | EventKind::SessionForked(_) => {
-                        done = true;
-                        break;
-                    }
-                    EventKind::InputDeleted(data) => {
-                        deleted.insert(data.input_id.clone());
-                    }
-                    EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
-                        for (index, block) in data.blocks.iter().enumerate().rev() {
-                            let InputBlock::Raw {
-                                text,
-                                key: Some(key),
-                                retire,
-                            } = block
-                            else {
-                                continue;
-                            };
-                            if found.contains_key(key) {
-                                continue;
-                            }
-                            if *retire {
-                                closed.insert(key.clone());
-                                continue;
-                            }
-                            if closed.contains(key) {
-                                continue;
-                            }
-                            found.insert(key.clone(), (event.sequence, index, text.clone()));
-                        }
-                    }
-                    _ => {}
+        for event in self.all_events(branch).await.iter().rev() {
+            match &event.kind {
+                EventKind::BranchStart(_) | EventKind::SessionForked(_) => {
+                    break;
                 }
+                EventKind::InputDeleted(data) => {
+                    deleted.insert(data.input_id.clone());
+                }
+                EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
+                    for (index, block) in data.blocks.iter().enumerate().rev() {
+                        let InputBlock::Raw {
+                            text,
+                            key: Some(key),
+                            retire,
+                        } = block
+                        else {
+                            continue;
+                        };
+                        if found.contains_key(key) {
+                            continue;
+                        }
+                        if *retire {
+                            closed.insert(key.clone());
+                            continue;
+                        }
+                        if closed.contains(key) {
+                            continue;
+                        }
+                        found.insert(key.clone(), (event.sequence, index, text.clone()));
+                    }
+                }
+                _ => {}
             }
-            if done || exhausted {
-                break;
-            }
-            from = reply
-                .events
-                .last()
-                .map_or(0, |event| event.sequence.saturating_sub(1));
         }
         let mut entries: Vec<(String, (u64, usize, String))> = found.into_iter().collect();
         entries.sort_by_key(|(_, (sequence, index, _))| (*sequence, *index));
@@ -1699,11 +1711,11 @@ pub fn message(blocks: Vec<InputBlock>, mode: InputMode) -> EventKind {
 /// [`dim_agent_runtime::Branch`] handle.
 pub fn input_message(blocks: Vec<InputBlock>, mode: InputMode) -> InputMessageData {
     InputMessageData {
+        handover: None,
         submission_id: Some(format!("test:{}", uuid::Uuid::new_v4())),
         user: None,
         blocks,
         mode: Some(mode),
-        handover: None,
     }
 }
 

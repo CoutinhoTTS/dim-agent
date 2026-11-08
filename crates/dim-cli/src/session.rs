@@ -29,6 +29,8 @@ enum Submission {
 
 pub use dim_client::wire::History;
 
+mod window;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EventNotice {
@@ -304,10 +306,15 @@ pub async fn chat(
     let mut questions = Questions::default();
     let result = async {
         display.muted = !interactive;
-        display.cursor = read_history(client, &session_id, 0, &mut |value| {
-            questions.history("main", &value);
-            if options.json { Ok(()) } else { display.event(serde_json::from_value(value)?, true) }
-        }).await?;
+        display.model = attached.model.map(|model| crate::wire::Configuration {
+            provider_id: model.provider_id,
+            model_id: model.model_id,
+            capability_snapshot: attached.capability_snapshot,
+            model_preferences: attached.model_preferences,
+        });
+        display.model_through = attached.sequence;
+        display.cursor = window::read(client, &session_id, &mut display).await?;
+        questions.start(client, &session_id).await?;
         display.failed = false;
         display.muted = false;
         let mut code = wait_turn(client, &session_id, None, &mut display, &mut input, &mut interrupts, &mut questions, None).await?;
@@ -385,6 +392,11 @@ pub async fn chat(
                         break;
                     }
                     display.record("Usage: /exit")?;
+                    draft.clear();
+                    continue;
+                }
+                Some("/earlier") => {
+                    if let Err(error) = window::earlier(client, &session_id, &mut display).await { display.record(&format!("Error: {error}"))?; }
                     draft.clear();
                     continue;
                 }

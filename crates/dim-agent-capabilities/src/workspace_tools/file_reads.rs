@@ -5,12 +5,12 @@
 //! Overwriting an existing file requires a binding from this branch whose
 //! operation is still in the model's context (#524).
 
-use crate::{history::chain_by_id, host::HostError};
+use crate::host::HostError;
 use dim_agent_runtime::{
-    Names, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryScope,
+    Names, QueryComparison, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick,
+    QuerySelect, QuerySpec, QueryValue, Timeline, TimelineQuery, TimelineQueryScope,
 };
-use dim_agent_types::{ContextCompactionResult, EventKind};
+use dim_agent_types::TimelinePosition;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
@@ -19,9 +19,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-
-/// How many compaction facts one page of the check reads.
-const COMPACTION_PAGE: u64 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextEncoding {
@@ -148,69 +145,98 @@ impl FileReads {
         if now <= established {
             return Ok(true);
         }
-        let Some(retain_from) = self.latest_completed(established).await? else {
-            return Ok(true);
-        };
-        let cut = self
+        let completed = self
             .timeline
-            .query(chain_by_id(&retain_from))
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: Some(TimelinePosition {
+                    branch_id: self.timeline.branch_id(),
+                    sequence: established + 1,
+                }),
+                through: Some(now),
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["context/compaction".into()],
+                            },
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "data.status".into(),
+                                },
+                                values: vec!["completed".into()],
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["data.retain_from".into()],
+                    },
+                    group_by: vec![],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            })
             .await
             .map_err(|error| {
                 HostError::failed(format!("Failed to read the branch timeline: {error}"))
-            })?
-            .positions
-            .into_iter()
-            .next();
-        Ok(cut.is_none_or(|cut| {
-            cut.branch_id != self.timeline.branch_id() || cut.sequence <= established
-        }))
-    }
-    /// The newest completed compaction on this branch above `established`,
-    /// read newest first: a compaction that completed earlier always cuts
-    /// before a later one, so the newest completed one decides whether the
-    /// operation survived.
-    async fn latest_completed(&self, established: u64) -> Result<Option<String>, HostError> {
-        let mut from_sequence = None;
-        loop {
-            let reply = self
-                .timeline
-                .query(TimelineQuery {
-                    scope: TimelineQueryScope::Branch,
-                    include_publishing: false,
-                    from_event: None,
-                    from_sequence,
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Descending,
-                    kinds: vec!["context/compaction".into()],
-                    flags: Vec::new(),
-                    event_id: None,
-                    predicate: None,
-                    limit: NonZeroU64::new(COMPACTION_PAGE)
-                        .expect("a page keeps at least one compaction"),
-                    offset: 0,
-                })
-                .await
-                .map_err(|error| {
-                    HostError::failed(format!("Failed to read the branch timeline: {error}"))
-                })?;
-            for event in &reply.events {
-                if event.sequence <= established {
-                    return Ok(None);
-                }
-                if let EventKind::ContextCompaction(data) = &event.kind
-                    && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
-                {
-                    return Ok(Some(retain_from.clone()));
-                }
-            }
-            let Some(last) = reply.events.last().map(|event| event.sequence) else {
-                return Ok(None);
-            };
-            if (reply.events.len() as u64) < COMPACTION_PAGE || last <= 1 {
-                return Ok(None);
-            }
-            from_sequence = Some(last - 1);
-        }
+            })?;
+        let QueryOutput::Rows { rows } = completed.result else {
+            unreachable!("field selection returns rows")
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(true);
+        };
+        let [QueryValue::Value { value: retain_from }] = row.values.as_slice() else {
+            unreachable!("completed compaction has a retain_from")
+        };
+        let cut = self
+            .timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(now),
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field { path: "id".into() },
+                                values: vec![retain_from.clone()],
+                            },
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "position.sequence".into(),
+                                },
+                                comparison: QueryComparison::Gt,
+                                right: QueryOperand::Value {
+                                    value: established.into(),
+                                },
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Exists,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: None,
+            })
+            .await
+            .map_err(|error| {
+                HostError::failed(format!("Failed to read the branch timeline: {error}"))
+            })?;
+        let QueryOutput::Exists { exists } = cut.result else {
+            unreachable!("existence selection returns a boolean")
+        };
+        Ok(!exists)
     }
 }
 
@@ -239,111 +265,5 @@ impl DynPlugin for FileReadsPlugin {
             ctx.provide_at(self.reads.clone(), Arc::new(FileReads::new(timeline)))?;
             Ok(Effect::Done)
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dim_agent_runtime::{MemoryTimelineStore, SessionConfig, TimelineKey, TimelineStore};
-    use dim_agent_types::{
-        CompactionDiagnosticsRecord, CompactionReason, CompactionStrategyRecord, CompactionTrigger,
-        ContextCompactionData,
-    };
-
-    async fn timeline() -> Arc<Timeline> {
-        let store = Arc::new(MemoryTimelineStore::default());
-        store
-            .create_session("file-reads", &SessionConfig::default())
-            .await
-            .expect("the session");
-        Arc::new(Timeline::new(
-            Ctx::root().unwrap(),
-            TimelineKey {
-                session_id: "file-reads".into(),
-                branch_id: "main".into(),
-            },
-            Vec::new(),
-            store,
-        ))
-    }
-
-    fn completed(retain_from: &str) -> EventKind {
-        EventKind::ContextCompaction(ContextCompactionData {
-            turn_id: None,
-            request_id: None,
-            command: None,
-            start: None,
-            through: 0,
-            outcome: ContextCompactionResult::Completed {
-                retain_from: retain_from.into(),
-                replacement: Vec::new(),
-                strategy: "test".into(),
-                diagnostics: Box::new(CompactionDiagnosticsRecord {
-                    reason: CompactionReason::Auto,
-                    trigger: CompactionTrigger::Threshold,
-                    retain_from: None,
-                    retain_limit: None,
-                    estimated_input_tokens: 0.0,
-                    estimated_output_tokens: None,
-                    entries_replaced: 0,
-                    model_call_count: 0,
-                    duration_ms: 0,
-                    model_usage: None,
-                    insufficient_space: None,
-                    strategy: CompactionStrategyRecord {
-                        kind: "test".into(),
-                        details: serde_json::Map::new(),
-                    },
-                }),
-                context_baseline: Vec::new(),
-                replacement_parts: None,
-                pinned_inputs: None,
-                digest_entries: None,
-            },
-        })
-    }
-
-    fn cancelled() -> EventKind {
-        EventKind::ContextCompaction(ContextCompactionData {
-            turn_id: None,
-            request_id: None,
-            command: None,
-            start: None,
-            through: 0,
-            outcome: ContextCompactionResult::Cancelled {
-                reason: "cancelled".into(),
-            },
-        })
-    }
-
-    #[tokio::test]
-    async fn the_guard_pages_to_a_completed_compaction_beyond_one_page() {
-        let timeline = timeline().await;
-        timeline
-            .append(completed("retained").into())
-            .expect("the completed compaction");
-        for _ in 0..COMPACTION_PAGE {
-            timeline
-                .append(cancelled().into())
-                .expect("a cancelled compaction");
-        }
-        let reads = FileReads::new(timeline);
-        assert_eq!(
-            reads.latest_completed(0).await.unwrap(),
-            Some("retained".to_owned())
-        );
-    }
-
-    #[tokio::test]
-    async fn the_guard_stops_at_sequence_one_before_asking_for_zero() {
-        let timeline = timeline().await;
-        for _ in 0..COMPACTION_PAGE {
-            timeline
-                .append(cancelled().into())
-                .expect("a cancelled compaction");
-        }
-        let reads = FileReads::new(timeline);
-        assert_eq!(reads.latest_completed(0).await.unwrap(), None);
     }
 }

@@ -370,16 +370,34 @@ async fn a_latest_turn_waiting_for_dispatch_survives_the_line_ending() {
     let end_query = dim_agent_runtime::TimelineQuery {
         scope: dim_agent_runtime::TimelineQueryScope::Branch,
         include_publishing: false,
-        from_event: None,
-        from_sequence: Some(timeline.sequence() + 1),
-        order_by: Default::default(),
-        direction: Default::default(),
-        kinds: vec!["branch/end".into()],
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: std::num::NonZeroU64::MIN,
-        offset: 0,
+        from: None,
+        through: None,
+        query: dim_agent_runtime::QuerySpec {
+            filter: Some(dim_agent_runtime::QueryFilter::And {
+                conditions: vec![
+                    dim_agent_runtime::QueryFilter::In {
+                        value: dim_agent_runtime::QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["branch/end".into()],
+                    },
+                    dim_agent_runtime::QueryFilter::Compare {
+                        left: dim_agent_runtime::QueryOperand::Field {
+                            path: "position.sequence".into(),
+                        },
+                        comparison: dim_agent_runtime::QueryComparison::Gt,
+                        right: dim_agent_runtime::QueryOperand::Value {
+                            value: timeline.sequence().into(),
+                        },
+                    },
+                ],
+            }),
+            select: dim_agent_runtime::QuerySelect::Exists,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: None,
     };
     let ending = client
         .send(
@@ -389,13 +407,10 @@ async fn a_latest_turn_waiting_for_dispatch_survives_the_line_ending() {
         .await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if !timeline
-                .query(end_query.clone())
-                .await
-                .unwrap()
-                .events
-                .is_empty()
-            {
+            if matches!(
+                timeline.query(end_query.clone()).await.unwrap().result,
+                dim_agent_runtime::QueryOutput::Exists { exists: true }
+            ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

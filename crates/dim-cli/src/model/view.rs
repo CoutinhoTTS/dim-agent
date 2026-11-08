@@ -56,6 +56,8 @@ pub struct ViewRow {
     /// A settled thought: how long it ran, in milliseconds.
     pub elapsed_ms: Option<u64>,
     pub tone: Option<RowTone>,
+    pub call_id: Option<String>,
+    pub tool_lookup_done: bool,
     pub tool_name: Option<String>,
     pub tool_input: Option<serde_json::Value>,
     /// The model request a tool call came from: the calls of one request are
@@ -208,6 +210,8 @@ pub enum LineState {
     Working,
     /// Open, with no turn running.
     Waiting,
+    /// The directory reports an ended branch without its terminal event.
+    Ended,
     /// It ended itself through the branch tool.
     EndedItself,
     /// Another issuer ended it: a host operation or the user.

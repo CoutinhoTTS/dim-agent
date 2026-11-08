@@ -283,3 +283,16 @@ the one method above; native capabilities and CLI own its implementation.
 Ablation: keep one bounded snapshot instead of output events, a stream, offsets,
 an arbitrary file API, another capture or persistent task state. Each is
 unnecessary for displaying live output in the selected command detail.
+
+## Pending task inventory
+
+The existing WorkspaceTools Session part registers nonmutating `session.exec.pending`.
+Parameters are `sessionId`, `branchId`, optional published `through` and optional property-query
+`after` cursor. Reply: `branchId`, fixed `through`, `tasks`, `next`; at most 128 tasks per page,
+ascending by start sequence. An ended branch is readable through the branch facade.
+
+A task has `eventId`, `sequence`, `startedAt`, `taskId`, `turnId`, `requestId`, `callId`,
+`description`. These fields come from `exec/started` with no matching `exec/ended` at that
+cutoff. The query does not read captured output, output paths, tool arguments or results.
+Later `exec/ended` settles the inventory by `taskId`. Read failure leaves controls unavailable;
+it does not prove that no tasks exist. This adds no task table and does not change stop admission.

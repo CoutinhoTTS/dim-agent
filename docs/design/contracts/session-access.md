@@ -418,7 +418,7 @@ while the first write is still unpublished.
 | `launch` | `AgentIndex::launch(LaunchRequest) -> Result<LaunchReply, SessionsError>` |
 | per-call acquire | `AgentIndex::acquire(id)` (existing, crate-internal) returning a `SessionUse` lease |
 | `input` | `Session::input(InputMessageData, branch)` (existing; returns the committed input for an id the branch already holds); a key is `InputBlock::Raw { key: Some(name), retire }` |
-| `lookup` | `Session::lookup(branch, submission_id)`, shared with `session.input_lookup`: the branch's index of submission ids; waits for the found input's publication |
+| `lookup` | `Session::lookup(branch, submission_id)`, shared with `session.input_lookup`: a query of the branch's committed input identities; waits for the found input's publication |
 | `history` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `AgentIndex::history_page(id, branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>` (S1): appends `input/withdraw` and replies with InputQueue's decision once it is written; `Withdrawal::Deleted { sequence }` or `Withdrawal::NotHeld`. Agents replies `deleted` once that `input/deleted` is published |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |

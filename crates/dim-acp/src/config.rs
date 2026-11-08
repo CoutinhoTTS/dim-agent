@@ -107,21 +107,17 @@ pub(crate) async fn models(rpc: &Rpc) -> Result<Vec<Model>, Error> {
 }
 
 impl Config {
-    pub(crate) async fn read(rpc: &Rpc, id: &str, history: &[Event]) -> Result<Self, Error> {
-        #[derive(Deserialize)]
-        struct Methods {
-            methods: Vec<Method>,
-        }
-        #[derive(Deserialize)]
-        struct Method {
-            name: String,
-        }
-        let mut config = Self::default();
-        for event in history {
-            config.event(event);
-        }
+    pub(crate) async fn read(
+        rpc: &Rpc,
+        id: &str,
+        model: Option<Configuration>,
+    ) -> Result<Self, Error> {
+        let mut config = Self {
+            model,
+            ..Self::default()
+        };
         if rpc.supports("session.methods") {
-            let methods: Methods = rpc
+            let methods: dim_client::wire::MethodTable = rpc
                 .typed("session.methods", json!({"sessionId":id}))
                 .await?;
             config.methods = methods

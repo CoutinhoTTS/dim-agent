@@ -90,6 +90,16 @@ impl Drop for DeferredInputs {
     }
 }
 impl dim_agent_runtime::TimelineStore for DeferredInputs {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        self.inner.query(scope, query, page)
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -169,17 +179,5 @@ impl dim_agent_runtime::TimelineStore for DeferredInputs {
         dim_agent_runtime::Result<Option<dim_agent_runtime::TimelineTrace>>,
     > {
         self.inner.trace(key, sequence)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a dim_agent_runtime::TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<
-        'a,
-        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryPage>,
-    > {
-        self.inner.query(key, query, from, through)
     }
 }

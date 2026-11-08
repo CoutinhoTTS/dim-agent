@@ -86,10 +86,10 @@ id's `eventhub:` prefix and its `queue` or `steer` mode: a `steer` delivery ends
 every wait, as any steer does, and a `queue` delivery only one that names no
 task; `append` deliveries and guide writes never end one. Turn end clears
 pending arrivals. It registers with `Dispatcher::consume` and rebuilds by
-reading the last `turn/start` or `turn/end` with its unpublished tail. Reload
-rebuilds only open-turn status, not old arrival notifications. Wait futures are
-caller-owned and use caller cancellation; the plugin does not spawn tasks.
-Only one wait can run per branch.
+selecting only the kind of the last `turn/start` or `turn/end` at the committed
+head, including its unpublished tail. Reload rebuilds only open-turn status, not
+old arrival notifications. Wait futures are caller-owned and use caller
+cancellation; the plugin does not spawn tasks. Only one wait can run per branch.
 
 ### Tests
 

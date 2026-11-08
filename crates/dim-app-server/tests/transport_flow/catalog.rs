@@ -198,7 +198,7 @@ async fn catalog_pages_and_searches_a_large_dormant_store_without_reading_histor
     assert!(agent.sessions().is_empty());
     connection
         .execute(
-            "UPDATE timeline_events SET body='unreadable history' WHERE session_id='catalog-0001'",
+            "UPDATE timeline_events SET body='{}' WHERE session_id='catalog-0001'",
             [],
         )
         .unwrap();

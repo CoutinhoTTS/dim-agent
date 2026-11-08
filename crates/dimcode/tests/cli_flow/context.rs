@@ -36,6 +36,7 @@ fn tui_compaction_reports_committed_failures_once_and_keeps_call_errors() {
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 line.clear();
+                if wire.2 && wire.empty_state(&request) { continue; }
                 match request["method"].as_str().unwrap() {
                     "account.providers" => wire.reply(&request, json!([])),
                     "session.context.usage" => wire.reply(&request, usage(1849.0)),
@@ -532,15 +533,12 @@ fn tui_usage_cache_hit_rate_ignores_events_off_main() {
         );
         let request = wire.read("session.context.usage");
         wire.reply(&request, usage(32000.0));
-        // A full hit on a task branch is folded after its own history page,
-        // before the next main-branch event renders.
         model_usage(wire, "child", 9, 10000.0, Some(10000.0));
-        let child = wire.read("session.history");
+        let child = wire.read("session.turn.get");
         assert_eq!(child["params"]["branchId"], "child");
-        assert_eq!(child["params"]["after"], 0);
         wire.reply(
             &child,
-            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            json!({"branchId":"child","through":8,"turn":null,"output":null}),
         );
         wire.event(
             12,
@@ -597,11 +595,14 @@ fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
         let first = wire.read("session.history");
         assert_eq!(
             first["params"],
-            json!({"sessionId":"session","branchId":"main","after":0,"limit":256})
+            json!({"sessionId":"session","branchId":"main","latestTurn":true,"limit":256})
         );
         wire.reply(
             &first,
-            json!({"events":[history_usage(5, 5000.0)],"through":8,"nextAfter":6,"done":false}),
+            json!({"events":[history_usage(7, 9200.0),
+                {"id":"event-8","sequence":8,"create_at":1,"type":"step","name":"text",
+                 "data":{"turn_id":"turn","request_id":"request","delta":"history loaded"}}],
+                "through":8,"nextBefore":7,"nextAfter":8,"done":false}),
         );
         let mut second = None;
         let mut started = 0;
@@ -626,7 +627,7 @@ fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
         let second = second.expect("main history pages");
         assert_eq!(
             second["params"],
-            json!({"sessionId":"session","branchId":"main","after":6,"limit":256,"through":8})
+            json!({"sessionId":"session","branchId":"main","before":7,"limit":256,"through":8})
         );
         // The first `/usage` reads the context while the second page is
         // outstanding, and only then does the page land.
@@ -635,11 +636,7 @@ fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
         wait_read.recv_timeout(PATIENCE).unwrap();
         wire.reply(
             &second,
-            json!({"events":[
-                history_usage(7, 9200.0),
-                {"id":"event-8","sequence":8,"create_at":1,"type":"step","name":"text",
-                 "data":{"turn_id":"turn","request_id":"request","delta":"history loaded"}}],
-                "through":8,"nextAfter":8,"done":true}),
+            json!({"events":[history_usage(5, 5000.0)],"through":8,"nextBefore":1,"nextAfter":6,"done":true}),
         );
         let loaded = wire.read("session.context.usage");
         wire.reply(&loaded, usage(64000.0));
@@ -764,12 +761,20 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
             json!({"turn_id":"line-turn","request_id":"line-request",
                 "status":"completed","finish_reason":"end_turn"}),
         );
-        let line_history = wire.read("session.history");
-        assert_eq!(line_history["params"]["branchId"], "line");
+        let line_state = wire.read("session.turn.get");
+        assert_eq!(line_state["params"]["branchId"], "line");
         wire.reply(
-            &line_history,
-            json!({"events":[],"through":13,"nextAfter":13,"done":true}),
+            &line_state,
+            json!({"branchId":"line","through":13,"turn":null,"output":null}),
         );
+        for method in [
+            "session.input.pending",
+            "session.exec.pending",
+            "session.turn.get",
+        ] {
+            let request = wire.read(method);
+            assert!(wire.empty_state(&request));
+        }
         wire.quiet(Duration::from_millis(300));
         wire.end(json!({"turn_id":"turn","status":"completed","reason":"fixture"}));
         wire.notice(

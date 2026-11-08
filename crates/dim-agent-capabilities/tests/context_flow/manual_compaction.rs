@@ -4,7 +4,7 @@ use super::context_reads::{CountContextReads, TASK_READS};
 use super::*;
 use dim_agent_capabilities::{
     agent_loop::AgentLoop,
-    history::{context_messages, read_context, summary_message},
+    history::{context_messages, summary_message},
 };
 use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
 use rutis::host::CtxHost;
@@ -553,7 +553,8 @@ pub(crate) fn assert_paired(events: &[Arc<AgentEvent>]) {
 /// The messages a preparation at the head would start from.
 async fn projected(timeline_session: &Session, branch: &str) -> Vec<Message> {
     let through = timeline_session.sequence(branch).unwrap();
-    let context = read_context_in(timeline_session, branch, through)
+    let context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .context_in(timeline_session, branch, through)
         .await
         .unwrap();
     let history = project_context_history(&context).unwrap();
@@ -995,7 +996,9 @@ impl DynPlugin for OpeningReads {
                 timeline_events(&timeline, TimelineQueryScope::Chain, ..=0).await?;
                 let (context, reads) = TASK_READS
                     .scope(Default::default(), async {
-                        let context = read_context(&timeline, timeline.committed()).await;
+                        let context = dim_agent_capabilities::history::HistoryRenderer::default()
+                            .context(&timeline, timeline.committed())
+                            .await;
                         (context, TASK_READS.with(|reads| reads.take()))
                     })
                     .await;
@@ -1099,7 +1102,10 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             .unwrap();
         session.idle(&child).await.unwrap();
     }
-    let context = read_context_in(&session, "main", fact).await.unwrap();
+    let context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .context_in(&session, "main", fact)
+        .await
+        .unwrap();
     let renamed = renamed_history(&context).unwrap();
     assert_eq!(
         context_messages(&context, &renamed)
@@ -1196,7 +1202,10 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             .unwrap()
             .contains(&("main".into(), 1..=published))
     );
-    let timeline_context = read_context_in(&session, "main", fact).await.unwrap();
+    let timeline_context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .context_in(&session, "main", fact)
+        .await
+        .unwrap();
     let history = renamed_history(&timeline_context).unwrap();
     assert_eq!(
         context_messages(&timeline_context, &history)

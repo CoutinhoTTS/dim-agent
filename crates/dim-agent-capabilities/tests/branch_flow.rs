@@ -1256,6 +1256,44 @@ impl TestStore {
     }
 }
 impl TimelineStore for TestStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        fn kinds(filter: &dim_agent_runtime::QueryFilter) -> Vec<String> {
+            use dim_agent_runtime::{QueryFilter, QueryOperand};
+            match filter {
+                QueryFilter::In {
+                    value: QueryOperand::Field { path },
+                    values,
+                } if path == "kind" => values
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_owned())
+                    .collect(),
+                QueryFilter::And { conditions } | QueryFilter::Or { conditions } => {
+                    conditions.iter().flat_map(kinds).collect()
+                }
+                _ => vec![],
+            }
+        }
+        Box::pin(async move {
+            let selected = query.filter.as_ref().map(kinds).unwrap_or_default();
+            if self.armed.lock().unwrap().as_deref() == Some(scope.key.branch_id.as_str())
+                && selected.as_slice() == ["input/message"]
+            {
+                return Err(AgentError::Storage("injected opening read failure".into()));
+            }
+            self.queries
+                .lock()
+                .unwrap()
+                .push((scope.key.branch_id.clone(), selected));
+            self.memory.query(scope, query, page).await
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -1342,26 +1380,6 @@ impl TimelineStore for TestStore {
         interpreter: &'a str,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         self.memory.latest_snapshot(key, through, interpreter)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<TimelineQueryPage>> {
-        Box::pin(async move {
-            if self.armed.lock().unwrap().as_deref() == Some(key.branch_id.as_str())
-                && query.kinds.as_slice() == ["input/message"]
-            {
-                return Err(AgentError::Storage("injected opening read failure".into()));
-            }
-            self.queries
-                .lock()
-                .unwrap()
-                .push((key.branch_id.clone(), query.kinds.clone()));
-            self.memory.query(key, query, from, through).await
-        })
     }
 }
 
@@ -6434,53 +6452,102 @@ async fn a_host_lines_end_says_nothing_to_main() {
     assert!(line_block(&events).is_none());
     let tree = session.session_service::<TreeCommands>().unwrap();
     let facts = local_events(&session, &host).await;
-    let anchor = facts[facts.len() - 2].clone();
-    let query = TimelineQuery {
+    let head = facts.last().unwrap().sequence;
+    let mut query = TimelineQuery {
         scope: TimelineQueryScope::Branch,
         include_publishing: true,
-        from_event: Some(anchor.id.clone()),
-        from_sequence: None,
-        order_by: Default::default(),
-        direction: TimelineQueryDirection::Descending,
-        kinds: vec![],
-        flags: vec![],
-        event_id: None,
-        predicate: None,
-        limit: std::num::NonZeroU64::new(2).unwrap(),
-        offset: 1,
+        from: None,
+        through: Some(head),
+        query: QuerySpec {
+            filter: None,
+            select: QuerySelect::Fields {
+                fields: vec!["id".into()],
+            },
+            group_by: vec![],
+            pick: None,
+            order_by: vec![QueryOrder {
+                key: QueryOrderKey::Position,
+                direction: TimelineQueryDirection::Descending,
+            }],
+        },
+        page: Some(QueryPage {
+            limit: std::num::NonZeroU64::new(2).unwrap(),
+            after: None,
+        }),
     };
-    let page = tree.query(host.clone(), query.clone()).await.unwrap();
-    assert_eq!(page.through, facts.last().unwrap().sequence);
-    assert_eq!(page.events.len(), 2);
-    assert_eq!(page.events[0].id, facts[facts.len() - 3].id);
-    assert!(
-        page.events
-            .iter()
-            .all(|event| event.sequence < anchor.sequence)
+    let first = tree.query(host.clone(), query.clone()).await.unwrap();
+    assert_eq!(first.through, head);
+    let QueryOutput::Rows { rows } = first.result else {
+        panic!("expected property rows")
+    };
+    assert_eq!(
+        rows[0].values[0],
+        QueryValue::Value {
+            value: serde_json::json!(facts.last().unwrap().id)
+        }
     );
+    assert_eq!(
+        rows[1].values[0],
+        QueryValue::Value {
+            value: serde_json::json!(facts[facts.len() - 2].id)
+        }
+    );
+    query.page.as_mut().unwrap().after = first.next;
+    let second = tree.query(host.clone(), query.clone()).await.unwrap();
+    let QueryOutput::Rows { rows } = second.result else {
+        panic!("expected property rows")
+    };
+    assert_eq!(
+        rows[0].values[0],
+        QueryValue::Value {
+            value: serde_json::json!(facts[facts.len() - 3].id)
+        }
+    );
+    query.through = None;
     assert!(matches!(
-        tree.query(
-            host.clone(),
-            TimelineQuery {
-                scope: TimelineQueryScope::Chain,
-                ..query.clone()
-            }
-        )
-        .await,
+        tree.query(host.clone(), query.clone()).await,
         Err(AgentError::InvalidInput(_))
     ));
-    assert!(
-        tree.query(
-            host,
-            TimelineQuery {
-                from_event: Some("missing".into()),
-                ..query
-            }
-        )
-        .await
-        .unwrap()
-        .events
-        .is_empty()
+    query.through = Some(head);
+    query.page.as_mut().unwrap().after = None;
+    query.scope = TimelineQueryScope::Chain;
+    assert!(matches!(
+        tree.query(host.clone(), query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    query.scope = TimelineQueryScope::Branch;
+    query.through = Some(head + 1);
+    assert!(matches!(
+        tree.query(host.clone(), query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    query.through = Some(head);
+    query.from = Some(TimelinePosition {
+        branch_id: "main".into(),
+        sequence: 1,
+    });
+    assert!(matches!(
+        tree.query(host, query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    query.from = None;
+    query.through = None;
+    assert!(matches!(
+        session.query("main", query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    let main = tree.get("main").unwrap();
+    assert!(matches!(
+        main.query(query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    query.include_publishing = false;
+    let via_session = session.query("main", query.clone()).await.unwrap();
+    query.through = Some(via_session.through);
+    let via_branch = main.query(query).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(via_session).unwrap(),
+        serde_json::to_value(via_branch).unwrap()
     );
     soon(agent.close()).await.unwrap();
 }
