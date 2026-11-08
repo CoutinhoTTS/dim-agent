@@ -111,6 +111,42 @@ pub struct Plan {
     indexes: Vec<String>,
 }
 
+/// What `Runtimes` reads from its host's environment (§2.2), a plain value
+/// like the home: the `PATH` a `system` runtime resolves on, and the
+/// variables that put the user's own sources first.
+#[derive(Clone, Debug, Default)]
+pub struct Environment {
+    /// `PATH`: the search path a `system` runtime resolves on; an environment
+    /// with none resolves no `system` runtime.
+    pub path: OsString,
+    /// `DIMCODE_NODE_MIRROR`: a base URL the Node archive's file name is
+    /// appended to.
+    pub node_mirror: Option<String>,
+    /// `DIMCODE_PYTHON_MIRROR`: the same for the Python archive.
+    pub python_mirror: Option<String>,
+    /// `DIMCODE_UV_MIRROR`: the same for the uv archive.
+    pub uv_mirror: Option<String>,
+    /// `DIMCODE_NPM_REGISTRY`: the registry npm tries first.
+    pub npm_registry: Option<String>,
+    /// `DIMCODE_PYTHON_INDEX`: the index pip tries first.
+    pub python_index: Option<String>,
+}
+impl Environment {
+    /// One of the variables above, unset when the host sets none or sets it
+    /// empty.
+    fn variable(&self, variable: &str) -> Option<String> {
+        let value = match variable {
+            "DIMCODE_NODE_MIRROR" => self.node_mirror.as_ref(),
+            "DIMCODE_PYTHON_MIRROR" => self.python_mirror.as_ref(),
+            "DIMCODE_UV_MIRROR" => self.uv_mirror.as_ref(),
+            "DIMCODE_NPM_REGISTRY" => self.npm_registry.as_ref(),
+            "DIMCODE_PYTHON_INDEX" => self.python_index.as_ref(),
+            _ => None,
+        };
+        value.filter(|value| !value.is_empty()).cloned()
+    }
+}
+
 /// The runtimes of a home (design §2.3): every path follows from the fixed
 /// versions, the configuration and the home.
 #[derive(Clone, Debug)]
@@ -119,11 +155,12 @@ pub struct Runtimes {
     /// The home the configuration was read from, kept so an action can read it
     /// again (§2.2).
     home: PathBuf,
-    /// The search path a `system` runtime resolves on, an embedding host's
-    /// input like the home: `None` reads the process `PATH` at each lookup,
-    /// and a host that gives one keeps its lookups out of the process
-    /// environment. Production leaves it `None`.
-    search_path: Option<OsString>,
+    /// The host's environment, an embedding host's input like the home:
+    /// `None` reads the process (its `PATH` at each lookup, its mirror and
+    /// registry variables at start), and a host that gives one is read
+    /// instead, out of the process environment entirely. Production leaves
+    /// it `None`.
+    environment: Option<Environment>,
     preset: Choices,
     node: Plan,
     python: Plan,
@@ -143,11 +180,11 @@ pub type Choices = BTreeMap<String, Choice>;
 
 impl Runtimes {
     /// The runtimes of `home`: the default configuration file's `preset`,
-    /// overridden by `<home>/runtimes/config.json`.
+    /// overridden by `<home>/runtimes/config.json`, read under `environment`.
     pub fn load(
         home: &Path,
         preset: &Choices,
-        search_path: Option<OsString>,
+        environment: Option<Environment>,
     ) -> Result<Self, String> {
         let root = home.join("runtimes");
         let user_file = root.join("config.json");
@@ -174,7 +211,7 @@ impl Runtimes {
             home,
             root,
             preset.clone(),
-            search_path,
+            environment,
             choice(Kind::Node),
             choice(Kind::Python),
             choice(Kind::Uv),
@@ -186,22 +223,29 @@ impl Runtimes {
     /// the environment at that moment instead of at startup. `runtime.list`
     /// keeps reporting the runtime in effect until such an action runs.
     pub fn reload(&self) -> Result<Self, String> {
-        Self::load(&self.home, &self.preset, self.search_path.clone())
+        Self::load(&self.home, &self.preset, self.environment.clone())
     }
 
     fn new(
         home: &Path,
         root: PathBuf,
         preset: Choices,
-        search_path: Option<OsString>,
+        environment: Option<Environment>,
         node: (Source, bool),
         python: (Source, bool),
         uv: (Source, bool),
     ) -> Result<Self, String> {
         let pins: Pins = serde_json::from_str(PINS).expect("runtime/runtimes.json is valid");
         let platform = platform();
-        let search = search_path.as_deref();
-        let mirror = |variable: &str| std::env::var(variable).ok().filter(|v| !v.is_empty());
+        let search = environment
+            .as_ref()
+            .map(|environment| environment.path.as_os_str());
+        let mirror = |variable: &str| match &environment {
+            Some(environment) => environment.variable(variable),
+            None => std::env::var(variable)
+                .ok()
+                .filter(|value| !value.is_empty()),
+        };
         let sources = |pin: &Pin, variable: &str| {
             mirror(variable)
                 .map(|base| format!("{}/{{file}}", base.trim_end_matches('/')))
@@ -326,7 +370,7 @@ impl Runtimes {
         Ok(Self {
             root,
             home: home.to_owned(),
-            search_path,
+            environment,
             preset,
             node: node_plan,
             python: python_plan,

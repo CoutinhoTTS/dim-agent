@@ -4,7 +4,7 @@
 //! for real (`npm ci`, `pip install --require-hashes`).
 use super::*;
 use dim_app_server::{
-    runtime_manager::{Kind, Runtimes},
+    runtime_manager::{Environment, Kind, Runtimes},
     session_typescript::SessionTypeScriptConfig,
 };
 use std::path::{Path, PathBuf};
@@ -193,7 +193,7 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
-            Some(relative.into_os_string()),
+            Some(environment(relative.into_os_string())),
         )
         .unwrap(),
     );
@@ -317,18 +317,23 @@ fn write_defaults(home: &Path, runtimes: &str) -> PathBuf {
     path
 }
 
-fn load_runtimes(
-    home: &Path,
-    defaults: &Path,
-    search_path: Option<std::ffi::OsString>,
-) -> Arc<Runtimes> {
+/// An environment holding only `path`, with every override unset: what a
+/// fixture's search path is.
+fn environment(path: std::ffi::OsString) -> Environment {
+    Environment {
+        path,
+        ..Default::default()
+    }
+}
+
+fn load_runtimes(home: &Path, defaults: &Path, environment: Option<Environment>) -> Arc<Runtimes> {
     Arc::new(
         Runtimes::load(
             home,
             &dim_app_server::plugin_manager::Defaults::read(defaults)
                 .unwrap()
                 .runtimes,
-            search_path,
+            environment,
         )
         .unwrap(),
     )
@@ -389,7 +394,7 @@ async fn a_system_uv_fixture_reads_ready_with_its_own_path() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     assert_eq!(
         runtimes.plan(Kind::Uv).interpreter,
         fixture.directory.join("uv"),
@@ -462,7 +467,7 @@ async fn a_removed_system_uv_reads_off_and_installs_again() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -523,7 +528,7 @@ async fn a_system_uv_below_the_floor_fails_with_its_version() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(_fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -559,7 +564,7 @@ async fn configuring_uv_writes_the_merged_file_and_applies_it() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "download", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1243,7 +1248,7 @@ async fn a_watch_streams_a_tool_install_to_the_watching_connection_only() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1307,7 +1312,7 @@ async fn a_watch_streams_a_failed_acquisition() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1350,7 +1355,7 @@ async fn a_watch_streams_a_configuration_change() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(_fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1394,7 +1399,7 @@ async fn a_second_watch_takes_over_the_first() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(_fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1450,7 +1455,7 @@ async fn a_closed_watcher_fails_nothing_for_another_watcher() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1510,7 +1515,7 @@ async fn a_reload_answers_the_open_call_operation_interrupted() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let probe = Arc::new(std::sync::Mutex::new(None));
     let (server, _) = launch_with(
         Arc::new(MockTools),
@@ -1602,7 +1607,7 @@ async fn a_watch_streams_a_row_going_down() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "download", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(node.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(node.search_path())));
     assert_eq!(
         runtimes.plan(Kind::Node).interpreter,
         node.directory.join("bin/node"),
