@@ -777,7 +777,8 @@ async fn a_subscription_deleted_while_off_is_removed_at_the_next_apply() {
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_a_typescript_row_declares_and_publishes_through_the_service() {
     let home = home();
-    let (server, _producer) = start_typescript(home.path(), Arc::new(Script::default())).await;
+    let model = Arc::new(Script::default());
+    let (server, _producer) = start_typescript(home.path(), model.clone()).await;
     let mut client = connect(&server).await;
     let session = create_session(&mut client, home.path()).await;
 
@@ -803,8 +804,8 @@ async fn node_a_typescript_row_declares_and_publishes_through_the_service() {
     );
 
     subscribe(&mut client, &session, vec!["tsproducer.*"], None).await;
-    // A fresh generation declares and publishes again, now that a subscriber
-    // exists.
+    // The row reloads with EventHub, declares and publishes `ts-1` again; it
+    // subscribed after the first publish, so this one reaches the branch.
     client
         .rpc("plugin.disable", json!({"name": "eventhub"}))
         .await
@@ -815,18 +816,24 @@ async fn node_a_typescript_row_declares_and_publishes_through_the_service() {
         .unwrap();
     assert_eq!(enabled["status"], json!("running"), "{enabled}");
 
-    let events = tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let events = history(&mut client, &session).await;
             if !inputs(&events, "<dim-event source=\"tsproducer\"").is_empty() {
-                break events;
+                break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
     .expect("the marker reaches the subscribed branch");
-    let marker = text_of(&inputs(&events, "<dim-event source=\"tsproducer\"")[0]);
+    // The delivered input drives one turn; settling it reads the finished
+    // batch, so the count below sees every marker the row published.
+    wait_for("the event's turn", || model.count() >= 1).await;
+    let events = history(&mut client, &session).await;
+    let markers = inputs(&events, "<dim-event source=\"tsproducer\"");
+    assert_eq!(markers.len(), 1, "{events:?}");
+    let marker = text_of(&markers[0]);
     assert!(marker.contains("hello from TypeScript"), "{marker}");
 
     drop(client);

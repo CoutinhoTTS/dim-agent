@@ -230,9 +230,10 @@ export type EventHubErrorThrown = import('./branch-services.js').RustError<'Even
   'no_caller_row' | 'unknown_source' | 'unknown_type' | 'too_large' | 'storage' |
   'transport' | 'failed' | 'session_closed' | 'branch_missing' | 'branch_ended' |
   'reloading' | 'rejected' | 'ambiguous' | 'publication_unknown', undefined>;
-/** Process service `eventHub`, provided by EventHub to producer rows. A row
- * reads it with `ctx.use<EventHub>('eventHub')`; it is optional, so a row
- * that applied first listens for `eventhub/ready` before reading. */
+/** Process service `eventHub`, provided by EventHub to producer rows. A
+ * `definePlugin` row injects `eventHub` and reads it with
+ * `ctx.use<EventHub>('eventHub')`: the row loads only while EventHub runs,
+ * and declares at `apply`. */
 export interface EventHub {
   declare(declaration: EventHubDeclaration): Promise<void>;
   publish(request: EventHubPublishRequest): Promise<EventHubPublishReply>;
