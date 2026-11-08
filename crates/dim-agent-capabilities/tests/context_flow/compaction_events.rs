@@ -107,7 +107,8 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
             assert_eq!(
                 project_context_history(&accelerated).unwrap(),
                 project_context_history(
-                    &replay_context(&timeline, timeline.sequence())
+                    &dim_agent_capabilities::history::HistoryRenderer::default()
+                        .replay_context(&timeline, timeline.sequence())
                         .await
                         .unwrap()
                 )

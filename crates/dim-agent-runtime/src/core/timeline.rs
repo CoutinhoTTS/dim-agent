@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, FaultReporter, Result, StoredEvent, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPage, TimelineQueryReply,
+    AgentError, BoxFuture, FaultReporter, QueryComparison, QueryFilter, QueryOperand, QueryOutput,
+    QueryPage, QuerySelect, QuerySpec, QueryValue, Result, StoredEvent, TimelineKey, TimelineQuery,
     TimelineQueryScope, TimelineStore,
 };
 use dim_agent_types::{
@@ -15,17 +15,14 @@ use rutis::service;
 use rutis::{Ctx, Disposer, Event};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     num::NonZeroU64,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::watch;
 use uuid::Uuid;
-
-/// Inputs one page of the restored submission index keeps.
-const SUBMISSION_PAGE: u64 = 256;
 
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
@@ -82,12 +79,6 @@ struct Inner {
     restored_sequence: u64,
     data: Mutex<Data>,
     commit: Mutex<()>,
-    /// The submission ids of the inputs the branch was restored with, set
-    /// before the branch accepts input.
-    restored: OnceLock<HashMap<String, Submission>>,
-    /// The submission ids of the inputs committed since, written under the
-    /// commit lock.
-    submissions: Mutex<HashMap<String, Submission>>,
     changed: watch::Sender<(u64, bool)>,
     faults: FaultReporter,
 }
@@ -97,30 +88,6 @@ pub(crate) struct SubmissionInput {
     pub id: String,
     pub sequence: u64,
 }
-/// The inputs a branch holds for one submission id: one, by its event id and
-/// sequence, or several, written before the branch accepted each id once.
-#[derive(Debug, Clone)]
-enum Submission {
-    Input(SubmissionInput),
-    Ambiguous,
-}
-fn index_submission(index: &mut HashMap<String, Submission>, event: &AgentEvent) {
-    if let EventKind::InputMessage(InputMessageData {
-        submission_id: Some(id),
-        ..
-    }) = &event.kind
-    {
-        index
-            .entry(id.clone())
-            .and_modify(|found| *found = Submission::Ambiguous)
-            .or_insert_with(|| {
-                Submission::Input(SubmissionInput {
-                    id: event.id.clone(),
-                    sequence: event.sequence,
-                })
-            });
-    }
-}
 /// What [`Timeline::input`] did.
 pub(crate) enum Appended {
     Written(Arc<AgentEvent>),
@@ -128,13 +95,8 @@ pub(crate) enum Appended {
     /// sequence; nothing was written.
     Existing(u64),
 }
-/// What [`Timeline::inputs`] did.
 pub(crate) enum AppendedBatch {
-    /// The whole batch was written, in the given order and at contiguous
-    /// sequences.
     Written(Vec<Arc<AgentEvent>>),
-    /// Every input's submission id is already committed, at these sequences
-    /// in the batch's given order; nothing was written.
     Existing(Vec<u64>),
 }
 #[derive(Default)]
@@ -221,12 +183,6 @@ impl Timeline {
                 ..Default::default()
             }),
             commit: Mutex::new(()),
-            restored: if sequence == 0 {
-                OnceLock::from(HashMap::new())
-            } else {
-                OnceLock::new()
-            },
-            submissions: Mutex::default(),
             changed: watch::channel((sequence, false)).0,
             faults,
         }))
@@ -270,40 +226,41 @@ impl Timeline {
         let _commit = self.0.commit.lock().unwrap();
         self.commit(originals, register)
     }
-    /// Appends `data` as one `input/message`, unless an input with its
-    /// submission id is already committed on this branch: the branch accepts
-    /// each id once. The check and the append hold the commit lock, so of
-    /// concurrent inputs with one id exactly one is written.
-    pub(crate) fn input_checked(
+    /// Appends an input once per submission id, including accepted inputs
+    /// awaiting publication. Concurrent attempts return the same input.
+    pub(crate) async fn input_checked(
         &self,
         data: InputMessageData,
         admit: impl FnOnce() -> Result<()>,
     ) -> Result<Appended> {
-        let _append = AppendGuard::enter()?;
-        let _commit = self.0.commit.lock().unwrap();
-        if let Some(id) = &data.submission_id
-            && let Some(input) = self.submission(id)?
-        {
-            return Ok(Appended::Existing(input.sequence));
+        loop {
+            let through = self.committed();
+            let found = match &data.submission_id {
+                Some(id) => self.submission(id, through).await?,
+                None => None,
+            };
+            let _append = AppendGuard::enter()?;
+            let _commit = self.0.commit.lock().unwrap();
+            if data.submission_id.is_some() && self.committed() != through {
+                continue;
+            }
+            if let Some(input) = found {
+                return Ok(Appended::Existing(input.sequence));
+            }
+            admit()?;
+            let mut events = self.commit(vec![EventKind::InputMessage(data).into()], |_| Ok(()))?;
+            return Ok(Appended::Written(
+                events.pop().expect("single-event batch returned one event"),
+            ));
         }
-        admit()?;
-        let mut events = self.commit(vec![EventKind::InputMessage(data).into()], |_| Ok(()))?;
-        Ok(Appended::Written(
-            events.pop().expect("single-event batch returned one event"),
-        ))
     }
-    /// Commits `inputs` as one atomic batch, unless every input's submission
-    /// id is already committed on this branch: all ids are required and
-    /// distinct. The check, admission and append hold the commit lock, so the
-    /// whole batch is decided at once. One id committed and another not fails
-    /// with [`AgentError::PartialSubmission`] and writes nothing.
-    pub(crate) fn inputs_checked(
+    /// Commits all inputs atomically, or returns the existing inputs in the same order.
+    /// Every submission id must be present and distinct. A partially committed batch fails.
+    pub(crate) async fn inputs_checked(
         &self,
         inputs: Vec<InputMessageData>,
         admit: impl FnOnce() -> Result<()>,
     ) -> Result<AppendedBatch> {
-        let _append = AppendGuard::enter()?;
-        let _commit = self.0.commit.lock().unwrap();
         let mut ids = HashSet::with_capacity(inputs.len());
         for input in &inputs {
             let Some(id) = &input.submission_id else {
@@ -311,104 +268,126 @@ impl Timeline {
                     "every input in a batch must carry a submission id".into(),
                 ));
             };
-            if !ids.insert(id.as_str()) {
+            if !ids.insert(id) {
                 return Err(AgentError::InvalidInput(format!(
                     "submission id {id} appears more than once in one batch"
                 )));
             }
         }
-        let mut committed = HashMap::with_capacity(inputs.len());
-        let mut pending = Vec::new();
-        for id in &ids {
-            match self.submission(id)? {
-                Some(input) => {
-                    committed.insert(*id, input.sequence);
-                }
-                None => pending.push(*id),
-            }
-        }
-        if pending.is_empty() {
-            // Every id is committed: the batch is a replay. Keep the given
-            // order, not the set's.
-            let sequences = inputs
-                .iter()
-                .map(|input| {
-                    let id = input
-                        .submission_id
-                        .as_deref()
-                        .expect("every id was checked above");
-                    committed[id]
-                })
-                .collect();
-            return Ok(AppendedBatch::Existing(sequences));
-        }
-        if !committed.is_empty() {
-            return Err(AgentError::PartialSubmission(pending.join(", ")));
-        }
-        admit()?;
-        let events = self.commit(
-            inputs
-                .into_iter()
-                .map(|input| EventKind::InputMessage(input).into())
-                .collect(),
-            |_| Ok(()),
-        )?;
-        Ok(AppendedBatch::Written(events))
-    }
-    /// The committed input with submission id `id`: its event id and sequence.
-    pub(crate) fn submission(&self, id: &str) -> Result<Option<SubmissionInput>> {
-        let restored = self.0.restored.get().ok_or_else(|| {
-            AgentError::fault("timeline.input", "restored submissions are not indexed")
-        })?;
-        let committed = self.0.submissions.lock().unwrap();
-        match (restored.get(id), committed.get(id)) {
-            (None, None) => Ok(None),
-            (Some(Submission::Input(input)), None) | (None, Some(Submission::Input(input))) => {
-                Ok(Some(input.clone()))
-            }
-            _ => Err(AgentError::AmbiguousSubmission(id.into())),
-        }
-    }
-    /// Indexes the submission ids of the inputs the branch was restored
-    /// with. The branch's build calls it before the branch accepts input, so
-    /// the published head is the restored head and nothing of this branch is
-    /// written and not yet published.
-    pub(crate) async fn index_submissions(&self) -> Result<()> {
-        if self.0.restored.get().is_some() {
-            return Ok(());
-        }
-        let mut restored = HashMap::new();
-        let mut from = 1;
         loop {
-            let reply = self
-                .query(TimelineQuery {
-                    scope: TimelineQueryScope::Branch,
-                    include_publishing: false,
-                    from_event: None,
-                    from_sequence: Some(from),
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Ascending,
-                    kinds: vec!["input/message".into()],
-                    flags: Vec::new(),
-                    event_id: None,
-                    predicate: None,
-                    limit: NonZeroU64::new(SUBMISSION_PAGE)
-                        .expect("a page keeps at least one input"),
-                    offset: 0,
-                })
-                .await?;
-            let short = (reply.events.len() as u64) < SUBMISSION_PAGE;
-            let last = reply.events.last().map(|event| event.sequence);
-            for event in &reply.events {
-                index_submission(&mut restored, event);
+            let through = self.committed();
+            let mut found = Vec::with_capacity(inputs.len());
+            let mut pending = Vec::new();
+            for input in &inputs {
+                let id = input
+                    .submission_id
+                    .as_deref()
+                    .expect("validated submission id");
+                match self.submission(id, through).await? {
+                    Some(input) => found.push(input.sequence),
+                    None => pending.push(id),
+                }
             }
-            match last {
-                Some(last) if !short => from = last + 1,
-                _ => break,
+            let _append = AppendGuard::enter()?;
+            let _commit = self.0.commit.lock().unwrap();
+            if self.committed() != through {
+                continue;
             }
+            if pending.is_empty() {
+                return Ok(AppendedBatch::Existing(found));
+            }
+            if !found.is_empty() {
+                return Err(AgentError::PartialSubmission(pending.join(", ")));
+            }
+            admit()?;
+            let events = self.commit(
+                inputs
+                    .into_iter()
+                    .map(|input| EventKind::InputMessage(input).into())
+                    .collect(),
+                |_| Ok(()),
+            )?;
+            return Ok(AppendedBatch::Written(events));
         }
-        let _ = self.0.restored.set(restored);
-        Ok(())
+    }
+    /// The committed input at `through` with submission id `id`.
+    /// More than one matching historical input is ambiguous.
+    pub(crate) async fn submission(
+        &self,
+        id: &str,
+        through: u64,
+    ) -> Result<Option<SubmissionInput>> {
+        let reply = self
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(through),
+                include_publishing: true,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                comparison: QueryComparison::Eq,
+                                right: QueryOperand::Value {
+                                    value: "input/message".into(),
+                                },
+                            },
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "data.submission_id".into(),
+                                },
+                                comparison: QueryComparison::Eq,
+                                right: QueryOperand::Value { value: id.into() },
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["id".into(), "position.sequence".into()],
+                    },
+                    group_by: Vec::new(),
+                    pick: None,
+                    order_by: Vec::new(),
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::new(2).expect("two inputs distinguish ambiguity"),
+                    after: None,
+                }),
+            })
+            .await?;
+        let QueryOutput::Rows { mut rows } = reply.result else {
+            unreachable!("submission lookup selects input identities")
+        };
+        if rows.len() > 1 {
+            return Err(AgentError::AmbiguousSubmission(id.into()));
+        }
+        let Some(row) = rows.pop() else {
+            return Ok(None);
+        };
+        let Ok(
+            [
+                QueryValue::Value {
+                    value: serde_json::Value::String(id),
+                },
+                QueryValue::Value {
+                    value: serde_json::Value::Number(sequence),
+                },
+            ],
+        ) = <[_; 2]>::try_from(row.values)
+        else {
+            return Err(AgentError::fault(
+                "timeline.input",
+                "a submission has no event identity or position",
+            ));
+        };
+        Ok(Some(SubmissionInput {
+            id,
+            sequence: sequence
+                .as_u64()
+                .expect("event sequences are unsigned integers"),
+        }))
     }
     /// Commits a batch; the caller holds the append guard and commit lock.
     fn commit(
@@ -489,12 +468,6 @@ impl Timeline {
             }
             data.allocated = last_sequence;
             data.hot.extend(records.iter().cloned());
-        }
-        {
-            let mut submissions = self.0.submissions.lock().unwrap();
-            for event in &events {
-                index_submission(&mut submissions, event);
-            }
         }
         let weak = Arc::downgrade(&self.0);
         let result = self.0.store.append(
@@ -594,309 +567,123 @@ impl Timeline {
             session_id: self.0.key.session_id.clone(),
             branch_id: branch.into(),
         };
-        let point = TimelineQuery {
-            scope: TimelineQueryScope::Branch,
-            from_event: None,
-            from_sequence: None,
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Ascending,
-            include_publishing: false,
-            kinds: Vec::new(),
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::new(1).expect("one is nonzero"),
-            offset: 0,
+        let scope = crate::TimelineReadScope {
+            key,
+            through: sequence,
+            segments: vec![crate::TimelineReadSegment {
+                branch_id: branch.into(),
+                from: sequence,
+                through: sequence,
+                stored_through: sequence,
+                tail: vec![],
+            }],
         };
-        Ok(self
+        let result = self
             .0
             .store
-            .query(&key, &point, sequence, sequence)
-            .await?
-            .events
-            .into_iter()
-            .next())
+            .query(
+                &scope,
+                &QuerySpec {
+                    filter: None,
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                Some(&QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            )
+            .await?;
+        let QueryOutput::Events { events } = result.result else {
+            unreachable!("event selection returns events")
+        };
+        Ok(events.into_iter().next().map(|row| row.event))
     }
-    /// One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
-    /// [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
-    /// the direction, kinds, flags, event id, predicate, limit and offset
-    /// select the facts, and the reply is up to `limit` of them in chain order
-    /// and then sequence, in the query's direction, each with its position. A
-    /// chain read is each ancestor to its cut and then this branch, root first
-    /// ascending and this branch first descending; the offset the earlier
-    /// segment did not use moves to the next one, so paging is skipping and a
-    /// page shorter than the limit means the selection is exhausted. The read
-    /// never returns a fact above a branch's coverage: an ancestor to its cut,
-    /// this branch to the published head, or to the committed head when the
-    /// query asks for it, in which case this branch's own facts in
-    /// `published+1..=through` are part of the same page.
-    ///
-    /// The reply's `through` is the cutoff the read took on this branch: the
-    /// published head, or the committed head the query asked for, which is
-    /// read when the call starts, so a write during the call stays out of the
-    /// page. The published part and the tail are disjoint in sequence, so each
-    /// fact is returned once. A caller that holds live events releases the ones
-    /// above the cutoff ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
-    pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
-        let (published, through, tail) = {
+
+    /// Computes properties over one fixed branch or ancestry scope.
+    /// The optional start must name a position inside that scope.
+    pub async fn query(&self, query: crate::TimelineQuery) -> Result<crate::TimelineQueryReply> {
+        query.query.validate(query.page.as_ref())?;
+        if query.through.is_none() && query.page.as_ref().is_some_and(|page| page.after.is_some()) {
+            return Err(AgentError::InvalidInput(
+                "continued queries require the original through".into(),
+            ));
+        }
+        let mut scope = {
             let data = self.0.data.lock().unwrap();
-            let through = if query.include_publishing {
+            let visible = if query.include_publishing {
                 data.allocated
             } else {
                 data.published
             };
-            let tail = (through > data.published).then(|| {
-                data.hot
+            let through = query.through.unwrap_or(visible);
+            if through > visible {
+                return Err(AgentError::InvalidInput(format!(
+                    "future timeline sequence {through}"
+                )));
+            }
+            let mut segments = Vec::new();
+            if query.scope == TimelineQueryScope::Chain {
+                segments.extend(self.0.ancestors.iter().filter(|(_, cut)| *cut > 0).map(
+                    |(branch, cut)| crate::TimelineReadSegment {
+                        branch_id: branch.clone(),
+                        from: 1,
+                        through: *cut,
+                        stored_through: *cut,
+                        tail: Vec::new(),
+                    },
+                ));
+            }
+            segments.push(crate::TimelineReadSegment {
+                branch_id: self.0.key.branch_id.clone(),
+                from: 1,
+                through,
+                stored_through: data.published.min(through),
+                tail: data
+                    .hot
                     .iter()
                     .filter(|record| {
                         record.event.sequence > data.published && record.event.sequence <= through
                     })
                     .map(|record| record.event.clone())
-                    .collect::<Vec<_>>()
+                    .collect(),
             });
-            (data.published, through, tail)
-        };
-        self.query_page(query, published, through, tail).await
-    }
-    /// [`Self::query`] with this branch clipped at `published` and, when
-    /// `through` names a committed sequence above it, the branch's own facts in
-    /// `published+1..=through` merged in. The query's start, selection and page
-    /// apply to the merged result: the tail continues the published page when
-    /// ascending and precedes it when descending, and a page shorter than the
-    /// limit means the selection is exhausted up to the tail's end.
-    async fn query_page(
-        &self,
-        query: TimelineQuery,
-        published: u64,
-        through: u64,
-        tail: Option<Vec<Arc<AgentEvent>>>,
-    ) -> Result<TimelineQueryReply> {
-        use TimelineQueryDirection::Descending;
-
-        query.validate()?;
-        let tail = tail.map(|events| (events, through));
-        let clips: Vec<(String, u64)> = match query.scope {
-            TimelineQueryScope::Branch => vec![(self.0.key.branch_id.clone(), published)],
-            TimelineQueryScope::Chain => self
-                .0
-                .ancestors
-                .iter()
-                .filter(|(_, cut)| *cut > 0)
-                .cloned()
-                .chain(std::iter::once((self.0.key.branch_id.clone(), published)))
-                .collect(),
-        };
-        let anchor = match (&query.from_event, query.from_sequence) {
-            (None, None) => None,
-            (None, Some(sequence)) => Some((
-                match query.scope {
-                    TimelineQueryScope::Branch => None,
-                    TimelineQueryScope::Chain => Some(self.0.key.branch_id.clone()),
-                },
-                sequence,
-            )),
-            (Some(event_id), None) => {
-                let mut found = None;
-                for (branch, clip) in &clips {
-                    let key = TimelineKey {
-                        session_id: self.0.key.session_id.clone(),
-                        branch_id: branch.clone(),
-                    };
-                    let probe = TimelineQuery {
-                        scope: TimelineQueryScope::Branch,
-                        from_event: None,
-                        from_sequence: None,
-                        order_by: query.order_by,
-                        direction: TimelineQueryDirection::Ascending,
-                        include_publishing: false,
-                        kinds: Vec::new(),
-                        flags: Vec::new(),
-                        event_id: Some(event_id.clone()),
-                        predicate: None,
-                        limit: std::num::NonZeroU64::new(1).expect("one is nonzero"),
-                        offset: 0,
-                    };
-                    let page = self.0.store.query(&key, &probe, 1, *clip).await?;
-                    if let Some(position) = page.positions.first() {
-                        found = Some((Some(branch.clone()), position.sequence));
-                        break;
-                    }
-                }
-                if found.is_none() {
-                    found = tail.as_ref().and_then(|(events, _)| {
-                        events
-                            .iter()
-                            .find(|event| &event.id == event_id)
-                            .map(|event| (Some(self.0.key.branch_id.clone()), event.sequence))
-                    });
-                }
-                found
-            }
-            (Some(_), Some(_)) => unreachable!("validate rejects two anchors"),
-        };
-        if query.from_event.is_some() && anchor.is_none() {
-            return Ok(TimelineQueryReply {
-                events: Vec::new(),
-                positions: Vec::new(),
+            crate::TimelineReadScope {
+                key: self.0.key.clone(),
                 through,
-            });
-        }
-        let anchor_index = match &anchor {
-            Some((Some(branch), _)) => Some(
-                clips
-                    .iter()
-                    .position(|(name, _)| name == branch)
-                    .ok_or_else(|| {
-                        AgentError::InvalidInput(format!(
-                            "query start names branch {branch}, which the scope does not cover"
-                        ))
-                    })?,
-            ),
-            _ => None,
-        };
-        let order: Vec<usize> = match query.direction {
-            TimelineQueryDirection::Ascending => (0..clips.len()).collect(),
-            Descending => (0..clips.len()).rev().collect(),
-        };
-        let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
-        let mut skip = query.offset;
-        let mut events = Vec::new();
-        let mut positions = Vec::new();
-        for index in order {
-            if events.len() >= limit {
-                break;
+                segments,
             }
-            let (branch, clip) = &clips[index];
-            let from = match (&anchor, anchor_index, query.direction) {
-                (None, _, _) => 1,
-                (
-                    Some((Some(_), sequence)),
-                    Some(start_index),
-                    TimelineQueryDirection::Ascending,
-                ) => {
-                    if index < start_index {
-                        continue;
-                    }
-                    if index == start_index { *sequence } else { 1 }
-                }
-                (Some((Some(_), _)), Some(start_index), TimelineQueryDirection::Descending) => {
-                    if index > start_index {
-                        continue;
-                    }
-                    1
-                }
-                (Some((None, sequence)), _, TimelineQueryDirection::Ascending) => *sequence,
-                (Some((None, _)), _, TimelineQueryDirection::Descending) => 1,
-                (Some(_), None, _) => 1,
-            };
-            let bound = match (&anchor, anchor_index, query.direction) {
-                (
-                    Some((Some(_), sequence)),
-                    Some(start_index),
-                    TimelineQueryDirection::Descending,
-                ) if index == start_index => (*clip).min(*sequence),
-                (Some((None, sequence)), _, TimelineQueryDirection::Descending) => {
-                    (*clip).min(*sequence)
-                }
-                _ => *clip,
-            };
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            let tail_bounds = match (&tail, *branch == self.0.key.branch_id) {
-                (Some((_, through)), true) => Some(match query.direction {
-                    TimelineQueryDirection::Ascending => (from, *through),
-                    Descending => (
-                        1,
-                        match (&anchor, anchor_index) {
-                            (Some((Some(_), sequence)), Some(start_index))
-                                if index == start_index =>
-                            {
-                                *sequence
-                            }
-                            (Some((None, sequence)), _) => *sequence,
-                            _ => *through,
-                        }
-                        .min(*through),
-                    ),
-                }),
-                _ => None,
-            };
-            let parts: [bool; 2] = match query.direction {
-                TimelineQueryDirection::Ascending => [false, true],
-                Descending => [true, false],
-            };
-            for is_tail in parts {
-                if events.len() >= limit {
-                    break;
-                }
-                let page = if is_tail {
-                    let (Some((tail_events, _)), Some((from, bound))) = (&tail, tail_bounds) else {
-                        continue;
-                    };
-                    self.tail_page(tail_events, &query, from, bound, limit - events.len(), skip)
-                } else {
-                    let mut request = query.clone();
-                    request.scope = TimelineQueryScope::Branch;
-                    request.from_event = None;
-                    request.from_sequence = None;
-                    request.limit = std::num::NonZeroU64::new(
-                        u64::try_from(limit - events.len())
-                            .unwrap_or(u64::MAX)
-                            .max(1),
-                    )
-                    .expect("a read keeps one event of its limit");
-                    request.offset = skip;
-                    self.0.store.query(&key, &request, from, bound).await?
-                };
-                let reached = page.skipped + page.events.len() as u64;
-                skip = skip.saturating_sub(reached);
-                events.extend(page.events);
-                positions.extend(page.positions);
-            }
-        }
-        Ok(TimelineQueryReply {
-            events,
-            positions,
-            through,
-        })
-    }
-    /// The part of one page the tail holds: the facts `query` accepts in
-    /// `from..=bound`, in the query's direction, with the read's offset
-    /// applied.
-    fn tail_page(
-        &self,
-        tail: &[Arc<AgentEvent>],
-        query: &TimelineQuery,
-        from: u64,
-        bound: u64,
-        limit: usize,
-        offset: u64,
-    ) -> TimelineQueryPage {
-        let mut events: Vec<Arc<AgentEvent>> = tail
-            .iter()
-            .filter(|event| (from..=bound).contains(&event.sequence) && query.accepts(event))
-            .cloned()
-            .collect();
-        if query.direction == TimelineQueryDirection::Descending {
-            events.reverse();
-        }
-        let skipped = events
-            .len()
-            .min(usize::try_from(offset).unwrap_or(usize::MAX));
-        let events: Vec<Arc<AgentEvent>> = events.into_iter().skip(skipped).take(limit).collect();
-        TimelineQueryPage {
-            positions: events
+        };
+        if let Some(from) = query.from {
+            let index = scope
+                .segments
                 .iter()
-                .map(|event| TimelinePosition {
-                    branch_id: self.0.key.branch_id.clone(),
-                    sequence: event.sequence,
-                })
-                .collect(),
-            events,
-            skipped: skipped as u64,
+                .position(|segment| segment.branch_id == from.branch_id)
+                .ok_or_else(|| {
+                    AgentError::InvalidInput("query start is outside its branch scope".into())
+                })?;
+            if from.sequence == 0 || from.sequence > scope.segments[index].through {
+                return Err(AgentError::InvalidInput(
+                    "query start is outside its sequence range".into(),
+                ));
+            }
+            scope.segments.drain(..index);
+            let first = &mut scope.segments[0];
+            first.from = from.sequence;
+            first.tail.retain(|event| event.sequence >= from.sequence);
         }
+        let result = self
+            .0
+            .store
+            .query(&scope, &query.query, query.page.as_ref())
+            .await?;
+        Ok(crate::TimelineQueryReply {
+            through: scope.through,
+            result: result.result,
+            next: result.next,
+        })
     }
     /// Checks that `sequence` ends an atomic batch: a stored row's structure,
     /// not event content, so the store answers it and it is not a query
@@ -991,27 +778,42 @@ impl Timeline {
         }
         Ok(None)
     }
-    /// The position of the event a checkpoint resumes at, read with
-    /// `from_event`, which names the branch the event sits in. A resume event
-    /// the store holds no id for (an event inside a merged output row) keeps
-    /// the position the checkpoint recorded.
+    /// The stored position of the checkpoint's resume event, if it still exists.
     #[service(skip)]
     async fn resume_position(&self, resume: &ResumePoint) -> Result<Option<TimelinePosition>> {
-        let query = TimelineQuery {
-            scope: TimelineQueryScope::Chain,
-            include_publishing: false,
-            from_event: Some(resume.event_id.clone()),
-            from_sequence: None,
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Ascending,
-            kinds: Vec::new(),
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: std::num::NonZeroU64::new(1).expect("one is nonzero"),
-            offset: 0,
+        let reply = self
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Chain,
+                include_publishing: false,
+                from: None,
+                through: None,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field { path: "id".into() },
+                        values: vec![resume.event_id.clone().into()],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["position".into()],
+                    },
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            })
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
         };
-        Ok(self.query(query).await?.positions.into_iter().next())
+        Ok(rows.into_iter().next().map(|row| {
+            let [QueryValue::Value { value }] = row.values.as_slice() else {
+                unreachable!("event has a position")
+            };
+            serde_json::from_value(value.clone()).expect("position follows the query contract")
+        }))
     }
     /// Waits for the anchor's durable publication, then writes only the cache.
     /// The owner tracks this future along with its other preparation work.

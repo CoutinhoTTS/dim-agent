@@ -592,8 +592,9 @@ async fn context_breakdown() -> std::result::Result<(), Box<dyn std::error::Erro
     let through = session.sequence("main")?;
     let mut phases = Vec::new();
     let read_start = allocation::live();
-    let context =
-        dim_agent_capabilities::history::read_context_in(&session, "main", through).await?;
+    let context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .context_in(&session, "main", through)
+        .await?;
     phases.push(json!({
         "phase": "read",
         "live": allocation::live(),

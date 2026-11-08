@@ -13,8 +13,9 @@ use crate::{
     workspace_tools::background::{WAKE_TASK_TAG, tagged},
 };
 use dim_agent_runtime::{
-    AgentBuilder, AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
+    AgentBuilder, AgentError, CAPABILITY_RELOADING, Dispatcher, Names, QueryFilter, QueryOperand,
+    QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Timeline, TimelineQuery,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -93,23 +94,36 @@ impl Wait {
         let reply = timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(timeline.committed()),
                 include_publishing: true,
-                from_event: None,
-                from_sequence: None,
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: vec!["turn/start".into(), "turn/end".into()],
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: NonZeroU64::MIN,
-                offset: 0,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["turn/start".into(), "turn/end".into()],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["kind".into()],
+                    },
+                    group_by: Vec::new(),
+                    pick: Some(QueryPick::Last),
+                    order_by: Vec::new(),
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
             })
             .await?;
-        let open = matches!(
-            reply.events.first().map(|event| &event.kind),
-            Some(EventKind::TurnStart(_))
-        );
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("wait recovery selects the latest turn control kind")
+        };
+        let open = rows.first().is_some_and(|row| {
+            matches!(row.values.first(),
+            Some(QueryValue::Value { value: Value::String(kind) }) if kind == "turn/start")
+        });
         self.state.lock().unwrap().open = open;
         Ok(reply.through)
     }

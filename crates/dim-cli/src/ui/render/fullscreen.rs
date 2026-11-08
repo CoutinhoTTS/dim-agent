@@ -364,6 +364,10 @@ impl FullScreen {
     }
 
     /// One page of the transcript, keeping two rows of context.
+    pub fn at_top(&self) -> bool {
+        self.top() == 0
+    }
+
     pub fn page(&mut self, down: bool) {
         let step = self.view_rows.saturating_sub(2).max(1) as isize;
         self.scroll(if down { step } else { -step });

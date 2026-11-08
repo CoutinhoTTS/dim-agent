@@ -384,6 +384,7 @@ fn resume_effort_only_sends_forced_inheritance_before_submitting() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_pending_questions(8);
         let idle = wire.read("session.idle");
         wire.reply(&idle, json!({"sequence":8}));
         let submit = wire.read("session.submit");
@@ -413,15 +414,17 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
         let home = Home::new();
         let (calls, observed) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let mut creates = 0;
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.2 && wire.empty_state(&request) { continue; }
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
                     "protocolVersion":3,"daemonProfile":{"kind":"product"},
-                    "features":["session.create","session.create.modelFromSession","session.history","provider.list"]}),
+                    "features":["session.create","session.create.modelFromSession","session.history","session.history.latestTurn","session.methods","provider.list"]}),
                 "session.create" => {
                     creates += 1;
                     calls.send(request["params"].clone()).unwrap();
@@ -434,6 +437,7 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
                 "session.attach" => {
                     let mut record = attach_record(&request);
                     record["model"] = json!({"providerId":"session-source","modelId":"model"});
+                    if switched { record["model"]=json!({"providerId":"configured-provider","modelId":"selected-model"}); record["modelPreferences"]=json!({"reasoningEffort":"low"}); }
                     record
                 }
                 "session.history" => {
@@ -590,9 +594,7 @@ fn temporary_model_preferences_use_adopted_choices_without_a_provider_catalog() 
             let mut record = attach_record(&attach);
             record["model"]["providerId"] = json!("temporary");
             record["modelPreferences"] = json!({"reasoningEffort":"high"});
-            if !from_history {
-                record["capabilitySnapshot"] = snapshot.clone();
-            }
+            record["capabilitySnapshot"] = snapshot.clone();
             wire.reply(&attach, record);
             let history = wire.read("session.history");
             let events = if from_history {
@@ -909,12 +911,14 @@ fn configured_model_selection_preserves_legacy_creation() {
     fs::write(&config, "{}").unwrap();
     let digest = format!("{:x}", Sha256::digest(b"{}"));
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
+        wire.2 = true;
         let hello = wire.read("hello");
         wire.reply(
             &hello,
             json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
             "protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":digest},
-            "features":["session.create","session.history"]}),
+            "features":["session.create","session.history","session.history.latestTurn","session.methods"]}),
         );
         let create = wire.read("session.create");
         assert_eq!(
@@ -1053,13 +1057,15 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
             "temporary-source"
         };
         let daemon = home.daemon(move |wire| {
+            wire.2=true;
             let mut line = String::new();
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 line.clear();
+                if wire.2 && wire.empty_state(&request) { continue; }
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => {
-                        let mut features = vec!["session.create", "session.history", "provider.list"];
+                        let mut features = vec!["session.create", "session.history", "session.history.latestTurn", "session.methods", "provider.list"];
                         if management {
                             features.push("provider.management");
                         }

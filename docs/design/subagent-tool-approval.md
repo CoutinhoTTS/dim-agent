@@ -248,6 +248,17 @@ cannot reopen it. It uses the [existing notice contract](appserver/session-notic
 
 ## 6. Cancellation, races and recovery
 
+Recovery reads one fixed committed range. It restores turn/interruption state and
+operation/delivery/result identities from selected fields, consuming each page
+before the next. Approval cleanup selects internal inputs with a
+`collaboration-approval:` submission id, checks their first block's approval
+marker, and removes inputs already applied or deleted. It does not read ordinary
+user input bodies, delegated prompts or completed report text to recover state.
+Unsettled operations and delivered requests retain their existing refusal and
+failure behavior. A member is stopped only while its current relation identifies
+this Session as its leader; copied facts confer no authority over the source's
+member.
+
 | Situation | Required settlement |
 | --- | --- |
 | Several members or parallel calls ask | Independent routes and original identities; leader can reject/allow independently; client queues leader Approval requests without overwriting one prompt with another |

@@ -6,6 +6,7 @@
 
 mod branch;
 mod fold;
+mod read;
 mod session;
 mod text;
 

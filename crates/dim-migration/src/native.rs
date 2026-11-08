@@ -569,6 +569,7 @@ impl Native {
             .map_err(failure)?;
         }
         dim_app_server::storage::initialize_session_catalog(&tx, &session).map_err(failure)?;
+        dim_app_server::storage::initialize_session_text_index(&tx, &session).map_err(failure)?;
         if let Some(title) = &data.title {
             tx.execute(
                 "INSERT INTO session_metadata VALUES (?1,1,?2,'manual')",

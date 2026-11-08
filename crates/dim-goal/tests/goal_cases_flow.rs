@@ -640,7 +640,7 @@ async fn r4_a_record_with_an_older_after_is_not_written() {
             false
         )
     );
-    release.send(()).unwrap();
+    let _ = release.send(());
 
     let writes = env.settled("main").await;
     assert!(
@@ -1642,6 +1642,225 @@ async fn pursuit_5_a_change_consumed_while_the_creation_check_runs_writes_no_pau
     assert!(
         env.creates("main").await.is_empty(),
         "the creation was refused"
+    );
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deletion_rebuild_catches_another_deletion_and_blocks_changes() {
+    let env = Env::start_gated().await;
+    env.set("first objective").await;
+    env.goal("edit", json!({"objective": "withdrawn objective"}))
+        .await
+        .unwrap();
+    let edit = env.wait_for("main", r#"op="edit""#).await;
+    env.goal("pause", json!({})).await.unwrap();
+    let pause = env.wait_for("main", r#"op="pause""#).await;
+    env.dispatched("main", pause.sequence).await;
+    let (entered, release) = env.gated().hold_read(&["branch/start", "session/forked"]);
+    env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData { input_id: edit.id }),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(15), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    let deletion = env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData { input_id: pause.id }),
+    );
+    env.dispatched("main", deletion.sequence).await;
+    {
+        let change = env.goal("edit", json!({"objective": "final objective"}));
+        tokio::pin!(change);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut change)
+                .await
+                .is_err(),
+            "a change waits for deletion recovery"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), change)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let writes = env.settled("main").await;
+    let state = writes
+        .iter()
+        .rev()
+        .find(|block| block.marker.contains(r#"kind="state""#))
+        .unwrap();
+    assert!(
+        state.text.contains("final objective"),
+        "the new change follows both deletions: {state:?}"
+    );
+    assert!(
+        state.marker.contains(r#"status="active""#),
+        "the withdrawn pause cannot survive: {state:?}"
+    );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn deletion_read_failure_fails_changes_and_a_later_fact_retries() {
+    let env = Env::start_gated().await;
+    env.set("first objective").await;
+    env.goal("edit", json!({"objective": "withdrawn objective"}))
+        .await
+        .unwrap();
+    let edit = env.wait_for("main", r#"op="edit""#).await;
+    env.dispatched("main", edit.sequence).await;
+    env.gated().fail_restore();
+    let deletion = env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData { input_id: edit.id }),
+    );
+    env.dispatched("main", deletion.sequence).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        env.goal("edit", json!({"objective": "must not commit"})),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_err(), "a failed rebuild cannot compose a change");
+    let input = env.emit("main", message(vec![], InputMode::Append));
+    env.dispatched("main", input.sequence).await;
+    env.goal("pause", json!({})).await.unwrap();
+    let writes = env.settled("main").await;
+    let state = writes
+        .iter()
+        .rev()
+        .find(|block| block.marker.contains(r#"kind="state""#))
+        .unwrap();
+    assert!(
+        state.text.contains("first objective"),
+        "retry restores the surviving objective: {state:?}"
+    );
+    assert!(
+        !writes
+            .iter()
+            .any(|block| block.text.contains("must not commit")),
+        "the failed command wrote no facts"
+    );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn closing_cancels_a_deletion_read() {
+    let env = Env::start_gated().await;
+    let set = env.set("first objective").await;
+    env.dispatched("main", set.sequence).await;
+    let (entered, release) = env.gated().hold_read(&["branch/start", "session/forked"]);
+    env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData { input_id: set.id }),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(15), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), env.close())
+        .await
+        .expect("closing cancels the pending store read");
+    assert!(release.send(()).is_err(), "no read survives closing");
+}
+
+#[tokio::test]
+async fn cancelling_an_uncommitted_record_allows_the_rebuilt_decision_to_write() {
+    let env = Env::start_gated().await;
+    let set = env.set("ship it").await;
+    let removable = env.emit(
+        "main",
+        message(vec![raw("ordinary block", None, false)], InputMode::Append),
+    );
+    env.turn_start("main", "work");
+    env.consume("main", &set.id);
+    let (entered, release) = env.gated().hold_query("input/message");
+    let end = env.end_turn("main", "work", "failed");
+    tokio::time::timeout(std::time::Duration::from_secs(15), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    let deleted = env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData {
+            input_id: removable.id.clone(),
+        }),
+    );
+    env.dispatched("main", deleted.sequence).await;
+    let paused = env.wait_for("main", r#"reason="turn_failed""#).await;
+    assert_eq!(
+        paused.text,
+        texts::automatic_pause(
+            "main",
+            "ship it",
+            "turn_failed",
+            "the last turn failed",
+            end.sequence
+        )
+    );
+    assert!(
+        release.send(()).is_err(),
+        "the stale uncommitted write was cancelled"
+    );
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"reason="turn_failed""#))
+            .count(),
+        1,
+        "the restored decision commits once"
+    );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn a_change_waiting_to_commit_recomposes_after_its_goal_is_deleted() {
+    let env = Env::start_gated().await;
+    let set = env.set("original objective").await;
+    env.dispatched("main", set.sequence).await;
+    let (entered, release) = env.gated().hold_query("input/message");
+    {
+        let change = env.goal("edit", json!({"objective": "edited objective"}));
+        tokio::pin!(change);
+        tokio::select! {
+            result = &mut change => panic!("change committed before the held read: {result:?}"),
+            result = entered => result.unwrap(),
+        }
+        env.emit(
+            "main",
+            EventKind::InputDeleted(InputDeletedData { input_id: set.id }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(15), change)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        release.send(()).is_err(),
+        "the obsolete composition was cancelled before commit"
+    );
+    let writes = env.settled("main").await;
+    let record = writes
+        .iter()
+        .rev()
+        .find(|block| block.marker.contains(r#"kind="state""#))
+        .unwrap();
+    assert!(
+        record.marker.contains(r#"status="none""#),
+        "editing after the set was deleted cannot revive its active state: {record:?}"
+    );
+    assert!(record.text.contains("edited objective"));
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"op="edit""#))
+            .count(),
+        1,
+        "only the recomposed batch commits"
     );
     env.close().await;
 }

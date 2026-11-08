@@ -9,6 +9,7 @@
 //! An open request holds its leader (`SessionLifecycle::take_hold`) until its
 //! `result` is written, so an idle unload never ends it.
 mod approvals;
+mod pending;
 
 use crate::agents::{AgentIndex, AgentProfile, SessionRestored, UnloadedSessionDeleted};
 use crate::collaboration_model_policy::ModelPolicy;
@@ -24,9 +25,10 @@ use dim_agent_capabilities::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{
-    AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
+    AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, QueryFilter,
+    QueryOperand, QueryOutput, QueryPage, QuerySelect, QuerySpec, QueryValue, Session,
     SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, Timeline, TimelineIdentity,
-    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope, rebuild_facts,
+    TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use futures_util::{
@@ -1299,34 +1301,67 @@ impl CollaborationSession {
         let Some(timeline) = timeline else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
-        let reply = match timeline
-            .query(TimelineQuery {
-                scope: TimelineQueryScope::Branch,
-                include_publishing: false,
-                from_event: None,
-                from_sequence: None,
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Ascending,
-                kinds: Vec::new(),
-                flags: Vec::new(),
-                event_id: Some(result_id.to_owned()),
-                predicate: None,
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            include_publishing: false,
+            from: None,
+            through: None,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field { path: "id".into() },
+                            values: vec![result_id.into()],
+                        },
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: vec!["collaboration/result".into()],
+                        },
+                    ],
+                }),
+                select: QuerySelect::Events,
+                group_by: vec![],
+                pick: None,
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
                 limit: NonZeroU64::MIN,
-                offset: 0,
-            })
-            .await
-        {
+                after: None,
+            }),
+        };
+        let reply = match timeline.query(query.clone()).await {
             Ok(reply) => reply,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        let Some(event) = reply.events.first() else {
-            return ToolResult::error("No collaboration result with this resultId.");
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
         };
-        match &event.kind {
-            EventKind::CollaborationResult(data) => {
-                success(json!({"resultId": event.id, "result": data}))
-            }
-            _ => ToolResult::error("The resultId does not identify a collaboration result."),
+        if let Some(row) = events.into_iter().next() {
+            let EventKind::CollaborationResult(data) = &row.event.kind else {
+                unreachable!("query selects collaboration results")
+            };
+            return success(json!({"resultId": row.event.id, "result": data}));
+        }
+        query.through = Some(reply.through);
+        query.query.filter = Some(QueryFilter::In {
+            value: QueryOperand::Field { path: "id".into() },
+            values: vec![result_id.into()],
+        });
+        query.query.select = QuerySelect::Exists;
+        query.page = None;
+        match timeline.query(query).await {
+            Ok(reply) => match reply.result {
+                QueryOutput::Exists { exists: true } => {
+                    ToolResult::error("The resultId does not identify a collaboration result.")
+                }
+                QueryOutput::Exists { exists: false } => {
+                    ToolResult::error("No collaboration result with this resultId.")
+                }
+                _ => unreachable!("existence selection returns a boolean"),
+            },
+            Err(error) => ToolResult::error(error.to_string()),
         }
     }
 
@@ -2555,107 +2590,6 @@ impl CollaborationSession {
         }
         self.state.lock().unwrap().branches.remove(branch_id);
     }
-
-    /// Reload: operations of an earlier generation without `delivered` are
-    /// refused, its delivered requests without `result` fail. Settlement
-    /// acts only on what this Session holds: a member is stopped only while
-    /// its relation names this Session as its leader. A fork's copied
-    /// request names its source's member, which keeps working for the
-    /// source (#127); after a daemon restart no relation exists, so nothing
-    /// is stopped.
-    fn rebuild(
-        &self,
-        timeline: &Arc<Timeline>,
-        phase: &BranchLifecycle,
-        events: &[Arc<AgentEvent>],
-        tasks: &TaskTracker,
-    ) -> (Option<String>, BTreeSet<String>) {
-        let mut current_turn = None;
-        let mut interrupted = BTreeSet::new();
-        let mut ops = BTreeMap::new();
-        let mut open: BTreeMap<String, (String, String)> = BTreeMap::new();
-        for event in events {
-            match &event.kind {
-                EventKind::TurnStart(data) => current_turn = Some(data.turn_id.clone()),
-                EventKind::TurnEnd(_) => current_turn = None,
-                EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn => {
-                    interrupted.extend(current_turn.clone());
-                }
-                EventKind::CollaborationDelivered(data) => {
-                    if let (
-                        Some(true),
-                        CollaborationDelivery::Ok {
-                            agent_id,
-                            session_id,
-                            ..
-                        },
-                    ) = (ops.remove(&data.op_event_id), &data.delivery)
-                    {
-                        open.insert(
-                            data.op_event_id.clone(),
-                            (agent_id.clone(), session_id.clone()),
-                        );
-                    }
-                }
-                EventKind::CollaborationResult(data) => {
-                    open.remove(&data.request_event_id);
-                }
-                kind => {
-                    if let Some((_, request)) = op_turn(kind) {
-                        ops.insert(event.id.clone(), request);
-                    }
-                }
-            }
-        }
-        for op in ops.into_keys() {
-            let _ = timeline.append(
-                EventKind::CollaborationDelivered(CollaborationDeliveredData {
-                    op_event_id: op,
-                    delivery: CollaborationDelivery::Error {
-                        error: Refusal::Closed,
-                    },
-                })
-                .into(),
-            );
-        }
-        for (op, (agent_id, session_id)) in open {
-            let leads = self
-                .collaboration
-                .directory
-                .relations
-                .lock()
-                .unwrap()
-                .get(&session_id)
-                .is_some_and(|relation| relation.leader == self.session_id);
-            let member = leads
-                .then(|| self.collaboration.index.session(&session_id))
-                .flatten()
-                .map(|(_, member)| member);
-            let (timeline, phase) = (timeline.clone(), phase.clone());
-            tasks.spawn(async move {
-                if !phase.activated().await {
-                    return;
-                }
-                if let Some(member) = member {
-                    let _ = member.stop("main", INTERRUPTED.into()).await;
-                }
-                let _ = timeline.append(
-                    EventKind::CollaborationResult(CollaborationResultData {
-                        request_event_id: op,
-                        agent_id,
-                        session_id,
-                        last_turn_id: None,
-                        text: String::new(),
-                        outcome: CollaborationOutcome::Failed {
-                            reason: RELOADING.into(),
-                        },
-                    })
-                    .into(),
-                );
-            });
-        }
-        (current_turn, interrupted)
-    }
 }
 
 fn close_request(open: &mut BTreeMap<String, BTreeSet<String>>, request: &str) {
@@ -2756,102 +2690,163 @@ async fn read_page(
             Err(error) => return Err(error),
         }
     }
-    let mut events = session
+    let reply = session
         .query(
             "main",
             TimelineQuery {
                 scope: TimelineQueryScope::Branch,
                 include_publishing: false,
-                from_event: None,
-                from_sequence: Some(next),
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: kinds.iter().map(|kind| (*kind).into()).collect(),
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: NonZeroU64::new(next - after).expect("a page keeps at least one fact"),
-                offset: 0,
+                from: Some(TimelinePosition {
+                    branch_id: "main".into(),
+                    sequence: after + 1,
+                }),
+                through: Some(next),
+                query: QuerySpec {
+                    filter: (!kinds.is_empty()).then(|| QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: kinds.iter().map(|kind| (*kind).into()).collect(),
+                    }),
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::new(next - after).expect("a page keeps at least one fact"),
+                    after: None,
+                }),
             },
         )
-        .await?
-        .events;
-    events.retain(|event| event.sequence > after);
-    events.reverse();
-    Ok((next, events))
+        .await?;
+    let QueryOutput::Events { events } = reply.result else {
+        unreachable!("event selection returns events")
+    };
+    Ok((next, events.into_iter().map(|row| row.event).collect()))
 }
 
-/// The public main-line facts named by their event ids.
+/// The public main-line tool calls named by their event ids.
 async fn read_events(
     session: &Session,
     event_ids: &[String],
 ) -> dim_agent_runtime::Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
-    let mut found = HashMap::with_capacity(event_ids.len());
-    for event_id in event_ids {
-        let reply = session
-            .query(
-                "main",
-                TimelineQuery {
-                    scope: TimelineQueryScope::Branch,
-                    include_publishing: false,
-                    from_event: None,
-                    from_sequence: None,
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Ascending,
-                    kinds: vec!["step/tool-call".into()],
-                    flags: Vec::new(),
-                    event_id: Some(event_id.clone()),
-                    predicate: None,
-                    limit: NonZeroU64::MIN,
-                    offset: 0,
+    let Some(limit) = NonZeroU64::new(event_ids.len() as u64) else {
+        return Ok(HashMap::new());
+    };
+    let reply = session
+        .query(
+            "main",
+            TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from: None,
+                through: None,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["step/tool-call".into()],
+                            },
+                            QueryFilter::In {
+                                value: QueryOperand::Field { path: "id".into() },
+                                values: event_ids.iter().cloned().map(Into::into).collect(),
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
                 },
-            )
-            .await?;
-        if let Some(event) = reply.events.into_iter().next() {
-            found.insert(event.id.clone(), event);
-        }
-    }
-    Ok(found)
+                page: Some(QueryPage { limit, after: None }),
+            },
+        )
+        .await?;
+    let QueryOutput::Events { events } = reply.result else {
+        unreachable!("event selection returns events")
+    };
+    Ok(events
+        .into_iter()
+        .map(|row| (row.event.id.clone(), row.event))
+        .collect())
 }
+
 /// The public main-line starts of the requested request/call pairs.
 async fn read_tool_use_starts(
     session: &Session,
     keys: &[(String, String)],
 ) -> dim_agent_runtime::Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>> {
     let mut starts = HashMap::with_capacity(keys.len());
+    if keys.is_empty() {
+        return Ok(starts);
+    }
+    let through = session.sequence("main")?;
     let mut query = TimelineQuery {
         scope: TimelineQueryScope::Branch,
         include_publishing: false,
-        from_event: None,
-        from_sequence: Some(1),
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Ascending,
-        kinds: vec!["step/tool-use-start".into()],
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: NonZeroU64::new(TOOL_USE_START_PAGE).expect("a page keeps at least one tool use"),
-        offset: 0,
+        from: None,
+        through: Some(through),
+        query: QuerySpec {
+            filter: Some(QueryFilter::And {
+                conditions: vec![
+                    QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["step/tool-use-start".into()],
+                    },
+                    QueryFilter::Or {
+                        conditions: keys
+                            .iter()
+                            .map(|(request, call)| QueryFilter::And {
+                                conditions: vec![
+                                    QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "data.request_id".into(),
+                                        },
+                                        values: vec![request.clone().into()],
+                                    },
+                                    QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "data.call_id".into(),
+                                        },
+                                        values: vec![call.clone().into()],
+                                    },
+                                ],
+                            })
+                            .collect(),
+                    },
+                ],
+            }),
+            select: QuerySelect::Events,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: NonZeroU64::new(TOOL_USE_START_PAGE)
+                .expect("a page keeps at least one tool use"),
+            after: None,
+        }),
     };
     loop {
         let reply = session.query("main", query.clone()).await?;
-        let short = (reply.events.len() as u64) < TOOL_USE_START_PAGE;
-        let last = reply.positions.last().map(|position| position.sequence);
-        for event in reply.events {
-            let EventKind::ToolUseStart(start) = &event.kind else {
-                continue;
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        for row in events {
+            let EventKind::ToolUseStart(start) = &row.event.kind else {
+                unreachable!("query selects tool use starts")
             };
-            let key = (start.request_id.clone(), start.call_id.clone());
-            if keys.contains(&key) {
-                starts.insert(key, event);
-            }
+            starts.insert((start.request_id.clone(), start.call_id.clone()), row.event);
         }
-        if short || starts.len() == keys.len() {
+        query.page.as_mut().unwrap().after = reply.next;
+        if query.page.as_ref().unwrap().after.is_none() || starts.len() == keys.len() {
             break;
-        }
-        match last {
-            Some(last) => query.from_sequence = Some(last + 1),
-            None => break,
         }
     }
     Ok(starts)
@@ -3363,6 +3358,7 @@ impl DynPlugin for CollaborationSessionPlugin {
                     }),
                 },
             )?;
+            pending::install(ctx, &service, ctx.require_at(&self.methods)?.as_ref())?;
             approvals::install(
                 ctx,
                 &service,
@@ -3491,48 +3487,248 @@ async fn restore(
     dispatcher: Arc<Dispatcher>,
     ctx: Ctx,
 ) -> dim_agent_runtime::Result<u64> {
-    let reply = rebuild_facts(
-        &timeline,
-        &[
-            "turn/start",
-            "turn/end",
-            "stop/interrupt",
-            "collaboration/request",
-            "collaboration/cancel",
-            "collaboration/close",
-            "collaboration/message",
-            "collaboration/delivered",
-            "collaboration/result",
-            "input/message",
-            "input/applied",
-            "input/deleted",
-        ],
-    )
-    .await?;
-    let events = reply.events;
+    let through = timeline.committed();
     let tasks = TaskTracker::new();
     let cleanup_tasks = tasks.clone();
     let mut stale_inputs = BTreeSet::new();
-    for event in &events {
-        match &event.kind {
-            EventKind::InputMessage(data)
-                if data
-                    .submission_id
-                    .as_ref()
-                    .is_some_and(|id| id.starts_with("collaboration-approval:"))
-                    && data.user.is_none()
-                    && matches!(data.blocks.first(), Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-agent-approval>\n")) =>
-            {
-                stale_inputs.insert(event.id.clone());
+    let mut current_turn = None;
+    let mut interrupted = BTreeSet::new();
+    let mut ops = BTreeMap::new();
+    let mut open: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut after = None;
+    loop {
+        let reply = timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(through),
+                include_publishing: true,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::Or {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: [
+                                    "turn/start",
+                                    "turn/end",
+                                    "stop/interrupt",
+                                    "collaboration/request",
+                                    "collaboration/cancel",
+                                    "collaboration/close",
+                                    "collaboration/message",
+                                    "collaboration/delivered",
+                                    "collaboration/result",
+                                    "input/applied",
+                                    "input/deleted",
+                                ]
+                                .map(Into::into)
+                                .to_vec(),
+                            },
+                            QueryFilter::And {
+                                conditions: vec![
+                                    QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "kind".into(),
+                                        },
+                                        values: vec!["input/message".into()],
+                                    },
+                                    QueryFilter::Prefix {
+                                        value: QueryOperand::Field {
+                                            path: "data.submission_id".into(),
+                                        },
+                                        prefix: "collaboration-approval:".into(),
+                                    },
+                                    QueryFilter::Not {
+                                        condition: Box::new(QueryFilter::Present {
+                                            value: QueryOperand::Field {
+                                                path: "data.user".into(),
+                                            },
+                                        }),
+                                    },
+                                ],
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: [
+                            "kind",
+                            "id",
+                            "data.turn_id",
+                            "data.scope",
+                            "data.op_event_id",
+                            "data.status",
+                            "data.agent_id",
+                            "data.session_id",
+                            "data.request_event_id",
+                            "data.input_id",
+                            "data.blocks[].text",
+                        ]
+                        .map(String::from)
+                        .to_vec(),
+                    },
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::new(256).unwrap(),
+                    after,
+                }),
+            })
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        for row in rows {
+            let [
+                QueryValue::Value {
+                    value: Value::String(kind),
+                },
+                QueryValue::Value {
+                    value: Value::String(id),
+                },
+                turn_id,
+                scope,
+                op_event_id,
+                status,
+                agent_id,
+                session_id,
+                request_event_id,
+                input_id,
+                blocks,
+            ] = row.values.as_slice()
+            else {
+                unreachable!("event has a kind and id")
+            };
+            match kind.as_str() {
+                "turn/start" => {
+                    let QueryValue::Value {
+                        value: Value::String(turn),
+                    } = turn_id
+                    else {
+                        unreachable!("turn start has a turn id")
+                    };
+                    current_turn = Some(turn.clone());
+                }
+                "turn/end" => current_turn = None,
+                "stop/interrupt" => {
+                    if matches!(scope, QueryValue::Value { value: Value::String(scope) } if scope == "turn")
+                    {
+                        interrupted.extend(current_turn.clone());
+                    }
+                }
+                "collaboration/delivered" => {
+                    let QueryValue::Value {
+                        value: Value::String(op),
+                    } = op_event_id
+                    else {
+                        unreachable!("delivery has an operation id")
+                    };
+                    if ops.remove(op) == Some(true)
+                        && matches!(status, QueryValue::Value { value: Value::String(status) } if status == "ok")
+                    {
+                        let (
+                            QueryValue::Value {
+                                value: Value::String(agent),
+                            },
+                            QueryValue::Value {
+                                value: Value::String(session),
+                            },
+                        ) = (agent_id, session_id)
+                        else {
+                            unreachable!("successful delivery identifies the member")
+                        };
+                        open.insert(op.clone(), (agent.clone(), session.clone()));
+                    }
+                }
+                "collaboration/result" => {
+                    let QueryValue::Value {
+                        value: Value::String(request),
+                    } = request_event_id
+                    else {
+                        unreachable!("result has a request id")
+                    };
+                    open.remove(request);
+                }
+                "collaboration/request"
+                | "collaboration/cancel"
+                | "collaboration/close"
+                | "collaboration/message" => {
+                    ops.insert(id.clone(), kind == "collaboration/request");
+                }
+                "input/message" => {
+                    if let QueryValue::Elements { values } = blocks
+                        && matches!(values.first(), Some(QueryValue::Value { value: Value::String(text) }) if text.starts_with("<dim-agent-approval>\n"))
+                    {
+                        stale_inputs.insert(id.clone());
+                    }
+                }
+                "input/applied" | "input/deleted" => {
+                    let QueryValue::Value {
+                        value: Value::String(input),
+                    } = input_id
+                    else {
+                        unreachable!("input decision has an input id")
+                    };
+                    stale_inputs.remove(input);
+                }
+                _ => unreachable!("query selects collaboration lifecycle facts"),
             }
-            EventKind::InputApplied(InputAppliedData { input_id, .. })
-            | EventKind::InputDeleted(InputDeletedData { input_id }) => {
-                stale_inputs.remove(input_id);
-            }
-            _ => {}
+        }
+        after = reply.next;
+        if after.is_none() {
+            break;
         }
     }
-    let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
+    for op in ops.into_keys() {
+        let _ = timeline.append(
+            EventKind::CollaborationDelivered(CollaborationDeliveredData {
+                op_event_id: op,
+                delivery: CollaborationDelivery::Error {
+                    error: Refusal::Closed,
+                },
+            })
+            .into(),
+        );
+    }
+    for (op, (agent_id, session_id)) in open {
+        let leads = service
+            .collaboration
+            .directory
+            .relations
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .is_some_and(|relation| relation.leader == service.session_id);
+        let member = leads
+            .then(|| service.collaboration.index.session(&session_id))
+            .flatten()
+            .map(|(_, member)| member);
+        let (timeline, phase) = (timeline.clone(), phase.clone());
+        tasks.spawn(async move {
+            if !phase.activated().await {
+                return;
+            }
+            if let Some(member) = member {
+                let _ = member.stop("main", INTERRUPTED.into()).await;
+            }
+            let _ = timeline.append(
+                EventKind::CollaborationResult(CollaborationResultData {
+                    request_event_id: op,
+                    agent_id,
+                    session_id,
+                    last_turn_id: None,
+                    text: String::new(),
+                    outcome: CollaborationOutcome::Failed {
+                        reason: RELOADING.into(),
+                    },
+                })
+                .into(),
+            );
+        });
+    }
     service.state.lock().unwrap().branches.insert(
         branch_id.clone(),
         BranchRecord {
@@ -3579,7 +3775,7 @@ async fn restore(
             }
         });
     }
-    Ok(reply.through)
+    Ok(through)
 }
 
 #[cfg(test)]

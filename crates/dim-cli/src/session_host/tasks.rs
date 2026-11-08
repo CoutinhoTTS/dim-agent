@@ -9,12 +9,15 @@ use crate::model::view::{MemberTarget, TaskKind};
 
 #[derive(Default)]
 pub(super) struct BranchHistory {
-    after: u64,
-    through: Option<u64>,
+    window: dim_client::window::Window,
     pub done: bool,
     pub error: Option<String>,
     live: Vec<Event>,
-    catch_up: bool,
+    window_complete: bool,
+    inventory_index: usize,
+    inventory_cursor: Option<serde_json::Value>,
+    goal_stale: bool,
+    earlier: bool,
     pub running: Option<bool>,
 }
 
@@ -23,6 +26,15 @@ pub(super) struct HistoryRequest {
     session_id: String,
     branch_id: String,
     current: bool,
+    stage: ReadStage,
+}
+
+enum ReadStage {
+    History,
+    Cut,
+    Inventory(&'static str),
+    Goal,
+    ToolOrigin { request_id: String, call_id: String },
 }
 
 pub(super) struct StopBatch {
@@ -81,13 +93,14 @@ impl Worker {
             .get_mut(branch_id)
             .expect("discovered line");
         if !self.lines.contains_key(branch_id)
-            && (history.after != 0 || history.done || history.error.is_some())
+            && (history.window.through.is_some() || history.done || history.error.is_some())
         {
-            history.after = 0;
-            history.through = None;
+            history.window = Default::default();
             history.done = false;
             history.error = None;
-            history.catch_up = false;
+            history.window_complete = false;
+            history.inventory_index = 0;
+            history.inventory_cursor = None;
             if let Some(request) = &mut self.task_history_request
                 && request.branch_id == branch_id
             {
@@ -126,7 +139,7 @@ impl Worker {
                 history.done = true;
                 history.error = None;
                 history.live.clear();
-                history.catch_up = false;
+                history.window_complete = false;
                 self.task_history_queue.retain(|id| id != branch);
                 if let Some(request) = &mut self.task_history_request
                     && request.branch_id == *branch
@@ -149,8 +162,9 @@ impl Worker {
             .get_mut(branch_id)
             .expect("discovered branch");
         if history.done {
+            history.goal_stale |= crate::goal::changed(&event.content);
             self.apply(branch_id, event);
-        } else if history.error.is_none() {
+        } else {
             history.live.push(event);
         }
     }
@@ -164,48 +178,167 @@ impl Worker {
         self.changed();
     }
 
+    pub(super) fn earlier(&mut self) {
+        if self.earlier_member() {
+            return;
+        }
+        let Some(history) = self.task_history.get_mut(&self.focus) else {
+            return;
+        };
+        if !history.done || history.earlier {
+            return;
+        }
+        if history.window.before.is_none() {
+            self.send(Update::Notice("Beginning of conversation".into()));
+            return;
+        }
+        history.earlier = true;
+        history.window_complete = false;
+        history.error = None;
+        self.task_history_queue.push_back(self.focus.clone());
+    }
+
     pub(super) async fn poll_task_history(&mut self) -> crate::Result<()> {
         if self.task_history_request.is_some() || self.session_id.is_empty() {
             return Ok(());
         }
+        if let Some(branch) = self
+            .task_history
+            .iter()
+            .find_map(|(id, state)| state.goal_stale.then(|| id.clone()))
+        {
+            self.task_history.get_mut(&branch).unwrap().goal_stale = false;
+            if self.methods.contains("session.goal.get") {
+                match self
+                    .client
+                    .send(
+                        "session.goal.get",
+                        json!({"sessionId":self.session_id,"branchId":branch}),
+                    )
+                    .await
+                {
+                    Ok(id) => {
+                        self.task_history_request = Some(HistoryRequest {
+                            id,
+                            session_id: self.session_id.clone(),
+                            branch_id: branch,
+                            current: true,
+                            stage: ReadStage::Goal,
+                        })
+                    }
+                    Err(error) => self.send(Update::Notice(format!("Goal: {error}"))),
+                }
+                return Ok(());
+            }
+        }
         let Some(branch_id) = self.task_history_queue.pop_front() else {
+            if self.methods.contains("session.tool.get") {
+                let mut shown = vec![self.focus.clone()];
+                if let Some(side) = &self.side
+                    && side != &self.focus
+                {
+                    shown.push(side.clone());
+                }
+                for branch in shown {
+                    if !self
+                        .task_history
+                        .get(&branch)
+                        .is_some_and(|history| history.done)
+                    {
+                        continue;
+                    }
+                    let missing = transcript_mut(&mut self.projection, &mut self.lines, &branch)
+                        .and_then(|projection| projection.missing_tool());
+                    if let Some((request_id, call_id)) = missing {
+                        if let Some(projection) =
+                            transcript_mut(&mut self.projection, &mut self.lines, &branch)
+                        {
+                            projection.tool_lookup(&request_id, &call_id, None);
+                        }
+                        match self.client.send("session.tool.get",json!({"sessionId":self.session_id,"branchId":branch,"requestId":request_id,"callId":call_id})).await {
+                            Ok(id)=>self.task_history_request=Some(HistoryRequest { id,session_id:self.session_id.clone(),branch_id:branch,current:true,stage:ReadStage::ToolOrigin { request_id,call_id } }),
+                            Err(error)=>self.send(Update::Notice(format!("Tool origin: {error}"))),
+                        }
+                        break;
+                    }
+                }
+            }
             return Ok(());
         };
-        let history = self.task_history.get(&branch_id).expect("queued branch");
-        let mut params = json!({
-            "sessionId": self.session_id, "branchId": branch_id,
-            "after": history.after, "limit": HISTORY_PAGE,
-        });
-        if let Some(through) = history.through {
-            params["through"] = json!(through);
+        if !self.client.supports(&["session.history.latestTurn"]) {
+            return Err(
+                "This daemon cannot read a bounded transcript window; update the daemon".into(),
+            );
         }
-        match self.client.send("session.history", params).await {
+        let (stage, method, params) = if branch_id != "main"
+            && !self.lines.contains_key(&branch_id)
+            && !self.task_history[&branch_id].window_complete
+        {
+            (
+                ReadStage::Cut,
+                "session.turn.get",
+                json!({"sessionId":self.session_id,"branchId":branch_id}),
+            )
+        } else if self.task_history[&branch_id].window_complete {
+            for required in ["session.input.pending", "session.turn.get"] {
+                if !self.methods.contains(required) {
+                    self.fail_inventory(
+                        &branch_id,
+                        format!("Current-state read unavailable: {required}"),
+                    );
+                    return Ok(());
+                }
+            }
+            let history = self.task_history.get_mut(&branch_id).unwrap();
+            while history.inventory_index < inventory::METHODS.len()
+                && !self
+                    .methods
+                    .contains(inventory::METHODS[history.inventory_index])
+            {
+                history.inventory_index += 1;
+            }
+            if history.inventory_index == inventory::METHODS.len() {
+                self.finish_window(&branch_id);
+                return Ok(());
+            }
+            let method = inventory::METHODS[history.inventory_index];
+            let mut params = json!({"sessionId":self.session_id,"branchId":branch_id});
+            if method != "session.goal.get" {
+                params["through"] = json!(history.window.through.unwrap());
+            }
+            if let Some(after) = &history.inventory_cursor {
+                params["after"] = after.clone();
+            }
+            (ReadStage::Inventory(method), method, params)
+        } else {
+            (
+                ReadStage::History,
+                "session.history",
+                self.task_history[&branch_id]
+                    .window
+                    .params(&self.session_id, &branch_id),
+            )
+        };
+        match self.client.send(method, params).await {
             Ok(id) => {
                 self.task_history_request = Some(HistoryRequest {
                     id,
                     session_id: self.session_id.clone(),
                     branch_id,
                     current: true,
+                    stage,
                 })
             }
             Err(error) => {
-                if branch_id == "main" {
-                    return Err(format!("Main branch history: {error}").into());
-                }
-                let history = self
-                    .task_history
-                    .get_mut(&branch_id)
-                    .expect("queued branch");
+                let history = self.task_history.get_mut(&branch_id).unwrap();
                 history.error = Some(error.to_string());
-                history.live.clear();
-                history.catch_up = history.through.is_some();
                 self.changed();
             }
         }
         Ok(())
     }
 
-    pub(super) fn task_history_reply(
+    pub(super) async fn task_history_reply(
         &mut self,
         result: Result<serde_json::Value, client::RpcError>,
     ) -> crate::Result<()> {
@@ -216,71 +349,178 @@ impl Worker {
         if !request.current || request.session_id != self.session_id {
             return Ok(());
         }
+        if let ReadStage::ToolOrigin {
+            request_id,
+            call_id,
+        } = &request.stage
+        {
+            let read = result.map_err(|error| error.to_string()).and_then(|value| {
+                serde_json::from_value::<dim_agent_types::ToolRead>(value)
+                    .map_err(|error| error.to_string())
+            });
+            match read {
+                Ok(read)
+                    if read.branch_id == request.branch_id
+                        && read.call.as_ref().is_none_or(|call| {
+                            call.request_id == *request_id && call.call.id == *call_id
+                        }) =>
+                {
+                    if let Some(projection) =
+                        transcript_mut(&mut self.projection, &mut self.lines, &request.branch_id)
+                    {
+                        projection.tool_lookup(request_id, call_id, read.call);
+                    }
+                }
+                Ok(_) => self.send(Update::Notice("Tool origin identity changed".into())),
+                Err(error) => self.send(Update::Notice(format!("Tool origin: {error}"))),
+            }
+            self.changed();
+            return Ok(());
+        }
+        if matches!(request.stage, ReadStage::Goal) {
+            let result = result.map_err(|error| error.to_string()).and_then(|value| {
+                self.apply_inventory(&request.branch_id, 0, "session.goal.get", value)
+                    .map_err(|error| error.to_string())
+            });
+            if let Err(error) = result {
+                self.send(Update::Notice(format!("Goal: {error}")));
+            }
+            self.changed();
+            return Ok(());
+        }
+        if !matches!(request.stage, ReadStage::History) {
+            let result = result.map_err(|error| error.to_string()).and_then(|value| {
+                match request.stage {
+                    ReadStage::Cut => {
+                        let turn: crate::wire::TurnRead =
+                            serde_json::from_value(value).map_err(|error| error.to_string())?;
+                        if turn.branch_id != request.branch_id {
+                            return Err("Inventory branch changed".into());
+                        }
+                        let history = self.task_history.get_mut(&request.branch_id).unwrap();
+                        history.window.through = Some(turn.through);
+                        history.window_complete = true;
+                    }
+                    ReadStage::Inventory(method) => {
+                        let through = self.task_history[&request.branch_id]
+                            .window
+                            .through
+                            .unwrap();
+                        let next = self
+                            .apply_inventory(&request.branch_id, through, method, value)
+                            .map_err(|error| error.to_string())?;
+                        let history = self.task_history.get_mut(&request.branch_id).unwrap();
+                        if next.is_some() && next == history.inventory_cursor {
+                            return Err("Inventory cursor did not advance".into());
+                        }
+                        if next.is_none() {
+                            history.inventory_index += 1;
+                        }
+                        history.inventory_cursor = next;
+                    }
+                    ReadStage::History | ReadStage::Goal | ReadStage::ToolOrigin { .. } => {
+                        unreachable!()
+                    }
+                }
+                Ok(())
+            });
+            match result {
+                Ok(()) => self.task_history_queue.push_back(request.branch_id),
+                Err(error) => self.fail_inventory(&request.branch_id, error),
+            }
+            self.changed();
+            return Ok(());
+        }
         let history = self
             .task_history
-            .get(&request.branch_id)
+            .get_mut(&request.branch_id)
             .expect("current history");
-        let result = result
-            .map_err(|error| error.to_string())
-            .and_then(|value| History::decode(value, history.after, history.through));
+        let result = result.map_err(|error| error.to_string()).and_then(|value| {
+            let page = serde_json::from_value(value)
+                .map_err(|error| format!("Invalid history reply: {error}"))?;
+            history.window.push(page).map_err(|error| error.to_string())
+        });
         match result {
             Err(error) => {
-                if request.branch_id == "main" {
+                history.error = Some(error.clone());
+                if request.branch_id == "main" && !history.done {
                     return Err(format!("Main branch history: {error}").into());
                 }
-                let history = self
-                    .task_history
-                    .get_mut(&request.branch_id)
-                    .expect("current history");
-                history.error = Some(error);
-                history.live.clear();
-                history.catch_up = history.through.is_some();
             }
-            Ok(page) => {
-                let history = self
-                    .task_history
-                    .get_mut(&request.branch_id)
-                    .expect("current history");
-                history.after = page.next_after;
-                history.through = Some(page.through);
-                history.done = page.done && !history.catch_up;
-                if page.done && history.catch_up {
-                    history.through = None;
-                    history.catch_up = false;
-                }
-                let done = history.done;
-                for event in page.events {
-                    self.apply(&request.branch_id, event);
-                }
-                let cursor = self.cursors.entry(request.branch_id.clone()).or_default();
-                *cursor = (*cursor).max(page.next_after);
-                if done {
-                    let history = self
-                        .task_history
-                        .get_mut(&request.branch_id)
-                        .expect("current history");
-                    let mut live = std::mem::take(&mut history.live);
-                    let running = history.running;
-                    live.sort_by_key(|event| event.sequence);
-                    for event in live {
-                        self.apply(&request.branch_id, event);
+            Ok(false) => self.task_history_queue.push_back(request.branch_id),
+            Ok(true) => {
+                let events = history.window.take();
+                let missing_prefix = history.window.before.is_some();
+                history.window_complete = true;
+                if history.earlier {
+                    history.earlier = false;
+                    let mut older = Projection::for_branch(&request.branch_id);
+                    for event in events {
+                        older.apply(&request.branch_id, &event);
                     }
-                    if let Some(running) = running {
-                        if request.branch_id != "main" {
-                            if let Some(line) = self.lines.get_mut(&request.branch_id) {
-                                line.projection.set_running(running);
-                            }
-                        } else {
-                            self.projection.set_running(running);
-                        }
+                    if let Some(projection) =
+                        transcript_mut(&mut self.projection, &mut self.lines, &request.branch_id)
+                    {
+                        projection.prepend(older);
                     }
                 } else {
-                    self.task_history_queue.push_back(request.branch_id);
+                    for event in events {
+                        self.apply(&request.branch_id, event);
+                    }
+                    self.task_history_queue.push_back(request.branch_id.clone());
+                }
+                if missing_prefix {
+                    self.send(Update::Notice(
+                        "Earlier content not loaded; /earlier to read it".into(),
+                    ));
                 }
             }
         }
         self.changed();
         Ok(())
+    }
+
+    fn fail_inventory(&mut self, branch: &str, error: String) {
+        let history = self.task_history.get_mut(branch).unwrap();
+        history.error = Some(error);
+        history.inventory_index = 0;
+        history.inventory_cursor = None;
+        self.projection.clear_inventory(branch);
+        if let Some(line) = self.lines.get_mut(branch) {
+            line.projection.clear_inventory(branch);
+        }
+        self.changed();
+    }
+
+    fn finish_window(&mut self, branch: &str) {
+        let through = self.task_history[branch]
+            .window
+            .through
+            .expect("loaded window");
+        self.cursors.insert(branch.to_owned(), through);
+        if let Some(line) = self.lines.get_mut(branch) {
+            line.cursor = through;
+        }
+        let history = self.task_history.get_mut(branch).unwrap();
+        history.done = true;
+        history.error = None;
+        let mut live = std::mem::take(&mut history.live);
+        let running = history.running;
+        live.sort_by_key(|event| event.sequence);
+        if let Some(projection) = transcript_mut(&mut self.projection, &mut self.lines, branch)
+            && let Some(running) = running
+        {
+            projection.set_running(running);
+        }
+        for event in live {
+            if event.sequence > through {
+                self.task_event(branch, event);
+            }
+        }
+        if let Some(projection) = transcript_mut(&mut self.projection, &mut self.lines, branch) {
+            projection.trim(300);
+        }
+        self.changed();
     }
 
     pub(super) fn stop_tasks(&mut self, session_id: String, projection_id: u64) {

@@ -203,7 +203,8 @@ async fn rejected_candidates_keep_their_size_and_report_the_failed_condition() {
         turns(&session, 2, chars).await;
         let calls_before = strategy.cuts().len();
         let events = chain_events(&session, "main", ..).await.unwrap();
-        let before = read_context_in(&session, "main", events.last().unwrap().sequence)
+        let before = dim_agent_capabilities::history::HistoryRenderer::default()
+            .context_in(&session, "main", events.last().unwrap().sequence)
             .await
             .unwrap();
         let history = project_context_history(&before).unwrap();
@@ -233,7 +234,8 @@ async fn rejected_candidates_keep_their_size_and_report_the_failed_condition() {
             }
             assert_eq!(diagnostics.entries_replaced, 0);
             assert_eq!(diagnostics.model_call_count, 1);
-            let context = read_context_in(&session, "main", events.last().unwrap().sequence)
+            let context = dim_agent_capabilities::history::HistoryRenderer::default()
+                .context_in(&session, "main", events.last().unwrap().sequence)
                 .await
                 .unwrap();
             let history = project_context_history(&context).unwrap();

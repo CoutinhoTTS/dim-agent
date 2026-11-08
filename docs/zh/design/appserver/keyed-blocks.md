@@ -73,13 +73,14 @@
 
 ## 3. 读取算法与成本
 
-一次下行扫描，`TimelineQuery` 带 `kinds: ["input/message", "input/deleted", "branch/start", "session/forked"]`、`TimelineQueryDirection::Descending`、按 sequence 排序、每页 `limit` 256。扫描从 `through` 开始，在第一个 opening 事件处停止；其下一切丢弃。翻页用上一页的 `min_sequence - 1` 作为 `from_sequence`，绝不用 `offset`：查询的 offset 是跳过语义，存储读取方会先取出 `offset + limit` 行再跳过，按 offset 深翻页的成本与页数的平方成正比。短于 limit 的页说明选择已穷尽（ADR 019 D2）。成本为 O(opening 之上的 input/message 与 input/deleted 行数)，每页一次基于 `(session_id, branch_id, sequence)` 的 zone 查询；两万条消息的分支约 80 页。
+在调用方固定的 `through` 处先查询最近的 opening 位置，再从该位置到同一截止点，按事件倒序分页读取输入标识、位置和块，每页 256 条匹配输入。
+[属性查询](../timeline-property-query.md)只选择包含带 key 块的输入，并排除该段中存在对应 `input/deleted` 的输入。删除关联始终使用完整固定范围，不随输出游标缩小；下一页原样传回 `after`，不重读已经处理的输入前缀。
 
-删除在同一趟中收集，不需要第二次读取。使其正确的顺序：InputQueue 只为它仍然持有且未应用的输入写 `input/deleted`——撤回在输入既无 `input/applied` 也无消费时才被决定——所以删除事件总是写在被删输入之后。因此下行扫描先遇到删除、后遇到块；块只有在它的输入 id 不在已收集集合中时才存活。被删输入写下的 `retire` 块被同一检查跳过，不会结束 key。
+输入删除不由客户端在历史中另行扫描：存储执行关联，调用方只消费查询留下的块。被删输入的 retire 块也被排除，不会结束 key。
 
 每个事件的带 key 块按块序逆序读取（输入的最后一个块最先），所以同一输入内部也由最新的块获胜，与跨输入一致。已被更新事件决定的 key 被跳过；对尚无更新存活块的 key，`retire` 将其记为对更早块关闭。上界在收集过程中强制，超限的回复在扫描结束前即失败。
 
-不需要新的存储能力：kinds 被下推到存储选择，下行、范围与 limit 都已存在。不存在的是块级 key 谓词——查询的 predicate 是一个 JSON 标量点路径并拒绝数组——所以扫描读取 opening 之上的每条输入消息，而不只是带 key 的。raw 块 key 上的派生索引属于 ADR 019 D4 的派生对象，不在本变更范围。
+该读使用属性查询的数组条件、删除关联及位置游标，不新增块级持久化投影。成本取决于 opening 以上的相关输入与关联查询；按[SQL 验收](../timeline-property-query.md#81-sql-成本验收)检查实际扫描量与索引，不能仅按返回块数估计。
 
 本读沿用 `session.history` 的双 owner 模式：活线经其 Session 读取（`Session::query`，读发布头），结束线经 TimelineTree 在其固定头读取（`TreeCommands::query`）。调用期间线结束会回答 `branch_ended`；随后改经 tree 在固定头重读。与 `latestTurn` 窗口不同，本读不需要原生存储：两种 owner 都能提供。
 

@@ -20,7 +20,7 @@ cannot fit the request fails terminally without requesting another recovery.
 | `S:PrepareContextHost` | Host preparation hook. |
 | `S:GuideEntries` | Register the digest entry while a strategy is bound. |
 | `B:TimelineIdentity` | Identify configuration publication scope; Session and branch ids of the `context.prepare` span. |
-| `B:Dispatcher` | Replay and receive preparation/steer/interrupt transitions and report faults. |
+| `B:Dispatcher` | Hand off recovery to live preparation/steer/interrupt transitions and report faults. |
 | `B:Timeline` | Read fixed context, publish handoff and configuration facts. |
 | `B:BranchLifecycle` | Refuse a guide adoption on a closing branch. |
 
@@ -46,8 +46,19 @@ cancelled by stop/steer and joined during cleanup; a steer during automatic comp
 for its result before replacing the request
 ([ContextCompaction §5.3](../../../design/plugins/ContextCompaction.md#53-one-compaction-path-contextpolicy)).
 Cleanup aggregates failures.
-Replay settles unmatched handoffs and automatic compaction starts without
-rerunning host work. The mock profile
+Recovery queries preparation identities without a matching model call or output
+end, and automatic compaction starts without a matching result, at one committed
+boundary. It reads only settlement and control fields, then writes terminal
+facts without reconstructing historical requests or rerunning host work.
+Preparation and policy hold no complete request between operations; validation
+estimates the actual request it receives, including changes made before commit.
+Context pages use one fixed content cutoff and store continuations. Cut discovery
+reads ids and positions; retained input and tool-result queries end at the chosen
+cut before returning bodies. Retry control facts use a separate fixed committed
+cutoff above the original content boundary. Provider-baseline validation reads
+the matching historical request when its exact prefix comparison requires it;
+that request remains local to the operation.
+The mock profile
 has no context resolver. Completed compaction facts remain authoritative across
 checkpoint selection. Recovery snapshots are built from the final adopted cut,
 saved separately after fact publication, and selected by interpreter compatibility.

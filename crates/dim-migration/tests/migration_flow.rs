@@ -992,6 +992,10 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
              DROP TABLE session_grants;
              DROP TABLE session_worktrees;
              DROP TABLE worktree_directories;
+             DROP TRIGGER timeline_text_delete;
+             DROP TABLE timeline_text;
+             DROP TABLE timeline_text_fts;
+             DROP TABLE timeline_text_tails;
              DROP TABLE agent_store_format;
              CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
              INSERT INTO agent_store_format VALUES (23);",
@@ -1105,6 +1109,53 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         history
             .iter()
             .any(|e| matches!(&e.kind,EventKind::Text(t) if t.delta=="effective suffix"))
+    );
+    let candidates = session
+        .query(
+            "main",
+            dim_agent_runtime::TimelineQuery {
+                scope: dim_agent_runtime::TimelineQueryScope::Branch,
+                from: None,
+                through: Some(session.sequence("main").unwrap()),
+                include_publishing: false,
+                query: dim_agent_runtime::QuerySpec {
+                    filter: Some(dim_agent_runtime::QueryFilter::And {
+                        conditions: vec![
+                            dim_agent_runtime::QueryFilter::In {
+                                value: dim_agent_runtime::QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec![json!("step/text")],
+                            },
+                            dim_agent_runtime::QueryFilter::TextCandidate {
+                                field: "data".into(),
+                                partition_by: vec![],
+                                terms: vec!["suffix".into()],
+                            },
+                        ],
+                    }),
+                    select: dim_agent_runtime::QuerySelect::Fields {
+                        fields: vec!["id".into()],
+                    },
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(dim_agent_runtime::QueryPage {
+                    limit: std::num::NonZeroU64::new(2).unwrap(),
+                    after: None,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let dim_agent_runtime::QueryOutput::Rows { rows } = candidates.result else {
+        panic!("imported text candidates")
+    };
+    assert_eq!(
+        rows.len(),
+        1,
+        "imported history must participate in the same text queries as appended history"
     );
     assert!(history.iter().all(|e| !matches!(
         e.kind,

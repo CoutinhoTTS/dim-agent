@@ -22,7 +22,7 @@
 //! settles and when it is answered.
 
 use crate::RpcError;
-use dim_agent_types::{ToolCallData, ToolResultData};
+use dim_agent_types::{ToolCall, ToolCallData, ToolResultData};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::{HashSet, VecDeque};
@@ -199,6 +199,13 @@ pub struct Pending {
 }
 
 impl Pending {
+    /// Discards a branch's old inventory before a new fixed-cut read and live merge.
+    pub fn clear_branch(&mut self, branch_id: &str) {
+        self.calls.retain(|call| call.branch_id != branch_id);
+        self.seen.retain(|(branch, _)| branch != branch_id);
+        self.settled.retain(|(branch, _)| branch != branch_id);
+    }
+
     /// Waiting calls in arrival order.
     pub fn calls(&self) -> impl Iterator<Item = &Call> {
         self.calls.iter()
@@ -212,9 +219,9 @@ impl Pending {
         match event["name"].as_str() {
             Some("tool-call") => {
                 if let Some(id) = event["id"].as_str()
-                    && let Ok(data) = serde_json::from_value(event["data"].clone())
+                    && let Ok(data) = serde_json::from_value::<ToolCallData>(event["data"].clone())
                 {
-                    self.asked(branch_id, id, &data);
+                    self.asked(branch_id, id, &data.request_id, &data.calls);
                 }
                 Vec::new()
             }
@@ -226,16 +233,16 @@ impl Pending {
     }
 
     /// The TUI's wire boundary already decoded the batch.
-    pub fn asked(&mut self, branch_id: &str, event_id: &str, data: &ToolCallData) {
+    pub fn asked(&mut self, branch_id: &str, event_id: &str, request_id: &str, calls: &[ToolCall]) {
         let key = (branch_id.to_owned(), event_id.to_owned());
         if self.settled.contains(&key) || !self.seen.insert(key) {
             return;
         }
-        for call in data.calls.iter().filter(|call| call.name == TOOL) {
+        for call in calls.iter().filter(|call| call.name == TOOL) {
             if let Some(questions) = parse(&call.input) {
                 self.calls.push_back(Call {
                     branch_id: branch_id.to_owned(),
-                    request_id: data.request_id.clone(),
+                    request_id: request_id.into(),
                     call_id: call.id.clone(),
                     questions,
                 });

@@ -5,7 +5,9 @@ Owner: [prompt.rs](../../../../crates/dim-agent-capabilities/src/prompt.rs) and
 Loads and adopts prompt/model/tool configuration in timeline order, exposes
 ConfigureControl and projects adopted prompt and configuration state.
 `Branch::get<PromptSnapshot>()` reads the last adopted `context/configured` without
-replaying history; rebuilding restores it from checkpoint configuration and facts.
+replaying history. Rebuilding reads the latest adopted configuration and pages only
+prompt changes, branch/turn boundaries and scope fields. It retains prompt state,
+not the conversation or historical model requests.
 
 ## Dependencies
 
@@ -17,7 +19,7 @@ replaying history; rebuilding restores it from checkpoint configuration and fact
 | `B:BranchLifecycle` | Coordinate opening and closing. |
 | `B:TimelineIdentity` | Session and branch ids of the `prompt.load` span. |
 | `B:Dispatcher` | Order configuration adoption and state projection. |
-| `B:Timeline` | Write controls and rebuild adopted context. |
+| `B:Timeline` | Write controls and query adopted prompt/configuration properties. |
 | `S:FaultReporter` | Report owned work failures. |
 | `B:BranchOpening` | Register initial prompt completion receipt. |
 | `S:GuideEntries` | The entries whose load or unload moves this branch's composition. |
