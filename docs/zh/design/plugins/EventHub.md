@@ -313,7 +313,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 i
 - **被什么挡住：** 一旦 `events` 工具上线，“先订阅，再等下一条事件”就是自然的用法。在打开的回合里投递的 `queue` 输入会一直保留到回合结束(`crates/dim-agent-capabilities/src/input_queue.rs:183-186`)，而 Wait 只在带标签的后台任务通知、steer、stop 或超时时结束(`crates/dim-agent-capabilities/src/wait.rs:116-140`)，于是一条事件只会在 wait 超时之后才到达。完整评测实测：`operator-asked-to-act` 的一个 run 睡了两次 300 秒，而 CI 通知一直排队。
 - **需要什么：** Wait 把打开的回合里落到分支上的 EventHub 投递当作一次到达。
   - **标记。** Wait 匹配 submission id 的前缀 `eventhub:`，这是由 Wait 持有的常量(`EVENT_SUBMISSION_PREFIX`)，EventHub 的 `submission_id` 使用它。标签无法承担这件事：输入的 tags 属于事件，而 `sessions.input` 没有承载它的请求字段。
-  - **哪些 wait。** 不带 `taskId` 的 wait 会被它结束；带 `taskId` 的不会。steer 仍然优先；任务与事件之间，先到的那个优先。
+  - **哪些 wait。** `steer` 投递像任何 steer 一样结束每一个 wait。`queue` 投递结束不带 `taskId` 的 wait，不结束带 `taskId` 的。steer 排在最前，按到达顺序；任务与排队事件之间，先到的那个优先。
   - **模式。** `queue` 或 `steer` 投递算数；`append` 投递不算(3.3)。指南输入的 submission id 以 `eventhub-guide` 开头，因此从不计数。
   - **结果。** 结果要说明事件在哪里，因为排队的输入要等到回合结束：`queue` 为 `wait ended: event <source> <id>; it is queued and arrives when this turn ends`，`steer` 为 `wait ended: event <source> <id>`。结构化结果是 `{"reason": "event", "source", "eventId", "waitedMs"}`。
   - **描述。** 工具描述把“一条事件投递到这条分支”列入 wait 结束的方式；该句子是协议(Wait.md 的 Model-facing texts)，流程测试断言它。
