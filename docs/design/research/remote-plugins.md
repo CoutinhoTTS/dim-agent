@@ -359,7 +359,7 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 
 之前把“不能借”说成“不能 leaf”是错的：宿主资源能 leaf，只是不能把现有的对象接口借过去。资源 leaf 的代价是它自己实现本地执行（TS/Python 重写，或 Rust leaf host 复用 `HostPlatform`），宿主侧的使用者改成调用它提供的数据服务。
 
-SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件还注入 `SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）；`settingsService`、`sessionStore`、`auxiliaryModelHost` 在 catalog 里都是 Rust-only。它的 `inject` 全是数据，但没有可借入口，所以和 GoalBranch 一起算“改依赖后可 leaf”。
+SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件还注入 `SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）；`settingsService`、`sessionStore`、`auxiliaryModelHost` 在 catalog 里都是 Rust-only，没有 `host_key` dispatcher，所以 leaf 解析不了。这和 GoalBranch 的 `settingsService` 是同一类，算“改依赖后可 leaf”。
 
 “可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上依赖全可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。纯逻辑第一批选 Goal、Questions、Recall；Wait 要等 `wait` 有了数据面才能进这一批（§4.9），SessionTitle 要等它那三个进程服务有了 dispatcher。
 
