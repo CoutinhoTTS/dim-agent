@@ -8377,6 +8377,7 @@ mod tests {
             error: None,
             waiting_for: Vec::new(),
             refused: Vec::new(),
+            optional: false,
         }])));
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
         app.handle_input(key(KeyCode::Enter));
@@ -8460,6 +8461,7 @@ mod tests {
             error: None,
             waiting_for: vec!["session-node".into()],
             refused: Vec::new(),
+            optional: false,
         };
         app.run_command("runtime", "");
         assert!(matches!(app.prompt, Some(Prompt::Runtime(_))));

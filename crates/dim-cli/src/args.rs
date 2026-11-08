@@ -149,6 +149,8 @@ Commands:\n\
   plugin list                      List plugins by name, the one in use and its status\n\
   plugin install PATH|GIT_URL [--ref R] [--id ID] [--no-enable]\n\
                                    Install a plugin and turn it on\n\
+  plugin install --optional NAME [--id ID] [--no-enable]\n\
+                                   Install an optional plugin the release ships\n\
   plugin enable NAME [--use ID|builtin|default]\n\
   plugin disable NAME\n\
   plugin reload NAME               Reload a plugin after editing it\n\
