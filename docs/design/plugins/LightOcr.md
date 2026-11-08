@@ -48,7 +48,7 @@ runtime/plugins/light-ocr/
 ```
 
 - `dim-plugin.json` declares `"dependencies": "npm"` and `"version"`; both members are PluginManager's ([PluginManager §2.1](PluginManager.md#21-the-plugin-directory-and-its-manifest)). The copy, never the shipped directory, is what runs.
-- `package.json` declares two dependencies: `@arcships/light-ocr` at exactly `0.5.9`, and `@arcships/rutis` at the version `runtime/package-lock.json` pins, because a default or installed plugin resolves `@arcships/rutis` from its own `node_modules` ([RuntimeManager §6](RuntimeManager.md#6-release)).
+- `package.json` declares three dependencies: `@arcships/light-ocr` at exactly `0.5.9`, `@arcships/light-ocr-runtime` at the version the facade itself pins (`0.1.9`), and `@arcships/rutis` at the version `runtime/package-lock.json` pins, because a default or installed plugin resolves `@arcships/rutis` from its own `node_modules` ([RuntimeManager §6](RuntimeManager.md#6-release)). The helper reads the platform identity from the runtime package's `platformIdentity`, the same export the facade's document API uses to select its platform package, so the plugin declares the runtime directly and the lock holds one copy of it.
 - `package-lock.json` pins every package with npm `integrity`, including the facade's own pins — runtime `0.1.9`, model `light-ocr-model-ppocrv6-small` `0.3.4` and the platform packages — because the facade declares them as its dependencies. The lock, not a version range, decides what runs, as `runtime/package-lock.json` does for the runtime packages.
 - A bump of light-ocr is a Dim change: a new lock in this plugin, reviewed like any dependency change. A newer release ships a new `version`: at the next start an installed copy is re-acquired in the background and the record switches only when the new copy is ready, so the old copy keeps serving until then ([PluginManager §3.1](PluginManager.md#31-startup)). The same path repairs a failed re-acquisition through `plugin.update`, and a plugin whose `@arcships/rutis` no longer matches the runtime is replaced the same way.
 - The shipped directory carries no `node_modules` and no build output: `scripts/stage-plugins.mjs` copies it without running `npm ci` ([RuntimeManager §6](RuntimeManager.md#6-release)). No package lifecycle script runs at install, because the install uses `--ignore-scripts`.
@@ -68,7 +68,7 @@ Service `ocrHelper`, scope process, no key, provided by the `light-ocr` row's `p
 
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
-| `describe` | async | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, executable, args, read}` or `null` |
+| `describe` | async | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, executable, args, read}` |
 
 - `contract` is the helper-contract version this plugin implements, `1`. Modality offers the target only when it equals the version Modality implements; an older copy that is still running marks the target unavailable with "the PP-OCR plugin needs an update" until its re-acquisition lands (Modality §A.2.1).
 - `target` is `{providerId: "local", modelId: "pp-ocr"}`, so Modality lists the target as `local/pp-ocr`.
@@ -92,11 +92,11 @@ The helper follows the helper contract Modality already defines (Modality §A.2)
 - It sizes each artifact before writing it and refuses with `resource_limit_exceeded` if the task's artifacts would cross 1 GiB. Modality charges the same bound as each file is written, so the directory never holds more than it.
 - It sniffs the input from its bytes, never from a declared media type, and accepts PNG and JPEG images and PDF documents.
 
-`result.json` is Modality's document shape: `{text, pageCount, pages: [{page, text, width, height, imagePath?, regions: [{text, confidence, polygon}]}]}`. `text` is every page's text joined with a newline between pages; each `page.text` is its lines joined with a newline; `polygon` is four `[x, y]` pairs in page pixels, clockwise from the top-left, which is the encoding `crates/dim-ocr` already defines for `local/apple-vision`.
+`result.json` is Modality's document shape: `{text, pageCount, pages: [{page, text, width, height, imagePath?, regions: [{text, confidence, polygon}]}]}`. `text` is every page's text joined with a newline between pages, where `local/apple-vision` joins them with a blank line; each `page.text` is its lines joined with a newline; `polygon` is four `[x, y]` pairs in page pixels, clockwise from the top-left, which is the encoding `crates/dim-ocr` already defines for `local/apple-vision`.
 
 ### 4.2 Images
 
-An image input is read once and recognized with `createEngine({execution: {provider: "cpu"}}).recognizeEncoded(bytes)`. The result is one page: `page` 1, `width` and `height` from `imageWidth` and `imageHeight`, `regions` from `lines` (`text`, `confidence`, `box` as the polygon), and `text` from the lines in reading order. An image input produces no `page-NNNN.png`: it is not rasterized, and in `layout` mode its page's `imagePath` is absent because the input is already the page image. An `OcrError` from `invalid_image`, `unsupported_pixel_format` or `invalid_argument` is a typed refusal `invalid_input`.
+An image input is read once and recognized with `createEngine({execution: {provider: "cpu"}, reducedLimits: {maxPixels: 25_000_000, …}}).recognizeEncoded(bytes, {applyExif: true})`. The engine carries Modality's 25,000,000-pixel page bound as a reduced engine limit: the facade passes `reducedLimits` through (`packages/light-ocr/src/index.d.ts` at 0.5.9, lines 11–15; its shape in `packages/runtime/src/index.d.ts`:63–66), the binding requires every legacy field and validates each (`bindings/node/src/addon.cpp`:447–484), and the engine may only reduce its bundle's limits (`docs/native-api.md`:344), so the fields the bound does not name stay the pinned bundle's own values, and those copied limits are the locked model version's own: a test fails when a lock update changes that version. An image above the bound is `resource_limit_exceeded` before recognition runs: the binding reads the encoded header and compares the decoded size with `maxPixels` before it decodes or infers (`bindings/node/src/encoded_image.cpp`:228, 241–243). The result is one page: `page` 1, `width` and `height` from `imageWidth` and `imageHeight`, `regions` from `lines` (`text`, `confidence`, `box` as the polygon), and `text` from the lines in reading order. An image input produces no `page-NNNN.png`: it is not rasterized, and in `layout` mode its page's `imagePath` is absent because the input is already the page image. An `OcrError` from `invalid_image`, `unsupported_pixel_format` or `invalid_argument` is a typed refusal `invalid_input`.
 
 ### 4.3 PDFs
 
@@ -104,13 +104,13 @@ A PDF is opened with `createDocumentEngine({engineOptions: {execution: {provider
 
 In `layout` mode the helper renders each page a second time, through the platform package's `pdfium` export — the renderer the document engine loads for itself — at the same `dpi`, and writes the bytes as `page-NNNN.png`, setting that page's `imagePath`. The second render is the only way to obtain the page image: the document API returns lines and dimensions, not pixels. A render failure there is `local_runtime_failed`. In `text` mode no page image is rendered beyond the recognition itself.
 
-The document engine has no code for an encrypted PDF: the rasterizer reports a password or permission failure when the document loads. The binding light-ocr loads, `pdfium-native` 0.6.1, maps PDFium's `FPDF_ERR_PASSWORD` to `PASSWORD:Password required or incorrect` and `FPDF_ERR_SECURITY` to `SECURITY:Unsupported security scheme` (`src/napi_helpers.h`, `GetPdfiumErrorMessage`, lines 24–55, the two cases at 37–44), and `src/pdfium_addon.cc:57` rejects the load with that message. The helper reports a load rejection whose message starts with `PASSWORD:` or `SECURITY:` as `encrypted_pdf`; any other load or render failure is `invalid_input` with the renderer's message.
+The document engine has no code for an encrypted PDF: the rasterizer reports a password or permission failure when the document loads. The binding light-ocr loads, `pdfium-native` 0.6.1, maps PDFium's `FPDF_ERR_PASSWORD` to `PASSWORD:Password required or incorrect` and `FPDF_ERR_SECURITY` to `SECURITY:Unsupported security scheme` (`src/napi_helpers.h`, `GetPdfiumErrorMessage`, lines 24–55, the two cases at 37–44), and `src/pdfium_addon.cc:57` rejects the load with that message. Every PDFium failure that reaches the helper as a plain error — the document engine's own load or rasterization during recognition, and the helper's `loadDocument` in `layout` mode, which reads the same input bytes — is classified by its message prefix: `PASSWORD:` or `SECURITY:` is `encrypted_pdf`, `FILE:`, `FORMAT:`, `PAGE:` or `UNKNOWN:` is `invalid_input`, and anything else is `local_runtime_failed`. A failure of the second render above, after the page was recognized, is always `local_runtime_failed` whatever its message: the engine has already loaded those bytes and rendered and recognized that page, so the input cannot be the cause.
 
 ### 4.4 Result and error mapping
 
 | light-ocr | Modality helper contract |
 | --- | --- |
-| `DocumentPage.index` (1-based) | `pages[].page` |
+| `DocumentPage.index` (0-based) + 1 | `pages[].page` |
 | `DocumentPage.width`, `height` | `pages[].width`, `pages[].height` |
 | `DocumentLine.text` / `OcrLine.text` | `pages[].text` line, `regions[].text` |
 | `DocumentLine.confidence` / `OcrLine.confidence` | `regions[].confidence`, clamped to [0, 1] |
@@ -209,8 +209,10 @@ HostPlatform's `spawn_confined` with `Confinement` already exists; this plugin a
 {
   "name": "dim-light-ocr",
   "private": true,
+  "type": "module",
   "dependencies": {
     "@arcships/light-ocr": "0.5.9",
+    "@arcships/light-ocr-runtime": "<the version the facade pins>",
     "@arcships/rutis": "<the version runtime/package-lock.json pins>"
   }
 }
@@ -222,7 +224,7 @@ The lock pins the facade, its runtime, model and platform packages, and `@arcshi
 
 No automated test downloads, installs or loads the real engine.
 
-- **Helper unit tests.** A fixture `node_modules/@arcships/light-ocr` in the test tree exports `createEngine`, `createDocumentEngine`, `getVersion`, `hasPdfSupport` and `OcrError`, with results and failures the test controls. The helper is run as a child process over fixture inputs, and the tests assert argv parsing, artifact names and shapes, `text.txt` content, the polygon conversion, the limit checks, every error mapping in §4.4, and that a refusal writes no partial artifact past the bound. Nothing is fetched; the fixture is a directory in the repository.
+- **Helper unit tests.** A fixture `node_modules/@arcships/light-ocr` in the test tree provides the exports the helper uses, plus `getVersion`, to prove the helper needs nothing else; the test controls results and failures. The helper is run as a child process over fixture inputs, and the tests assert argv parsing, artifact names and shapes, `text.txt` content, the polygon conversion, the limit checks, every error mapping in §4.4, and that a refusal writes no partial artifact past the bound. Nothing is fetched; the fixture is a directory in the repository.
 - **Row and plugin tests.** The row is loaded with the fixture engine and `describe` is asserted against Modality's A.2.1 shape — `target`, `executable` = `process.execPath`, `args`, `read`. Presence, absence and removal of the service are Modality's acceptance flows, run with a stub provider (Modality Appendix D item 9); the plugin's own tests cover only the description it publishes.
 - **Install tests.** With a fixture plugin that declares `dependencies`, PluginManager's acquisition copies it, installs its locked dependencies from a local fixture registry and renames it into place; the shipped directory is unchanged (PluginManager Appendix C item 13).
 - **The one real run.** A single end-to-end acceptance, not in CI, on macOS arm64: install the plugin from the release's optional directory with the real lock from the public registry, run `modality.ocr.recognize` on a one-page PNG and on a two-page PDF in both output modes, and assert the text, the page count, `page-NNNN.png` in layout mode, exit 0, `confined: true`, and that the helper wrote nothing outside its work directory. It installs and loads downloaded native code, so it is run by hand and never as part of a normal test suite.
@@ -233,7 +235,7 @@ No automated test downloads, installs or loads the real engine.
 1. `plugin.list` shows `light-ocr` with `optional: true` before it is installed; `dimcode plugin install --optional light-ocr` copies it to `<home>/plugins/light-ocr/<version>+<suffix>`, installs its locked dependencies there, and turns it on; the shipped directory has no `node_modules` and is unchanged.
 2. With the plugin installed and the row running, `modality.capabilities` lists `local/pp-ocr` beside `local/apple-vision`; with the plugin off, Pending or removed, it lists only `local/apple-vision` and nothing else changes.
 3. An image task returns text and regions; a layout task returns the same regions and no page image for an image input; a PDF task returns one page per page; a two-page PDF in layout mode returns `page-0001.png` and `page-0002.png`.
-4. The limits are enforced: a 501-page PDF and an input over 100 MiB are `resource_limit_exceeded`; an encrypted PDF is `encrypted_pdf`; a corrupt image is `invalid_input`.
+4. The limits and refusals settle `invalid_input` for the task: a 501-page PDF, its message carrying the helper's limit; an encrypted PDF, with the helper's `encrypted_pdf` message; an input over 100 MiB, refused at submission before any helper runs; a corrupt image. Modality folds the helper's `resource_limit_exceeded` and `encrypted_pdf` into `invalid_input`, and the helper tests assert those two codes directly.
 5. Cancel and timeout kill the helper; the task settles cancelled or failed, and the work directory is removed.
 6. `confined: true` on macOS; `confined: false` on Windows and on Linux without `bubblewrap`.
 7. A newer release's copy re-acquires the installed plugin in the background at the next start into a new `<version>+<suffix>` directory: the record and `dir` switch only when the new copy is ready, the old copy keeps serving and stays on disk until the next start's cleanup, and the target keeps working without a second `enable`; a failed re-acquisition keeps the old copy and shows in `plugin.list` until `plugin.update` repairs it.
