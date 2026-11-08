@@ -444,6 +444,7 @@ async fn e2_a_rebuild_reads_goal_candidates_and_control_fields() {
             )),
             configuration: None,
             prompt: None,
+            failure_chain: None,
         }),
     );
     seed.append(
@@ -1116,6 +1117,7 @@ async fn e2_a_clear_batch_takes_the_cheap_rebuild_unless_its_trigger_was_deleted
             ),
         );
         let record = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
+            handover: None,
             submission_id: Some("test:clear-record".into()),
             user: None,
             blocks: vec![raw(
@@ -1126,6 +1128,7 @@ async fn e2_a_clear_batch_takes_the_cheap_rebuild_unless_its_trigger_was_deleted
             mode: Some(InputMode::Append),
         });
         let trigger = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
+            handover: None,
             submission_id: Some("test:clear".into()),
             user: None,
             blocks: vec![raw(&texts::clear("main"), None, false)],

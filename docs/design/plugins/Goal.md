@@ -82,8 +82,7 @@ A goal exists only while an objective is live. Under the evaluator judge of [Pur
 
 | Change (`op` in the marker) | Written by | Trigger block | Record the fold states |
 | --- | --- | --- | --- |
-| `set {objective, judge?}` | `session.goal.get` | `{sessionId, branchId?}` | `{branchId, through, goal}` (A.3) | None |
-| `session.goal.set` | `op="set"`, the objective in its body, `judge="evaluator"` when chosen | `status = active`, the objective, `judge`; count restarts |
+| `set {objective, judge?}` | `session.goal.set` | `op="set"`, the objective in its body, `judge="evaluator"` when chosen | `status = active`, the objective, `judge`; count restarts |
 | `edit {objective}` | `session.goal.edit` | `op="edit"`, the objective in its body | The objective replaced, `judge` and the status kept (`none` if the goal has no status) |
 | `pause` (reason `user`) | `session.goal.pause` | `op="pause" reason="user"` | `status = paused (user)`, whatever it was |
 | `resume` | `session.goal.resume` | `op="resume"` | `status = active`, whatever it was (a `completed` or `blocked` goal reopens); count restarts; the Queue input drives a turn |

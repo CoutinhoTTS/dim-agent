@@ -7,7 +7,7 @@ Each page contains at most 128 inputs in ascending branch sequence order. Contin
 `through`; a failure is not an empty inventory.
 
 Each input contains `inputId`, `sequence`, effective `mode`, optional `user`, and `applied`.
-Candidates are branch-local `input/message` facts without matching `input/consumed` or
+Candidates are branch-local ordinary `input/message` facts, excluding handover inputs, without matching `input/consumed` or
 `input/deleted` at the cutoff. Only identity, sequence, mode and user content are projected;
 internal context blocks are not returned. A second query over the selected identities determines
 which have `input/applied`. Missing stored mode follows the input format's existing default:

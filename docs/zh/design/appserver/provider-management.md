@@ -443,7 +443,7 @@ owner 实现是 `ProviderService::selectable_models` 与
 适配器因此不持有 Provider 凭据，也不读取 Provider 记录。它是 `ProviderConnectionResolver`
 旁边的第二个进程 host 端口，不是管理方法：操作 `resolveModalityConnection`，异步，请求
 `{target: {providerId, modelId}, operation: string}`，回复 `{connection, protocol,
-model}`。
+model, realtime}`。
 
 `connection` 是同一模型的对话调用会取得的既有 `ResolvedModelConnection`——连接事实、失败
 策略，以及托管账号上的凭据恢复——因此适配器执行与执行时相同的一次恢复规则。`protocol` 是
@@ -460,6 +460,14 @@ model}`。
 `unavailable` 状态无论存储了何种原因都排除所有用途，因此旧投影为这类模型写下的记录不会被
 任一读取列出，也不会发放任何租约。
 
+**实时声明。** 提供实时操作的条目在 `metadata.raw.realtime: {protocol, path}` 中声明它所说的
+传输。Provider 将其解析为 `RealtimeDeclaration`，并作为 `realtime` 随连接回复携带；未声明的
+条目回复 `null`，配置式配置因为没有目录条目，对每个目标都回复 `null`。该操作仍与其余操作一样
+声明在 `metadata.raw.modalityCapabilities` 中，因此一个列出 `realtime.voice` 却没有传输声明的
+模型会解析出 `realtime` 为 `null` 的连接：Modality 在任何网络调用之前拒绝该模型的 `open`，
+而不是猜测 URL。`protocol` 是适配器为该线上协议使用的名字，`path` 由该适配器追加到路由的
+base URL 之后。
+
 **凭据规则与生命周期。** 连接只活在那一次调用中。Provider 从不持久化它，从不把它返回给
 客户端，也从不写进任务记录、结果、诊断或错误。它的 `Debug` 打印模型、路由、base URL、头名
 以及是否存在凭据，从不打印头的值、bearer 或 key；`ModelConnection` 当前未实现 `Debug`，
@@ -473,8 +481,8 @@ model}`。
 `ModalityConnectionHost`，`ModalityTarget` 携带模型标识与操作。Provider 在
 `ProviderPlugin::apply` 提供它，配置式模型配置从模型文件提供它，其条目未声明任何操作，
 因此对每个 target 都以声明拒绝作答。App Server catalog 以 Rust-only 名
-`modalityConnectionHost` 注册它。回复复用 `ResolvedModelConnection` 与 `ModelProtocol`；
-不新增凭据类型。
+`modalityConnectionHost` 注册它。回复复用 `ResolvedModelConnection` 与 `ModelProtocol`，并新增
+`RealtimeDeclaration`（条目声明的传输）；不新增凭据类型。
 
 ### 3.7 已存选择的离线校验
 

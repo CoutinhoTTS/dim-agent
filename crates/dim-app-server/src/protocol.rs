@@ -508,10 +508,15 @@ pub enum ClientKind {
     Other,
 }
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Shutdown {
     #[serde(default)]
     pub force: bool,
+    /// Refuse (`daemon_busy`) instead of stopping while another client
+    /// connection is open or a Session has an attached client or a running
+    /// turn. Advertised as `daemon.shutdown.ifIdle`.
+    #[serde(default)]
+    pub if_idle: bool,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1185,8 +1190,7 @@ pub struct SessionInfo {
     /// The Session's creation origin; protocol v3 with a native store (#557).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<SessionOrigin>,
-    /// The leader Session a Collaboration member belongs to; absent when the
-    /// store records none (#557).
+    /// The stored parent Session; absent when the store records none (#557).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     /// `title`, `titleSource` and `titleRevision` from SessionStore (S5b);

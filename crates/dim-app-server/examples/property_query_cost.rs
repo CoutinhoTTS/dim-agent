@@ -115,6 +115,7 @@ async fn main() {
         records.push(record(
             records.len() as u64 + 1,
             EventKind::ModelCall(ModelCallData {
+                failure_chain: None,
                 turn_id: "t".into(),
                 request_id: "r".into(),
                 configuration: None,

@@ -48,6 +48,12 @@ a replacement during preparation. A retired handler follows its own stopping
 contract; it is not replaced by a current handler of the same name. Failed
 preparation drops its source references without registering a request.
 
+For a continuation request ([Loop](Loop.md#a-failed-model-step-and-its-disposer)),
+request preparation declares no tools and ToolBinding fixes an empty snapshot
+for that request. The choice belongs to the Loop's request preparation and has
+no separate flag: the committed `context/prepare` already records the declared
+tools.
+
 ### Rule check
 
 | Rule | Application |
@@ -103,7 +109,7 @@ Before admitting a `write_filesystem` call, the pinned handler's `resolve_write`
 may resolve its target using metadata only. Approval and execution receive that
 same resolved call; the committed model call is unchanged. A resolver cannot
 mutate files or start processes before approval. Permission's [workspace write
-contract](Permission.md#workspace-write-targets) decides whether the target asks.
+contract](Permission.md#write-targets-without-the-facts) decides whether the target asks.
 
 ### Dependencies
 
@@ -133,6 +139,12 @@ and reads their turn, request and call identities. It does not read tool
 arguments. Interrupt state comes from the latest interrupt or turn boundary
 at the same fixed read boundary.
 Cancellation is not rollback of a tool's completed side effect.
+
+A request prepared with no tools never runs a call: the executor's snapshot
+refusal ([tool_binding.rs](../../../../crates/dim-agent-capabilities/src/tool_binding.rs))
+means no call from that request is ever dispatched. ModelProvider states the
+stream refusal and the request's settlement
+([ModelProvider](ModelProvider.md#failures)).
 
 ### Model-facing texts
 

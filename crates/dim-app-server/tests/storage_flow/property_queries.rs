@@ -462,6 +462,11 @@ async fn property_queries_load_only_selected_request_components_and_filter_bodie
     let EventKind::ModelCall(call) = &mut Arc::make_mut(&mut records[1].event).kind else {
         unreachable!()
     };
+    call.failure_chain = Some(dim_agent_types::FailureChain {
+        from_request_id: "earlier-request".into(),
+        attempts: 5,
+        waited_ms: 70_000,
+    });
     Arc::make_mut(&mut call.request).system =
         Some(Arc::new(SystemPrompt::Text("selected system".into())));
     append(&store, key("properties", "main"), records.clone())
@@ -480,6 +485,7 @@ async fn property_queries_load_only_selected_request_components_and_filter_bodie
         "data.request.tools",
         "data.request.system",
         "data.turn_id",
+        "data.failure_chain",
     ]);
     store.take_node_loads();
     parity(&store, &memory, &scope, &query).await;

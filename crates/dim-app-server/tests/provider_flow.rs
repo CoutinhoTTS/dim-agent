@@ -1925,13 +1925,41 @@ async fn modality_connection_resolution_reaches_the_stub_and_refuses_unselectabl
         "metadata":{"raw":{"modalityCapabilities":["image.generate"]}}
     }))
     .unwrap();
-    mine.models = vec![media("media"), unavailable, disabled, edit_only];
+    let voice = |id: &str, realtime: Value| -> ModelEntry {
+        serde_json::from_value(json!({
+            "modelId":id, "displayName":id, "status":"active",
+            "capabilities":{"modalities":["text","audio"],"toolCalling":false,"streaming":true,
+                "structuredOutput":false,"vision":false,"audio":true,"reasoning":false},
+            "metadata":{"raw":{"type":"realtime","realtime":realtime,
+                "modalityCapabilities":["realtime.voice"]}}
+        }))
+        .unwrap()
+    };
+    let declared = voice(
+        "voice",
+        json!({"protocol": "openai-realtime", "path": "/realtime"}),
+    );
+    let broken = voice("broken", json!({"protocol": "openai-realtime"}));
+    mine.models = vec![
+        media("media"),
+        unavailable,
+        disabled,
+        edit_only,
+        declared,
+        broken,
+    ];
     let created = provider.create(mine, &cancel).await.unwrap();
     let enabled = provider
         .set_enabled_models(
             MINE.into(),
             created.version.unwrap(),
-            vec!["media".into(), "unavailable".into(), "edit-only".into()],
+            vec![
+                "media".into(),
+                "unavailable".into(),
+                "edit-only".into(),
+                "voice".into(),
+                "broken".into(),
+            ],
             &cancel,
         )
         .await
@@ -1997,6 +2025,41 @@ async fn modality_connection_resolution_reaches_the_stub_and_refuses_unselectabl
         );
         assert_eq!(header("x-marker"), Some("modality-connection"));
     }
+    // A realtime operation carries the entry's declared transport; every other
+    // operation of the same model carries none, and a declaration that does
+    // not parse is refused rather than silently absent.
+    let voice = modality
+        .0
+        .resolve_for_modality(modality_target("voice", "realtime.voice"), cancel.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        voice.realtime,
+        Some(dim_agent_capabilities::host::RealtimeDeclaration {
+            protocol: "openai-realtime".into(),
+            path: "/realtime".into(),
+        })
+    );
+    assert!(!format!("{voice:?}").contains(KEY));
+    let image = modality
+        .0
+        .resolve_for_modality(modality_target("voice", "image.generate"), cancel.clone())
+        .await;
+    assert_eq!(
+        image.err().unwrap().to_string(),
+        "Model does not declare the image.generate operation"
+    );
+    let broken = modality
+        .0
+        .resolve_for_modality(modality_target("broken", "realtime.voice"), cancel.clone())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        broken.to_string(),
+        "The model's realtime declaration needs a protocol and a path"
+    );
+    assert!(!format!("{broken:?} {broken}").contains(KEY));
     for (label, target, expected) in [
         (
             "unavailable",

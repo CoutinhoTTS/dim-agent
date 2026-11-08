@@ -46,16 +46,21 @@ pub enum Withdrawal {
 /// One committed input until Loop consumes it.
 struct Entry {
     id: String,
-    mode: InputMode,
-    /// This queue decided to write its `input/applied`.
-    released: bool,
+    kind: EntryKind,
+}
+enum EntryKind {
+    /// An input this queue releases by its mode.
+    Input { mode: InputMode, released: bool },
+    /// Held for the turn it names, never released or counted.
+    Handover { turn_id: String },
 }
 /// What InputQueue derives from the events it consumes.
 #[derive(Default)]
 struct QueueState {
     entries: Vec<Entry>,
-    /// Between a dispatched `turn/start` and its `turn/end`.
-    turn_open: bool,
+    /// The open turn's id, between a dispatched `turn/start` and its
+    /// `turn/end`.
+    turn: Option<String>,
     /// An input released while no turn ran is about to start one: until
     /// its `turn/start`, queue inputs wait as if the turn ran. A
     /// `stop/interrupt` ends the wait, since inputs applied before it no
@@ -65,9 +70,15 @@ struct QueueState {
 impl QueueState {
     fn step(&mut self, event: &AgentEvent) -> Vec<Decision> {
         match &event.kind {
-            EventKind::InputMessage(data) => self.input(&event.id, data.effective_mode()),
-            EventKind::TurnStart(_) => {
-                self.turn_open = true;
+            EventKind::InputMessage(data) => self.input(
+                &event.id,
+                data.effective_mode(),
+                data.handover
+                    .as_ref()
+                    .map(|handover| handover.turn_id.as_str()),
+            ),
+            EventKind::TurnStart(data) => {
+                self.turn = Some(data.turn_id.clone());
                 self.starting = false;
                 Vec::new()
             }
@@ -75,7 +86,7 @@ impl QueueState {
                 self.starting = false;
                 Vec::new()
             }
-            EventKind::TurnEnd(_) => self.end_turn(),
+            EventKind::TurnEnd(data) => self.end_turn(&data.turn_id),
             EventKind::InputConsumed(data) => {
                 self.entries.retain(|entry| entry.id != data.input_id);
                 Vec::new()
@@ -84,41 +95,68 @@ impl QueueState {
             _ => Vec::new(),
         }
     }
-    fn input(&mut self, id: &str, mode: InputMode) -> Vec<Decision> {
+    fn input(&mut self, id: &str, mode: InputMode, handover: Option<&str>) -> Vec<Decision> {
+        if let Some(turn_id) = handover {
+            if self.turn.as_deref() != Some(turn_id) {
+                return vec![Decision::Delete(id.to_owned())];
+            }
+            self.entries.push(Entry {
+                id: id.to_owned(),
+                kind: EntryKind::Handover {
+                    turn_id: turn_id.to_owned(),
+                },
+            });
+            return Vec::new();
+        }
         self.entries.push(Entry {
             id: id.to_owned(),
-            mode,
-            released: false,
+            kind: EntryKind::Input {
+                mode,
+                released: false,
+            },
         });
-        let held_queue = self
-            .entries
-            .iter()
-            .any(|entry| !entry.released && entry.mode == InputMode::Queue && entry.id != id);
+        let held_queue = self.entries.iter().any(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::Input {
+                    mode: InputMode::Queue,
+                    released: false
+                }
+            ) && entry.id != id
+        });
         match mode {
-            InputMode::Queue if self.turn_open || self.starting || held_queue => Vec::new(),
+            InputMode::Queue if self.turn.is_some() || self.starting || held_queue => Vec::new(),
             _ => self.release(id),
         }
     }
-    fn end_turn(&mut self) -> Vec<Decision> {
-        self.turn_open = false;
-        match self
-            .entries
-            .iter()
-            .find(|entry| !entry.released && entry.mode == InputMode::Queue)
-        {
-            Some(next) => {
-                let next = next.id.clone();
-                self.release(&next)
+    fn end_turn(&mut self, turn: &str) -> Vec<Decision> {
+        self.turn = None;
+        let mut decisions = Vec::new();
+        self.entries.retain(|entry| {
+            let ended = matches!(&entry.kind, EntryKind::Handover { turn_id } if turn_id == turn);
+            if ended {
+                decisions.push(Decision::Delete(entry.id.clone()));
             }
-            None => Vec::new(),
+            !ended
+        });
+        if let Some(next) = self.entries.iter().find(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::Input {
+                    mode: InputMode::Queue,
+                    released: false
+                }
+            )
+        }) {
+            let next = next.id.clone();
+            decisions.extend(self.release(&next));
         }
+        decisions
     }
     fn withdraw(&mut self, id: &str) -> Vec<Decision> {
-        match self
-            .entries
-            .iter()
-            .position(|entry| entry.id == id && !entry.released)
-        {
+        match self.entries.iter().position(|entry| {
+            entry.id == id && !matches!(entry.kind, EntryKind::Input { released: true, .. })
+        }) {
             Some(index) => {
                 self.entries.remove(index);
                 vec![Decision::Delete(id.to_owned())]
@@ -132,20 +170,26 @@ impl QueueState {
         let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
             return Vec::new();
         };
-        entry.released = true;
-        if !self.turn_open && entry.mode != InputMode::Append {
+        let EntryKind::Input { mode, released } = &mut entry.kind else {
+            return Vec::new();
+        };
+        *released = true;
+        let mode = *mode;
+        if self.turn.is_none() && mode != InputMode::Append {
             self.starting = true;
         }
-        vec![Decision::Apply(entry.id.clone(), entry.mode)]
+        vec![Decision::Apply(entry.id.clone(), mode)]
     }
 }
 /// Consumes `input/message` and decides by its mode when Loop may consume
 /// it, writing `input/applied` with the mode then: steer and append inputs
 /// at once; a queue input when no turn runs or is about to start,
-/// otherwise after the turn ends, one per turn. Knows of turns only through `turn/start`,
-/// `turn/end` and `stop/interrupt`; Loop decides how to consume what is
-/// applied. Consumes `input/withdraw` in order and writes `input/deleted`
-/// for an input it still holds unapplied.
+/// otherwise after the turn ends, one per turn. A handover input is never
+/// released: it waits for the turn it names and is deleted when that turn
+/// ends, or on arrival when no such turn is open. Knows of turns only
+/// through `turn/start`, `turn/end` and `stop/interrupt`; Loop decides how
+/// to consume what is applied. Consumes `input/withdraw` in order and
+/// writes `input/deleted` for an input it still holds unapplied.
 pub struct InputQueue {
     state: Mutex<QueueState>,
     observable: Arc<StateCell<InputSnapshot>>,
@@ -160,7 +204,11 @@ pub struct InputQueue {
 impl InputQueue {
     fn publish(&self, state: &QueueState) {
         self.observable.set(InputSnapshot {
-            queued: state.entries.len(),
+            queued: state
+                .entries
+                .iter()
+                .filter(|entry| matches!(&entry.kind, EntryKind::Input { .. }))
+                .count(),
         });
     }
     /// Writes the decisions; returns the sequence of the last `input/deleted`.
@@ -219,6 +267,8 @@ impl InputQueue {
                         "data.mode",
                         "data.user.content[].type",
                         "data.input_id",
+                        "data.turn_id",
+                        "data.handover.turn_id",
                     ]
                     .map(String::from)
                     .to_vec(),
@@ -251,8 +301,10 @@ impl InputQueue {
                         mode,
                         user,
                         input,
+                        turn,
+                        handover,
                     ],
-                ) = <[_; 5]>::try_from(row.values)
+                ) = <[_; 7]>::try_from(row.values)
                 else {
                     return Err(AgentError::fault(
                         "InputQueue",
@@ -273,13 +325,31 @@ impl InputQueue {
                             }
                             QueryValue::Elements { .. } => unreachable!("an input mode is scalar"),
                         };
-                        owed.extend(state.input(&id, mode));
+                        let handover = match &handover {
+                            QueryValue::Missing => None,
+                            QueryValue::Value { value } if value.is_null() => None,
+                            QueryValue::Value { value } => {
+                                Some(value.as_str().expect("handover turn identity"))
+                            }
+                            QueryValue::Elements { .. } => {
+                                unreachable!("handover turn identity is scalar")
+                            }
+                        };
+                        owed.extend(state.input(&id, mode, handover));
                     }
                     "turn/start" => {
-                        state.turn_open = true;
+                        let QueryValue::Value { value: turn } = turn else {
+                            unreachable!("turn identity")
+                        };
+                        state.turn = Some(turn.as_str().expect("turn identity").to_owned());
                         state.starting = false;
                     }
-                    "turn/end" => owed.extend(state.end_turn()),
+                    "turn/end" => {
+                        let QueryValue::Value { value: turn } = turn else {
+                            unreachable!("turn identity")
+                        };
+                        owed.extend(state.end_turn(turn.as_str().expect("turn identity")));
+                    }
                     "stop/interrupt" => state.starting = false,
                     "input/consumed" | "input/withdraw" | "input/applied" | "input/deleted" => {
                         let QueryValue::Value {

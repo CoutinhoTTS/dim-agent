@@ -19,6 +19,8 @@ pub use metadata::testing;
 pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};
 #[cfg(feature = "testing")]
 pub use query::{QueryStatementStats, sqlite_memory};
+#[cfg(feature = "testing")]
+pub use sqlite::set_upgrade_report_delay;
 pub use sqlite::{
     FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, Vacuumed, vacuum_store,
 };

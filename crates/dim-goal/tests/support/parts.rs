@@ -1711,6 +1711,7 @@ pub fn message(blocks: Vec<InputBlock>, mode: InputMode) -> EventKind {
 /// [`dim_agent_runtime::Branch`] handle.
 pub fn input_message(blocks: Vec<InputBlock>, mode: InputMode) -> InputMessageData {
     InputMessageData {
+        handover: None,
         submission_id: Some(format!("test:{}", uuid::Uuid::new_v4())),
         user: None,
         blocks,

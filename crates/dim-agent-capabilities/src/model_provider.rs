@@ -1,6 +1,8 @@
 mod images;
 mod recovery;
-pub use recovery::{Consume, RetryObserver, RetryWaiting, invoke as invoke_with_recovery};
+pub use recovery::{
+    Consume, MAX_ATTEMPTS, RetryObserver, RetryWaiting, WAIT_BUDGET, invoke as invoke_with_recovery,
+};
 
 use crate::{
     context_preparation::ContextPreparation,
@@ -63,6 +65,7 @@ fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
         retry_after_ms: facts
             .retry_after_stop
             .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
+        retry_forbidden: facts.retry_forbidden,
     }
 }
 
@@ -84,11 +87,12 @@ impl ModelProvider {
         &self,
         turn_id: &str,
         request_id: &str,
-        provider_id: &str,
-        model_id: &str,
+        model: (&str, &str),
+        failure_chain: Option<&FailureChain>,
         result: std::result::Result<FinishReason, HostError>,
         started: &[StartedCall],
     ) -> dim_agent_runtime::Result<()> {
+        let (provider_id, model_id) = model;
         let outcome = match result {
             Ok(finish_reason) => ModelOutputOutcome::Completed { finish_reason },
             Err(HostError::Cancelled(reason)) => ModelOutputOutcome::Cancelled { reason },
@@ -99,8 +103,14 @@ impl ModelProvider {
                 model,
                 ..
             }) => {
-                let facts = model
-                    .unwrap_or_else(|| Box::new(ModelFailureFacts::unknown(Some(message.clone()))));
+                let facts = model.unwrap_or_else(|| {
+                    let mut facts = ModelFailureFacts::unknown(Some(message.clone()));
+                    if let Some(chain) = failure_chain {
+                        facts.attempts = chain.attempts;
+                        facts.waited = std::time::Duration::from_millis(chain.waited_ms);
+                    }
+                    Box::new(facts)
+                });
                 tracing::error!(
                     session_id = %self.identity.session_id,
                     branch_id = %self.identity.branch_id,
@@ -230,6 +240,7 @@ impl ModelProvider {
                 "data.request.modelId".into(),
                 "position.sequence".into(),
                 "position.branch_id".into(),
+                "data.failure_chain".into(),
             ],
         };
         request.query.filter = Some(QueryFilter::And {
@@ -290,13 +301,22 @@ impl ModelProvider {
                         QueryValue::Value {
                             value: serde_json::Value::String(branch_id),
                         },
+                        failure_chain,
                     ],
-                ) = <[_; 6]>::try_from(row.values)
+                ) = <[_; 7]>::try_from(row.values)
                 else {
                     return Err(AgentError::fault(
                         "ModelProvider",
                         "a model call has invalid operation identities",
                     ));
+                };
+                let failure_chain = match failure_chain {
+                    QueryValue::Missing => None,
+                    QueryValue::Value { value } if value.is_null() => None,
+                    QueryValue::Value { value } => Some(
+                        serde_json::from_value::<FailureChain>(value).expect("model failure chain"),
+                    ),
+                    QueryValue::Elements { .. } => unreachable!("failure chain is an object"),
                 };
                 let mut tools = TimelineQuery {
                     scope: TimelineQueryScope::Branch,
@@ -411,8 +431,8 @@ impl ModelProvider {
                 self.complete(
                     &turn_id,
                     &request_id,
-                    &provider_id,
-                    &model_id,
+                    (&provider_id, &model_id),
+                    failure_chain.as_ref(),
                     Err(HostError::failed(CAPABILITY_RELOADING)),
                     &started,
                 )?;
@@ -476,6 +496,7 @@ impl ModelProvider {
                 recovery::invoke(
                     &self.host,
                     &request,
+                    call.failure_chain.as_ref(),
                     resolved,
                     &cancel,
                     &mut output,
@@ -523,8 +544,8 @@ impl ModelProvider {
             let submitted = self.complete(
                 &call.turn_id,
                 &call.request_id,
-                &call.request.provider_id,
-                &call.request.model_id,
+                (&call.request.provider_id, &call.request.model_id),
+                call.failure_chain.as_ref(),
                 result,
                 &output.started,
             );
@@ -714,8 +735,8 @@ impl DynPlugin for ModelProviderPlugin {
                                 return owner.complete(
                                     &call.turn_id,
                                     &call.request_id,
-                                    &call.request.provider_id,
-                                    &call.request.model_id,
+                                    (&call.request.provider_id, &call.request.model_id),
+                                    call.failure_chain.as_ref(),
                                     Err(HostError::Cancelled(reason)),
                                     &[],
                                 );

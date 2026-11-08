@@ -487,7 +487,9 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
             "session-source / model"
         });
         terminal.write(b"/new\r");
-        terminal.until("new session");
+        // The palette row ("start a new session") carries the words before
+        // `/new` runs; the boundary rule follows the switch's composer clear.
+        terminal.until("─ new session ─");
         terminal.write(b"hello\r");
         terminal.until("startup fixture rejection");
         terminal.signal(libc::SIGKILL);
@@ -1105,7 +1107,9 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
         let mut terminal = Terminal::launch_tui(command);
         terminal.until(&format!("{provider} / model"));
         terminal.write(b"/new\r");
-        terminal.until("new session");
+        // The palette row ("start a new session") carries the words before
+        // `/new` runs; the boundary rule follows the switch's composer clear.
+        terminal.until("─ new session ─");
         terminal.write(b"hello\r");
         if configured {
             terminal.until("startup fixture rejection");

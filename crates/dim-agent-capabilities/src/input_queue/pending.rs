@@ -33,6 +33,13 @@ pub(super) async fn read(
                         values: vec![json!("input/message")],
                     },
                     QueryFilter::Not {
+                        condition: Box::new(QueryFilter::Present {
+                            value: QueryOperand::Field {
+                                path: "data.handover".into(),
+                            },
+                        }),
+                    },
+                    QueryFilter::Not {
                         condition: Box::new(QueryFilter::Exists {
                             condition: Box::new(QueryFilter::And {
                                 conditions: vec![

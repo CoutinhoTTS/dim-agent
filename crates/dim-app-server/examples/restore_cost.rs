@@ -397,6 +397,7 @@ fn request_event(sequence: u64, request: Arc<ModelRequest>, call: bool) -> Store
             request,
             configuration: None,
             prompt: None,
+            failure_chain: None,
         })
     } else {
         EventKind::ContextPrepare(ContextPrepareData {
@@ -407,6 +408,7 @@ fn request_event(sequence: u64, request: Arc<ModelRequest>, call: bool) -> Store
             configuration: None,
             prompt: None,
             recovery: None,
+            failure_chain: None,
         })
     };
     StoredEvent {

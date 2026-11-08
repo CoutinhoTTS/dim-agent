@@ -58,6 +58,14 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 的最小通道：一个私有文件、首行带 PID，CLI 只校验并打印它，不解析日志，也不复制
 业务内容。
 
+**升级进度。** 格式升级可能远长于启动等待。升级事务运行期间，存储 owner 在同一位置
+原子改写进度说明，首行是 `dimcode-startup-progress v1 pid=<pid>`，正文是
+`store-upgrade from=<from> to=<to> progress=<n>`：`n` 每次重写递增。SQLite 的进度回调
+最多每秒报告一次，每个升级步骤完成时再报告一次；库新建或已是最新格式时不写。进度
+说明让 CLI 区分“仍在升级”和“卡住”，不含业务内容或凭据，成功打开时与遗留说明一起
+删除。只认失败首行的旧版 CLI 读到进度说明时按“没有说明”处理，退回通用错误文本；
+CLI 等待规则见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+
 “本构建认识的形状”指当前格式的表和索引集合，或某个升级步骤起点的集合：结构完全相符时
 先看标记是否等于该版本，再看是否需要升级。结构不相符时按可读的单一标记分类，下表四行
 互斥。
@@ -124,7 +132,7 @@ Cannot open native store <path>.
 `v<marker> (schema is v<schema>)`，否则写 `v<schema> (format marker is missing or ambiguous)`；
 结构不相符时，读出单一标记写 `v<marker>`，读不出则只写 `unrecognized`。
 
-- **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写说明。成功打开（含升级成功）时，存储 owner 删除遗留说明；删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
+- **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写失败说明；格式升级期间写进度说明，成功打开（含升级成功）时存储 owner 删除遗留说明，删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
 - **位置**：说明是库的同级文件，不是新数据库格式，也不是 `daemon.log` 的一部分。CLI 启动的守护进程使用 `<native home>/dimcode.sqlite`，所以 CLI 读取 `<native home>/dimcode.sqlite.startup`。直接以 `--database` 启动的守护进程把说明写在它的库旁，CLI 的启动路径不读取。
 - **不自动恢复**：不删除、重建、降级、重置标记或复制库；`--home PATH` 只建立另一个环境。终端说明只给兼容构建和 `--home` 两条路；开发说明继续使用 `./dev` 的隔离 home。
 - **验证**：`storage_flow` 用一次性库覆盖全部分支：v37 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v32 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v36 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
@@ -181,7 +189,7 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 | `agent_sessions.session_id` | `TEXT` | 否 | — | 主键，原 Session ID |
 | `agent_sessions.created_at_ms` | `INTEGER` | 否 | — | `CHECK(created_at_ms >= 0)`；创建事务写入真实 Unix 毫秒 |
 | `agent_sessions.config` | `TEXT` | 否 | — | `SessionConfig` JSON，创建时的配置 |
-| `agent_sessions.leader_session_id` | `TEXT` | 是 | — | 外键到 `agent_sessions(session_id)`；非空表示这个 Session 是那个 leader Session 的委派成员，NULL 表示不是成员 |
+| `agent_sessions.leader_session_id` | `TEXT` | 是 | — | 外键到 `agent_sessions(session_id)`，保存 [目录的父会话](session-classification.md#31-the-origin)。协作成员资格由会话的创建角色确定 |
 | `agent_sessions.origin` | `TEXT` | 否 | `'unknown'` | `CHECK (origin IN ('client', 'acp', 'internal', 'unknown'))`；创建来源，创建事务写入一次；默认值只为让 `ALTER TABLE` 能加非空列，写入方一律显式给出（v30，[#557](https://github.com/arcships/dim/issues/557)） |
 | `session_owners.session_id` | `TEXT` | **SQL 允许** | — | 主键，外键到 `agent_sessions(session_id)`；业务要求每个 Session 恰有一条非空 owner |
 | `session_owners.agent_id` | `TEXT` | 否 | — | 外键到 `agents(agent_id)` |
@@ -649,7 +657,7 @@ ProjectionCheckpoint = {
   - 精确匹配且标记相符的 v29 库在同一事务内 `ALTER TABLE agent_sessions ADD COLUMN origin ...`（ALTER 生成的表文本须与空库的完全一致，启动门禁逐字比较），随后 `UPDATE agent_sessions SET origin='internal' WHERE leader_session_id IS NOT NULL`；标记表改为 30。
   - 标记相符的 v28 及更早受支持格式先执行已有各步，再执行本步。
   - 其余旧行保持 `unknown`：升级不根据 `interactive`、Agent 归属或消息文本猜来源。
-- **写入方**：`session.create` 写 `client`，或用请求里的 `acp`；Collaboration 成员创建写 `internal` 并同时写 leader；`sessions.launch` 写 `internal`；`session.fork` 写 `client`，不复制来源；迁移写 `unknown`，映射后的值由迁移自己的设计写入（可能把 `unknown` 替换一次，之后再不改）。这些写入都使用显式列名，包括迁移与分叉的插入语句。
+- **写入方**：`session.create` 写 `client`，或用请求里的 `acp`；Collaboration 成员创建写 `internal` 并同时写 leader；`sessions.launch` 写 `internal`；`session.fork` 写 `client`；[迁移](../plugins/Migration.md)导入会话时写映射后的来源或 `unknown`。这些写入都使用显式列名，包括迁移与分叉的插入语句。
 - **不能留在 v29**：启动要求精确 SQL 结构，v29 守护进程会拒绝多出该列的库；这正是"旧读取器无法解释新值"时的既有行为。
 - **单向**：不做备份、降级或迁移选项，与之前各步相同。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v29 to v30; earlier dimcode versions cannot open it.`
 - **验证**：
