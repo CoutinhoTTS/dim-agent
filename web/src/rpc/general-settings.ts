@@ -26,6 +26,9 @@ function array<T>(value: unknown, read: (item: unknown) => T): T[] {
 function optionalString(value: unknown): string | undefined {
   return value === undefined || value === null ? undefined : string(value)
 }
+function optionalBoolean(value: unknown): boolean | undefined {
+  return value === undefined || value === null ? undefined : boolean(value)
+}
 function choice<const T extends readonly string[]>(value: unknown, choices: T): T[number] {
   const text = string(value)
   if (!choices.includes(text)) throw new ProtocolError("Invalid settings reply: unknown option")
@@ -89,6 +92,7 @@ export function readSkills(value: unknown): SkillsView {
 
 export type PluginEntry = {
   name: string; use: string | undefined; off: boolean; locked: boolean; status: string | undefined; error: string | undefined
+  optional: boolean | undefined
   candidates: { id: string; kinds: string[]; git: string | undefined }[]
   refused: { kind: string; error: string }[]
 }
@@ -96,7 +100,7 @@ export function readPlugins(value: unknown): PluginEntry[] {
   return array(value, (item) => {
     const plugin = object(item)
     return {
-      name: string(plugin.name), use: optionalString(plugin.use), off: boolean(plugin.off), locked: boolean(plugin.locked), status: optionalString(plugin.status), error: optionalString(plugin.error),
+      name: string(plugin.name), use: optionalString(plugin.use), off: boolean(plugin.off), locked: boolean(plugin.locked), status: optionalString(plugin.status), error: optionalString(plugin.error), optional: optionalBoolean(plugin.optional),
       candidates: array(plugin.candidates, (item) => {
         const candidate = object(item)
         const source = candidate.source === undefined ? undefined : object(candidate.source)

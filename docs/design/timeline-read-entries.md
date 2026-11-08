@@ -4,6 +4,8 @@ Status: Proposed. Scope: every way a part, the App Server or a TypeScript plugin
 
 Base: `origin/main` at `514225777`. Call sites exclude tests and examples. Every row below was read from source at that base, so the TypeScript paths it names, Goal's `runtime/plugins/goal/branch.ts` among them, are a pre-port snapshot.
 
+This is a historical audit of that base, not the current query API. The replacement contract is specified in [Timeline property queries](timeline-property-query.md); current bindings are generated in [branch-services.d.ts](../../npm/branch-services.d.ts).
+
 ## 1. The entries
 
 ### 1.1 `Timeline` service (`crates/dim-agent-runtime/src/core/timeline.rs`)

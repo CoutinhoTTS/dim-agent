@@ -7,8 +7,7 @@
 
 use crate::text::{self, Judge, Marker, OBJECTIVE_KEY, STATE_KEY, STATUS_KEY};
 use dim_agent_types::{
-    AgentEvent, BranchSource, EventKind, InputBlock, InputMessageData, InputMode, InterruptScope,
-    TurnOutcome,
+    AgentEvent, BranchSource, EventKind, InputBlock, InputMode, InterruptScope, TurnOutcome,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -41,12 +40,6 @@ pub enum Progress {
 /// Consecutive continuation-driven turns without a tool call that pause a goal
 /// (C7).
 pub const NO_PROGRESS_TURNS: usize = 3;
-
-/// One continuation input Goal wrote, and the streak it states (C7).
-struct Continuation {
-    sequence: u64,
-    idle: usize,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnStatus {
@@ -185,8 +178,8 @@ pub fn is_opening(kind: &EventKind) -> bool {
 /// with no `after` (one Goal wrote while deciding), no `result` (a conclusion)
 /// and no old key (a change written before the state record existed). The
 /// objective or summary the change asks for is decoded from its body.
-pub(crate) fn change_of(data: &InputMessageData) -> Option<(Marker, &'static str)> {
-    for block in &data.blocks {
+pub(crate) fn change_of(blocks: &[InputBlock]) -> Option<(Marker, &'static str)> {
+    for block in blocks {
         let InputBlock::Raw {
             text: raw,
             key,
@@ -315,6 +308,11 @@ fn legacy_state(attrs: &Marker, text: &str) -> text::State {
     }
 }
 
+pub(crate) struct ConclusionRecord {
+    sequence: u64,
+    answered: bool,
+}
+
 /// One branch's goal state: the fold of its consumed local events (§2).
 #[derive(Default)]
 pub struct Fold {
@@ -346,7 +344,7 @@ pub struct Fold {
     /// Evaluations created on this branch: `N` → the evaluator branch.
     pub evaluations: BTreeMap<u64, String>,
     /// The first conclusion input from each evaluation's own evaluator.
-    pub conclusions: BTreeMap<u64, u64>,
+    pub conclusions: BTreeMap<u64, ConclusionRecord>,
     /// The `continue` conclusions no input for their evaluation has answered
     /// yet: evaluation → (input sequence, conclusion). A continuation or pause
     /// for the evaluation, a newer turn end or an operator input drops the
@@ -358,9 +356,8 @@ pub struct Fold {
     /// The `after` the latest state record names: the change trigger it
     /// answered. A change trigger at or below it was answered (D3).
     pub state_after: u64,
-    /// Sequence of the latest change trigger, and the trigger inputs by id.
+    /// Sequence of the latest change trigger.
     pub last_change: u64,
-    change_triggers: BTreeMap<String, u64>,
     /// The lines this branch opened that ended.
     pub ended: HashSet<String>,
     /// The lines this branch could not create.
@@ -368,27 +365,26 @@ pub struct Fold {
     /// Turn ends in this branch's local events.
     pub turn_ends: usize,
     /// Background tasks this branch started and has not ended, by `task_id`.
-    open_tasks: HashSet<String>,
-    interrupts: Vec<u64>,
-    continuations: Vec<Continuation>,
+    pub(crate) open_tasks: HashSet<String>,
+    pub(crate) last_interrupt: u64,
+    continuation_count: usize,
+    continuation_idle: usize,
     /// The ids of the continuation inputs, which drive turns (C7).
-    continuation_inputs: HashSet<String>,
+    pub(crate) continuation_inputs: HashSet<String>,
     /// Whether the latest `turn/start` was driven by Goal's continuation; the
     /// `turn/end` that closes it keeps the answer.
-    turn_continuation_driven: bool,
-    decided: BTreeSet<String>,
-    driving: HashMap<String, u64>,
-    events: Vec<AgentEvent>,
-    deleted: HashSet<String>,
+    pub(crate) turn_continuation_driven: bool,
+    pub(crate) decided: BTreeSet<String>,
+    pub(crate) driving: HashMap<String, u64>,
     /// The sequences of the inputs `input/deleted` removed. A record whose
     /// `after` names one of them states a change that never took effect and is
     /// stepped as no statement at all (R2).
-    deleted_sequences: HashSet<u64>,
+    pub(crate) deleted_sequences: HashSet<u64>,
     /// The highest `after` among the state records this fold has stepped,
     /// deleted changes included; `0` before the first (sequences start at
     /// one). A deletion asks whether a record naming the withdrawn change, or
     /// a later record, exists (R2), which only the highest can answer.
-    record_after: u64,
+    pub(crate) record_after: u64,
     /// A state record that names its trigger by submission id (R5): it states
     /// its change when the very next event is that trigger, and states
     /// nothing when any other event comes first.
@@ -398,6 +394,7 @@ pub struct Fold {
 /// A `goal:state` record with `trigger="<submission id>"`: the statement it
 /// carries waits for the trigger input it names, the next event (R5).
 struct HeldRecord {
+    sequence: u64,
     trigger: String,
     attrs: Marker,
     raw: String,
@@ -405,34 +402,9 @@ struct HeldRecord {
 }
 
 impl Fold {
-    /// Applies one consumed local event; `input/deleted` refolds without it.
+    /// Applies one delivered event. Input deletion is rebuilt by the owning part.
     pub fn apply(&mut self, event: &AgentEvent) {
-        if let EventKind::InputDeleted(data) = &event.kind {
-            self.deleted.insert(data.input_id.clone());
-            self.events.push(event.clone());
-            self.refold();
-            return;
-        }
-        self.events.push(event.clone());
         self.step(event);
-    }
-
-    fn refold(&mut self) {
-        let events = std::mem::take(&mut self.events);
-        let copied_live = self.copied_live;
-        *self = Self::default();
-        self.copied_live = copied_live;
-        self.deleted = events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                EventKind::InputDeleted(data) => Some(data.input_id.clone()),
-                _ => None,
-            })
-            .collect();
-        for event in &events {
-            self.step(event);
-        }
-        self.events = events;
     }
 
     /// Starts the fold of a branch whose own segment has no goal (D4): only the
@@ -448,15 +420,10 @@ impl Fold {
         }
     }
 
-    /// Restarts the fold at a branch's own opening, keeping the ids of the
-    /// deleted inputs and, for a fork, which keys the copied facts left live.
+    /// Restarts at the local opening, retaining the copied keys for a fork.
     fn open(&mut self, event: &AgentEvent) {
         let copied_live = matches!(event.kind, EventKind::SessionForked(_)).then_some(self.live);
-        let events = std::mem::take(&mut self.events);
-        let deleted = std::mem::take(&mut self.deleted);
         *self = Self::default();
-        self.events = events;
-        self.deleted = deleted;
         self.copied_live = copied_live;
     }
 
@@ -464,29 +431,35 @@ impl Fold {
         let sequence = event.sequence;
         // A held record names its trigger, the next event (R5): only that
         // input pairs with it; any other event lets it state nothing.
-        let held = match &event.kind {
-            EventKind::InputMessage(_) => self.held_record.take(),
-            _ => {
-                self.held_record = None;
-                None
-            }
-        };
+        if !matches!(event.kind, EventKind::InputMessage(_)) {
+            self.held_record = None;
+        }
         if is_opening(&event.kind) {
             self.open(event);
             return;
         }
         match &event.kind {
             EventKind::InputMessage(data) => {
-                self.step_input(event, data, sequence);
-                if let Some(held) = held
-                    && !self.deleted.contains(&event.id)
-                    && data.submission_id.as_deref() == Some(held.trigger.as_str())
-                {
-                    // The trigger's change is applied above; the record states
-                    // it at the trigger's sequence (A14).
-                    self.step_state(&held.attrs, &held.raw, held.retire, Some(sequence));
+                if data.effective_mode() != InputMode::Append {
+                    self.driving.insert(event.id.clone(), sequence);
                 }
+                let first_text = data.blocks.first().map(block_text);
+                if data.user.is_some() && !first_text.is_some_and(|text| text.starts_with("<dim-"))
+                {
+                    self.last_operator = sequence;
+                    self.continuation_count = 0;
+                    self.continuation_idle = 0;
+                    self.pending_conclusions
+                        .retain(|evaluation, _| *evaluation > sequence);
+                }
+                self.goal_input(
+                    sequence,
+                    &event.id,
+                    data.submission_id.as_deref(),
+                    &data.blocks,
+                );
             }
+
             EventKind::BranchCreate(data) => {
                 let BranchSource::Host { operation_id } = &data.source else {
                     return;
@@ -509,6 +482,7 @@ impl Fold {
             }
             EventKind::InputConsumed(data) => {
                 self.driving.remove(&data.input_id);
+                self.continuation_inputs.remove(&data.input_id);
             }
             EventKind::TurnStart(_) => {
                 self.turn_start = sequence;
@@ -532,7 +506,7 @@ impl Fold {
                     .retain(|evaluation, _| *evaluation >= sequence);
             }
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn => {
-                self.interrupts.push(sequence);
+                self.last_interrupt = sequence;
             }
             EventKind::ExecStarted(data) => {
                 self.open_tasks.insert(data.task_id.clone());
@@ -544,25 +518,48 @@ impl Fold {
         }
     }
 
-    fn step_input(&mut self, event: &AgentEvent, data: &InputMessageData, sequence: u64) {
-        if self.deleted.contains(&event.id) {
-            // The input is gone; a record naming it states a change that never
-            // took effect (R2).
-            self.deleted_sequences.insert(sequence);
-            return;
+    pub(crate) fn goal_input(
+        &mut self,
+        sequence: u64,
+        id: &str,
+        submission: Option<&str>,
+        blocks: &[InputBlock],
+    ) {
+        let held = self.held_record.take();
+        self.step_input(sequence, id, blocks);
+        if let Some(held) = held {
+            self.pair(held, sequence, submission);
         }
-        if data.effective_mode() != InputMode::Append {
-            self.driving.insert(event.id.clone(), sequence);
+        self.retain_requests();
+    }
+
+    pub(crate) fn held_next(&self) -> Option<u64> {
+        self.held_record.as_ref()?.sequence.checked_add(1)
+    }
+
+    pub(crate) fn pair_next(&mut self, sequence: u64, submission: Option<&str>) {
+        if let Some(held) = self.held_record.take() {
+            self.pair(held, sequence, submission);
         }
-        let first_text = data.blocks.first().map(block_text);
+    }
+
+    fn pair(&mut self, held: HeldRecord, sequence: u64, submission: Option<&str>) {
+        if held.sequence.checked_add(1) == Some(sequence)
+            && submission == Some(held.trigger.as_str())
+        {
+            self.step_state(
+                &held.attrs,
+                &held.raw,
+                held.retire,
+                Some(sequence),
+                sequence,
+            );
+        }
+    }
+
+    fn step_input(&mut self, sequence: u64, id: &str, blocks: &[InputBlock]) {
+        let first_text = blocks.first().map(block_text);
         let first = first_text.and_then(text::marker);
-        if data.user.is_some() && !first_text.is_some_and(|text| text.starts_with("<dim-")) {
-            self.last_operator = sequence;
-            // An operator input supersedes a conclusion still waiting on a
-            // background task: the operator's input decides what comes next.
-            self.pending_conclusions
-                .retain(|evaluation, _| *evaluation > sequence);
-        }
         // A restatement names the rebuild's cutoff in `after` without
         // answering the fact at it (R6.1): the cutoff can be a conclusion's
         // own sequence, whose deferred decision must still be taken.
@@ -574,6 +571,11 @@ impl Fold {
             // A continuation or pause for the evaluation answers its
             // conclusion; the deferred one is no longer pending.
             if let Some(number) = sequence_of(after) {
+                for (evaluation, conclusion) in &mut self.conclusions {
+                    if *evaluation == number || conclusion.sequence == number {
+                        conclusion.answered = true;
+                    }
+                }
                 self.pending_conclusions.remove(&number);
                 self.pending_conclusions
                     .retain(|_, (input, _)| *input != number);
@@ -585,15 +587,17 @@ impl Fold {
             .map(String::as_str)
             == Some("continuation")
         {
-            self.continuation_inputs.insert(event.id.clone());
-            self.continuations.push(Continuation {
-                sequence,
-                idle: first
+            if self.driving.contains_key(id) {
+                self.continuation_inputs.insert(id.to_owned());
+            }
+            if sequence > self.active.max(self.last_operator) {
+                self.continuation_count += 1;
+                self.continuation_idle = first
                     .as_ref()
                     .and_then(|attrs| attrs.get("idle"))
                     .and_then(|idle| idle.parse().ok())
-                    .unwrap_or(0),
-            });
+                    .unwrap_or(0);
+            }
         }
         let conclusion = first_text.and_then(conclusion_of);
         if let Some(conclusion) = &conclusion {
@@ -601,8 +605,20 @@ impl Fold {
             if self.evaluations.get(&evaluation) == Some(&conclusion.evaluator)
                 && !self.conclusions.contains_key(&evaluation)
             {
-                self.conclusions.insert(evaluation, sequence);
-                if conclusion.result == ConclusionKind::Continue {
+                self.conclusions.insert(
+                    evaluation,
+                    ConclusionRecord {
+                        sequence,
+                        answered: false,
+                    },
+                );
+                if conclusion.result == ConclusionKind::Continue
+                    && evaluation > self.last_operator
+                    && self
+                        .turn_end
+                        .as_ref()
+                        .is_none_or(|end| evaluation >= end.sequence)
+                {
                     self.pending_conclusions
                         .insert(evaluation, (sequence, conclusion.clone()));
                 }
@@ -611,10 +627,10 @@ impl Fold {
         // An input that carries a state record states the state; the old-key
         // retires that ride with it (R1) are part of that statement, not a
         // change of their own.
-        let stated = data.blocks.iter().any(
+        let stated = blocks.iter().any(
             |block| matches!(block, InputBlock::Raw { key: Some(key), .. } if key == STATE_KEY),
         );
-        for raw in &data.blocks {
+        for raw in blocks {
             let InputBlock::Raw {
                 text: raw_text,
                 key,
@@ -640,7 +656,7 @@ impl Fold {
                 self.last_block = sequence;
             }
             if key == Some(STATE_KEY) {
-                self.step_state(&attrs, raw_text, *retire, None);
+                self.step_state(&attrs, raw_text, *retire, None, sequence);
             } else if stated {
                 // The old-key retires that ride with a state record are part
                 // of that statement (R1): they end the key, and the state the
@@ -654,11 +670,10 @@ impl Fold {
                 self.step_legacy(key.unwrap_or_default(), &attrs, raw_text, *retire, sequence);
             }
         }
-        if let Some((attrs, op)) = change_of(data) {
+        if let Some((attrs, op)) = change_of(blocks) {
             self.local_blocks += 1;
             self.last_block = sequence;
             self.last_change = sequence;
-            self.change_triggers.insert(event.id.clone(), sequence);
             self.step_change(op, &attrs, sequence);
         }
     }
@@ -671,13 +686,21 @@ impl Fold {
     /// `trigger="<submission id>"` names its change instead of an `after` and
     /// is held until the next event, that trigger, arrives: `paired` carries
     /// the trigger's sequence when it does (R5).
-    fn step_state(&mut self, attrs: &Marker, raw: &str, retire: bool, paired: Option<u64>) {
+    fn step_state(
+        &mut self,
+        attrs: &Marker,
+        raw: &str,
+        retire: bool,
+        paired: Option<u64>,
+        sequence: u64,
+    ) {
         let Some(after) =
             paired.or_else(|| attrs.get("after").and_then(|after| sequence_of(after)))
         else {
             match attrs.get("trigger") {
                 Some(trigger) => {
                     self.held_record = Some(HeldRecord {
+                        sequence,
                         trigger: trigger.clone(),
                         attrs: attrs.clone(),
                         raw: raw.to_owned(),
@@ -773,6 +796,8 @@ impl Fold {
         self.state = state;
         if active_now {
             self.active = sequence;
+            self.continuation_count = 0;
+            self.continuation_idle = 0;
         }
     }
 
@@ -798,7 +823,76 @@ impl Fold {
         }
         if matches!(op, "set" | "resume") {
             self.active = sequence;
+            self.continuation_count = 0;
+            self.continuation_idle = 0;
         }
+    }
+
+    pub(crate) fn finish_restore(&mut self, opening: Option<u64>) {
+        self.deleted_sequences.clear();
+        self.compact(opening);
+    }
+
+    pub(crate) fn compact(&mut self, opening: Option<u64>) {
+        self.evaluations.retain(|evaluation, branch| {
+            !(self.ended.contains(branch) || self.failed.contains(branch))
+                || (*evaluation >= self.last_block
+                    && !self
+                        .conclusions
+                        .get(evaluation)
+                        .is_some_and(|conclusion| conclusion.answered))
+        });
+        self.ended
+            .retain(|branch| self.evaluations.values().any(|known| known == branch));
+        self.failed
+            .retain(|branch| self.evaluations.values().any(|known| known == branch));
+        self.conclusions
+            .retain(|evaluation, _| self.evaluations.contains_key(evaluation));
+        self.pending_conclusions
+            .retain(|evaluation, _| *evaluation >= self.last_block);
+        self.retain_requests();
+        let decided = std::mem::take(&mut self.decided);
+        self.decided = decided
+            .into_iter()
+            .filter(|key| {
+                sequence_of(key).is_some_and(|sequence| self.needs_decision(sequence, opening))
+            })
+            .collect();
+    }
+
+    fn retain_requests(&mut self) {
+        let turn_open = self.turn_open();
+        let end = self.turn_end.as_ref();
+        let ended_request = self.requests.iter().rposition(|request| {
+            end.is_some_and(|end| {
+                request.sequence > end.turn_start && request.sequence < end.sequence
+            })
+        });
+        let current_request = self
+            .requests
+            .iter()
+            .rposition(|request| turn_open && request.sequence > self.turn_start);
+        let mut index = 0;
+        self.requests.retain(|_| {
+            let keep = Some(index) == ended_request || Some(index) == current_request;
+            index += 1;
+            keep
+        });
+    }
+
+    pub(crate) fn needs_decision(&self, sequence: u64, opening: Option<u64>) -> bool {
+        Some(sequence) == opening
+            || sequence == self.last_interrupt
+            || sequence == self.last_change
+            || self
+                .turn_end
+                .as_ref()
+                .is_some_and(|end| sequence == end.sequence)
+            || self.evaluations.contains_key(&sequence)
+            || self
+                .conclusions
+                .values()
+                .any(|input| input.sequence == sequence)
     }
 
     /// The goal state this fold states after `op` with `attrs`, as the change
@@ -816,31 +910,20 @@ impl Fold {
     pub fn running(&self) -> bool {
         self.objective.is_some() && self.state == text::State::Active
     }
+    pub fn interrupt_after(&self, sequence: u64) -> Option<u64> {
+        (self.last_interrupt > sequence).then_some(self.last_interrupt)
+    }
     pub fn interrupted(&self) -> bool {
-        self.interrupts
-            .iter()
-            .any(|sequence| *sequence > self.active)
+        self.last_interrupt > self.active
     }
     pub fn count(&self) -> usize {
-        let since = self.active.max(self.last_operator);
-        self.continuations
-            .iter()
-            .filter(|continuation| continuation.sequence > since)
-            .count()
+        self.continuation_count
     }
-    /// The streak the latest continuation after the count's cutoff states: the
-    /// continuation-driven turns without a tool call ending at the turn it
-    /// follows (C7). A continuation from before an operator input states none.
     fn idle(&self) -> usize {
-        let since = self.active.max(self.last_operator);
-        self.continuations
-            .iter()
-            .rev()
-            .find(|continuation| continuation.sequence > since)
-            .map_or(0, |continuation| continuation.idle)
+        self.continuation_idle
     }
     pub fn pending_driving(&self) -> bool {
-        self.driving.keys().any(|id| !self.deleted.contains(id))
+        !self.driving.is_empty()
     }
     /// Whether a background task this branch started is still open (A.4).
     pub fn open_tasks(&self) -> bool {
@@ -851,18 +934,27 @@ impl Fold {
     /// it (Pursuit §5).
     pub fn pending_conclusion(&self) -> Option<(u64, &Conclusion)> {
         let (evaluation, (sequence, conclusion)) = self.pending_conclusions.last_key_value()?;
-        (self.conclusions.get(evaluation) == Some(sequence) && self.is_current(*evaluation))
-            .then_some((*sequence, conclusion))
+        (self
+            .conclusions
+            .get(evaluation)
+            .is_some_and(|record| record.sequence == *sequence)
+            && self.is_current(*evaluation))
+        .then_some((*sequence, conclusion))
     }
     pub fn turn_open(&self) -> bool {
         self.turn_start > self.turn_end.as_ref().map_or(0, |end| end.sequence)
     }
     /// The worker's completion request inside the turn that ends at `sequence`.
     pub fn request_in_turn(&self, sequence: u64) -> Option<&Request> {
+        let start = self
+            .turn_end
+            .as_ref()
+            .filter(|end| end.sequence == sequence)
+            .map_or(self.turn_start, |end| end.turn_start);
         self.requests
             .iter()
             .rev()
-            .find(|request| request.sequence > self.turn_start && request.sequence < sequence)
+            .find(|request| request.sequence > start && request.sequence < sequence)
     }
     /// The evaluation the branch `evaluator` was created for, if it is one.
     pub fn evaluation_of(&self, evaluator: &str) -> Option<u64> {
@@ -873,7 +965,7 @@ impl Fold {
     }
     /// Whether evaluation `N` is still current: no Goal block follows it.
     pub fn is_current(&self, evaluation: u64) -> bool {
-        self.last_block <= evaluation
+        self.objective.is_some() && self.last_block <= evaluation
     }
     pub fn is_decided(&self, sequence: u64) -> bool {
         self.decided.contains(&sequence.to_string())
@@ -883,10 +975,6 @@ impl Fold {
     /// trigger does not answer a newer one.
     pub fn pending_change(&self) -> Option<u64> {
         (self.last_change > self.state_after).then_some(self.last_change)
-    }
-    /// The sequence of the change trigger input `id`, when this fold holds it.
-    pub fn change_trigger(&self, id: &str) -> Option<u64> {
-        self.change_triggers.get(id).copied()
     }
     /// Whether a state record naming `after` or a later change has been
     /// stepped: the newest live record states that state, not the withdrawn
@@ -1010,7 +1098,12 @@ pub fn decide_conclusion(
     conclusion: &Conclusion,
 ) -> Option<ConclusionAction> {
     let evaluation = conclusion.evaluation;
-    if fold.conclusions.get(&evaluation).copied() != Some(sequence) {
+    if fold
+        .conclusions
+        .get(&evaluation)
+        .map(|record| record.sequence)
+        != Some(sequence)
+    {
         return None;
     }
     if !fold.is_current(evaluation) || !fold.running() {

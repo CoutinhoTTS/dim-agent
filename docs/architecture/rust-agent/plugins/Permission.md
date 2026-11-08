@@ -83,8 +83,10 @@ text is the advisor's, written by ToolExecutor in its existing batch result.
 ### Events and lifetime
 
 Produces and consumes `permission/changed`. Updates become effective when
-dispatched, not merely appended. Replay starts with Session policy, folds the
-fixed ancestor prefix and then local changes. No background tasks. Cleanup
+dispatched, not merely appended. Recovery starts with Session policy, then
+selects the last policy and its position on the fixed ancestor prefix plus the
+committed local branch. Only a local change sets the branch's version. It reads
+no other event fields. No background tasks. Cleanup
 closes admission and drops pending waiters, which report Closed. Reload builds
 a new state cell from history. Policy is admission logic, not OS isolation;
 explicit disallow overrides allow.
@@ -301,7 +303,7 @@ rechecks policy before allowing an approved call to start.
 | Service | Purpose |
 | --- | --- |
 | `B:Permission` | Evaluate current policy and recheck an allowed response. |
-| `B:Dispatcher` | Replay requests to recover abandoned ones, then receive approval responses. |
+| `B:Dispatcher` | Recover abandoned requests, then receive approval responses. |
 | `B:Timeline` | Commit requests/cancellations. |
 
 ### Events and lifetime
@@ -310,6 +312,9 @@ Produces `approval/request` and `approval/cancelled`; consumes `approval/respond
 Caller cancellation settles its waiter; branch close/reload releases remaining
 requests. Recovery cancels unmatched historical requests because their execution
 did not survive. The service owns request state, not tool execution tasks.
+Recovery reads approval identities with no matching response or cancellation
+at one fixed committed boundary. It consumes each result page immediately;
+historical call arguments are not needed for cancellation.
 Responses are not unconditional authority: cancelled batches and changed policy
 can prevent execution. Approval does not sandbox an admitted tool.
 

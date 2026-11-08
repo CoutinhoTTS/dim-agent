@@ -7,9 +7,10 @@ use crate::fold::{self, Conclusion, ConclusionAction, Decision, Fold, TurnEnd};
 use crate::text::{self, GoalTexts, Live};
 use dim_agent_capabilities::timeline_tree::TreeCommands;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, BranchLifecycle, BranchOptions, Dispatcher, Names, SessionLifecycle,
-    Timeline, TimelineIdentity, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPredicate, TimelineQueryScope, rebuild_facts,
+    AgentError, BoxFuture, BranchLifecycle, BranchOptions, Dispatcher, Names, QueryComparison,
+    QueryFilter, QueryOperand, QueryOrder, QueryOrderKey, QueryOutput, QueryPage, QueryPick,
+    QuerySelect, QuerySpec, QueryValue, SessionLifecycle, Timeline, TimelineIdentity,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, BranchSource, EventKind, ExecStatus, InputBlock, InputMessageData, InterruptScope,
@@ -26,6 +27,8 @@ use std::{
 };
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+mod restore;
 
 const SOURCE: &str = "goal";
 
@@ -79,6 +82,18 @@ pub(crate) struct Changes {
 }
 
 impl Changes {
+    pub(crate) async fn published(&self, branch: &str) -> Result<(), AgentError> {
+        let owner = self
+            .owners
+            .lock()
+            .unwrap()
+            .get(branch)
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| AgentError::Reloading("Goal".into()))?;
+        owner.await_ready().await?;
+        drop(owner.write_guard().await?);
+        Ok(())
+    }
     /// Writes `change` on `branch` through its Owner and returns the
     /// trigger's sequence.
     pub(crate) async fn change(&self, branch: &str, change: Change) -> Result<u64, AgentError> {
@@ -141,8 +156,7 @@ struct SegmentScan {
     /// The newest local Goal block: its sequence and whether it is a retired
     /// state record.
     newest: Option<(u64, bool)>,
-    /// The segment's opening: its sequence and whether it is a fork. Absent
-    /// when a Goal block stopped the scan above it.
+    /// The local opening and whether it is a fork.
     opening: Option<(u64, bool)>,
     /// The read's cutoff.
     through: u64,
@@ -220,6 +234,7 @@ impl DynPlugin for GoalBranch {
             let (resolved, _) = watch::channel(false);
             let (stepped, _) = watch::channel(0);
             let (ready, _) = watch::channel(false);
+            let (fresh, _) = watch::channel(Ok(true));
             let owner = Arc::new(Owner {
                 branch_id: identity.branch_id.clone(),
                 timeline,
@@ -233,6 +248,7 @@ impl DynPlugin for GoalBranch {
                 resolved,
                 stepped,
                 ready,
+                fresh,
                 state: Mutex::new(State::default()),
                 write: tokio::sync::Mutex::new(()),
             });
@@ -326,6 +342,8 @@ enum Retry {
 #[derive(Default)]
 struct State {
     fold: Fold,
+    decisions: CancellationToken,
+    refresh_from: Option<u64>,
     /// The opening event the fold started at.
     start: Option<u64>,
     role: Option<Role>,
@@ -367,6 +385,7 @@ struct Owner {
     /// Set once the rebuild has returned and the facts it held are folded
     /// (R6.2): a change composes only from that complete fold.
     ready: watch::Sender<bool>,
+    fresh: watch::Sender<Result<bool, AgentError>>,
     state: Mutex<State>,
     /// Serializes state records: each is composed from the fold as it stands
     /// when the lock is taken and commits before the next one is composed, so
@@ -470,44 +489,55 @@ impl Owner {
     /// state record and the trigger as one atomic batch, the record first, so
     /// the trigger's turn starts with the record already ahead of it (R5).
     async fn change(self: &Arc<Self>, change: Change) -> Result<u64, AgentError> {
-        self.await_ready().await?;
-        let _write = self.write.lock().await;
-        self.await_fold().await?;
-        let trigger = change.trigger(&self.branch_id);
-        let (objective, state, judge, live) = {
-            let lock = self.state.lock().unwrap();
-            let (attrs, op) =
-                fold::change_of(&trigger).expect("a change carries its own trigger marker");
-            let (objective, state, judge) = lock.fold.after_change(op, &attrs);
-            (objective, state, judge, lock.fold.live)
-        };
-        let trigger_id = trigger
-            .submission_id
-            .clone()
-            .expect("Goal inputs carry a submission id");
-        let record = text::state(
-            &self.branch_id,
-            objective.as_deref(),
-            state,
-            judge,
-            text::Answered::Trigger(&trigger_id),
-            live,
-            &self.texts,
-        );
-        let events = self
-            .tree
-            .inputs(self.branch_id.clone(), vec![record, trigger])
-            .await?;
-        let sequence = events
-            .last()
-            .expect("a change batch holds its trigger")
-            .sequence;
-        let mut lock = self.state.lock().unwrap();
-        lock.recorded = lock.recorded.max(sequence);
-        lock.written.insert(sequence);
-        lock.last_write = lock.last_write.max(sequence);
-        drop(lock);
-        Ok(sequence)
+        loop {
+            self.await_ready().await?;
+            let write = self.write_guard().await?;
+            let trigger = change.trigger(&self.branch_id);
+            let (objective, state, judge, live, decisions) = {
+                let lock = self.state.lock().unwrap();
+                let (attrs, op) = fold::change_of(&trigger.blocks)
+                    .expect("a change carries its own trigger marker");
+                let (objective, state, judge) = lock.fold.after_change(op, &attrs);
+                (
+                    objective,
+                    state,
+                    judge,
+                    lock.fold.live,
+                    lock.decisions.clone(),
+                )
+            };
+            let trigger_id = trigger
+                .submission_id
+                .clone()
+                .expect("Goal inputs carry a submission id");
+            let record = text::state(
+                &self.branch_id,
+                objective.as_deref(),
+                state,
+                judge,
+                text::Answered::Trigger(&trigger_id),
+                live,
+                &self.texts,
+            );
+            let events = tokio::select! {
+                biased;
+                _ = decisions.cancelled() => {
+                    drop(write);
+                    continue;
+                }
+                result = self.tree.inputs(self.branch_id.clone(), vec![record, trigger]) => result?,
+            };
+            let sequence = events
+                .last()
+                .expect("a change batch holds its trigger")
+                .sequence;
+            let mut lock = self.state.lock().unwrap();
+            lock.recorded = lock.recorded.max(sequence);
+            lock.written.insert(sequence);
+            lock.last_write = lock.last_write.max(sequence);
+            drop(lock);
+            return Ok(sequence);
+        }
     }
 
     /// Runs `work` once under `key` while the branch is active, and records a
@@ -531,10 +561,16 @@ impl Owner {
         }
         let owner = self.clone();
         let phase = self.phase.clone();
+        let decisions = self.state.lock().unwrap().decisions.clone();
         self.tasks.spawn(async move {
             if phase.activated().await
                 && !owner.stopped()
-                && let Err(error) = work(owner.clone()).await
+                && let Err(error) = tokio::select! {
+                    biased;
+                    _ = decisions.cancelled() => Ok(()),
+                    _ = owner.stop.cancelled() => Ok(()),
+                    result = work(owner.clone()) => result,
+                }
             {
                 tracing::warn!(key = %key, %error, "Goal write failed");
             }
@@ -545,6 +581,9 @@ impl Owner {
             };
             // The second pass reads the fold as it stands now; C4, `decided`
             // and the conclusion's own checks deduplicate it.
+            if decisions.is_cancelled() && matches!(*owner.fresh.borrow(), Ok(true)) {
+                owner.resume_decisions();
+            }
             match retry {
                 Some(Retry::TurnEnd) => owner.decide_end(),
                 Some(Retry::Settle) => owner.settle_deferred(),
@@ -577,11 +616,8 @@ impl Owner {
         }
     }
 
-    /// Folds this branch's facts through the cutoff of one read, unpublished
-    /// tail included, and releases only what lies above it (A.6). The read
-    /// selects `KEYS`, the kinds the fold consumes, never the whole branch
-    /// (ADR 020 D3). A branch with no goal of its own takes the cheap path
-    /// first (D4): no goal, no 13-kind fold.
+    /// Reconstructs current Goal state from properties at one committed cut,
+    /// then resumes decisions and hands newer facts to live delivery.
     async fn rebuild(self: &Arc<Self>) -> Result<u64, AgentError> {
         // An evaluator line needs its turn history (`turn_ends` tells its
         // first turn from a later one) and its own segment may carry no Goal
@@ -596,40 +632,24 @@ impl Owner {
             ),
             Err(_) => true,
         };
-        if !evaluator && let Some(through) = self.rebuild_without_goal().await? {
+        let through = self.timeline.committed();
+        let opening = self.opening(through).await?;
+        if !evaluator && let Some(through) = self.rebuild_without_goal(through, opening).await? {
             let start = self.state.lock().unwrap().start;
             if let Some(start) = start {
                 self.decide_start(start);
             }
+            self.settle();
             return Ok(through);
         }
-        let reply = rebuild_facts(&self.timeline, KEYS).await?;
-        for event in &reply.events {
-            self.ingest(event, false);
+        let (fold, start) = self.restore_at(through, opening).await?;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.fold = fold;
+            state.start = start;
         }
-        let through = reply.through;
-        // The decisions the previous generation owed are taken once, before
-        // any live event. A conclusion still pending from a cancelled end
-        // takes the settle path: decide_end alone skips it, because the
-        // evaluator's branch/create already decided the turn end.
-        let pending = self
-            .state
-            .lock()
-            .unwrap()
-            .fold
-            .pending_conclusion()
-            .is_some();
-        if pending {
-            self.settle_deferred();
-        } else {
-            self.decide_end();
-        }
-        self.settle();
-        let start = self.state.lock().unwrap().start;
-        if let Some(start) = start {
-            self.decide_start(start);
-        }
-        self.answer_change();
+        self.stepped.send_replace(through);
+        self.resume_decisions();
         self.reconcile(through).await?;
         Ok(through)
     }
@@ -639,13 +659,14 @@ impl Owner {
     /// Returns the cutoff live delivery continues from, or `None` when the
     /// full fold is owed.
     ///
-    /// Nothing else Goal decides reads a fact that could exist here: every
-    /// decision begins with `Fold::running`, which is false without an
-    /// objective, and the settle pass needs an evaluation it cannot know
-    /// without one. A fork still reads its copied prefix once, for the one
-    /// thing the opening needs: which keys it left live (D5).
-    async fn rebuild_without_goal(self: &Arc<Self>) -> Result<Option<u64>, AgentError> {
-        let Some(scan) = self.newest_goal_block().await? else {
+    /// Unfinished evaluators are still settled. A fork also resolves the keys
+    /// its copied prefix left live (D5).
+    async fn rebuild_without_goal(
+        self: &Arc<Self>,
+        through: u64,
+        opening: Option<(u64, bool)>,
+    ) -> Result<Option<u64>, AgentError> {
+        let Some(scan) = self.newest_goal_block(through, opening).await? else {
             return Ok(None);
         };
         if scan.newest.is_some_and(|(_, retired)| !retired) {
@@ -660,160 +681,288 @@ impl Owner {
             }
             _ => None,
         };
+        let start = scan.opening.map(|(sequence, _)| sequence);
+        let mut fold = Fold::default();
+        fold.start_without_goal(copied_live, scan.newest.map(|(sequence, _)| sequence));
+        self.open_evaluations(scan.through, start, &mut fold)
+            .await?;
         let mut state = self.state.lock().unwrap();
-        if let Some((opening, _)) = scan.opening {
-            state.start = Some(opening);
-        }
-        state
-            .fold
-            .start_without_goal(copied_live, scan.newest.map(|(sequence, _)| sequence));
+        state.start = start;
+        state.fold = fold;
         Ok(Some(scan.through))
     }
 
-    /// The newest Goal block on this branch's own segment and, when it holds
-    /// none, the segment's opening (D4): one descending scan of the inputs from
-    /// the committed head down to the opening, skipping inputs `input/deleted`
-    /// removed. The scan stops at the newest Goal block or at the opening,
-    /// whichever it meets first; a segment that holds no opening owes the full
-    /// fold, and returns `None`.
-    async fn newest_goal_block(&self) -> Result<Option<SegmentScan>, AgentError> {
-        let mut deleted = HashSet::new();
-        let mut from = None;
-        let mut through;
+    async fn opening(&self, through: u64) -> Result<Option<(u64, bool)>, AgentError> {
+        let reply = self
+            .timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(through),
+                include_publishing: true,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["branch/start".into(), "session/forked".into()],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["position.sequence".into(), "kind".into()],
+                    },
+                    group_by: vec!["kind".into()],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![QueryOrder {
+                        key: QueryOrderKey::Position,
+                        direction: TimelineQueryDirection::Descending,
+                    }],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            })
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("opening fields return rows")
+        };
+        Ok(rows.first().map(|row| {
+            let [
+                QueryValue::Value { value: sequence },
+                QueryValue::Value { value: kind },
+            ] = row.values.as_slice()
+            else {
+                unreachable!("opening fields exist")
+            };
+            (
+                sequence.as_u64().expect("event sequence"),
+                kind == "session/forked",
+            )
+        }))
+    }
+
+    async fn newest_goal_block(
+        &self,
+        through: u64,
+        opening: Option<(u64, bool)>,
+    ) -> Result<Option<SegmentScan>, AgentError> {
+        if opening.is_none() {
+            return Ok(None);
+        }
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: opening.map(|(sequence, _)| dim_agent_types::TimelinePosition {
+                branch_id: self.branch_id.clone(),
+                sequence,
+            }),
+            through: Some(through),
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(live_inputs(goal_inputs())),
+                select: QuerySelect::Fields {
+                    fields: vec![
+                        "position.sequence".into(),
+                        "data.submission_id".into(),
+                        "data.blocks".into(),
+                    ],
+                },
+                group_by: vec![],
+                pick: None,
+                order_by: vec![QueryOrder {
+                    key: QueryOrderKey::Position,
+                    direction: TimelineQueryDirection::Descending,
+                }],
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(SCAN_PAGE).unwrap(),
+                after: None,
+            }),
+        };
+        let mut trigger: Option<(u64, String)> = None;
         loop {
-            let mut query = read_page(TimelineQueryScope::Branch, from, SCAN_PAGE, true);
-            query.kinds = vec![
-                "input/message".into(),
-                "input/deleted".into(),
-                "branch/start".into(),
-                "session/forked".into(),
-            ];
-            query.direction = TimelineQueryDirection::Descending;
-            let reply = self.timeline.query(query).await?;
-            through = reply.through;
-            for (index, event) in reply.events.iter().enumerate() {
-                match &event.kind {
-                    EventKind::InputDeleted(data) => {
-                        deleted.insert(data.input_id.clone());
-                    }
-                    EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
-                        // R5: a change trigger states what the record
-                        // immediately before it in the same batch states, so
-                        // a `clear` batch takes the cheap path too. A pair the
-                        // page boundary hides reads as the trigger alone: the
-                        // full fold, the safe side.
-                        let paired = fold::change_of(data)
-                            .and_then(|_| reply.events.get(index + 1))
-                            .and_then(|record| paired_record(record, data));
-                        if let Some(retired) = paired.or_else(|| goal_record(data)) {
-                            return Ok(Some(SegmentScan {
-                                newest: Some((event.sequence, retired)),
-                                opening: None,
-                                through,
-                            }));
-                        }
-                    }
-                    EventKind::BranchStart(_) | EventKind::SessionForked(_) => {
-                        return Ok(Some(SegmentScan {
-                            newest: None,
-                            opening: Some((
-                                event.sequence,
-                                matches!(event.kind, EventKind::SessionForked(_)),
-                            )),
-                            through,
-                        }));
-                    }
-                    _ => {}
+            let reply = self.timeline.query(query.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("candidate fields return rows")
+            };
+            for row in rows {
+                let [
+                    QueryValue::Value { value: sequence },
+                    submission,
+                    QueryValue::Value { value: blocks },
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("input fields exist")
+                };
+                let sequence = sequence.as_u64().expect("event sequence");
+                let blocks: Vec<InputBlock> = serde_json::from_value(blocks.clone())
+                    .expect("input blocks follow their event contract");
+                if let Some((at, submission)) = trigger.take() {
+                    let retired = (sequence + 1 == at)
+                        .then(|| paired_record(&blocks, &submission))
+                        .flatten()
+                        .unwrap_or(false);
+                    return Ok(Some(SegmentScan {
+                        newest: Some((at, retired)),
+                        opening,
+                        through,
+                    }));
+                }
+                if fold::change_of(&blocks).is_some()
+                    && let QueryValue::Value {
+                        value: serde_json::Value::String(submission),
+                    } = submission
+                {
+                    trigger = Some((sequence, submission.clone()));
+                    continue;
+                }
+                if let Some(retired) = goal_record(&blocks) {
+                    let opening_clear = blocks.iter().any(|block| {
+                        let InputBlock::Raw { text: raw, key, .. } = block;
+                        key.as_deref() == Some(text::STATE_KEY)
+                            && text::marker(raw).is_some_and(|attrs| {
+                                attrs
+                                    .get("after")
+                                    .and_then(|after| fold::sequence_of(after))
+                                    == opening.map(|(sequence, _)| sequence)
+                                    && attrs.get("reason").map(String::as_str) == Some("new_branch")
+                            })
+                    });
+                    return Ok(Some(SegmentScan {
+                        newest: Some((sequence, retired && opening_clear)),
+                        opening,
+                        through,
+                    }));
                 }
             }
-            let Some(last) = reply.events.last().map(|event| event.sequence) else {
-                return Ok(None);
-            };
-            if (reply.events.len() as u64) < SCAN_PAGE || last <= 1 {
-                return Ok(None);
+            query.page.as_mut().unwrap().after = reply.next;
+            if query.page.as_ref().unwrap().after.is_none() {
+                return Ok(Some(SegmentScan {
+                    newest: trigger.map(|(at, _)| (at, false)),
+                    opening,
+                    through,
+                }));
             }
-            from = Some(last - 1);
         }
     }
 
-    /// Which Goal keys a fork's copied prefix left live (D5): one descending
-    /// scan below the opening, the newest block of each key deciding.
     async fn copied_keys(&self, opening: u64) -> Result<Live, AgentError> {
+        let through = opening.saturating_sub(1);
         let mut live = Live::default();
-        let mut found = (false, false, false);
-        let mut deleted = HashSet::new();
-        let mut from = opening.checked_sub(1).filter(|from| *from > 0);
-        while let Some(start) = from {
-            let mut query = read_page(TimelineQueryScope::Branch, Some(start), SCAN_PAGE, true);
-            query.kinds = vec!["input/message".into(), "input/deleted".into()];
-            query.direction = TimelineQueryDirection::Descending;
-            let reply = self.timeline.query(query).await?;
-            for event in &reply.events {
-                match &event.kind {
-                    EventKind::InputDeleted(data) => {
-                        deleted.insert(data.input_id.clone());
-                    }
-                    EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
-                        for block in data.blocks.iter().rev() {
-                            let InputBlock::Raw {
-                                text: raw,
-                                key,
-                                retire,
-                            } = block;
-                            if text::marker(raw).is_none() {
-                                continue;
-                            }
-                            let slot = match key.as_deref() {
-                                Some(text::STATE_KEY) => &mut found.0,
-                                Some(text::OBJECTIVE_KEY) => &mut found.1,
-                                Some(text::STATUS_KEY) => &mut found.2,
-                                _ => continue,
-                            };
-                            if *slot {
-                                continue;
-                            }
-                            *slot = true;
-                            match key.as_deref() {
-                                Some(text::STATE_KEY) => live.state = !retire,
-                                Some(text::OBJECTIVE_KEY) => live.objective = !retire,
-                                _ => live.status = !retire,
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let Some(last) = reply.events.last().map(|event| event.sequence) else {
-                break;
-            };
-            if found == (true, true, true) || (reply.events.len() as u64) < SCAN_PAGE || last <= 1 {
-                break;
-            }
-            from = Some(last - 1);
+        for (key, slot) in [
+            (text::STATE_KEY, &mut live.state),
+            (text::OBJECTIVE_KEY, &mut live.objective),
+            (text::STATUS_KEY, &mut live.status),
+        ] {
+            *slot = self
+                .key_at(&self.branch_id, through, key, true)
+                .await?
+                .unwrap_or(false);
         }
         Ok(live)
+    }
+
+    async fn key_at(
+        &self,
+        branch: &str,
+        through: u64,
+        key: &str,
+        include_publishing: bool,
+    ) -> Result<Option<bool>, AgentError> {
+        if through == 0 {
+            return Ok(None);
+        }
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing,
+            query: QuerySpec {
+                filter: Some(live_inputs(key_block(key))),
+                select: QuerySelect::Fields {
+                    fields: vec!["data.blocks".into()],
+                },
+                group_by: vec![],
+                pick: None,
+                order_by: vec![QueryOrder {
+                    key: QueryOrderKey::Position,
+                    direction: TimelineQueryDirection::Descending,
+                }],
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(INHERITED_PAGE).unwrap(),
+                after: None,
+            }),
+        };
+        loop {
+            let reply = if branch == self.branch_id {
+                self.timeline.query(query.clone()).await?
+            } else {
+                self.tree.query(branch.to_owned(), query.clone()).await?
+            };
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("key fields return rows")
+            };
+            for row in rows {
+                let [QueryValue::Value { value: blocks }] = row.values.as_slice() else {
+                    unreachable!("input blocks exist")
+                };
+                let blocks: Vec<InputBlock> = serde_json::from_value(blocks.clone())
+                    .expect("input blocks follow their event contract");
+                for block in blocks.iter().rev() {
+                    let InputBlock::Raw {
+                        text: raw,
+                        key: block_key,
+                        retire,
+                    } = block;
+                    if block_key.as_deref() == Some(key) && text::marker(raw).is_some() {
+                        return Ok(Some(!retire));
+                    }
+                }
+            }
+            query.page.as_mut().unwrap().after = reply.next;
+            if query.page.as_ref().unwrap().after.is_none() {
+                return Ok(None);
+            }
+        }
     }
 
     /// Folds one consumed local event and takes the decisions it carries. The
     /// rebuild's facts take decisions only through its closing steps.
     fn ingest(self: &Arc<Self>, event: &AgentEvent, live: bool) {
-        let turn_start = self.state.lock().unwrap().fold.turn_start;
-        // A deleted change trigger never took effect: the fold is recomputed
-        // without it and, when a record naming it or a later change was
-        // written, the recomputed state is stated again (R2). The sequence is
-        // read before the fold drops the trigger.
-        let withdrawn = match &event.kind {
-            EventKind::InputDeleted(data) => self
-                .state
-                .lock()
-                .unwrap()
-                .fold
-                .change_trigger(&data.input_id),
-            _ => None,
-        };
-        self.state.lock().unwrap().fold.apply(event);
         let sequence = event.sequence;
-        self.stepped.send_replace(sequence);
+        let turn_start = {
+            let mut state = self.state.lock().unwrap();
+            let invalid = !matches!(*self.fresh.borrow(), Ok(true));
+            if invalid || matches!(event.kind, EventKind::InputDeleted(_)) {
+                let start = !matches!(*self.fresh.borrow(), Ok(false));
+                let _ = self.fresh.send_replace(Ok(false));
+                state.refresh_from.get_or_insert(sequence);
+                state.recorded = state.recorded.max(state.fold.record_after);
+                state.decisions.cancel();
+                self.stepped.send_replace(sequence);
+                drop(state);
+                if start {
+                    self.refresh();
+                }
+                return;
+            }
+            let turn_start = state.fold.turn_start;
+            state.fold.apply(event);
+            let start = state.start;
+            state.fold.compact(start);
+            let recorded = state.recorded;
+            let State {
+                fold,
+                written,
+                restated,
+                last_write,
+                ..
+            } = &mut *state;
+            written.retain(|after| *after == recorded || fold.needs_decision(*after, start));
+            restated.retain(|after| *after >= *last_write);
+            self.stepped.send_replace(sequence);
+            turn_start
+        };
         if fold::is_opening(&event.kind) {
             self.state.lock().unwrap().start = Some(sequence);
             if live {
@@ -860,12 +1009,6 @@ impl Owner {
                 }
                 self.answer_change();
                 self.settle();
-            }
-            EventKind::InputDeleted(_) => {
-                self.decide_end();
-                if let Some(withdrawn) = withdrawn {
-                    self.answer_deletion(sequence, withdrawn);
-                }
             }
             // A cancelled background end does not wake (BackgroundExec's
             // `wakes`); when it closes the last open task of an idle branch,
@@ -939,16 +1082,12 @@ impl Owner {
     fn started_clear(self: &Arc<Self>, at: u64, live: Live) {
         self.task(format!("clear:{at}"), None, move |owner| {
             Box::pin(async move {
-                let _write = owner.write.lock().await;
+                let _write = owner.write_guard().await?;
                 let write = {
-                    let mut state = owner.state.lock().unwrap();
-                    let write = !state.fold.is_decided(at)
+                    let state = owner.state.lock().unwrap();
+                    !state.fold.is_decided(at)
                         && state.fold.local_blocks == 0
-                        && state.fold.last_change == 0;
-                    if write {
-                        state.recorded = state.recorded.max(at);
-                    }
-                    write
+                        && state.fold.last_change == 0
                 };
                 if !write {
                     return Ok(());
@@ -956,6 +1095,8 @@ impl Owner {
                 owner
                     .write(text::start_clear(&owner.branch_id, at, live))
                     .await?;
+                let mut state = owner.state.lock().unwrap();
+                state.recorded = state.recorded.max(at);
                 Ok(())
             })
         });
@@ -1022,21 +1163,15 @@ impl Owner {
         withdrawn: Option<u64>,
         restate: bool,
     ) -> Result<(), AgentError> {
-        let _write = self.write.lock().await;
-        if restate {
-            // The statement must be the fold as it stands after every Goal
-            // write this generation made (R7.1); a record composed from a
-            // fold that has not stepped them states an older state and would
-            // publish it over the record that already states the newer one.
-            self.await_fold().await?;
-        }
+        let _write = self.write_guard().await?;
         let (objective, state, judge, live) = {
-            let mut lock = self.state.lock().unwrap();
+            let lock = self.state.lock().unwrap();
             if answer && lock.fold.pending_change() != Some(after) {
                 return Ok(());
             }
             if let Some(withdrawn) = withdrawn {
                 let named = lock.fold.recorded_at_or_after(withdrawn)
+                    || lock.recorded >= withdrawn
                     || lock.written.range(withdrawn..).next().is_some();
                 if !named {
                     return Ok(());
@@ -1048,14 +1183,11 @@ impl Owner {
             if restate {
                 // A write above the cutoff replaced the published block with
                 // a state composed from the rebuilt fold (R7.1).
-                if lock.last_write > after || !lock.restated.insert(after) {
+                if lock.last_write > after || lock.restated.contains(&after) {
                     return Ok(());
                 }
-            } else {
-                if !lock.written.insert(after) {
-                    return Ok(());
-                }
-                lock.recorded = after;
+            } else if lock.written.contains(&after) {
+                return Ok(());
             }
             let fold = &lock.fold;
             (
@@ -1080,13 +1212,26 @@ impl Owner {
             &self.texts,
         );
         if let Err(error) = self.write(input).await {
-            let mut lock = self.state.lock().unwrap();
-            if restate {
-                lock.restated.remove(&after);
-            } else {
-                lock.written.remove(&after);
+            if !restate {
+                let mut lock = self.state.lock().unwrap();
+                lock.recorded = lock.recorded.max(after);
             }
             return Err(error);
+        }
+        {
+            let mut lock = self.state.lock().unwrap();
+            if restate {
+                lock.restated.insert(after);
+            } else {
+                lock.written.insert(after);
+                lock.recorded = lock.recorded.max(after);
+            }
+        }
+        if withdrawn.is_some() {
+            let mut state = self.state.lock().unwrap();
+            if state.refresh_from == Some(after) {
+                state.refresh_from = None;
+            }
         }
         Ok(())
     }
@@ -1153,67 +1298,51 @@ impl Owner {
     /// and its retire flag, or `None` when no block of the key is above the
     /// opening.
     async fn published_state(&self, through: u64) -> Result<Option<(String, bool)>, AgentError> {
-        if through == 0 {
-            // An empty segment publishes no block, and a read cannot start
-            // below the first sequence.
+        let opening = self.state.lock().unwrap().start;
+        let reply = self
+            .timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: opening.map(|sequence| dim_agent_types::TimelinePosition {
+                    branch_id: self.branch_id.clone(),
+                    sequence,
+                }),
+                through: Some(through),
+                include_publishing: true,
+                query: QuerySpec {
+                    filter: Some(live_inputs(key_block(text::STATE_KEY))),
+                    select: QuerySelect::Fields {
+                        fields: vec!["data.blocks".into()],
+                    },
+                    group_by: vec![],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            })
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("key fields return rows")
+        };
+        let Some(row) = rows.first() else {
             return Ok(None);
-        }
-        let mut deleted = HashSet::new();
-        let mut from = Some(through);
-        while let Some(below) = from {
-            let mut query = read_page(TimelineQueryScope::Branch, Some(below), SCAN_PAGE, true);
-            query.kinds = vec![
-                "input/message".into(),
-                "input/deleted".into(),
-                "branch/start".into(),
-                "session/forked".into(),
-            ];
-            query.direction = TimelineQueryDirection::Descending;
-            let reply = self.timeline.query(query).await?;
-            for event in &reply.events {
-                match &event.kind {
-                    EventKind::BranchStart(_) | EventKind::SessionForked(_) => return Ok(None),
-                    EventKind::InputDeleted(data) => {
-                        deleted.insert(data.input_id.clone());
-                    }
-                    EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
-                        for block in data.blocks.iter().rev() {
-                            let InputBlock::Raw {
-                                text: raw,
-                                key: Some(key),
-                                retire,
-                            } = block
-                            else {
-                                continue;
-                            };
-                            if key == text::STATE_KEY {
-                                return Ok(Some((raw.clone(), *retire)));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let Some(last) = reply.events.last().map(|event| event.sequence) else {
-                return Ok(None);
-            };
-            if (reply.events.len() as u64) < SCAN_PAGE || last <= 1 {
-                return Ok(None);
-            }
-            from = Some(last - 1);
-        }
-        Ok(None)
-    }
-
-    /// States the branch again after the deletion of the change trigger
-    /// `withdrawn` (R2): the trigger is gone from the fold and a record that
-    /// named it states a state the branch no longer has, so the recomputed
-    /// state is stated with the deletion's sequence. Whether such a record
-    /// exists is decided under the write lock.
-    fn answer_deletion(self: &Arc<Self>, at: u64, withdrawn: u64) {
-        self.task(format!("delete:{at}"), None, move |owner| {
-            Box::pin(async move { owner.record(at, None, false, Some(withdrawn)).await })
-        });
+        };
+        let [QueryValue::Value { value: blocks }] = row.values.as_slice() else {
+            unreachable!("input blocks exist")
+        };
+        let blocks: Vec<InputBlock> = serde_json::from_value(blocks.clone())
+            .expect("input blocks follow their event contract");
+        Ok(blocks.into_iter().rev().find_map(|block| {
+            let InputBlock::Raw {
+                text: raw,
+                key,
+                retire,
+            } = block;
+            (key.as_deref() == Some(text::STATE_KEY)).then_some((raw, retire))
+        }))
     }
 
     /// Whether this branch already committed its `branch/create` for `after`:
@@ -1223,16 +1352,42 @@ impl Owner {
         let reply = self
             .timeline
             .query(TimelineQuery {
-                kinds: vec!["branch/create".into()],
-                predicate: Some(TimelineQueryPredicate {
-                    path: "source.operation_id".into(),
-                    value: fold::evaluation_operation(after).into(),
+                scope: TimelineQueryScope::Branch,
+                from: Some(dim_agent_types::TimelinePosition {
+                    branch_id: self.branch_id.clone(),
+                    sequence: after,
                 }),
-                limit: NonZeroU64::new(1).expect("one fact is a page"),
-                ..read_page(TimelineQueryScope::Branch, Some(after), 1, true)
+                through: Some(self.timeline.committed()),
+                include_publishing: true,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["branch/create".into()],
+                            },
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "data.source.operation_id".into(),
+                                },
+                                values: vec![fold::evaluation_operation(after).into()],
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Exists,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: None,
             })
             .await?;
-        Ok(!reply.events.is_empty())
+        let QueryOutput::Exists { exists } = reply.result else {
+            unreachable!("existence selection returns a boolean")
+        };
+        Ok(exists)
     }
 
     /// Whether the turn `turn_id` made a tool call: one bounded query from the
@@ -1241,16 +1396,42 @@ impl Owner {
         let reply = self
             .timeline
             .query(TimelineQuery {
-                kinds: vec!["step/tool-call".into()],
-                predicate: Some(TimelineQueryPredicate {
-                    path: "turn_id".into(),
-                    value: turn_id.into(),
+                scope: TimelineQueryScope::Branch,
+                from: Some(dim_agent_types::TimelinePosition {
+                    branch_id: self.branch_id.clone(),
+                    sequence: turn_start,
                 }),
-                limit: NonZeroU64::new(1).expect("one fact is a page"),
-                ..read_page(TimelineQueryScope::Branch, Some(turn_start), 1, true)
+                through: Some(self.timeline.committed()),
+                include_publishing: true,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["step/tool-call".into()],
+                            },
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "data.turn_id".into(),
+                                },
+                                values: vec![turn_id.into()],
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Exists,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: None,
             })
             .await?;
-        Ok(!reply.events.is_empty())
+        let QueryOutput::Exists { exists } = reply.result else {
+            unreachable!("existence selection returns a boolean")
+        };
+        Ok(exists)
     }
 
     /// The turn-end decision (A.4, Pursuit §4.1): an evaluator creation when
@@ -1326,7 +1507,9 @@ impl Owner {
         let progress = {
             let (end, open) = {
                 let state = self.state.lock().unwrap();
-                if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
+                if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
+                    || state.fold.interrupt_after(after).is_some()
+                {
                     return Ok(());
                 }
                 (state.fold.turn_end.clone(), state.fold.open_tasks())
@@ -1348,9 +1531,12 @@ impl Owner {
         if self.stopped() {
             return Ok(());
         }
+        let write = self.write_guard().await?;
         let decision = {
             let state = self.state.lock().unwrap();
-            if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
+            if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
+                || state.fold.interrupt_after(after).is_some()
+            {
                 return Ok(());
             }
             fold::decide_turn_end(&state.fold, limit, progress)
@@ -1365,6 +1551,7 @@ impl Owner {
                 self.write(input).await?;
             }
             Decision::Pause { reason } => {
+                drop(write);
                 self.record(
                     after,
                     Some(text::State::Paused(reason.to_owned())),
@@ -1384,6 +1571,11 @@ impl Owner {
         let Some(TurnEnd { sequence, .. }) = end else {
             return;
         };
+        let interrupt = self.state.lock().unwrap().fold.interrupt_after(sequence);
+        if let Some(interrupt) = interrupt {
+            self.interrupted(interrupt);
+            return;
+        }
         let decide = {
             let state = self.state.lock().unwrap();
             state.fold.running() && !state.fold.is_decided(sequence)
@@ -1452,6 +1644,7 @@ impl Owner {
         turn_start: u64,
         end: &TurnEndData,
     ) -> Result<(), AgentError> {
+        let _write = self.write_guard().await?;
         let role = self.state.lock().unwrap().role.clone();
         let Some(role) = role else {
             return Ok(());
@@ -1511,55 +1704,95 @@ impl Owner {
         through: u64,
         turn_id: &str,
     ) -> Result<String, AgentError> {
-        let mut events = Vec::new();
-        let mut from = turn_start;
-        loop {
-            let page = self
-                .timeline
-                .query(TimelineQuery {
-                    kinds: vec!["step/model-start".into(), "step/text".into()],
-                    predicate: Some(TimelineQueryPredicate {
-                        path: "turn_id".into(),
-                        value: turn_id.into(),
-                    }),
-                    ..read_page(TimelineQueryScope::Branch, Some(from), REPLY_PAGE, false)
-                })
-                .await?;
-            events.extend(
-                page.events
-                    .iter()
-                    .filter(|event| event.sequence <= through)
-                    .cloned(),
-            );
-            let Some(last) = page.events.last() else {
-                break;
-            };
-            if (page.events.len() as u64) < REPLY_PAGE || last.sequence >= through {
-                break;
-            }
-            from = last.sequence + 1;
-        }
-        let mut request = None;
-        for event in &events {
-            if let EventKind::ModelStart(data) = &event.kind
-                && data.turn_id == turn_id
-            {
-                request = Some(data.request_id.clone());
-            }
-        }
-        let Some(request) = request else {
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: Some(dim_agent_types::TimelinePosition {
+                branch_id: self.branch_id.clone(),
+                sequence: turn_start,
+            }),
+            through: Some(through),
+            include_publishing: false,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: vec!["step/model-start".into()],
+                        },
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "data.turn_id".into(),
+                            },
+                            values: vec![turn_id.into()],
+                        },
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["data.request_id".into()],
+                },
+                group_by: vec![],
+                pick: Some(QueryPick::Last),
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::MIN,
+                after: None,
+            }),
+        };
+        let reply = self.timeline.query(query.clone()).await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        let Some(row) = rows.first() else {
             return Ok(String::new());
         };
-        let mut reply = String::new();
-        for event in &events {
-            if let EventKind::Text(data) = &event.kind
-                && data.turn_id == turn_id
-                && data.request_id == request
-            {
-                reply.push_str(&data.delta);
+        let [QueryValue::Value { value: request }] = row.values.as_slice() else {
+            unreachable!("model start has a request id")
+        };
+        let Some(QueryFilter::And { conditions }) = &mut query.query.filter else {
+            unreachable!()
+        };
+        conditions[0] = QueryFilter::In {
+            value: QueryOperand::Field {
+                path: "kind".into(),
+            },
+            values: vec!["step/text".into()],
+        };
+        conditions.push(QueryFilter::In {
+            value: QueryOperand::Field {
+                path: "data.request_id".into(),
+            },
+            values: vec![request.clone()],
+        });
+        query.query.select = QuerySelect::Fields {
+            fields: vec!["data.delta".into()],
+        };
+        query.query.pick = None;
+        query.page.as_mut().unwrap().limit = NonZeroU64::new(REPLY_PAGE).unwrap();
+        let mut text = String::new();
+        loop {
+            let reply = self.timeline.query(query.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
+            };
+            for row in rows {
+                let [
+                    QueryValue::Value {
+                        value: serde_json::Value::String(delta),
+                    },
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("text event has a delta")
+                };
+                text.push_str(delta);
+            }
+            query.page.as_mut().unwrap().after = reply.next;
+            if query.page.as_ref().unwrap().after.is_none() {
+                return Ok(text);
             }
         }
-        Ok(reply)
     }
 
     fn evaluation_failed(self: &Arc<Self>, evaluation: u64, at: u64) {
@@ -1645,6 +1878,7 @@ impl Owner {
                 };
                 // C7 measures the branch's own continuations; the evaluator
                 // judged this turn, so this path reads no progress (Pursuit §5).
+                let write = self.write_guard().await?;
                 let decision = {
                     let state = self.state.lock().unwrap();
                     if state.written.contains(&sequence)
@@ -1672,15 +1906,14 @@ impl Owner {
                         );
                         // The input is committed before the fold consumes it; a
                         // retry in between must not answer it again.
-                        if !self.state.lock().unwrap().written.insert(sequence) {
+                        if self.state.lock().unwrap().written.contains(&sequence) {
                             return Ok(());
                         }
-                        if let Err(error) = self.write(input).await {
-                            self.state.lock().unwrap().written.remove(&sequence);
-                            return Err(error);
-                        }
+                        self.write(input).await?;
+                        self.state.lock().unwrap().written.insert(sequence);
                     }
                     Decision::Pause { reason } => {
+                        drop(write);
                         self.record(
                             sequence,
                             Some(text::State::Paused(reason.to_owned())),
@@ -1761,60 +1994,16 @@ impl Owner {
     /// retired with it.
     async fn inherited_keys(&self) -> Result<Live, AgentError> {
         let mut live = Live::default();
-        let mut found = (false, false, false);
-        for (branch, cut) in self.timeline.ancestors().iter().rev() {
-            // A cut of zero contributes nothing to the chain (the chain read
-            // skips it), and a read cannot start at sequence zero.
-            if *cut == 0 {
-                continue;
-            }
-            let mut from = *cut;
-            loop {
-                let mut query = read_page(
-                    TimelineQueryScope::Branch,
-                    Some(from),
-                    INHERITED_PAGE,
-                    false,
-                );
-                query.kinds = vec!["input/message".into()];
-                query.direction = TimelineQueryDirection::Descending;
-                let reply = self.tree.query(branch.clone(), query).await?;
-                for event in &reply.events {
-                    let EventKind::InputMessage(data) = &event.kind else {
-                        continue;
-                    };
-                    for block in data.blocks.iter().rev() {
-                        let InputBlock::Raw {
-                            text: block_text,
-                            key,
-                            retire,
-                        } = block;
-                        if text::marker(block_text).is_none() {
-                            continue;
-                        }
-                        let (slot, value) = match key.as_deref() {
-                            Some(text::STATE_KEY) => (&mut found.0, &mut live.state),
-                            Some(text::OBJECTIVE_KEY) => (&mut found.1, &mut live.objective),
-                            Some(text::STATUS_KEY) => (&mut found.2, &mut live.status),
-                            _ => continue,
-                        };
-                        if *slot {
-                            continue;
-                        }
-                        *slot = true;
-                        *value = !retire;
-                    }
-                }
-                if found == (true, true, true) {
-                    return Ok(live);
-                }
-                let Some(last) = reply.events.last().map(|event| event.sequence) else {
-                    break;
-                };
-                if (reply.events.len() as u64) < INHERITED_PAGE || last <= 1 {
+        for (key, slot) in [
+            (text::STATE_KEY, &mut live.state),
+            (text::OBJECTIVE_KEY, &mut live.objective),
+            (text::STATUS_KEY, &mut live.status),
+        ] {
+            for (branch, cut) in self.timeline.ancestors().iter().rev() {
+                if let Some(value) = self.key_at(branch, *cut, key, false).await? {
+                    *slot = value;
                     break;
                 }
-                from = last - 1;
             }
         }
         Ok(live)
@@ -1824,12 +2013,8 @@ impl Owner {
 /// Whether `record`, the event immediately before the change trigger `data`,
 /// is the state record that names `data` by submission id; `Some(retired)`
 /// then carries the record's classification (R5).
-fn paired_record(record: &AgentEvent, data: &InputMessageData) -> Option<bool> {
-    let EventKind::InputMessage(record) = &record.kind else {
-        return None;
-    };
-    let trigger = data.submission_id.as_deref()?;
-    for block in &record.blocks {
+fn paired_record(blocks: &[InputBlock], trigger: &str) -> Option<bool> {
+    for block in blocks.iter().rev() {
         let InputBlock::Raw {
             text: raw,
             key,
@@ -1923,9 +2108,9 @@ fn published_statement(raw: &str, retire: bool) -> Option<Statement> {
 /// are Goal's blocks too, and a branch that has them has history the fold must
 /// read. An input with a `goal:state` block is classified by that block: the
 /// old-key retires that ride with it belong to its statement (R3).
-fn goal_record(data: &dim_agent_types::InputMessageData) -> Option<bool> {
+fn goal_record(blocks: &[InputBlock]) -> Option<bool> {
     let mut record = None;
-    for block in &data.blocks {
+    for block in blocks.iter().rev() {
         let InputBlock::Raw {
             text: raw,
             key,
@@ -1942,35 +2127,86 @@ fn goal_record(data: &dim_agent_types::InputMessageData) -> Option<bool> {
     record
 }
 
-/// One page of this branch's facts, oldest first from `from` in ascending
-/// reads; the direction is the caller's.
-fn read_page(
-    scope: TimelineQueryScope,
-    from: Option<u64>,
-    limit: u64,
-    include_publishing: bool,
-) -> TimelineQuery {
-    TimelineQuery {
-        scope,
-        from_event: None,
-        from_sequence: from,
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Ascending,
-        include_publishing,
-        kinds: Vec::new(),
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: NonZeroU64::new(limit).expect("a page keeps at least one fact"),
-        offset: 0,
-    }
-}
-
 fn result_name(result: fold::ConclusionKind) -> &'static str {
     match result {
         fold::ConclusionKind::Done => "done",
         fold::ConclusionKind::Continue => "continue",
         fold::ConclusionKind::Blocked => "blocked",
         fold::ConclusionKind::Failed => "failed",
+    }
+}
+
+pub(crate) fn goal_inputs() -> QueryFilter {
+    QueryFilter::And {
+        conditions: vec![
+            QueryFilter::Any {
+                field: "data.blocks".into(),
+                condition: Box::new(QueryFilter::Prefix {
+                    value: QueryOperand::Element {
+                        path: "text".into(),
+                    },
+                    prefix: "<dim-goal ".into(),
+                }),
+            },
+            QueryFilter::TextCandidate {
+                field: "data".into(),
+                partition_by: vec![],
+                terms: vec!["goal".into()],
+            },
+        ],
+    }
+}
+
+fn key_block(key: &str) -> QueryFilter {
+    QueryFilter::And {
+        conditions: vec![
+            QueryFilter::Any {
+                field: "data.blocks".into(),
+                condition: Box::new(QueryFilter::In {
+                    value: QueryOperand::Element { path: "key".into() },
+                    values: vec![key.into()],
+                }),
+            },
+            QueryFilter::TextCandidate {
+                field: "data".into(),
+                partition_by: vec![],
+                terms: vec!["goal".into()],
+            },
+        ],
+    }
+}
+
+pub(crate) fn live_inputs(condition: QueryFilter) -> QueryFilter {
+    QueryFilter::And {
+        conditions: vec![
+            QueryFilter::In {
+                value: QueryOperand::Field {
+                    path: "kind".into(),
+                },
+                values: vec!["input/message".into()],
+            },
+            condition,
+            QueryFilter::Not {
+                condition: Box::new(QueryFilter::Exists {
+                    condition: Box::new(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["input/deleted".into()],
+                            },
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "data.input_id".into(),
+                                },
+                                comparison: QueryComparison::Eq,
+                                right: QueryOperand::Outer { path: "id".into() },
+                            },
+                        ],
+                    }),
+                }),
+            },
+        ],
     }
 }

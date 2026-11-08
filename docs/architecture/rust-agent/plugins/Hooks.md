@@ -124,6 +124,12 @@ input resets the count. The follow-up is recognized from its own
 `dim-hooks kind="follow-up"` marker as the view folds the branch, so the
 identity and the count are rebuilt from the Timeline when the part or the
 Session restores, and another source's queued input is never counted.
+Recovery consumes property pages at one committed cutoff: input markers and
+consumption decisions, turn/interruption positions, and the fields used to derive
+tool matcher aliases. It excludes tool calls that already have a result before
+loading arguments, and never loads historical tool-result content or tool schemas.
+Only outstanding call arguments remain in the view for a later terminal event;
+recovery queues no historical hook command.
 
 `SessionStart` is derived on `main` from the folded view: it runs only when no
 `turn/start` and no Session-start block was seen; it runs at most once per

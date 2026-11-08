@@ -2,21 +2,23 @@ use crate::{
     context_policy::{
         ContextPolicy, EstimateEvent, PolicyContext, configured_request, estimate_events,
     },
-    history::{HistoryRenderer, chain_by_id, context_configuration},
+    history::{HistoryRenderer, chain_by_id},
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::{PromptSnapshot, scope_is_visible},
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Dispatcher, Names, Timeline,
-    TimelineIdentity, rebuild_facts,
+    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Dispatcher, Names,
+    QueryComparison, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect,
+    QuerySpec, QueryValue, Timeline, TimelineIdentity, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use std::{
+    num::NonZeroU64,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
 };
@@ -61,15 +63,20 @@ impl ConfigurationPublisher {
         inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot) -> Vec<InputBlock> + Send,
         register: impl FnOnce(&[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> + Send,
     ) -> dim_agent_runtime::Result<Option<u64>> {
-        let context =
-            crate::history::read_context(&self.timeline, self.timeline.sequence()).await?;
-        let before = PromptSnapshot::from_context(&context);
+        let (before, previous_configuration) =
+            PromptSnapshot::read(&self.timeline, self.timeline.sequence()).await?;
+        let ancestry: Vec<_> = self
+            .timeline
+            .ancestors()
+            .into_iter()
+            .map(|(branch, _)| branch)
+            .collect();
         for change in &changes {
             let scope = match change {
                 PromptChange::Set { entry } => &entry.scope,
                 PromptChange::Revoke { scope, .. } => scope,
             };
-            if !scope_is_visible(scope, &self.identity.branch_id, &context.ancestry) {
+            if !scope_is_visible(scope, &self.identity.branch_id, &ancestry) {
                 return Err(AgentError::InvalidInput(
                     "prompt scope is outside branch ancestry".into(),
                 ));
@@ -87,7 +94,6 @@ impl ConfigurationPublisher {
                 ));
             }
         }
-        let previous_configuration = context_configuration(&context);
         let base = previous_configuration
             .as_ref()
             .map(|data| (*data.settings).clone());
@@ -137,15 +143,8 @@ impl ConfigurationPublisher {
                 },
                 changes,
             };
-            let synthetic = AgentEvent {
-                id: "candidate".into(),
-                sequence: 0,
-                create_at: 0,
-                tags: None,
-                kind: EventKind::PromptChanged(data.clone()),
-            };
             let mut after = before.clone();
-            after.apply(&synthetic);
+            after.changed(&data.timeline, &data.revision, &data.changes);
             let blocks = inputs(&before, &after);
             drafts.push(EventKind::PromptChanged(data).into());
             drafts.extend(blocks.into_iter().map(|block| {
@@ -215,12 +214,11 @@ impl ConfigurationPublisher {
         if self.closing() {
             return Ok(());
         }
-        let context =
-            crate::history::read_context(&self.timeline, self.timeline.sequence()).await?;
-        let Some(previous) = context_configuration(&context) else {
+        let (before, previous) =
+            PromptSnapshot::read(&self.timeline, self.timeline.sequence()).await?;
+        let Some(previous) = previous else {
             return Ok(());
         };
-        let before = PromptSnapshot::from_context(&context);
         let data =
             self.rerendered_configuration(&before, Some(&previous), (*previous.settings).clone());
         if data.system == previous.system {
@@ -367,7 +365,6 @@ pub struct ContextPreparation {
     state: Mutex<PreparationState>,
     tasks: TaskTracker,
     errors: Mutex<Vec<AgentError>>,
-    prepared: Mutex<Option<(String, u64, Arc<ModelRequest>)>>,
     host: Arc<PrepareContextHost>,
     policy: Option<ContextPolicy>,
     history: Arc<HistoryRenderer>,
@@ -375,55 +372,265 @@ pub struct ContextPreparation {
     identity: Arc<TimelineIdentity>,
 }
 impl ContextPreparation {
-    /// Rebuilds the interrupt mark; a committed preparation with neither a
-    /// `model/call` nor an output end was left by a reload or restart and
-    /// fails without running.
-    fn rebuild(
-        &self,
-        state: &mut PreparationState,
-        events: &[Arc<AgentEvent>],
-    ) -> dim_agent_runtime::Result<()> {
-        let mut open: Vec<ContextPrepareData> = Vec::new();
-        let mut started: Vec<(u64, ContextCompactionStartData)> = Vec::new();
-        let settled = |open: &mut Vec<ContextPrepareData>, turn: &str, request: &str| {
-            open.retain(|source| source.turn_id != turn || source.request_id != request)
-        };
-        for event in events {
-            state.steer.apply(event);
-            match &event.kind {
-                EventKind::StopInterrupt(data) => state.interrupted = Some(data.reason.clone()),
-                EventKind::TurnStart(_) | EventKind::TurnEnd(_) => state.interrupted = None,
-                EventKind::ContextPrepare(source) => open.push(source.clone()),
-                EventKind::ModelCall(call) => settled(&mut open, &call.turn_id, &call.request_id),
-                EventKind::ModelOutputEnd(end) => settled(&mut open, &end.turn_id, &end.request_id),
-                EventKind::ContextCompactionStart(data) if data.command.is_none() => {
-                    started.push((event.sequence, data.clone()))
-                }
-                EventKind::ContextCompaction(data) => {
-                    started.retain(|(sequence, _)| Some(*sequence) != data.start)
-                }
-                _ => {}
-            }
-        }
-        for (start, data) in started {
-            self.timeline.append(
-                EventKind::ContextCompaction(ContextCompactionData {
-                    turn_id: data.turn_id,
-                    request_id: data.request_id,
-                    command: None,
-                    start: Some(start),
-                    through: data.through,
-                    outcome: ContextCompactionResult::Cancelled {
-                        reason: CAPABILITY_RELOADING.into(),
+    async fn rebuild(&self) -> dim_agent_runtime::Result<u64> {
+        let through = self.timeline.committed();
+        let mut request = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
                     },
-                })
-                .into(),
-            )?;
+                    values: vec![
+                        "stop/interrupt".into(),
+                        "turn/start".into(),
+                        "turn/end".into(),
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["kind".into(), "data.reason".into()],
+                },
+                group_by: Vec::new(),
+                pick: Some(QueryPick::Last),
+                order_by: Vec::new(),
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(256).expect("a page contains operations"),
+                after: None,
+            }),
+        };
+        let control = self.timeline.query(request.clone()).await?;
+        let QueryOutput::Rows { rows } = control.result else {
+            unreachable!("preparation recovery selects control fields")
+        };
+        let interrupted = if let Some(row) = rows.into_iter().next() {
+            let mut values = row.values.into_iter();
+            match (values.next(), values.next()) {
+                (
+                    Some(QueryValue::Value {
+                        value: serde_json::Value::String(kind),
+                    }),
+                    Some(reason),
+                ) => {
+                    if kind == "stop/interrupt" {
+                        let QueryValue::Value {
+                            value: serde_json::Value::String(reason),
+                        } = reason
+                        else {
+                            return Err(AgentError::fault(
+                                "ContextPreparation",
+                                "an interrupt has no reason",
+                            ));
+                        };
+                        Some(reason)
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    return Err(AgentError::fault(
+                        "ContextPreparation",
+                        "a control event has no kind",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let steer = SteerMark::restore(&self.timeline, through).await?;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.interrupted = interrupted;
+            state.steer = steer;
         }
-        for source in open {
-            self.complete(source, Err(HostError::failed(CAPABILITY_RELOADING)))?;
+
+        let equal = |path: &str, value: serde_json::Value| QueryFilter::Compare {
+            left: QueryOperand::Field { path: path.into() },
+            comparison: QueryComparison::Eq,
+            right: QueryOperand::Value { value },
+        };
+        let correlated = |inner: &str, outer: &str| QueryFilter::Compare {
+            left: QueryOperand::Field { path: inner.into() },
+            comparison: QueryComparison::Eq,
+            right: QueryOperand::Outer { path: outer.into() },
+        };
+        request.query.pick = None;
+        request.query.select = QuerySelect::Fields {
+            fields: [
+                "data.turn_id",
+                "data.request_id",
+                "position.sequence",
+                "data.through",
+            ]
+            .map(String::from)
+            .to_vec(),
+        };
+        request.query.filter = Some(QueryFilter::And {
+            conditions: vec![
+                equal("kind", "context/compaction-start".into()),
+                QueryFilter::Not {
+                    condition: Box::new(QueryFilter::Present {
+                        value: QueryOperand::Field {
+                            path: "data.command".into(),
+                        },
+                    }),
+                },
+                QueryFilter::Not {
+                    condition: Box::new(QueryFilter::Exists {
+                        condition: Box::new(QueryFilter::And {
+                            conditions: vec![
+                                equal("kind", "context/compaction".into()),
+                                correlated("data.start", "position.sequence"),
+                            ],
+                        }),
+                    }),
+                },
+            ],
+        });
+        loop {
+            let reply = self.timeline.query(request.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("compaction recovery selects settlement fields")
+            };
+            for row in rows {
+                let Ok(
+                    [
+                        turn,
+                        invocation,
+                        QueryValue::Value {
+                            value: serde_json::Value::Number(start),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::Number(boundary),
+                        },
+                    ],
+                ) = <[_; 4]>::try_from(row.values)
+                else {
+                    return Err(AgentError::fault(
+                        "ContextPreparation",
+                        "a compaction start has invalid positions",
+                    ));
+                };
+                let optional_id = |value| match value {
+                    QueryValue::Missing => Ok(None),
+                    QueryValue::Value {
+                        value: serde_json::Value::String(id),
+                    } => Ok(Some(id)),
+                    _ => Err(AgentError::fault(
+                        "ContextPreparation",
+                        "a compaction identity must be a string when present",
+                    )),
+                };
+                self.timeline.append(
+                    EventKind::ContextCompaction(ContextCompactionData {
+                        turn_id: optional_id(turn)?,
+                        request_id: optional_id(invocation)?,
+                        command: None,
+                        start: Some(
+                            start
+                                .as_u64()
+                                .expect("compaction start sequences are unsigned integers"),
+                        ),
+                        through: boundary
+                            .as_u64()
+                            .expect("compaction boundaries are unsigned integers"),
+                        outcome: ContextCompactionResult::Cancelled {
+                            reason: CAPABILITY_RELOADING.into(),
+                        },
+                    })
+                    .into(),
+                )?;
+            }
+            let Some(next) = reply.next else {
+                break;
+            };
+            request
+                .page
+                .as_mut()
+                .expect("compaction recovery is paged")
+                .after = Some(next);
         }
-        Ok(())
+        request
+            .page
+            .as_mut()
+            .expect("preparation recovery is paged")
+            .after = None;
+        request.query.select = QuerySelect::Fields {
+            fields: vec!["data.turn_id".into(), "data.request_id".into()],
+        };
+        request.query.filter = Some(QueryFilter::And {
+            conditions: vec![
+                equal("kind", "context/prepare".into()),
+                QueryFilter::Not {
+                    condition: Box::new(QueryFilter::Exists {
+                        condition: Box::new(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: vec![
+                                        "model/call".into(),
+                                        "step/model-output-end".into(),
+                                    ],
+                                },
+                                correlated("data.turn_id", "data.turn_id"),
+                                correlated("data.request_id", "data.request_id"),
+                            ],
+                        }),
+                    }),
+                },
+            ],
+        });
+        loop {
+            let reply = self.timeline.query(request.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("preparation recovery selects operation identities")
+            };
+            for row in rows {
+                let Ok(
+                    [
+                        QueryValue::Value {
+                            value: serde_json::Value::String(turn_id),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::String(request_id),
+                        },
+                    ],
+                ) = <[_; 2]>::try_from(row.values)
+                else {
+                    return Err(AgentError::fault(
+                        "ContextPreparation",
+                        "a preparation has no operation identity",
+                    ));
+                };
+                self.timeline.append(
+                    EventKind::ModelOutputEnd(ModelOutputEndData {
+                        turn_id,
+                        request_id,
+                        outcome: ModelOutputOutcome::Failed {
+                            error: CAPABILITY_RELOADING.into(),
+                            budget: None,
+                            presentation: None,
+                            failure: None,
+                        },
+                    })
+                    .into(),
+                )?;
+            }
+            let Some(next) = reply.next else {
+                break;
+            };
+            request
+                .page
+                .as_mut()
+                .expect("preparation recovery is paged")
+                .after = Some(next);
+        }
+        Ok(through)
     }
     fn complete(
         &self,
@@ -668,16 +875,16 @@ impl ContextPreparation {
                     })
                     && !supplied.iter().any(|seen| seen.id == data.input_id)
                 {
-                    let input = self
+                    let reply = self
                         .timeline
-                        .query(chain_by_id(&data.input_id))
+                        .query(chain_by_id(&data.input_id, through, QuerySelect::Events))
                         .await
-                        .map_err(ContextOpError::Read)?
-                        .events
-                        .into_iter()
-                        .next();
-                    if let Some(input) = input {
-                        supplied.push(input);
+                        .map_err(ContextOpError::Read)?;
+                    let QueryOutput::Events { events } = reply.result else {
+                        unreachable!("event selection returns events")
+                    };
+                    if let Some(row) = events.into_iter().next() {
+                        supplied.push(row.event);
                     }
                 }
             }
@@ -707,33 +914,20 @@ impl ContextPreparation {
         generation: &CancellationToken,
     ) -> std::result::Result<Arc<ModelRequest>, HostError> {
         crate::context_policy::check_cancel(&cancel)?;
-        let cached = self
-            .prepared
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|(turn, through, _)| turn == &source.turn_id && *through == source.through)
-            .map(|(_, _, request)| request.clone());
-        let request = match cached {
-            Some(request) => request,
-            None => {
-                self.host
-                    .0
-                    .prepare(
-                        source.request.clone(),
-                        ContextSource {
-                            turn_id: source.turn_id.clone(),
-                            request_id: source.request_id.clone(),
-                            through: source.through,
-                        },
-                        cancel.clone(),
-                    )
-                    .await?
-            }
-        };
+        let request = self
+            .host
+            .0
+            .prepare(
+                source.request.clone(),
+                ContextSource {
+                    turn_id: source.turn_id.clone(),
+                    request_id: source.request_id.clone(),
+                    through: source.through,
+                },
+                cancel.clone(),
+            )
+            .await?;
         validate_capability_snapshot(&request)?;
-        *self.prepared.lock().unwrap() =
-            Some((source.turn_id.clone(), source.through, request.clone()));
         let streamed = self
             .history
             .rendered_stream(&self.timeline, source.through, 256)
@@ -881,7 +1075,6 @@ impl DynPlugin for ContextPreparationPlugin {
                 state: Mutex::new(PreparationState::default()),
                 tasks: TaskTracker::new(),
                 errors: Mutex::new(Vec::new()),
-                prepared: Mutex::new(None),
                 host,
                 policy: ContextPolicy::bind(&timeline, &context, &strategy, &history)
                     .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?,
@@ -906,7 +1099,6 @@ impl DynPlugin for ContextPreparationPlugin {
             let failures = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
             let read = owner.clone();
-            let read_timeline = owner.timeline.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -925,27 +1117,7 @@ impl DynPlugin for ContextPreparationPlugin {
                     .to_vec(),
                     Arc::new(move || {
                         let read = read.clone();
-                        let timeline = read_timeline.clone();
-                        Box::pin(async move {
-                            let reply = rebuild_facts(
-                                &timeline,
-                                &[
-                                    "context/prepare",
-                                    "model/call",
-                                    "step/model-output-end",
-                                    "context/compaction-start",
-                                    "context/compaction",
-                                    "stop/interrupt",
-                                    "step/model-start",
-                                    "input/applied",
-                                    "turn/start",
-                                    "turn/end",
-                                ],
-                            )
-                            .await?;
-                            read.rebuild(&mut read.state.lock().unwrap(), &reply.events)?;
-                            Ok(reply.through)
-                        })
+                        Box::pin(async move { read.rebuild().await })
                     }),
                     Arc::new(move |event| {
                         let owner = owner.clone();

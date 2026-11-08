@@ -6,6 +6,7 @@ The InputQueue plugin registers InputMethods in every Session and InputQueue in 
 
 Owner: [input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs).
 Registers the namespace `session.input` with the Session's `sessionMethods`:
+`session.input.pending` ([contract](../../../design/input-state-read.md)) and
 `session.input.withdraw` for every branch of its Session, served through that
 branch's InputQueue. It also provides the Session table `submitChecks`
 ([`SubmitChecks`](../../../../crates/dim-agent-capabilities/src/input_queue.rs)):
@@ -68,17 +69,20 @@ observable input queue.
 
 | Service | Purpose |
 | --- | --- |
-| `B:Dispatcher` | Replay the queue, then consume input/turn/interrupt transitions. |
+| `B:Dispatcher` | Hand off restored queue state to live input/turn/interrupt transitions. |
 | `B:Timeline` | Commit application decisions. |
 
 ### Events and lifetime
 
 Consumes `input/message`, `input/consumed`, `turn/start`, `turn/end`,
-`stop/interrupt`; produces `input/applied` and, for a handover input,
-`input/deleted`. It does not run a model itself.
-It registers with `Dispatcher::consume`; the rebuild writes owed application
-decisions, without duplicating already committed ones, before any live event. No background tasks or
-external resources. Reload reconstructs state from local history. An idle append
+`stop/interrupt`; produces `input/applied`. It does not run a model itself.
+It registers with `Dispatcher::consume`; recovery reads ordered identity, input
+mode, handover identity and turn identity fields in pages at one committed boundary. User-content shape
+distinguishes the default queue mode from an internal append; content text is
+not read. Recovery retains queue entries and owed decisions, removes each owed
+decision when its written result is read, and writes the remaining application
+or withdrawal decisions before live delivery. It holds no historical event
+list. No background tasks or external resources. An idle append
 is pending until a driving input; an interrupt is not permission to start a new
 turn from previously unapplied input.
 

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 pub fn parse(
     args: &mut dyn Iterator<Item = String>,
 ) -> std::result::Result<(String, Value), String> {
-    const USAGE: &str = "Use plugin list | install <path|git-url> [--ref R] [--id ID] [--no-enable] | enable <name> [--use ID|builtin|default] | disable <name> | reload <name> | update <id> | remove <id>";
+    const USAGE: &str = "Use plugin list | install <path|git-url> [--ref R] [--id ID] [--no-enable] | install --optional <name> [--id ID] [--no-enable] | enable <name> [--use ID|builtin|default] | disable <name> | reload <name> | update <id> | remove <id>";
     let command = args.next().ok_or(USAGE)?;
     let rest: Vec<String> = args.collect();
     let one = |field: &str| match rest.as_slice() {
@@ -25,12 +25,14 @@ pub fn parse(
         "list" if rest.is_empty() => json!({}),
         "install" => {
             let mut source = None;
+            let mut optional = None;
             let (mut reference, mut id, mut enable) = (None, None, true);
             let mut rest = rest.into_iter();
             while let Some(arg) = rest.next() {
                 match arg.as_str() {
                     "--ref" => reference = Some(rest.next().ok_or(USAGE)?),
                     "--id" => id = Some(rest.next().ok_or(USAGE)?),
+                    "--optional" => optional = Some(rest.next().ok_or(USAGE)?),
                     "--no-enable" => enable = false,
                     value if value.starts_with("--") || source.is_some() => {
                         return Err(USAGE.into());
@@ -38,16 +40,23 @@ pub fn parse(
                     value => source = Some(value.to_owned()),
                 }
             }
-            let source = source.ok_or(USAGE)?;
-            let source = if source.contains("://") {
-                json!({"git": source, "ref": reference})
-            } else if reference.is_some() {
-                return Err("--ref applies to a Git URL".into());
-            } else {
-                let path = std::env::current_dir()
-                    .map_err(|error| error.to_string())?
-                    .join(&source);
-                json!({"path": path})
+            let source = match (optional, source) {
+                (Some(name), None) if reference.is_none() => json!({"optional": name}),
+                (Some(_), None) => return Err("--ref applies to a Git URL".into()),
+                (Some(_), Some(_)) => return Err(USAGE.into()),
+                (None, None) => return Err(USAGE.into()),
+                (None, Some(source)) if source.contains("://") => {
+                    json!({"git": source, "ref": reference})
+                }
+                (None, Some(_)) if reference.is_some() => {
+                    return Err("--ref applies to a Git URL".into());
+                }
+                (None, Some(source)) => {
+                    let path = std::env::current_dir()
+                        .map_err(|error| error.to_string())?
+                        .join(&source);
+                    json!({"path": path})
+                }
             };
             let mut params = json!({"source": source, "enable": enable});
             if let Some(id) = id {
@@ -74,6 +83,9 @@ pub fn call(action: &PluginAction) -> (&'static str, Value) {
         PluginAction::Disable(name) => ("plugin.disable", json!({"name": name})),
         PluginAction::Reload(name) => ("plugin.reload", json!({"name": name})),
         PluginAction::Install(path) => ("plugin.install", json!({"source": {"path": path}})),
+        PluginAction::InstallOptional(name) => {
+            ("plugin.install", json!({"source": {"optional": name}}))
+        }
     }
 }
 
@@ -261,6 +273,11 @@ mod tests {
                 "plugin.install",
                 json!({"source": {"path": "/p/my-tool"}}),
             ),
+            (
+                PluginAction::InstallOptional("light-ocr".into()),
+                "plugin.install",
+                json!({"source": {"optional": "light-ocr"}}),
+            ),
         ];
         for (action, method, params) in cases {
             assert_eq!(call(&action), (method, params), "{action:?}");
@@ -287,6 +304,23 @@ mod tests {
                 "plugin.install",
                 json!({"source": {"git": "file:///r.git"}, "enable": true}),
             ),
+            (
+                vec!["install", "--optional", "light-ocr"],
+                "plugin.install",
+                json!({"source": {"optional": "light-ocr"}, "enable": true}),
+            ),
+            (
+                vec![
+                    "install",
+                    "--optional",
+                    "light-ocr",
+                    "--id",
+                    "ocr",
+                    "--no-enable",
+                ],
+                "plugin.install",
+                json!({"source": {"optional": "light-ocr"}, "enable": false, "id": "ocr"}),
+            ),
             (vec!["enable", "n"], "plugin.enable", json!({"name": "n"})),
             (
                 vec!["enable", "n", "--use", "builtin"],
@@ -305,6 +339,9 @@ mod tests {
             vec!["list", "x"],
             vec!["install"],
             vec!["install", "x", "--ref", "v1"],
+            vec!["install", "--optional", "light-ocr", "--ref", "v1"],
+            vec!["install", "x", "--optional", "light-ocr"],
+            vec!["install", "--optional"],
             vec!["enable", "n", "--use"],
             vec!["remove"],
             vec!["frobnicate"],

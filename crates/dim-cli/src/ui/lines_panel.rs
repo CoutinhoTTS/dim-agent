@@ -23,6 +23,7 @@ pub fn state_label(state: &LineState) -> String {
         LineState::Main => t("the session itself").to_owned(),
         LineState::Working => t("working").to_owned(),
         LineState::Waiting => t("waiting").to_owned(),
+        LineState::Ended => t("ended").to_owned(),
         LineState::EndedItself => t("ended itself").to_owned(),
         LineState::EndedByOperation => t("ended by an operation").to_owned(),
         LineState::EndedWith(ancestor) => tf("ended with {id}", &[("id", ancestor)]),
@@ -188,7 +189,8 @@ impl LinesPanel {
             if let Some(line) = self.lines.iter().find(|line| line.id == id) {
                 if matches!(
                     line.state,
-                    LineState::EndedItself
+                    LineState::Ended
+                        | LineState::EndedItself
                         | LineState::EndedByOperation
                         | LineState::EndedWith(_)
                         | LineState::CreationFailed
