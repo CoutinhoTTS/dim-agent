@@ -2627,6 +2627,7 @@
         "json",
         "matches",
         "tracing::warn",
+        "unreachable",
         "vec",
         "write"
       ]
@@ -24817,10 +24818,13 @@
         "mod acquire",
         "path PluginsDir",
         "path PluginsDir::new",
+        "path acquire::Staging",
         "path acquire::check_git_url",
         "path acquire::check_id",
         "path acquire::clone",
+        "path acquire::copy",
         "path acquire::manifest_of",
+        "path acquire::work_dir",
         "use acquire::PluginsDir"
       ]
     },
@@ -24854,6 +24858,7 @@
         "path Record",
         "path Record::read",
         "path Source::Git",
+        "path Source::Optional",
         "path Source::Path",
         "path record",
         "path record::Code",
@@ -24880,6 +24885,7 @@
       "references": [
         "path crate::runtime_manager::Kind::Node",
         "path crate::runtime_manager::Kind::Python",
+        "path crate::runtime_manager::PackagesError",
         "path crate::runtime_manager::RuntimeService"
       ]
     },
@@ -24924,6 +24930,7 @@
       "references": [
         "path Manifest",
         "path Manifest::read",
+        "path super::record::is_version",
         "use super::record::Manifest"
       ]
     },

@@ -26,6 +26,15 @@ pub(super) fn error(error: PluginError) -> RpcError {
         "acquire_failed" => {
             "Plugin acquisition failed; check Git access and filesystem permissions"
         }
+        "optional_not_found" => {
+            "This release does not ship that optional plugin; refresh the catalog"
+        }
+        "node_unavailable" => {
+            "The Node runtime could not be supplied for the plugin's dependencies"
+        }
+        "dependencies_failed" => {
+            "The plugin's locked dependencies could not be installed; check network access"
+        }
         "record_unreadable" => "Plugin configuration could not be read",
         _ => "Plugin operation failed",
     };

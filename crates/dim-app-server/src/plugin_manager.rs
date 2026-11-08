@@ -30,6 +30,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
+use tokio_util::sync::CancellationToken;
 
 /// The editable loader layer PluginManager's rows and overrides live in.
 pub const LAYER: &str = "plugins";
@@ -61,6 +62,19 @@ impl From<PluginError> for RpcError {
 
 fn not_found(what: &str) -> PluginError {
     PluginError::new("plugin_not_found", format!("no plugin {what:?}"))
+}
+
+/// §3.2 step 3: RuntimeManager's dependency-install failure as the plugin
+/// call's error: `node_unavailable` when Node could not be supplied, and
+/// `dependencies_failed` with npm's message otherwise. A cancellation is
+/// the call's generation unloading, which the method framework answers
+/// itself with `operation_interrupted`.
+fn packages_error(error: crate::runtime_manager::PackagesError) -> PluginError {
+    let code = match error.code {
+        "node_unavailable" => "node_unavailable",
+        _ => "dependencies_failed",
+    };
+    PluginError::new(code, error.message)
 }
 
 /// The plugin a name uses (§2.2 `names.<name>.use`, resolved).
@@ -144,6 +158,11 @@ pub(crate) struct State {
     /// Held while the layer is derived from the record and reconciled, so
     /// the layer reconciled last is derived from the latest record.
     applying: tokio::sync::Mutex<()>,
+    /// §4: every file system change for a plugin — staging, clone, copy,
+    /// rename, dependency install and the startup cleanup — runs one at a
+    /// time, so the cleanup never runs between an acquisition's rename and
+    /// its record write, and no two acquisitions interleave.
+    fs: tokio::sync::Mutex<()>,
 }
 
 /// The `plugins` layer startup reconciles with (§3.1).
@@ -193,11 +212,15 @@ impl State {
         dirs.clean(&keep);
         let none = BTreeSet::new();
         for name in names(&record, &defaults, &none) {
-            let dir = using(&record, &defaults, &none, &name)
-                .and_then(|used| dir_of(&record, &defaults, &name, &used));
-            if let Some(Ok(Manifest {
+            let Some(used) = using(&record, &defaults, &none, &name) else {
+                continue;
+            };
+            let Some(dir) = dir_of(&record, &defaults, &name, &used) else {
+                continue;
+            };
+            if let Ok(Manifest {
                 code: Some(code), ..
-            })) = dir.as_deref().map(Manifest::read)
+            }) = manifest_used(&record, &used, &dir)
             {
                 register_names(catalog, &code);
             }
@@ -213,6 +236,7 @@ impl State {
             builtins: OnceLock::new(),
             catalog: OnceLock::new(),
             applying: tokio::sync::Mutex::new(()),
+            fs: tokio::sync::Mutex::new(()),
         }))
     }
 
@@ -225,6 +249,16 @@ impl State {
         builtins: BTreeSet<String>,
         catalog: ServiceCatalog,
     ) -> Result<StartupLayer, String> {
+        // §2.3: an optional plugin's name cannot also be a built-in row's.
+        // The built-in names are known here, once the assembly's rows are
+        // built (`lib.rs` calls this with them).
+        for name in self.defaults.optional.keys() {
+            if builtins.contains(name) {
+                return Err(format!(
+                    "optional plugin {name} is also a built-in plugin's name"
+                ));
+            }
+        }
         let mut locked_rows = Vec::new();
         for name in &self.defaults.locked {
             if self.defaults.plugins.contains_key(name) && !builtins.contains(name) {
@@ -287,11 +321,11 @@ impl State {
             else {
                 continue;
             };
-            match Manifest::read(&dir) {
+            let used = used.as_ref().expect("a plugin in use has a directory");
+            match manifest_used(record, used, &dir) {
                 Ok(Manifest {
                     code: Some(code), ..
                 }) if missing_instance_names(catalog, &code).is_empty() => {
-                    let used = used.as_ref().expect("a plugin in use");
                     self.provide_data_dir(&name, used);
                     let id = own_id(&name, used).expect("not a built-in");
                     if is_python(&code)
@@ -305,7 +339,7 @@ impl State {
                 Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(%name, %error, "plugin manifest unreadable");
-                    if let Some(plugin) = used.as_ref().and_then(|used| own_id(&name, used)) {
+                    if let Some(plugin) = own_id(&name, used) {
                         unreadable.push(plugin.to_owned());
                     }
                 }
@@ -470,11 +504,13 @@ fn row_value(name: &str, id: &str, dir: &Path, code: &record::Code, config: Valu
     })
 }
 
-/// Every name PluginManager knows: built-in, default, installed, chosen.
+/// Every name PluginManager knows: built-in, default, optional, installed,
+/// chosen.
 fn names(record: &Record, defaults: &Defaults, builtins: &BTreeSet<String>) -> BTreeSet<String> {
     builtins
         .iter()
         .chain(defaults.plugins.keys())
+        .chain(defaults.optional.keys())
         .chain(record.installed.iter().map(|entry| &entry.name))
         .chain(record.names.keys())
         .cloned()
@@ -529,6 +565,28 @@ fn dir_of(record: &Record, defaults: &Defaults, name: &str, used: &Use) -> Optio
         Use::Builtin => None,
         Use::Default => defaults.plugins.get(name).cloned(),
         Use::Installed(id) => record.installed(id).map(|entry| entry.dir.clone()),
+    }
+}
+
+/// The name in the default configuration file's `optional` map that `used`
+/// was installed from, when it is an `{optional}` source.
+fn optional_source<'a>(record: &'a Record, used: &Use) -> Option<&'a str> {
+    let Use::Installed(id) = used else {
+        return None;
+    };
+    match record.installed(id).map(|entry| &entry.source) {
+        Some(Source::Optional { optional }) => Some(optional),
+        _ => None,
+    }
+}
+
+/// Reads the manifest of the plugin a name uses; an optional plugin's
+/// manifest must name its version (§2.1).
+fn manifest_used(record: &Record, used: &Use, dir: &Path) -> Result<Manifest, PluginError> {
+    let manifest = Manifest::read(dir)?;
+    match optional_source(record, used) {
+        Some(_) => manifest.require_version(),
+        None => Ok(manifest),
     }
 }
 
@@ -993,6 +1051,11 @@ enum SourceParams {
         #[serde(rename = "ref")]
         reference: Option<String>,
     },
+    /// A plugin the default configuration file ships optionally, by its
+    /// name there (§2.3, §3.2).
+    Optional {
+        optional: String,
+    },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1080,6 +1143,7 @@ impl Manager {
         method: &str,
         params: Value,
         progress: Option<&Progress>,
+        cancel: &CancellationToken,
     ) -> Result<Value, PluginError> {
         let phase = |phase: &str| {
             if let Some(progress) = progress {
@@ -1091,7 +1155,7 @@ impl Manager {
                 let Empty {} = decode(params)?;
                 Ok(self.list().await)
             }
-            "plugin.install" => self.install(decode(params)?, &phase).await,
+            "plugin.install" => self.install(decode(params)?, &phase, cancel).await,
             "plugin.enable" => self.enable(decode(params)?).await,
             "plugin.disable" => {
                 let NameParams { name, use_: None } = decode(params)? else {
@@ -1105,7 +1169,7 @@ impl Manager {
                 };
                 self.reload(&name).await
             }
-            "plugin.update" => self.update(decode(params)?, &phase).await,
+            "plugin.update" => self.update(decode(params)?, &phase, cancel).await,
             "plugin.remove" => {
                 let IdParams {
                     id,
@@ -1125,12 +1189,14 @@ impl Manager {
         &self,
         params: InstallParams,
         phase: &(dyn Fn(&str) + Sync),
+        cancel: &CancellationToken,
     ) -> Result<Value, PluginError> {
         let enable = params.enable.unwrap_or(true);
         if let Some(id) = &params.id {
             acquire::check_id(id)?;
             self.refuse_installed(id)?;
         }
+        let _fs = self.state.fs.lock().await;
         phase("fetch");
         let mut placed: Option<PathBuf> = None;
         let result = async {
@@ -1151,6 +1217,8 @@ impl Manager {
                     phase("check");
                     let manifest = acquire::manifest_of(&staging)?;
                     let id = self.new_id(params.id.as_deref(), &manifest)?;
+                    self.dependencies(&manifest, &staging, phase, cancel)
+                        .await?;
                     let target = self.state.dirs.acquisition_dir(&id, &commit)?;
                     let dir = staging.place(&self.state.dirs, &target)?;
                     placed = Some(dir.clone());
@@ -1162,6 +1230,29 @@ impl Manager {
                     };
                     (id, manifest, source, dir)
                 }
+                SourceParams::Optional { optional } => {
+                    let shipped = self.shipped_optional(&optional)?;
+                    let staging = self.state.dirs.stage()?;
+                    acquire::copy(shipped, &acquire::work_dir(&staging))?;
+                    phase("check");
+                    let manifest = acquire::manifest_of(&staging)?.require_version()?;
+                    let id = self.new_id(params.id.as_deref(), &manifest)?;
+                    self.dependencies(&manifest, &staging, phase, cancel)
+                        .await?;
+                    let version = manifest
+                        .version
+                        .clone()
+                        .expect("an optional plugin's manifest names its version");
+                    let target = self.state.dirs.acquisition_dir(&id, &version)?;
+                    let dir = staging.place(&self.state.dirs, &target)?;
+                    placed = Some(dir.clone());
+                    let manifest = Manifest::read(&dir)?;
+                    (id, manifest, Source::Optional { optional }, dir)
+                }
+            };
+            let version = match &source {
+                Source::Optional { .. } => manifest.version.clone(),
+                _ => None,
             };
             let entry = Installed {
                 id: id.clone(),
@@ -1169,6 +1260,7 @@ impl Manager {
                 source,
                 dir,
                 kinds: manifest.kinds(),
+                version,
             };
             let locked = self.locked(&manifest.name);
             let turn_on = enable && !locked;
@@ -1246,9 +1338,73 @@ impl Manager {
         }
     }
 
+    /// The shipped directory of the optional plugin `name` (§2.3): a
+    /// name the default configuration file does not list is
+    /// `optional_not_found`. A listed name whose directory is missing is
+    /// `acquire_failed` from `acquire::copy`, naming the path.
+    fn shipped_optional(&self, name: &str) -> Result<&Path, PluginError> {
+        self.state
+            .defaults
+            .optional
+            .get(name)
+            .map(PathBuf::as_path)
+            .ok_or_else(|| {
+                PluginError::new(
+                    "optional_not_found",
+                    format!("the default configuration file ships no optional plugin {name:?}"),
+                )
+            })
+    }
+
+    /// §3.2 step 3: when the manifest declares dependencies, installs them
+    /// into the staging work tree through RuntimeManager, once and before
+    /// the rename; the `dependencies` phase is reported first, so a client
+    /// sees the wait for Node (§3.2). A failure deletes the staging
+    /// directory, which its drop does.
+    async fn dependencies(
+        &self,
+        manifest: &Manifest,
+        staging: &acquire::Staging,
+        phase: &(dyn Fn(&str) + Sync),
+        cancel: &CancellationToken,
+    ) -> Result<(), PluginError> {
+        if manifest.dependencies.is_none() {
+            return Ok(());
+        }
+        phase("dependencies");
+        let Some(runtimes) = self.ctx.get_at(&self.runtimes) else {
+            return Err(PluginError::new(
+                "node_unavailable",
+                "RuntimeManager is not part of this host",
+            ));
+        };
+        let work = std::fs::canonicalize(acquire::work_dir(staging))
+            .map_err(|error| PluginError::new("acquire_failed", error.to_string()))?;
+        runtimes
+            .install_packages(&work, cancel)
+            .await
+            .map_err(packages_error)
+    }
+
     /// Whether `name` is a name PluginManager knows.
     fn known(&self, record: &Record, name: &str) -> bool {
         self.shipped(name).is_some() || record.installed.iter().any(|entry| entry.name == name)
+    }
+
+    /// `plugin_not_found` for a name with no candidate. An uninstalled
+    /// optional plugin's name names the install call in the message (§3.3):
+    /// the client boundary keeps one static description per code, so the
+    /// hint reaches the model-facing `plugin` tool and the log only.
+    fn not_found(&self, name: &str) -> PluginError {
+        if self.state.defaults.optional.contains_key(name) {
+            return PluginError::new(
+                "plugin_not_found",
+                format!(
+                    "no plugin {name:?}; install it with plugin.install {{source: {{optional: {name:?}}}}}"
+                ),
+            );
+        }
+        not_found(name)
     }
 
     /// `plugin.enable` (§3.3).
@@ -1271,7 +1427,7 @@ impl Manager {
             |_, ()| name.clone(),
             |record| {
                 if !self.known(record, &name) {
-                    return Err(not_found(&name));
+                    return Err(self.not_found(&name));
                 }
                 let choice = record.names.entry(name.clone()).or_default();
                 if let Some(use_) = &use_ {
@@ -1311,7 +1467,7 @@ impl Manager {
             |_, ()| name.to_owned(),
             |record| {
                 if !self.known(record, name) {
-                    return Err(not_found(name));
+                    return Err(self.not_found(name));
                 }
                 record.names.entry(name.to_owned()).or_default().off = true;
                 Ok(())
@@ -1329,6 +1485,7 @@ impl Manager {
                 "built-in and default plugins can be turned off, not removed",
             ));
         }
+        let _fs = self.state.fs.lock().await;
         let (entry, change) = self.commit(
             |_, entry: &Installed| entry.name.clone(),
             |record| {
@@ -1361,7 +1518,7 @@ impl Manager {
         let used = {
             let record = self.state.record.lock().unwrap();
             if !self.known(&record, name) {
-                return Err(not_found(name));
+                return Err(self.not_found(name));
             }
             self.using(&record, name)
         };
@@ -1467,6 +1624,7 @@ impl Manager {
         &self,
         params: IdParams,
         phase: &(dyn Fn(&str) + Sync),
+        cancel: &CancellationToken,
     ) -> Result<Value, PluginError> {
         let IdParams { id, reference } = params;
         let entry = self
@@ -1477,16 +1635,39 @@ impl Manager {
             .installed(&id)
             .cloned()
             .ok_or_else(|| not_found(&id))?;
+        let _fs = self.state.fs.lock().await;
+        match entry.source.clone() {
+            Source::Path { .. } => Err(PluginError::new(
+                "not_updatable",
+                format!("{id} is a local directory: reload it"),
+            )),
+            Source::Git { .. } => self.update_git(entry, reference, phase, cancel).await,
+            Source::Optional { optional } => {
+                self.update_optional(entry, optional, phase, cancel).await
+            }
+        }
+    }
+
+    /// §3.5 for a Git plugin: fetches the ref's commit into a new
+    /// `<commit>+<suffix>` directory, installs its declared dependencies
+    /// there before the record changes, and switches the record; a failed
+    /// dependency install deletes the new directory and keeps the old
+    /// commit.
+    async fn update_git(
+        &self,
+        entry: Installed,
+        reference: Option<String>,
+        phase: &(dyn Fn(&str) + Sync),
+        cancel: &CancellationToken,
+    ) -> Result<Value, PluginError> {
+        let id = entry.id.clone();
         let Source::Git {
             git,
             reference: recorded,
             commit: old,
         } = &entry.source
         else {
-            return Err(PluginError::new(
-                "not_updatable",
-                format!("{id} is a local directory: reload it"),
-            ));
+            unreachable!("a Git source");
         };
         let reference = reference.or_else(|| recorded.clone());
         phase("fetch");
@@ -1521,6 +1702,8 @@ impl Manager {
                 format!("the new commit names {:?}; install it again", manifest.name),
             ));
         }
+        self.dependencies(&manifest, &staging, phase, cancel)
+            .await?;
         let target = self.state.dirs.acquisition_dir(&id, &commit)?;
         let dir = staging.place(&self.state.dirs, &target)?;
         let manifest = match Manifest::read(&dir) {
@@ -1561,6 +1744,82 @@ impl Manager {
             reply = self.switch(&entry.name, change, true).await.into_map();
         }
         reply.insert("commit".into(), json!(commit));
+        Ok(Value::Object(reply))
+    }
+
+    /// §3.5 for an `{optional}` plugin: re-copies the shipped directory at
+    /// its current version into a new `<version>+<suffix>` directory,
+    /// installs its dependencies, and switches the record; the reply carries
+    /// `version`. At an unchanged version the new copy gets its own
+    /// directory, and a failure keeps the old copy.
+    async fn update_optional(
+        &self,
+        entry: Installed,
+        optional: String,
+        phase: &(dyn Fn(&str) + Sync),
+        cancel: &CancellationToken,
+    ) -> Result<Value, PluginError> {
+        let id = entry.id.clone();
+        let shipped = self.shipped_optional(&optional)?;
+        phase("fetch");
+        let staging = self.state.dirs.stage()?;
+        acquire::copy(shipped, &acquire::work_dir(&staging))?;
+        phase("check");
+        let manifest = acquire::manifest_of(&staging)?.require_version()?;
+        if manifest.name != entry.name {
+            return Err(PluginError::new(
+                "name_changed",
+                format!(
+                    "the shipped plugin names {:?}; install it again",
+                    manifest.name
+                ),
+            ));
+        }
+        self.dependencies(&manifest, &staging, phase, cancel)
+            .await?;
+        let version = manifest
+            .version
+            .clone()
+            .expect("an optional plugin's manifest names its version");
+        let target = self.state.dirs.acquisition_dir(&id, &version)?;
+        let dir = staging.place(&self.state.dirs, &target)?;
+        let manifest = match Manifest::read(&dir) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                let _ = self.state.dirs.delete(&dir);
+                return Err(error);
+            }
+        };
+        let committed = self.commit(
+            |_, ()| entry.name.clone(),
+            |record| {
+                let current = record
+                    .installed
+                    .iter_mut()
+                    .find(|current| current.id == id)
+                    .ok_or_else(|| not_found(&id))?;
+                current.source = Source::Optional {
+                    optional: optional.clone(),
+                };
+                current.dir = dir.clone();
+                current.kinds = manifest.kinds();
+                current.version = Some(version.clone());
+                Ok(())
+            },
+        );
+        let ((), change) = match committed {
+            Ok(done) => done,
+            Err(error) => {
+                let _ = self.state.dirs.delete(&dir);
+                return Err(error);
+            }
+        };
+        phase("load");
+        let mut reply = Map::new();
+        if change.after == Some(Use::Installed(id.clone())) {
+            reply = self.switch(&entry.name, change, true).await.into_map();
+        }
+        reply.insert("version".into(), json!(version));
         Ok(Value::Object(reply))
     }
 
@@ -1711,6 +1970,21 @@ impl Manager {
         let record = self.state.record.lock().unwrap().clone();
         let mut items = Vec::new();
         for name in names(&record, &self.state.defaults, self.builtins()) {
+            let optional = self.state.defaults.optional.contains_key(&name);
+            // §3.6: an optional plugin that is not installed has its own
+            // item, so a client can offer it; `off` is a report, not a
+            // recorded state, and there is no status because nothing runs.
+            if optional && !record.installed.iter().any(|entry| entry.name == name) {
+                items.push(json!({
+                    "name": name,
+                    "use": null,
+                    "off": true,
+                    "locked": self.locked(&name),
+                    "candidates": [],
+                    "optional": true,
+                }));
+                continue;
+            }
             items.push({
                 let choice = record.names.get(&name).cloned().unwrap_or_default();
                 let used = self.using(&record, &name);
@@ -1735,6 +2009,27 @@ impl Manager {
                     "candidates": candidates,
                 });
                 let fields = item.as_object_mut().unwrap();
+                // §2.3, §3.6: once installed, an optional plugin's item is
+                // like any installed name's; the marker is provenance.
+                if optional {
+                    fields.insert("optional".into(), json!(true));
+                }
+                // §3.6: `update` appears only when the shipped version
+                // differs from the installed one, never merely because a
+                // copy exists. A shipped manifest that cannot be read, or
+                // names no version, offers none (§2.3).
+                if let Some(Use::Installed(id)) = &used
+                    && let Some(entry) = record.installed(id)
+                    && let Source::Optional {
+                        optional: shipped_name,
+                    } = &entry.source
+                    && let Some(dir) = self.state.defaults.optional.get(shipped_name)
+                    && let Ok(manifest) = Manifest::read(dir)
+                    && let Some(version) = manifest.version
+                    && Some(&version) != entry.version.as_ref()
+                {
+                    fields.insert("update".into(), json!({"version": version}));
+                }
                 match &used {
                     None if choice.off => {
                         fields.insert("status".into(), json!("off"));
@@ -1879,12 +2174,12 @@ impl DynPlugin for PluginManagerPlugin {
                         ..MethodDecl::new(name, *name != "plugin.list", Interruption::Report)
                     })
                     .collect(),
-                Arc::new(move |call, _stopping, progress| {
+                Arc::new(move |call, stopping, progress| {
                     let MethodCall { method, params, .. } = call;
                     let manager = handler.clone();
                     Box::pin(async move {
                         manager
-                            .call(&method, params, Some(&progress))
+                            .call(&method, params, Some(&progress), &stopping)
                             .await
                             .map(|value| management::reply(&method, value))
                             .map_err(management::error)

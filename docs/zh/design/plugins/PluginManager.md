@@ -99,7 +99,7 @@ flowchart LR
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "installed": [
     {
       "id": "my-tool",
@@ -137,6 +137,8 @@ flowchart LR
 
 没有条目的名字处于出厂状态：内置插件或默认插件处于打开状态。写入时先写到同一目录下的临时文件，在它自己的可写句柄上刷盘（`sync_all`，在 Windows 上也可用），然后改名覆盖 `plugins.json`。文件无法解析时，启动失败，并给出文件路径；PluginManager 从不覆盖一个它读不了的文件。格式带有版本号；未知版本使启动失败。
 
+`plugins.json` 恰好在其带有 `{optional}` 来源或已安装版本时是版本 3，否则写成版本 2，因此删掉最后一个可选条目后写出的是旧版本二进制也能读的记录。每次写入的版本都跟随内容。读取接受版本 1、2 和 3：版本 1 保留所有安装、选择和 `off` 标记；版本 1 或 2 的记录若带有 `{optional}` 来源或 `version` 字段，则报 `record_unreadable`（"optional sources require record version 3"）。版本 1 文件第一次写成版本 2 时，把版本 1 的原始字节同步到 `plugins.json.v1.backup`，只写一次：记录不会回到版本 1，已存在且内容相同的备份会被复用，不同或读不了时拒绝写入。版本 2 文件每次写成版本 3 时，都先用当前版本 2 记录的原始字节替换 `plugins.json.v2.backup`，写到同目录的临时文件、在各自的句柄上同步再改名覆盖备份，然后才写记录：删掉最后一个可选条目后记录会回到版本 2，所以备份始终是最后一份版本 2 记录，也就是回退到旧二进制时想要的那一份；备份写入失败则拒绝记录写入。备份或记录写入失败都保留原记录。未知版本使启动失败且不覆盖数据。旧版本的读者会拒绝版本 2 和版本 3；回退需要恢复保存下来的记录。
+
 持久化的 `use: "default"` 在发行内容不再提供同名默认包时选择该名称的内置插件。
 默认包仍存在时，显式选择继续使用该包。该来源过渡不重写记录；`off` 和已安装来源选择保持原义。
 
@@ -159,6 +161,7 @@ flowchart LR
 - `plugins` 把每个默认插件的名字映射到它的目录，路径相对于这个文件。默认插件和其他插件一样是一个插件目录（§2.1）。
 - `optional` 把每个可选插件的名字映射到它的目录，路径相对于这个文件。可选插件随发行提供，但不安装、不打开：在用户安装它之前没有任何东西读取它，`plugin.list` 会列出它供客户端提供（§3.6）。`plugin.install {source: {optional: "<name>"}}` 把该目录——从不含 `node_modules`——复制到 `<home>/plugins/<id>/<version>+<suffix>`，并在那里安装它声明的依赖（§3.2、§7）；随发行的目录保持不动、只读。新发行带有新的 `version`：下次启动时已安装的副本会在后台重新获取（§3.1），在成功之前旧副本继续使用并留在磁盘上，切换后的下一次启动删除它。`enable` 默认为 true，此后 `plugin.enable` 与 `plugin.disable` 与其他已安装插件相同；可选插件的名字在安装之前不记录 `off` 状态：`plugin.list` 把它报告为 off（§3.6）。
 - 内置 SessionTitle、Scheduler 和 Goal 由原生产品 profile 安装，在这个文件中没有条目。
+- 同一个名字不能同时出现在 `plugins` 和 `optional` 中，可选插件的名字也不能是内置插件的名字：两者都是启动错误，并指出两个来源。可选插件的项没有候选者（§3.6），否则会遮住该名字下随发行提供的插件。
 - `locked` 列出不能关闭、也不能切换所用插件的名字。锁定名字的其他插件仍然可以安装。锁定是产品配置；PluginManager 执行它。
 
 ### 2.4 PluginManager 不保存的状态
@@ -221,7 +224,7 @@ TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 Plug
 
 - `plugin.enable {name, use?}`：`use` 是一个已安装的 id、`"builtin"` 或 `"default"`；不给时，使用该名字当前的 `use`。对锁定的名字，当 `use` 改变时拒绝（`plugin_locked`）。写入 `names.<name>`（清除 `off`，设置 `use`），然后 reconcile 推导出的层（§3）。当该调用打开一个运行时关闭的插件时，它请求运行时（§2.5）；启动 reconcile 从不这样做。
 - `plugin.disable {name}`：对锁定的名字拒绝。写入 `off: true`，然后 reconcile 推导出的层。
-- `plugin.enable`、`plugin.disable` 与 `plugin.reload` 指名一个没有候选者的名字——没有已安装条目、没有默认插件、也没有内置插件——时，以 `plugin_not_found` 拒绝，与未知名字相同；当名字属于未安装的可选插件时，消息给出 `plugin.install {source: {optional: "<name>"}}`。什么都不安装，调用也不请求运行时：安装始终是显式的 `plugin.install`，`enable` 只打开已安装的东西，从不获取（§2.5）。有候选者的名字——内置、默认或已安装——不受影响。
+- `plugin.enable`、`plugin.disable` 与 `plugin.reload` 指名一个没有候选者的名字——没有已安装条目、没有默认插件、也没有内置插件——时，以 `plugin_not_found` 拒绝，与未知名字相同；当名字属于未安装的可选插件时，消息给出 `plugin.install {source: {optional: "<name>"}}`。这个具体形式只留在模型面向的 `plugin` 工具和日志看到的消息里：客户端 RPC 边界对每个错误码保留一条静态描述（A.2），客户端从 `plugin.list` 得知该项是可选插件并提供 Install。什么都不安装，调用也不请求运行时：安装始终是显式的 `plugin.install`，`enable` 只打开已安装的东西，从不获取（§2.5）。有候选者的名字——内置、默认或已安装——不受影响。
 
 当一个内容所有者本身被打开时（例如 Hooks），PluginManager 登记每个正在使用、并带有该种类的插件的内容（§3.7）。
 
@@ -381,10 +384,10 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | `plugin.enable` | `{name, use?}` | `{status?, skipped?, refused?, restartRequired?}` |
 | `plugin.disable` | `{name}` | `{}` |
 | `plugin.reload` | `{name}` | `{status?, skipped?, refused?, restartRequired?}` |
-| `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
+| `plugin.update` | `{id, ref?}` | `{commit?, version?, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
-名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `waitingFor`，即 `Loader::waits` 给出的服务；等待运行时的行给出运行时的连接行 `session-node` 或 `py`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check`、`dependencies` 和 `load`；插件未声明依赖时没有 `dependencies`。
+名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `waitingFor`，即 `Loader::waits` 给出的服务；等待运行时的行给出运行时的连接行 `session-node` 或 `py`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check`、`dependencies` 和 `load`；插件未声明依赖时没有 `dependencies`。`plugin.update` 的回复对 Git 来源带 `commit`，对 `{optional}` 来源带 `version`；本地路径插件两者都没有。
 
 客户端 RPC 边界对来源、状态错误和内容拒绝的投影，以及一次拒绝可能携带的全部 reason，见 A.2。
 
@@ -457,7 +460,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 17. 已安装可选 fixture 的随发行版本在两次启动之间变化：第二次启动在后台重新获取到新的 `<version>+<suffix>` 目录，记录与 `dir` 切换，插件继续从旧副本服务；两个目录都留到下次启动，由它的清理删除旧的；依赖安装失败时旧副本保留，`plugin.list` 显示 `update.error`，直到下次启动或 `plugin.update <id>` 修复。
 18. 对可选 fixture 在同版本上运行 `plugin.update <id>` 会创建第二个 `<version>+<suffix>` 目录并切换记录；旧目录在下次启动的清理之前保持不变。
 19. 在同一进程内先移除、再安装同一版本，会得到新的 `<version>+<suffix>` 目录；两者都留到下次启动，由它的清理只删除没有条目引用的那一个。
-20. `plugin.enable`、`plugin.disable` 与 `plugin.reload` 指名一个未安装的可选 fixture 时，以 `plugin_not_found` 拒绝；消息给出 `plugin.install {source: {optional: "<name>"}}`；什么都不安装，也不请求运行时。没有已安装条目的默认 fixture 名字仍然可以被关闭和打开。
+20. `plugin.enable`、`plugin.disable` 与 `plugin.reload` 指名一个未安装的可选 fixture 时，以 `plugin_not_found` 拒绝；消息给出 `plugin.install {source: {optional: "<name>"}}`，而客户端看到的是今天的静态描述；什么都不安装，也不请求运行时。没有已安装条目的默认 fixture 名字仍然可以被关闭和打开。
 21. Phase 2 的 `dim-cli` 测试把包含未安装可选 fixture 项——`{name, use: null, off: true, locked: false, candidates: [], optional: true}`——的 `plugin.list` 回复反序列化为今天的 `PluginItem`，证明形状保持可解码。
 22. TUI 的 `/plugins` 面板与 Web 设置页为 `optional: true` 的项提供 Install 动作，调用 `plugin.install {source: {optional: "<name>"}}`；TUI 对该项的开关调用 `plugin.enable`，显示第 20 项的拒绝；Desktop 解码同样的新增字段，无需改动。
 

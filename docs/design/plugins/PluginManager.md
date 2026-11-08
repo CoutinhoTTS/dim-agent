@@ -159,13 +159,25 @@ ships that default package. An existing default package remains the explicit sel
 it is shipped. This source transition does not rewrite the record; `off` and installed source
 selections retain their meaning.
 
-`plugins.json` uses version 2. Reading version 1 preserves every installation,
-choice and `off` flag. Before the first version 2 write, the exact version 1
-bytes are synced to `plugins.json.v1.backup`. An existing identical backup is
-reused; a different or unreadable backup refuses the write. Backup or record
-write failure leaves the original record in place. Unknown versions fail
-without overwriting data. Older readers reject version 2; rollback requires
-restoring the saved version 1 record.
+`plugins.json` is version 3 exactly when it holds an `{optional}` source or an
+installed version; otherwise it is written as version 2, so removing the last
+optional entry writes a record older binaries read. The version written follows
+the content on every write. Reading accepts versions 1, 2 and 3: version 1
+preserves every installation, choice and `off` flag, and a version 1 or 2 record
+that holds an `{optional}` source or a `version` field is `record_unreadable`
+("optional sources require record version 3"). Over a version 1 file the first
+version 2 write keeps the exact version 1 bytes in `plugins.json.v1.backup`,
+once: a record never returns to version 1, so an existing identical backup is
+reused and a different or unreadable one refuses the write. Over a version 2
+file every version 3 write replaces `plugins.json.v2.backup` with the exact
+current version 2 bytes, through a temporary file synced on its own handle and
+renamed over the backup, before the record itself is written: the record does
+return to version 2 when the last optional entry is removed, so the backup
+always holds the last version 2 record, the one a rollback to an older binary
+wants, and a failed backup write refuses the record write.
+Backup or record write failure leaves the original record in place. Unknown
+versions fail without overwriting data. Older readers reject version 2 and
+version 3; rollback requires restoring the saved record.
 
 ### 2.3 The default configuration file
 
@@ -186,6 +198,7 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 - `plugins` maps each default plugin's name to its directory, relative to this file. A default plugin is a plugin directory like any other (§2.1).
 - `optional` maps an optional plugin's name to its directory, relative to this file. An optional plugin is shipped but is not installed and not turned on: nothing reads it until the user installs it, and `plugin.list` shows it so a client can offer it (§3.6). `plugin.install {source: {optional: "<name>"}}` copies the directory — never `node_modules` — into `<home>/plugins/<id>/<version>+<suffix>` and installs its declared dependencies there (§3.2, §7); the shipped directory stays untouched and read-only. A newer release ships a new `version`: at the next start an installed copy is re-acquired in the background (§3.1), the old copy stays in use and on disk until that succeeds, and the next start after the switch deletes it. `enable` defaults to true, `plugin.enable` and `plugin.disable` then work as for any installed plugin, and an optional plugin's name records no `off` state until it is installed: `plugin.list` reports it off (§3.6).
 - Built-in SessionTitle, Scheduler and Goal are installed by the native product profile and have no entry in this file.
+- A name cannot appear in both `plugins` and `optional`, and an optional plugin's name cannot be a built-in plugin's: each is a startup error naming both. An optional plugin's item has no candidates (§3.6), so it would hide the plugin shipped under that name.
 - `locked` lists names that cannot be turned off and whose plugin cannot be switched. Other plugins of a locked name may still be installed. Locking is product configuration; PluginManager applies it.
 
 ### 2.4 State PluginManager does not keep
@@ -248,7 +261,7 @@ A local-path plugin is used in place and its declared dependencies are not insta
 
 - `plugin.enable {name, use?}`: `use` is an installed id, `"builtin"` or `"default"`; absent, the name's current `use`. Refused for a locked name when `use` changes (`plugin_locked`). Writes `names.<name>` (clears `off`, sets `use`), then reconciles the derived layer (§3). When this call turns on a plugin whose runtime is off, it requests the runtime (§2.5); the startup reconcile never does.
 - `plugin.disable {name}`: refused for a locked name. Writes `off: true`, then reconciles the derived layer.
-- `plugin.enable`, `plugin.disable` and `plugin.reload` naming a name with no candidate — no installed entry, no default plugin and no built-in plugin — are refused with `plugin_not_found`, as for an unknown name; when the name is an uninstalled optional plugin's, the message names `plugin.install {source: {optional: "<name>"}}`. Nothing is installed and the call requests no runtime: installing is always an explicit `plugin.install`, and `enable` turns on what is installed; it never acquires (§2.5). A name that has a candidate — built-in, default or installed — is not affected.
+- `plugin.enable`, `plugin.disable` and `plugin.reload` naming a name with no candidate — no installed entry, no default plugin and no built-in plugin — are refused with `plugin_not_found`, as for an unknown name; when the name is an uninstalled optional plugin's, the message names `plugin.install {source: {optional: "<name>"}}`. That concrete form stays in the message the model-facing `plugin` tool and the log see: the client RPC boundary keeps one static description per code (A.2), so a client learns from `plugin.list` that the item is optional and offers Install. Nothing is installed and the call requests no runtime: installing is always an explicit `plugin.install`, and `enable` turns on what is installed; it never acquires (§2.5). A name that has a candidate — built-in, default or installed — is not affected.
 
 When a content owner itself is turned on (Hooks, for example), PluginManager registers the content of every plugin in use that carries that kind (§3.7).
 
@@ -409,10 +422,10 @@ None to rutis: every loader operation used exists in rutis-loader 0.19.3.
 | `plugin.enable` | `{name, use?}` | `{status?, skipped?, refused?, restartRequired?}` |
 | `plugin.disable` | `{name}` | `{}` |
 | `plugin.reload` | `{name}` | `{status?, skipped?, refused?, restartRequired?}` |
-| `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
+| `plugin.update` | `{id, ref?}` | `{commit?, version?, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
-`status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor`, the services of `Loader::waits`; a row waiting for its runtime names the runtime's connection row, `session-node` or `py`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check`, `dependencies` and `load` through the call's progress sink; `dependencies` is absent when the plugin declares none.
+`status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor`, the services of `Loader::waits`; a row waiting for its runtime names the runtime's connection row, `session-node` or `py`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check`, `dependencies` and `load` through the call's progress sink; `dependencies` is absent when the plugin declares none. A `plugin.update` reply carries `commit` for a Git source and `version` for an `{optional}` one; a local-path plugin has neither.
 
 The client RPC boundary's projection of sources, status errors and content
 refusals, and every reason a refusal can carry, is in A.2.
@@ -506,7 +519,7 @@ shows the generic one.
 17. The shipped version of an installed optional fixture changes between two starts: the second start re-acquires it in the background into a new `<version>+<suffix>` directory, the record and `dir` switch, and the plugin keeps serving from the old copy; both directories exist until the next start, whose cleanup deletes the old one; with a failing dependency install the old copy stays and `plugin.list` shows `update.error` until the next start or `plugin.update <id>` repairs it.
 18. `plugin.update <id>` of an optional fixture at an unchanged version creates a second `<version>+<suffix>` directory and switches the record; the old directory is untouched until the next start's cleanup.
 19. A remove followed in the same process by an install of the same version gets a new `<version>+<suffix>` directory; both exist until the next start, whose cleanup deletes only the one no entry refers to.
-20. `plugin.enable`, `plugin.disable` and `plugin.reload` naming an uninstalled optional fixture are refused with `plugin_not_found`; the message names `plugin.install {source: {optional: "<name>"}}`; nothing is installed and no runtime is requested. A default fixture name with no installed entry can still be disabled and enabled.
+20. `plugin.enable`, `plugin.disable` and `plugin.reload` naming an uninstalled optional fixture are refused with `plugin_not_found`; the message names `plugin.install {source: {optional: "<name>"}}` while the client sees today's static description; nothing is installed and no runtime is requested. A default fixture name with no installed entry can still be disabled and enabled.
 21. The Phase 2 `dim-cli` test deserializes a `plugin.list` response carrying the uninstalled optional fixture's item — `{name, use: null, off: true, locked: false, candidates: [], optional: true}` — into today's `PluginItem`, proving the shape stays decodable.
 22. The TUI `/plugins` panel and the web settings page offer an Install action for an item with `optional: true`, calling `plugin.install {source: {optional: "<name>"}}`; the TUI's toggle on such an item calls `plugin.enable` and shows the refusal from 20; Desktop decodes the same additive fields and needs no change.
 

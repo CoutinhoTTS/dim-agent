@@ -1,6 +1,7 @@
 //! PluginManager (docs/design/plugins/PluginManager.md): `plugins.json`,
 //! the `plugin.*` methods and the loader rows they command.
-use super::session_typescript::{fixture, start, submit, when_served};
+use super::runtime_manager::FixtureNode;
+use super::session_typescript::{fixture, setup, start, submit, when_served};
 use super::*;
 use dim_agent_runtime::testing::chain_events;
 use dim_app_server::{
@@ -149,13 +150,18 @@ fn name_of(dir: &Path) -> String {
     dir.file_name().unwrap().to_string_lossy().into_owned()
 }
 
-/// `<commit>+<16 lowercase hex>`: one acquisition's own directory (§3.2).
+/// `<key>+<16 lowercase hex>`: one acquisition's own directory (§3.2); the
+/// key is a Git commit or an optional plugin's version.
 fn acquisition_name(name: &str) -> bool {
-    let Some((commit, suffix)) = name.split_once('+') else {
+    let Some((key, suffix)) = name.split_once('+') else {
         return false;
     };
-    commit.len() >= 7
-        && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    let commit = key.len() >= 7 && key.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let version = key.split('.').count() == 3
+        && key
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    (commit || version)
         && suffix.len() == 16
         && suffix
             .bytes()
@@ -603,6 +609,776 @@ async fn a_remove_never_requests_a_runtime() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The names in `dir`, sorted.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The default configuration file's content for a test: the two plugin
+/// maps, the locked rows and the fixture runtimes.
+fn defaults_file(plugins: Value, optional: Value) -> Value {
+    json!({
+        "plugins": plugins,
+        "optional": optional,
+        "locked": ["PluginManager", "Rpc", "Transport"],
+        "runtimes": {
+            "node": {"source": "system", "auto": false},
+            "python": {"source": "system", "auto": false},
+            "uv": {"source": "download", "auto": false},
+        },
+    })
+}
+
+/// The plain server on `home`, its default configuration file replaced.
+fn config_with(home: &Path, defaults: Value) -> ServerConfig {
+    let config = config(home);
+    std::fs::write(
+        config.plugin_defaults.as_ref().unwrap(),
+        defaults.to_string(),
+    )
+    .unwrap();
+    config
+}
+
+/// Writes an optional fixture plugin at `<root>/<name>`; `npm` adds the
+/// `dependencies` declaration and the package files its lock needs.
+fn optional_plugin(root: &Path, name: &str, version: &str, npm: bool) -> PathBuf {
+    let dir = root.join(name);
+    std::fs::create_dir_all(dir.join("skills")).unwrap();
+    let mut manifest = json!({
+        "name": name,
+        "version": version,
+        "code": {"entry": "index.ts"},
+        "skills": "skills",
+    });
+    if npm {
+        manifest["dependencies"] = json!("npm");
+        for (file, content) in [
+            (
+                "package.json",
+                json!({"name": name, "version": version,
+                    "dependencies": {"fixture-dep": "file:fixture-dep"}}),
+            ),
+            (
+                "package-lock.json",
+                json!({"name": name, "version": version, "lockfileVersion": 3,
+                    "packages": {"": {"name": name, "version": version,
+                        "dependencies": {"fixture-dep": "file:fixture-dep"}}}}),
+            ),
+        ] {
+            std::fs::write(dir.join(file), content.to_string()).unwrap();
+        }
+    }
+    std::fs::write(dir.join("dim-plugin.json"), manifest.to_string()).unwrap();
+    std::fs::write(dir.join("index.ts"), "export default {};\n").unwrap();
+    std::fs::write(dir.join("skills/one.md"), "one").unwrap();
+    dir
+}
+
+/// §3.2: `plugin.install {source: {optional}}` copies the shipped
+/// directory without `node_modules` into `<version>+<suffix>` and installs
+/// its locked dependencies there; the record becomes version 3 with a
+/// version 2 backup, removing the last optional entry writes version 2
+/// again, and a later optional install replaces the backup with that current
+/// version 2 record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_optional_install_copies_its_directory_and_installs_its_dependencies() {
+    let home = home();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", true);
+    let fixture = FixtureNode::with(
+        "24.21.0",
+        "mkdir -p node_modules/fixture-dep\n\
+         echo 'export default 1' > node_modules/fixture-dep/index.js",
+    );
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        fixture.search_path(),
+    );
+    let version_2 = json!({"version": 2, "installed": [], "names": {}}).to_string();
+    std::fs::write(home.join("plugins.json"), &version_2).unwrap();
+    let shipped_files = entries(&shipped);
+    let manifest_bytes = std::fs::read(shipped.join("dim-plugin.json")).unwrap();
+
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source": {"optional": "ocr-fixture"}}),
+    )
+    .await;
+    assert_ok(&installed);
+    assert_eq!(installed["result"]["id"], "ocr-fixture", "{installed}");
+    assert_eq!(installed["result"]["name"], "ocr-fixture", "{installed}");
+    assert_eq!(installed["result"]["enabled"], true, "{installed}");
+
+    let dir = recorded_dir(&home, "ocr-fixture");
+    assert_eq!(name_of(dir.parent().unwrap()), "ocr-fixture", "{dir:?}");
+    assert!(acquisition_name(&name_of(&dir)), "{dir:?}");
+    assert!(name_of(&dir).starts_with("1.0.0+"), "{dir:?}");
+    assert_eq!(
+        entries(&dir),
+        [
+            "dim-plugin.json",
+            "index.ts",
+            "node_modules",
+            "package-lock.json",
+            "package.json",
+            "skills"
+        ],
+        "{dir:?}"
+    );
+    assert!(
+        dir.join("node_modules/fixture-dep/index.js").is_file(),
+        "{dir:?}"
+    );
+    assert_eq!(
+        entries(&shipped),
+        shipped_files,
+        "the shipped directory is untouched"
+    );
+    assert_eq!(
+        std::fs::read(shipped.join("dim-plugin.json")).unwrap(),
+        manifest_bytes
+    );
+    assert!(
+        !shipped.join("node_modules").exists(),
+        "the copy's dependencies are never installed in place"
+    );
+
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(home.join("plugins.json")).unwrap()).unwrap();
+    assert_eq!(record["version"], 3, "{record}");
+    assert_eq!(
+        record["installed"][0]["source"],
+        json!({"optional": "ocr-fixture"}),
+        "{record}"
+    );
+    assert_eq!(record["installed"][0]["version"], "1.0.0", "{record}");
+    assert_eq!(
+        std::fs::read_to_string(home.join("plugins.json.v2.backup")).unwrap(),
+        version_2,
+        "the first version 3 write keeps the exact version 2 bytes"
+    );
+
+    // §3.6: once installed, the item is a normal one that keeps the marker.
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let item = item(&list, "ocr-fixture");
+    assert_eq!(item["use"], "ocr-fixture", "{list}");
+    assert_eq!(item["off"], false, "{list}");
+    assert_eq!(item["optional"], true, "{list}");
+    assert_eq!(
+        item["candidates"][0]["source"],
+        json!({"optional": "ocr-fixture"}),
+        "{list}"
+    );
+    assert!(item.get("update").is_none(), "{list}");
+
+    // §2.2: removing the last optional entry writes version 2 again.
+    assert_ok(&call(&mut client, "plugin.remove", json!({"id": "ocr-fixture"})).await);
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(home.join("plugins.json")).unwrap()).unwrap();
+    assert_eq!(record["version"], 2, "{record}");
+    assert_eq!(record["installed"], json!([]), "{record}");
+
+    // §2.2: a later version 3 write replaces the backup with the version 2
+    // record current at that moment, so a second optional install works
+    // after the record went back to version 2.
+    let other = plugin_dir(&home.join("src"), "notes");
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"path": other}}),
+        )
+        .await,
+    );
+    let before_second = std::fs::read(home.join("plugins.json")).unwrap();
+    let reinstalled = call(
+        &mut client,
+        "plugin.install",
+        json!({"source": {"optional": "ocr-fixture"}}),
+    )
+    .await;
+    assert_ok(&reinstalled);
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(home.join("plugins.json")).unwrap()).unwrap();
+    assert_eq!(record["version"], 3, "{record}");
+    assert_eq!(
+        std::fs::read(home.join("plugins.json.v2.backup")).unwrap(),
+        before_second,
+        "the version 2 backup follows the last version 2 record"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.2 step 1, A.2: a name the default configuration file does not ship is
+/// `optional_not_found` before anything is acquired; the client sees the
+/// static description and nothing is created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_optional_name_creates_nothing() {
+    let home = home();
+    let config = config_with(&home, defaults_file(json!({}), json!({})));
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let refused = call(
+        &mut client,
+        "plugin.install",
+        json!({"source": {"optional": "missing"}}),
+    )
+    .await;
+    assert_eq!(app_error(&refused), "optional_not_found", "{refused}");
+    assert_eq!(
+        refused["error"]["message"],
+        "This release does not ship that optional plugin; refresh the catalog",
+        "{refused}"
+    );
+    assert!(
+        plugins_entries(&home).is_empty(),
+        "{:?}",
+        plugins_entries(&home)
+    );
+    assert!(!home.join("plugins.json").exists(), "nothing is recorded");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.6: an uninstalled optional plugin has exactly its own item, with no
+/// status; installing it turns the item into a normal one that keeps the
+/// marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_uninstalled_optional_plugin_has_its_own_item() {
+    let home = home();
+    optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", false);
+    let config = config_with(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "ocr-fixture").clone(),
+        json!({
+            "name": "ocr-fixture",
+            "use": null,
+            "off": true,
+            "locked": false,
+            "candidates": [],
+            "optional": true,
+        }),
+        "{list}"
+    );
+
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let installed = item(&list, "ocr-fixture");
+    assert_eq!(installed["use"], "ocr-fixture", "{list}");
+    assert_eq!(installed["off"], false, "{list}");
+    assert_eq!(installed["optional"], true, "{list}");
+    assert_eq!(installed["candidates"][0]["id"], "ocr-fixture", "{list}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.3: `plugin.enable`, `plugin.disable` and `plugin.reload` of an
+/// uninstalled optional name keep answering `plugin_not_found` with today's
+/// client description; nothing is installed and no runtime is requested.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uninstalled_optional_name_is_refused_as_a_missing_plugin() {
+    let home = home();
+    optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", false);
+    let search = home.join("empty-path");
+    std::fs::create_dir_all(&search).unwrap();
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        search.into(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for (method, params) in [
+        ("plugin.enable", json!({"name": "ocr-fixture"})),
+        ("plugin.disable", json!({"name": "ocr-fixture"})),
+        ("plugin.reload", json!({"name": "ocr-fixture"})),
+    ] {
+        let refused = call(&mut client, method, params).await;
+        assert_eq!(
+            app_error(&refused),
+            "plugin_not_found",
+            "{method}: {refused}"
+        );
+        assert_eq!(
+            refused["error"]["message"], "Plugin not found or disabled; refresh the catalog",
+            "{method}: {refused}"
+        );
+    }
+    assert!(!home.join("plugins.json").exists(), "nothing is installed");
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_eq!(listed["result"][0]["status"], "off", "{listed}");
+    assert_eq!(listed["result"][1]["status"], "off", "{listed}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §2.5, acceptance 14: `plugin.install` and `plugin.enable` of a plugin
+/// with code request its runtime and reply `pending` waiting for the
+/// runtime's connection row; a plain start and a reload request nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_install_or_enable_requests_the_runtime_but_a_reload_does_not() {
+    let home = home();
+    let source = plugin_dir(&home.join("src"), "node-tool");
+    std::fs::write(
+        source.join("dim-plugin.json"),
+        json!({"name": "node-tool", "code": {"entry": "index.ts"}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(source.join("index.ts"), "export default {};\n").unwrap();
+    let search = home.join("empty-path");
+    std::fs::create_dir_all(&search).unwrap();
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({})),
+        search.clone().into(),
+    );
+
+    // A plain start requests nothing.
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_eq!(listed["result"][0]["status"], "off", "{listed}");
+    // Installing asks for Node: the plugin row waits for the connection row
+    // while the acquisition runs, and Node no longer reads off.
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source": {"path": source}}),
+    )
+    .await;
+    assert_eq!(installed["result"]["status"], "pending", "{installed}");
+    assert_eq!(
+        installed["result"]["waitingFor"],
+        json!(["session-node"]),
+        "{installed}"
+    );
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_ne!(
+        listed["result"][0]["status"], "off",
+        "install requested the Node runtime: {listed}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // A plain start of the same configuration and a reload request nothing;
+    // enabling asks for Node again.
+    let dir = source.canonicalize().unwrap();
+    std::fs::write(
+        home.join("plugins.json"),
+        json!({
+            "version": 2,
+            "installed": [{
+                "id": "node-tool",
+                "name": "node-tool",
+                "source": {"path": dir},
+                "dir": dir,
+                "kinds": ["code"],
+            }],
+            "names": {"node-tool": {"use": "node-tool"}},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_eq!(
+        listed["result"][0]["status"], "off",
+        "a plain start requests no runtime: {listed}"
+    );
+    let reloaded = call(&mut client, "plugin.reload", json!({"name": "node-tool"})).await;
+    assert_eq!(reloaded["result"]["status"], "pending", "{reloaded}");
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_eq!(
+        listed["result"][0]["status"], "off",
+        "a reload requests no runtime: {listed}"
+    );
+    assert_ok(&call(&mut client, "plugin.enable", json!({"name": "node-tool"})).await);
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_ne!(
+        listed["result"][0]["status"], "off",
+        "enable requested the Node runtime: {listed}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.5: `plugin.update` of an optional plugin at an unchanged version
+/// copies it into a new `<version>+<suffix>` directory and switches the
+/// record; a failing dependency install keeps the old copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_optional_update_draws_its_own_directory_and_keeps_the_old_copy() {
+    let home = home();
+    optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", true);
+    let fixture = FixtureNode::with("24.21.0", "mkdir -p node_modules/fixture-dep");
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        fixture.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    let first = recorded_dir(&home, "ocr-fixture");
+
+    let updated = call(&mut client, "plugin.update", json!({"id": "ocr-fixture"})).await;
+    assert_eq!(updated["result"]["version"], "1.0.0", "{updated}");
+    assert!(updated["result"].get("commit").is_none(), "{updated}");
+    let next = recorded_dir(&home, "ocr-fixture");
+    assert_ne!(first, next, "an update draws its own directory");
+    assert!(acquisition_name(&name_of(&next)), "{next:?}");
+    assert_eq!(copies(&home, "ocr-fixture").len(), 2, "the old copy stays");
+    assert!(next.join("node_modules/fixture-dep").is_dir(), "{next:?}");
+    assert_eq!(record(&home)["installed"][0]["version"], "1.0.0");
+
+    // A failing dependency install keeps the old copy and reports npm's
+    // failure as `dependencies_failed`.
+    fixture.npm("echo refused >&2\nexit 1");
+    let refused = call(&mut client, "plugin.update", json!({"id": "ocr-fixture"})).await;
+    assert_eq!(app_error(&refused), "dependencies_failed", "{refused}");
+    assert_eq!(
+        recorded_dir(&home, "ocr-fixture"),
+        next,
+        "the failure keeps the copy in use"
+    );
+    assert_eq!(copies(&home, "ocr-fixture").len(), 2, "no third copy");
+    assert!(
+        !home.join("plugins/.staging").exists(),
+        "the failed staging directory is gone"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A Git repository holding a `git-notes` skills plugin that declares its
+/// npm dependencies; `lock` writes its `package-lock.json` too.
+fn git_dependency_repo(home: &Path, lock: bool) -> PathBuf {
+    let repo = home.join("repo");
+    std::fs::create_dir_all(repo.join("skills")).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.join("dim-plugin.json"),
+        json!({"name": "git-notes", "skills": "skills", "dependencies": "npm"}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(repo.join("skills/one.md"), "one").unwrap();
+    std::fs::write(
+        repo.join("package.json"),
+        json!({"name": "git-notes", "dependencies": {"fixture-dep": "file:fixture-dep"}})
+            .to_string(),
+    )
+    .unwrap();
+    if lock {
+        std::fs::write(
+            repo.join("package-lock.json"),
+            json!({"name": "git-notes", "lockfileVersion": 3, "packages": {}}).to_string(),
+        )
+        .unwrap();
+    }
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "one"]);
+    repo
+}
+
+/// §3.2 step 3, §3.5: a Git plugin declaring dependencies gets them
+/// installed in its clone before the record changes; a manifest declaring
+/// them without `package-lock.json` is `invalid_manifest`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_git_plugin_installs_its_dependencies_before_the_record_changes() {
+    ssh_stand_in();
+    let home = home();
+    let fixture = FixtureNode::with(
+        "24.21.0",
+        "mkdir -p node_modules/fixture-dep\n\
+         echo 'export default 1' > node_modules/fixture-dep/index.js",
+    );
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({})),
+        fixture.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let repo = git_dependency_repo(&home, true);
+    let url = format!("ssh://fixture{}", repo.display());
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source": {"git": url}}),
+    )
+    .await;
+    assert_ok(&installed);
+    let dir = recorded_dir(&home, "git-notes");
+    assert!(
+        dir.join("node_modules/fixture-dep/index.js").is_file(),
+        "the clone gets its locked dependencies: {dir:?}"
+    );
+    assert!(
+        !repo.join("node_modules").exists(),
+        "the repository is untouched"
+    );
+
+    let unlocked = home.join("unlocked");
+    std::fs::create_dir_all(unlocked.join("skills")).unwrap();
+    git(&unlocked, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        unlocked.join("dim-plugin.json"),
+        json!({"name": "git-unlocked", "skills": "skills", "dependencies": "npm"}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(unlocked.join("skills/one.md"), "one").unwrap();
+    std::fs::write(
+        unlocked.join("package.json"),
+        json!({"name": "git-unlocked"}).to_string(),
+    )
+    .unwrap();
+    git(&unlocked, &["add", "-A"]);
+    git(&unlocked, &["commit", "-qm", "one"]);
+    let url = format!("ssh://fixture{}", unlocked.display());
+    let refused = call(
+        &mut client,
+        "plugin.install",
+        json!({"id": "git-unlocked", "source": {"git": url}}),
+    )
+    .await;
+    assert_eq!(app_error(&refused), "invalid_manifest", "{refused}");
+    assert!(copies(&home, "git-unlocked").is_empty());
+    assert!(
+        record(&home)["installed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["id"] != "git-unlocked")
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §4, §3.2: every file system change for a plugin runs one at a time, and
+/// a copy and its record appear only after the dependency install finishes.
+/// The gated npm holds an install between staging and rename while a remove
+/// of another plugin waits for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_file_system_queue_holds_a_remove_until_the_install_finishes() {
+    let home = home();
+    optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", true);
+    let started = home.join("npm-started");
+    let release = home.join("npm-release");
+    let fixture = FixtureNode::with(
+        "24.21.0",
+        &format!(
+            "touch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\n\
+             mkdir -p node_modules/fixture-dep\necho 'export default 1' > node_modules/fixture-dep/index.js",
+            started.display(),
+            release.display()
+        ),
+    );
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        fixture.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let other = plugin_dir(&home.join("src"), "notes");
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"path": other}}),
+        )
+        .await,
+    );
+
+    let installing = client
+        .send(
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "npm never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // §3.2 step 3 before step 4: the copy is not renamed into place and the
+    // record does not name it while its dependencies are installed.
+    assert!(
+        copies(&home, "ocr-fixture").is_empty(),
+        "{:?}",
+        copies(&home, "ocr-fixture")
+    );
+    assert!(
+        record(&home)["installed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["id"] != "ocr-fixture"),
+        "the record is written after the rename"
+    );
+
+    // The remove of another plugin waits for the install's file system
+    // changes (§4).
+    let removing = client.send("plugin.remove", json!({"id": "notes"})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        record(&home)["installed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "notes"),
+        "the remove ran while the install held the file system queue"
+    );
+    std::fs::write(&release, "").unwrap();
+    assert_ok(&client.response(installing).await);
+    assert_ok(&client.response(removing).await);
+    assert!(
+        recorded_dir(&home, "ocr-fixture")
+            .join("node_modules/fixture-dep/index.js")
+            .is_file()
+    );
+    assert!(
+        record(&home)["installed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["id"] != "notes"),
+        "the remove ran once the install finished"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §2.2: a record below version 3 that holds an `{optional}` source is
+/// refused at startup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_version_2_record_with_an_optional_source_is_refused() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    std::fs::write(
+        home.join("plugins.json"),
+        json!({
+            "version": 2,
+            "installed": [{
+                "id": "ocr-fixture",
+                "name": "ocr-fixture",
+                "source": {"optional": "ocr-fixture"},
+                "dir": home.join("plugins/ocr-fixture/1.0.0+0123456789abcdef"),
+                "kinds": [],
+                "version": "1.0.0",
+            }],
+            "names": {},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (builder, _, _) = setup();
+    match serve(builder, config).await {
+        Ok(_) => panic!("a version 2 record holding an optional source must be refused"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("optional sources require record version 3"),
+            "{error}"
+        ),
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §2.3: an optional plugin's name cannot also be a default plugin's,
+/// and it cannot be a built-in plugin's either; both are startup errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_optional_name_colliding_with_another_map_is_refused() {
+    let home = home();
+    let dir = plugin_dir(&home.join("src"), "web");
+    let mut config = config_with(
+        &home,
+        defaults_file(json!({"web": dir}), json!({"web": "src/web"})),
+    );
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let (builder, _, _) = setup();
+    match serve(builder, config).await {
+        Ok(_) => panic!("a name in both maps must be refused"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("is in both \"plugins\" and \"optional\""),
+            "{error}"
+        ),
+    }
+
+    let second = home.join("second");
+    let mut config = config_with(&second, defaults_file(json!({}), json!({"web": "src/web"})));
+    config.unix_path = Some(second.join("ipc/server.sock"));
+    let (builder, _, _) = setup();
+    match serve(builder, config).await {
+        Ok(_) => panic!("an optional name that is a built-in plugin's must be refused"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("optional plugin web is also a built-in plugin's name"),
+            "{error}"
+        ),
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// §3.2 step 4: a Git acquisition renames into `<id>/<commit>+<16 lowercase
 /// hex>`, drawn for that acquisition; an update draws its own directory
 /// instead of replacing the one in use.
@@ -624,6 +1400,10 @@ async fn a_git_acquisition_gets_its_own_suffixed_directory() {
     let second = second_commit(&repo);
     let updated = call(&mut client, "plugin.update", json!({"id":"git-notes"})).await;
     assert_eq!(updated["result"]["commit"], second.as_str(), "{updated}");
+    assert!(
+        updated["result"].get("version").is_none(),
+        "a Git update's reply is unchanged: {updated}"
+    );
     let next = recorded_dir(&home, "git-notes");
     assert_ne!(first, next, "an update draws its own directory");
     assert!(acquisition_name(&name_of(&next)), "{next:?}");
@@ -984,10 +1764,13 @@ async fn plugin_tool_runs_plugin_commands() {
         .join("../../runtime/plugins/plugin-authoring")
         .canonicalize()
         .unwrap();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", false);
     std::fs::write(
         config.plugin_defaults.as_ref().unwrap(),
-        json!({"plugins": {"plugin-authoring": authoring}, "locked": ["PluginManager", "Rpc", "Transport"]})
-            .to_string(),
+        json!({"plugins": {"plugin-authoring": authoring},
+            "optional": {"ocr-fixture": shipped},
+            "locked": ["PluginManager", "Rpc", "Transport"]})
+        .to_string(),
     )
     .unwrap();
     config.unix_path = Some(home.join("ipc/server.sock"));
@@ -1026,6 +1809,24 @@ async fn plugin_tool_runs_plugin_commands() {
     );
     let (usage, error) = plugin(&mut client, &server, &session, "install a b").await;
     assert!(error && usage.starts_with("Usage: install"), "{usage}");
+    let (usage, error) = plugin(&mut client, &server, &session, "help install").await;
+    assert!(
+        !error
+            && usage.starts_with("Usage: install <path|git-url>")
+            && usage.contains("| install --optional <name> [--id ID] [--no-enable]"),
+        "{usage}"
+    );
+    let (refused, error) =
+        plugin(&mut client, &server, &session, "install --optional missing").await;
+    assert!(
+        error && refused.starts_with("optional_not_found:"),
+        "{refused}"
+    );
+    let (refused, error) = plugin(&mut client, &server, &session, "enable ocr-fixture").await;
+    assert!(
+        error && refused.contains(r#"plugin.install {source: {optional: "ocr-fixture"}}"#),
+        "{refused}"
+    );
     let (refused, error) =
         plugin(&mut client, &server, &session, r"install C:\work\my-plugin").await;
     assert!(
