@@ -11,6 +11,7 @@
 | [#1294](https://github.com/arcships/dim/issues/1294) Leaf runtime | §4.2 |
 | [#1293](https://github.com/arcships/dim/issues/1293) Rust leaf host | §4.2 |
 | [#1289](https://github.com/arcships/dim/issues/1289) Shape policy | §4.8 |
+| [#1300](https://github.com/arcships/dim/issues/1300) Shape inventory | §4.7、§4.9 |
 | [#1292](https://github.com/arcships/dim/issues/1292) Data faces | §4.7、§4.9 |
 | [#1296](https://github.com/arcships/dim/issues/1296) Resource leaf | §4.6 |
 | [#1295](https://github.com/arcships/dim/issues/1295) execHost | §3.1、§3.2 |
