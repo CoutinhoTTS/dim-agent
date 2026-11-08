@@ -65,6 +65,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 pub use task::{TaskRecord, TaskState};
 use tokio_util::sync::CancellationToken;
 
@@ -76,19 +77,44 @@ pub(crate) struct HostTargetSpec {
     pub provider_id: &'static str,
     pub model_id: &'static str,
 }
-/// The host targets this build runs, beside the catalog they serve.
-pub(crate) const HOST_TARGETS: &[HostTargetSpec] = &[HostTargetSpec {
+/// The build's own OCR target.
+pub(crate) const APPLE_VISION_TARGET: HostTargetSpec = HostTargetSpec {
     category: "ocr",
     operation: "recognize",
     provider_id: dim_ocr::APPLE_VISION_PROVIDER,
     model_id: dim_ocr::APPLE_VISION_MODEL,
-}];
+};
+/// The OCR target a plugin supplies through `ocrHelper` (A.2.1).
+pub(crate) const PLUGIN_OCR_TARGET: HostTargetSpec = HostTargetSpec {
+    category: "ocr",
+    operation: "recognize",
+    provider_id: dim_ocr::PLUGIN_PROVIDER,
+    model_id: dim_ocr::PLUGIN_MODEL,
+};
+/// The host targets this build runs, beside the catalog they serve.
+pub(crate) const HOST_TARGETS: &[HostTargetSpec] = &[APPLE_VISION_TARGET, PLUGIN_OCR_TARGET];
 
-/// The host target an operation runs, if this build runs it itself.
-pub(crate) fn host_target(category: &str, operation: &str) -> Option<&'static HostTargetSpec> {
-    HOST_TARGETS
+/// The host targets an operation runs, if this build runs it itself.
+pub(crate) fn host_target<'a>(
+    category: &'a str,
+    operation: &'a str,
+) -> Option<impl Iterator<Item = &'static HostTargetSpec> + 'a> {
+    let mut targets = HOST_TARGETS
         .iter()
-        .find(|target| target.category == category && target.operation == operation)
+        .filter(move |target| target.category == category && target.operation == operation)
+        .peekable();
+    targets.peek()?;
+    Some(targets)
+}
+
+/// The host target `model` names for this operation, if any.
+pub(crate) fn host_target_for(
+    category: &str,
+    operation: &str,
+    model: &ModelId,
+) -> Option<&'static HostTargetSpec> {
+    host_target(category, operation)?
+        .find(|target| target.provider_id == model.provider_id && target.model_id == model.model_id)
 }
 
 /// The adapter service Modality reads per call. A missing service is an
@@ -422,11 +448,99 @@ pub(crate) struct Evaluation {
     /// The helper this build starts for its host targets; the product's
     /// installer passes its own executable.
     ocr_helper: Option<PathBuf>,
+    /// The plugin-supplied target as this call read it (A.2.1); a call that
+    /// cannot reach the OCR target carries [`PluginTargetState::Absent`]
+    /// without reading it.
+    pp_ocr: PluginTargetState,
+}
+
+/// The plugin-supplied OCR target as one call reads it: absent (no service,
+/// a failed or null `describe`), present with another contract, or ready.
+pub(crate) enum PluginTargetState {
+    Absent,
+    Outdated,
+    Ready(dim_ocr::HelperDescription),
+}
+impl PluginTargetState {
+    /// Why the target cannot run, or `None` when it is ready.
+    fn reason(&self) -> Option<Reason> {
+        match self {
+            Self::Absent => Some(reason("runtime", "The PP-OCR plugin is not running")),
+            Self::Outdated => Some(reason("runtime", "The PP-OCR plugin needs an update")),
+            Self::Ready(_) => None,
+        }
+    }
+}
+
+/// How long one call waits for `ocrHelper.describe` (A.2.1): the row already
+/// holds the value, so only a stalled row ever reaches it.
+pub(crate) const PLUGIN_DESCRIBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Reads `ocrHelper.describe` once for this call (A.2.1). A missing service,
+/// a failed call, a cancelled call, a reply that misses
+/// [`PLUGIN_DESCRIBE_TIMEOUT`], or a reply naming another target is absent.
+/// The method is `async`, so the call starts without blocking the calling
+/// thread; giving up on the wait drops the reply, which cancels the call and
+/// discards a late answer. The contract is read first, ignoring the rest of
+/// the reply's shape, so a newer contract reports itself outdated whatever its
+/// fields are; only this build's contract is parsed strictly, and a reply that
+/// fails that parse is absent.
+pub(crate) async fn plugin_target_state(
+    ctx: &Ctx,
+    cancel: &CancellationToken,
+) -> PluginTargetState {
+    use rutis_bridge::session::{HostDispatch, Value as ServiceValue, host_key, settle};
+    let Some(service) = ctx.get_at::<dyn HostDispatch>(&host_key("ocrHelper")) else {
+        return PluginTargetState::Absent;
+    };
+    // The declared kind decides how the call would run before it is made
+    // (A.2.1): only `async` never blocks the calling thread. A `describe`
+    // declared with another kind is a package that does not implement this
+    // contract's `async` method, and an update is the honest reason; a
+    // service that declares no `describe` method is not this contract's
+    // service.
+    match service.methods() {
+        Some(methods) => match methods.get("describe").and_then(|kind| kind.as_str()) {
+            Some("async") => {}
+            Some(_) => return PluginTargetState::Outdated,
+            None => return PluginTargetState::Absent,
+        },
+        None => return PluginTargetState::Absent,
+    }
+    let Ok(reply) = service.invoke("describe", ServiceValue::List(Vec::new())) else {
+        return PluginTargetState::Absent;
+    };
+    let value = tokio::select! {
+        _ = cancel.cancelled() => return PluginTargetState::Absent,
+        reply = tokio::time::timeout(PLUGIN_DESCRIBE_TIMEOUT, settle(reply)) => match reply {
+            Ok(Ok(value)) => value,
+            _ => return PluginTargetState::Absent,
+        },
+    };
+    let Ok(json) = value.json() else {
+        return PluginTargetState::Absent;
+    };
+    if json.is_null() {
+        return PluginTargetState::Absent;
+    }
+    let version = match serde_json::from_value::<dim_ocr::HelperVersion>(json.clone()) {
+        Ok(version) if version.target.names_plugin_target() => version,
+        _ => return PluginTargetState::Absent,
+    };
+    if version.contract != dim_ocr::HELPER_CONTRACT {
+        return PluginTargetState::Outdated;
+    }
+    match serde_json::from_value::<dim_ocr::HelperDescription>(json) {
+        Ok(description) if description.names_plugin_target() => {
+            PluginTargetState::Ready(description)
+        }
+        _ => PluginTargetState::Absent,
+    }
 }
 impl Evaluation {
-    /// Why a host target cannot run here, or `None` when it can (decision 4):
-    /// `platform` for a host without Apple Vision, `build` for a build that
-    /// starts no helper or holds no host platform.
+    /// Why the build's own host target cannot run here, or `None` when it can
+    /// (decision 4): `platform` for a host without Apple Vision, `build` for a
+    /// build that starts no helper or holds no host platform.
     pub(crate) fn host_reason(&self) -> Option<Reason> {
         if !dim_ocr::apple_vision_available() {
             return Some(reason(
@@ -441,6 +555,55 @@ impl Evaluation {
             return Some(reason("build", "The host platform is unavailable"));
         }
         None
+    }
+    /// Why the plugin-supplied target cannot run, or `None` when it is ready.
+    pub(crate) fn plugin_reason(&self) -> Option<Reason> {
+        self.pp_ocr.reason()
+    }
+    /// Why `model` cannot run as one of this build's host targets; `None`
+    /// when it is not a host target or is ready.
+    pub(crate) fn host_target_reason(&self, model: &ModelId) -> Option<Reason> {
+        if model.provider_id == dim_ocr::APPLE_VISION_PROVIDER
+            && model.model_id == dim_ocr::APPLE_VISION_MODEL
+        {
+            return self.host_reason();
+        }
+        if model.provider_id == dim_ocr::PLUGIN_PROVIDER && model.model_id == dim_ocr::PLUGIN_MODEL
+        {
+            return self.plugin_reason();
+        }
+        None
+    }
+    /// The options one host operation offers: the build's own target when it
+    /// can run here, and the plugin-supplied target when it is ready or
+    /// present with another contract (then listed unavailable with its
+    /// reason); an absent plugin target is not listed (A.2.1, decision 4).
+    fn host_options(&self) -> Vec<OptionSnapshot> {
+        let mut options = Vec::new();
+        if self.host_reason().is_none() {
+            options.push(OptionSnapshot {
+                provider_id: dim_ocr::APPLE_VISION_PROVIDER.into(),
+                model_id: dim_ocr::APPLE_VISION_MODEL.into(),
+                available: true,
+                reason: None,
+            });
+        }
+        match &self.pp_ocr {
+            PluginTargetState::Ready(_) => options.push(OptionSnapshot {
+                provider_id: dim_ocr::PLUGIN_PROVIDER.into(),
+                model_id: dim_ocr::PLUGIN_MODEL.into(),
+                available: true,
+                reason: None,
+            }),
+            PluginTargetState::Outdated => options.push(OptionSnapshot {
+                provider_id: dim_ocr::PLUGIN_PROVIDER.into(),
+                model_id: dim_ocr::PLUGIN_MODEL.into(),
+                available: false,
+                reason: self.plugin_reason(),
+            }),
+            PluginTargetState::Absent => {}
+        }
+        options
     }
 
     fn adapter_available(&self) -> bool {
@@ -543,20 +706,11 @@ impl Evaluation {
     /// per-model answer and narrows nothing (A.3, D2). The persisted default
     /// follows when it is no longer an option.
     fn options(&self, category: &str, row: &OperationRow) -> Vec<OptionSnapshot> {
-        let mut options: Vec<OptionSnapshot> = if let Some(target) =
-            host_target(category, row.operation)
-        {
+        let mut options: Vec<OptionSnapshot> = if host_target(category, row.operation).is_some() {
             // A host target this platform or build cannot run is absent, never
-            // an unavailable option (decision 4).
-            match self.host_reason() {
-                Some(_) => Vec::new(),
-                None => vec![OptionSnapshot {
-                    provider_id: target.provider_id.into(),
-                    model_id: target.model_id.into(),
-                    available: true,
-                    reason: None,
-                }],
-            }
+            // an unavailable option; a plugin target another contract supplies
+            // is listed with its reason (A.2.1, decision 4).
+            self.host_options()
         } else if is_understand(category, row.operation) {
             self.selectable
                 .iter()
@@ -637,18 +791,18 @@ impl Evaluation {
                 ),
             };
         }
-        if let Some(target) = host_target(category, operation) {
-            if model.provider_id != target.provider_id || model.model_id != target.model_id {
+        if host_target(category, operation).is_some() {
+            if host_target_for(category, operation, model).is_none() {
                 return reason(
                     "configuration",
                     format!("The model does not declare {name}"),
                 );
             }
-            // The configured model is the host target itself: the operation's
-            // own reason is the answer when it cannot run here. An available
-            // target is never refused, so when there is no reason the shared
+            // The configured model is a host target itself: that target's own
+            // reason is the answer when it cannot run here. An available target
+            // is never refused, so when there is no reason the shared
             // vocabulary below answers for an unavailable model.
-            if let Some(reason) = self.host_reason() {
+            if let Some(reason) = self.host_target_reason(model) {
                 return reason;
             }
         }
@@ -703,9 +857,17 @@ impl Evaluation {
                 true => (true, vec![]),
             }
         } else if host_target(category, row.operation).is_some() {
-            match self.host_reason() {
-                Some(reason) => (false, vec![reason]),
-                None => (true, vec![]),
+            if served {
+                (true, vec![])
+            } else {
+                let mut reasons = Vec::new();
+                if let Some(reason) = self.host_reason() {
+                    reasons.push(reason);
+                }
+                if let Some(reason) = self.plugin_reason() {
+                    reasons.push(reason);
+                }
+                (false, reasons)
             }
         } else if category == "image" {
             let detail = if self.has_adapter() {
@@ -841,6 +1003,18 @@ pub(crate) fn host_error(error: HostError) -> RpcError {
     }
 }
 
+/// Whether one call reads the plugin-supplied OCR target (A.2.1): only a call
+/// whose reply or resolution names the OCR category reads `ocrHelper`, so an
+/// image, video or speech request and a realtime session never wait on it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OcrLookup {
+    /// This call cannot reach the OCR target.
+    Skip,
+    /// This call's reply or resolved operation carries the OCR target: read
+    /// `describe` once.
+    Read,
+}
+
 pub(crate) async fn evaluate(
     settings: &SettingsService,
     selectable: &SelectableModelsHost,
@@ -848,6 +1022,7 @@ pub(crate) async fn evaluate(
     ctx: &Ctx,
     ocr_helper: Option<&std::path::Path>,
     cancel: &CancellationToken,
+    ocr: OcrLookup,
 ) -> Result<(String, Evaluation), RpcError> {
     let snapshot = settings
         .read::<ModalitySettings>(SettingsScope::User, cancel)
@@ -884,6 +1059,10 @@ pub(crate) async fn evaluate(
                 .get::<dim_agent_capabilities::host_platform::HostPlatform>()
                 .is_some(),
             ocr_helper: ocr_helper.map(|path| path.to_owned()),
+            pp_ocr: match ocr {
+                OcrLookup::Skip => PluginTargetState::Absent,
+                OcrLookup::Read => plugin_target_state(ctx, cancel).await,
+            },
         },
     ))
 }
@@ -1104,6 +1283,9 @@ impl DynPlugin for ModalityPlugin {
                                     &context,
                                     ocr_helper.as_deref(),
                                     &stopping,
+                                    // The snapshot carries every category,
+                                    // the OCR one included.
+                                    OcrLookup::Read,
                                 )
                                 .await?;
                                 reply(evaluation.snapshot(&revision))
@@ -1123,6 +1305,9 @@ impl DynPlugin for ModalityPlugin {
                                     &context,
                                     ocr_helper.as_deref(),
                                     &stopping,
+                                    // The reply is the same snapshot: every
+                                    // category, the OCR one included.
+                                    OcrLookup::Read,
                                 )
                                 .await?;
                                 if let Some(model) = model {
