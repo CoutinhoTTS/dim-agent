@@ -116,6 +116,7 @@ pub enum Call {
     BranchCreate(BranchCreate),
     BranchEnd(BranchEnd),
     Branches(Branches),
+    BranchGet(BranchRequest),
     AgentCreate(AgentCreate),
     AgentList,
     AgentClose(AgentClose),
@@ -790,7 +791,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 36] = [
+const BUILTIN_METHODS: [&str; 37] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -823,6 +824,7 @@ const BUILTIN_METHODS: [&str; 36] = [
     "session.branch_create",
     "session.branch_end",
     "session.branches",
+    "session.branch.get",
     "agent.create",
     "agent.list",
     "agent.close",
@@ -898,6 +900,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.branch_create" => Call::BranchCreate(params(raw_params)?),
             "session.branch_end" => Call::BranchEnd(params(raw_params)?),
             "session.branches" => Call::Branches(params(raw_params)?),
+            "session.branch.get" => Call::BranchGet(params(raw_params)?),
             "agent.create" => Call::AgentCreate(params(raw_params)?),
             "agent.list" => {
                 let _: Empty = params(raw_params)?;
@@ -1267,6 +1270,7 @@ pub enum Reply {
     InputLookup(InputLookupResult),
     History(crate::tree_protocol::HistoryResult),
     Branches(crate::tree_protocol::BranchesResult),
+    BranchGet(crate::tree_protocol::BranchDirectoryView),
     Keys(crate::tree_protocol::KeysResult),
     BranchCreate(crate::tree_protocol::CreateResult),
     Barrier(crate::tree_protocol::BarrierResult),

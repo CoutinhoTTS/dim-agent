@@ -621,6 +621,9 @@ fn run_terminal(
                             && app.composer.is_empty())) =>
             {
                 if let Some(full) = &mut full {
+                    if key.code == KeyCode::PageUp && full.at_top() {
+                        app.host.send(Command::Earlier);
+                    }
                     match key.code {
                         KeyCode::Home => full.scroll_to_top(),
                         KeyCode::End => full.follow(),
@@ -4169,6 +4172,10 @@ impl App {
             }
             "compact" => {
                 self.host.send(Command::Compact);
+                Outcome::Continue
+            }
+            "earlier" => {
+                self.host.send(Command::Earlier);
                 Outcome::Continue
             }
             "export" => {
@@ -8266,6 +8273,8 @@ mod tests {
                 streaming: false,
                 elapsed_ms: None,
                 tone: None,
+                call_id: None,
+                tool_lookup_done: false,
                 tool_name: tool.map(Into::into),
                 tool_input: tool.map(|_| serde_json::json!({"path": "cache.rs"})),
                 batch: tool.map(|_| "q1".into()),
@@ -8377,6 +8386,7 @@ mod tests {
             error: None,
             waiting_for: Vec::new(),
             refused: Vec::new(),
+            optional: false,
         }])));
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
         app.handle_input(key(KeyCode::Enter));
@@ -8460,6 +8470,7 @@ mod tests {
             error: None,
             waiting_for: vec!["session-node".into()],
             refused: Vec::new(),
+            optional: false,
         };
         app.run_command("runtime", "");
         assert!(matches!(app.prompt, Some(Prompt::Runtime(_))));
@@ -8650,6 +8661,8 @@ mod tests {
                         streaming: false,
                         elapsed_ms: None,
                         tone: None,
+                        call_id: None,
+                        tool_lookup_done: false,
                         tool_name: None,
                         tool_input: None,
                         batch: None,
@@ -9024,6 +9037,8 @@ mod tests {
                 streaming: false,
                 elapsed_ms: None,
                 tone: None,
+                call_id: None,
+                tool_lookup_done: false,
                 tool_name: None,
                 tool_input: None,
                 batch: None,
@@ -9148,6 +9163,8 @@ mod tests {
                     streaming: false,
                     elapsed_ms: None,
                     tone: None,
+                    call_id: None,
+                    tool_lookup_done: false,
                     tool_name: None,
                     tool_input: None,
                     batch: None,
@@ -9186,6 +9203,8 @@ mod tests {
             streaming: false,
             elapsed_ms: None,
             tone: None,
+            call_id: None,
+            tool_lookup_done: false,
             tool_name: None,
             tool_input: None,
             batch: None,
@@ -9213,6 +9232,8 @@ mod tests {
             streaming: false,
             elapsed_ms: None,
             tone: None,
+            call_id: None,
+            tool_lookup_done: false,
             tool_name: None,
             tool_input: None,
             batch: None,

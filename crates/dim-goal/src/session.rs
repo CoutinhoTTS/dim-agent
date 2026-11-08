@@ -1,7 +1,8 @@
 //! Goal's Session part (design §1, A.1, A.2): the `goal_update` tool, the
 //! `session.goal.*` methods and the guide entry. It writes changes by branch
 //! id through the branch part's Owner, which composes their records, and never
-//! reads Goal's state.
+//! reads Goal's state to admit a change. `get` queries the committed Goal fields
+//! independently of the transcript window.
 
 use crate::branch::{Change, Changes};
 use crate::text::{self, OBJECTIVE_LIMIT, SUMMARY_LIMIT};
@@ -92,16 +93,36 @@ impl DynPlugin for GoalSession {
             methods.register(
                 ctx,
                 "session.goal",
-                ["set", "edit", "pause", "resume", "clear"]
+                ["set", "edit", "pause", "resume", "clear", "get"]
                     .into_iter()
                     .map(|name| {
-                        MethodDecl::new(&format!("session.goal.{name}"), true, Interruption::Report)
+                        MethodDecl::new(
+                            &format!("session.goal.{name}"),
+                            name != "get",
+                            Interruption::Report,
+                        )
                     })
                     .collect(),
-                Arc::new(move |call, _cancel, _progress| {
+                Arc::new(move |call, cancel, _progress| {
                     let MethodCall { method, params, .. } = call;
                     let owner = owner.clone();
-                    Box::pin(async move { owner.call(&method, params).await })
+                    Box::pin(async move {
+                        if method == "session.goal.get" {
+                            let id = branch_of(&params)?;
+                            return tokio::select! {
+                                result = async {
+                                    match owner.tree.get(&id) {
+                                        Ok(_) => owner.changes.published(&id).await?,
+                                        Err(dim_agent_runtime::AgentError::BranchEnded(_)) => {},
+                                        Err(error) => return Err(error),
+                                    }
+                                    crate::read::current(&owner.tree, &id, &cancel).await
+                                } => reply(result?),
+                                _ = cancel.cancelled() => Err(RpcError::interrupted()),
+                            };
+                        }
+                        owner.call(&method, params).await
+                    })
                 }),
             )?;
             Ok(Effect::Done)

@@ -246,7 +246,7 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 ### 3.6 移除和列出
 
 - `plugin.remove {id}`：如果有名字在用它，这个名字就不再用它：该名字有内置插件或默认插件时，删掉 `names.<name>.use`，回到那个插件（原来是关闭的仍然关闭）；否则删掉 `names.<name>` 条目，这个名字下不运行任何插件。从 `plugins.json` 中移除条目；它的 Git 或可选目录留在原处，由下次启动的清理删除（`<home>/plugins/<id>/` 至多保留一个进程历史产生的那些副本）。本地目录从不删除。内置插件和默认插件不能移除（`not_removable`）；它们可以被关闭。
-- `plugin.list {}`：每个名字一项，由 `plugins.json`、默认配置文件（`plugins` 与 `optional`）和 `assembly` 行构建，列出每个候选者以及正在使用的那一个；状态在调用时从 `Loader::get` 读取。未安装的可选插件有自己的一项：`{name, use: null, off: true, locked: false, candidates: [], optional: true}`，没有状态，供客户端提供安装。`off` 是报告，不是记录的状态——该名字下不运行任何东西，`plugins.json` 中也没有它的条目（§2.3）——`off: true` 让今天的客户端保持诚实：若为 `off: false`，它们会把它显示为运行中并提供 Disable 与 Reload，而这两者都会失败；`off: true` 则把它显示为惰性，TUI 的开关调用 `plugin.enable`，以 `plugin_not_found` 被拒绝（§3.3）。安装之后，它与其他已安装名字相同。`optional` 标记是插件的来源信息：名字在发行的 `optional` 映射里，或该名字的任一已安装条目的来源是 `{optional}`，它就存在，因此发行之后把名字从映射里去掉，副本仍保留它。`update` 跟随重新获取会作用的那个条目：名字正在使用时取它所用的 `{optional}` 条目，否则取该名字在记录顺序里最后一个已安装的 `{optional}` 条目，因此关闭的名字、或改用其他候选者的名字仍然带着它。已安装可选插件若随发行版本不同，带 `update: {version, error?}`：`version` 是它正迁往的发行版本，`error` 是最近一次重新获取的失败。
+- `plugin.list {}`：每个名字一项，由 `plugins.json`、默认配置文件（`plugins` 与 `optional`）和 `assembly` 行构建，列出每个候选者以及正在使用的那一个；状态在调用时从 `Loader::get` 读取。未安装的可选插件有自己的一项：`{name, use: null, off: true, locked: false, candidates: [], optional: true}`，没有状态，供客户端提供安装。`off` 是报告，不是记录的状态——该名字下不运行任何东西，`plugins.json` 中也没有它的条目（§2.3）——`off: true` 让不认识 `optional` 的客户端保持诚实：若为 `off: false`，它会把这个名字显示为运行中并提供 Disable 与 Reload，而这两者都会失败；`off: true` 则把它显示为惰性。认识 `optional` 的客户端改为提供 Install；TUI 的开关不调用 `plugin.enable`，而是自己显示安装提示，见 §3.3。安装之后，它与其他已安装名字相同。`optional` 标记是插件的来源信息：名字在发行的 `optional` 映射里，或该名字的任一已安装条目的来源是 `{optional}`，它就存在，因此发行之后把名字从映射里去掉，副本仍保留它。`update` 跟随重新获取会作用的那个条目：名字正在使用时取它所用的 `{optional}` 条目，否则取该名字在记录顺序里最后一个已安装的 `{optional}` 条目，因此关闭的名字、或改用其他候选者的名字仍然带着它。已安装可选插件若随发行版本不同，带 `update: {version, error?}`：`version` 是它正迁往的发行版本，`error` 是最近一次重新获取的失败。
 
 ### 3.7 内容登记
 
@@ -462,7 +462,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 19. 在同一进程内先移除、再安装同一版本，会得到新的 `<version>+<suffix>` 目录；两者都留到下次启动，由它的清理只删除没有条目引用的那一个。
 20. `plugin.enable`、`plugin.disable` 与 `plugin.reload` 指名一个未安装的可选 fixture 时，以 `plugin_not_found` 拒绝；消息给出 `plugin.install {source: {optional: "<name>"}}`，而客户端看到的是今天的静态描述；什么都不安装，也不请求运行时。没有已安装条目的默认 fixture 名字仍然可以被关闭和打开。
 21. Phase 2 的 `dim-cli` 测试把包含未安装可选 fixture 项——`{name, use: null, off: true, locked: false, candidates: [], optional: true}`——的 `plugin.list` 回复反序列化为今天的 `PluginItem`，证明形状保持可解码。
-22. TUI 的 `/plugins` 面板与 Web 设置页为 `optional: true` 的项提供 Install 动作，调用 `plugin.install {source: {optional: "<name>"}}`；TUI 对该项的开关调用 `plugin.enable`，显示第 20 项的拒绝；Desktop 解码同样的新增字段，无需改动。
+22. TUI 的 `/plugins` 面板与 Web 设置页为 `optional: true` 的项提供 Install 动作，调用 `plugin.install {source: {optional: "<name>"}}`；TUI 对该项的开关不调用 `plugin.enable`，而是自己显示安装提示；Desktop 解码同样的新增字段，无需改动。
 
 ## 附录 D. 待对齐问题
 

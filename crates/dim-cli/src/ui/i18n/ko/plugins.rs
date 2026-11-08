@@ -4,6 +4,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter on/off · r reload · Ctrl+R refresh · Esc close" => {
             "Enter 켜기/끄기 · r 다시 로드 · Ctrl+R 새로 고침 · Esc 닫기"
         }
+        "i install · Ctrl+R refresh · Esc close" => "i 설치 · Ctrl+R 새로 고침 · Esc 닫기",
+        "Press i to install {name}." => "i 키를 눌러 {name}을(를) 설치하세요.",
+        "not installed" => "설치되지 않음",
         "Locked: Dim needs it, so it cannot be turned off." => {
             "잠김: Dim에 필요하므로 끌 수 없습니다."
         }

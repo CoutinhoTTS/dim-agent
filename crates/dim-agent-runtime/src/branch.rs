@@ -127,10 +127,8 @@ impl Branch {
     pub async fn batch_end(&self, sequence: u64) -> Result<()> {
         self.0.timeline().batch_end(sequence).await
     }
-    /// One bounded read of this branch's facts: the request selects them and
-    /// the reply carries each event's position. The read stops at what is
-    /// published: the branch's own committed tail belongs to the part that
-    /// folds it, through the branch's Timeline.
+    /// Computes the requested properties at a fixed published cutoff.
+    /// Reading committed but unpublished facts through this facade is invalid.
     pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
         if query.include_publishing {
             return Err(AgentError::InvalidInput(

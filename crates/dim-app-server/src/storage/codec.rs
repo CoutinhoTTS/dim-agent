@@ -1,6 +1,6 @@
 use super::sqlite::error;
 use dim_agent_runtime::core::TraceStep;
-use dim_agent_runtime::{Result, StoredEvent, TimelineTrace};
+use dim_agent_runtime::{QueryValue, Result, StoredEvent, TimelineTrace, project_property};
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, Message, ModelRequest, SystemPrompt, ToolDefinition,
 };
@@ -769,6 +769,123 @@ impl Reader {
             Content::System(value) => Ok(value),
             _ => Err(error("request system references wrong content kind")),
         }
+    }
+    /// Projects an event property, resolving only the referenced request fields it uses.
+    /// `None` resumes the same projection after the next node-load allowance begins.
+    pub(super) fn property(
+        &mut self,
+        connection: &Connection,
+        session: &str,
+        wire: &WireEvent,
+        path: &str,
+    ) -> Result<Option<QueryValue>> {
+        let Some(refs) = &wire.refs else {
+            return project_property(&wire.event, path).map(Some);
+        };
+        for field in ["messages", "tools", "system"] {
+            let prefix = format!("data.request.{field}");
+            if let Some(rest) = path.strip_prefix(&prefix)
+                && (rest.is_empty() || rest.starts_with('.') || rest.starts_with('['))
+            {
+                return self.request_property(
+                    connection,
+                    session,
+                    refs,
+                    field,
+                    rest.strip_prefix('.').unwrap_or(rest),
+                );
+            }
+        }
+        if !matches!(path, "data" | "data.request") {
+            return project_property(&wire.event, path).map(Some);
+        }
+        let mut request = wire
+            .event
+            .get("data")
+            .and_then(|data| data.get("request"))
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| error("request references have no request object"))?;
+        for field in ["messages", "tools", "system"] {
+            let Some(value) = self.request_property(connection, session, refs, field, "")? else {
+                return Ok(None);
+            };
+            match value {
+                QueryValue::Missing => {
+                    request.remove(field);
+                }
+                QueryValue::Value { value } => {
+                    request.insert(field.into(), value);
+                }
+                QueryValue::Elements { .. } => {
+                    unreachable!("a whole request field is one JSON value")
+                }
+            }
+        }
+        let value = if path == "data.request" {
+            Value::Object(request)
+        } else {
+            let mut data = wire.event["data"]
+                .as_object()
+                .expect("the request belongs to data")
+                .clone();
+            data.insert("request".into(), Value::Object(request));
+            Value::Object(data)
+        };
+        Ok(Some(QueryValue::Value { value }))
+    }
+
+    fn request_property(
+        &mut self,
+        connection: &Connection,
+        session: &str,
+        refs: &Refs,
+        field: &str,
+        path: &str,
+    ) -> Result<Option<QueryValue>> {
+        if field == "messages" {
+            let messages = match refs {
+                Refs::List(refs) => {
+                    let Some(messages) =
+                        self.messages(connection, session, refs.list.as_ref(), refs.length, true)?
+                    else {
+                        return Ok(None);
+                    };
+                    messages
+                }
+                Refs::Messages(refs) => refs
+                    .messages
+                    .iter()
+                    .map(
+                        |reference| match self.cache.load(connection, session, reference)? {
+                            Content::Message(message) => Ok(message),
+                            _ => Err(error("request message references wrong content kind")),
+                        },
+                    )
+                    .collect::<Result<Vec<_>>>()?,
+            };
+            return project_property(&messages, path).map(Some);
+        }
+        let (tools, system) = match refs {
+            Refs::List(refs) => (&refs.tools, &refs.system),
+            Refs::Messages(refs) => (&refs.tools, &refs.system),
+        };
+        let value = match field {
+            "tools" => match tools {
+                Some(reference) => {
+                    project_property(&self.tools(connection, session, reference)?, path)?
+                }
+                None => QueryValue::Missing,
+            },
+            "system" => match system {
+                Some(reference) => {
+                    project_property(&self.system(connection, session, reference)?, path)?
+                }
+                None => QueryValue::Missing,
+            },
+            _ => unreachable!("request content is messages, tools or system"),
+        };
+        Ok(Some(value))
     }
     /// Rebuilds the request `refs` reference, or `None` when this hold ran
     /// out of node loads. A v16 row resolves each reference through the

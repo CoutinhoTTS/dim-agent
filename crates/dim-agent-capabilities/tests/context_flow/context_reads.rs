@@ -28,6 +28,7 @@ pub(super) struct CountContextReads {
     pub(super) pages: std::sync::Mutex<Vec<(String, u64, usize)>>,
     /// The kinds of every query, in call order.
     pub(super) query_kinds: std::sync::Mutex<Vec<Vec<String>>>,
+    pub(super) property_queries: std::sync::Mutex<Vec<QuerySpec>>,
     /// Fails the given occurrence of a read of this branch and range with a
     /// storage error, counted from when it is set.
     pub(super) fail_range: std::sync::Mutex<Option<ReadOccurrence>>,
@@ -37,6 +38,7 @@ pub(super) struct CountContextReads {
     /// Every page a context fold read, in call order.
     pub(super) context_pages: std::sync::Mutex<Vec<ContextPageRead>>,
     fail_at: AtomicUsize,
+    fail_configuration: std::sync::atomic::AtomicBool,
     reject_at: AtomicUsize,
     pause_at: AtomicUsize,
     fail_snapshot: bool,
@@ -58,6 +60,7 @@ pub(super) struct ContextPageRead {
     pub from: u64,
     pub offset: u64,
     pub last: Option<u64>,
+    pub first: Option<u64>,
 }
 
 tokio::task_local! {
@@ -219,6 +222,77 @@ impl CountContextReads {
     }
 }
 impl TimelineStore for CountContextReads {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        Box::pin(async move {
+            self.property_queries.lock().unwrap().push(query.clone());
+            let mut filters: Vec<_> = query.filter.iter().collect();
+            let mut kinds = Vec::new();
+            while let Some(filter) = filters.pop() {
+                match filter {
+                    QueryFilter::In {
+                        value: QueryOperand::Field { path },
+                        values,
+                    } if path == "kind" => kinds.extend(
+                        values
+                            .iter()
+                            .map(|value| value.as_str().unwrap().to_owned()),
+                    ),
+                    QueryFilter::And { conditions } | QueryFilter::Or { conditions } => {
+                        filters.extend(conditions)
+                    }
+                    _ => {}
+                }
+            }
+            if kinds == ["context/configured"]
+                && self.fail_configuration.swap(false, Ordering::SeqCst)
+            {
+                return Err(AgentError::Storage(
+                    "injected configuration read failure".into(),
+                ));
+            }
+            self.query_kinds.lock().unwrap().push(kinds);
+            for segment in &scope.segments {
+                self.queries
+                    .lock()
+                    .unwrap()
+                    .push((segment.branch_id.clone(), segment.from..=segment.through));
+                self.gate(&segment.branch_id, &(segment.from..=segment.through))
+                    .await?;
+            }
+            let result = self.memory.query(scope, query, page).await?;
+            if matches!(&query.filter, Some(QueryFilter::In { value: QueryOperand::Field { path }, .. }) if path == "id")
+            {
+                self.positions.fetch_add(1, Ordering::SeqCst);
+            }
+            if matches!(&query.filter, Some(QueryFilter::Or { conditions }) if conditions.iter().all(|condition| matches!(condition, QueryFilter::In { value: QueryOperand::Field { path }, .. } if path == "context.render" || path == "context.state")))
+                && let QueryOutput::Events { events } = &result.result
+            {
+                for segment in &scope.segments {
+                    let mut positions = events
+                        .iter()
+                        .filter(|row| row.position.branch_id == segment.branch_id)
+                        .map(|row| row.position.sequence);
+                    let first = positions.next();
+                    let last = positions.next_back().or(first);
+                    self.context_pages.lock().unwrap().push(ContextPageRead {
+                        branch: segment.branch_id.clone(),
+                        from: segment.from,
+                        offset: 0,
+                        first,
+                        last,
+                    });
+                }
+            }
+            Ok(result)
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -381,35 +455,6 @@ impl TimelineStore for CountContextReads {
                 ));
             }
             self.memory.latest_snapshot(key, through, interpreter).await
-        })
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        Box::pin(async move {
-            if query.event_id.is_some() {
-                self.positions.fetch_add(1, Ordering::SeqCst);
-            }
-            self.queries
-                .lock()
-                .unwrap()
-                .push((key.branch_id.clone(), from..=through));
-            self.query_kinds.lock().unwrap().push(query.kinds.clone());
-            self.gate(&key.branch_id, &(from..=through)).await?;
-            let page = self.memory.query(key, query, from, through).await?;
-            if query.flags.len() == 2 {
-                self.context_pages.lock().unwrap().push(ContextPageRead {
-                    branch: key.branch_id.clone(),
-                    from,
-                    offset: query.offset,
-                    last: page.positions.last().map(|position| position.sequence),
-                });
-            }
-            Ok(page)
         })
     }
 }
@@ -1075,7 +1120,8 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
         "the fold begins at the resume event"
     );
     let full = project_context_history(
-        &replay_context(&timeline, timeline.sequence())
+        &dim_agent_capabilities::history::HistoryRenderer::default()
+            .replay_context(&timeline, timeline.sequence())
             .await
             .unwrap(),
     )
@@ -1187,67 +1233,62 @@ impl LoadPrompt for SystemSources {
 }
 
 #[tokio::test]
-async fn configure_context_read_failure_keeps_the_previous_state_and_allows_retry() {
-    for read in [1] {
-        let store = Arc::new(CountContextReads::default());
-        let mut builder = AgentBuilder::new(AgentConfig::default());
-        defaults::mock_hosts(&mut builder);
-        defaults::install_with_prompt(
-            &mut builder,
-            Arc::new(SystemSources(AtomicUsize::new(1))),
-            None,
-        );
-        builder.timeline_store(store.clone());
-        let agent = MinimalHost::start(&builder).await.unwrap();
-        let session = agent
-            .create_session(SessionConfig::default())
+async fn configure_property_read_failure_keeps_the_previous_state_and_allows_retry() {
+    let store = Arc::new(CountContextReads::default());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    defaults::install_with_prompt(
+        &mut builder,
+        Arc::new(SystemSources(AtomicUsize::new(1))),
+        None,
+    );
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let update = ConfigureUpdate {
+        sources: vec![PromptSourceTarget {
+            source: "alpha".into(),
+            scope: PromptScope::Branch {
+                timeline: "main".into(),
+            },
+        }],
+        model: Some(ModelSelection {
+            provider_id: "provider".into(),
+            model_id: "model".into(),
+            capability_snapshot: None,
+            config: None,
+            metadata: None,
+        }),
+    };
+    store.fail_configuration.store(true, Ordering::SeqCst);
+    assert!(matches!(session.configure(update.clone(), "main").await,
+        Err(AgentError::Storage(message)) if message.contains("injected configuration read failure")));
+    assert!(session.failure().is_none());
+    assert!(
+        !chain_events(&session, "main", ..)
             .await
-            .unwrap();
-        let update = ConfigureUpdate {
-            sources: vec![PromptSourceTarget {
-                source: "alpha".into(),
-                scope: PromptScope::Branch {
-                    timeline: "main".into(),
-                },
-            }],
-            model: Some(ModelSelection {
-                provider_id: "provider".into(),
-                model_id: "model".into(),
-                capability_snapshot: None,
-                config: None,
-                metadata: None,
-            }),
-        };
-        store.fail_at.store(
-            store.attempts.load(Ordering::SeqCst) + read,
-            Ordering::SeqCst,
-        );
-        assert!(matches!(session.configure(update.clone(), "main").await,
-            Err(AgentError::Storage(message)) if message.contains("injected context read failure")));
-        assert!(session.failure().is_none());
-        assert!(
-            !chain_events(&session, "main", ..)
-                .await
-                .unwrap()
-                .iter()
-                .any(|event| matches!(
-                    event.kind,
-                    EventKind::PromptChanged(_) | EventKind::ContextConfigured(_)
-                ))
-        );
-        assert_eq!(
-            session.configure(update, "main").await.unwrap(),
-            ConfigureOutcome::Adopted
-        );
-        session
-            .submit("after configure retry".into(), InputMode::Queue, "main")
-            .await
-            .unwrap();
-        session.idle("main").await.unwrap();
-        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event|
-            matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after configure retry"))));
-        agent.close().await.unwrap();
-    }
+            .unwrap()
+            .iter()
+            .any(|event| matches!(
+                event.kind,
+                EventKind::PromptChanged(_) | EventKind::ContextConfigured(_)
+            ))
+    );
+    assert_eq!(
+        session.configure(update, "main").await.unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    session
+        .submit("after configure retry".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event|
+        matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after configure retry"))));
+    agent.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1749,11 +1790,8 @@ async fn a_below_threshold_preparation_reads_no_growing_turn_order() {
     agent.close().await.unwrap();
 }
 
-/// An ancestor's pages cost the page: each begins at the event the previous
-/// one ended at, read by id, and never re-selects the prefix with a growing
-/// skip. The fold's projection is the one the full render gives.
 #[tokio::test]
-async fn an_ancestor_fold_continues_from_the_event_its_page_ended_at() {
+async fn an_ancestor_fold_continues_without_duplicate_events_at_a_fixed_cutoff() {
     let store = Arc::new(CountContextReads::default());
     store
         .create_session("fold", &SessionConfig::default())
@@ -1838,7 +1876,7 @@ async fn an_ancestor_fold_continues_from_the_event_its_page_ended_at() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|page| page.branch == "main")
+        .filter(|page| page.branch == "main" && page.first.is_some())
         .cloned()
         .collect();
     assert!(
@@ -1855,10 +1893,13 @@ async fn an_ancestor_fold_continues_from_the_event_its_page_ended_at() {
         "the first ancestor page begins at the branch's first fact: {pages:?}"
     );
     for pair in pages.windows(2) {
+        assert!(
+            pair[1].first > pair[0].last,
+            "continued pages do not return events from the preceding page: {pages:?}"
+        );
         assert_eq!(
-            Some(pair[1].from),
-            pair[0].last,
-            "an ancestor page begins at the event the previous one ended at: {pages:?}"
+            pair[1].from, pair[0].from,
+            "continuation preserves the read scope"
         );
     }
     dim_agent_runtime::core::close_timeline(&child)
@@ -1912,7 +1953,10 @@ async fn a_streamed_context_resumes_at_the_event_its_checkpoint_names() {
     let fact = append(completed(&cut.id, "summary", through, vec![]));
     let saved = renderer
         .snapshot(
-            &replay_context(&timeline, through).await.unwrap(),
+            &dim_agent_capabilities::history::HistoryRenderer::default()
+                .replay_context(&timeline, through)
+                .await
+                .unwrap(),
             &cut.id,
             &fact,
         )
@@ -2068,7 +2112,10 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
         end.sequence,
     ] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &replay_context(&timeline, at).await.unwrap(),
+            &dim_agent_capabilities::history::HistoryRenderer::default()
+                .replay_context(&timeline, at)
+                .await
+                .unwrap(),
         );
         let actual = dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
             .await
@@ -2201,7 +2248,10 @@ async fn a_malformed_compaction_cut_replays_the_segment_and_keeps_the_verdict() 
 
     for at in [open.sequence + 1, turn.sequence] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &replay_context(&timeline, at).await.unwrap(),
+            &dim_agent_capabilities::history::HistoryRenderer::default()
+                .replay_context(&timeline, at)
+                .await
+                .unwrap(),
         );
         assert!(
             expected.is_err(),

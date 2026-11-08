@@ -35,11 +35,21 @@ fn opened_with_methods(wire: &mut Wire, features: &[&str], history: Vec<Value>, 
         &page,
         json!({"events":history,"through":8,"nextAfter":8,"done":true}),
     );
-    for _ in 0..2 {
+    wire.2 = false;
+    let (mut startup, mut owners) = (0, 0);
+    while startup < 2 || owners < 3 {
         let request = wire.read_any();
         match request["method"].as_str() {
-            Some("account.providers") => wire.reply(&request, json!([])),
+            Some("account.providers") => {
+                wire.reply(&request, json!([]));
+                startup += 1;
+            }
+            Some("session.input.pending" | "session.exec.pending" | "session.turn.get") => {
+                assert!(wire.empty_state(&request));
+                owners += 1;
+            }
             Some("session.context.usage") => {
+                startup += 1;
                 wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                     "code":-32601,"message":"Unknown method",
                     "data":{"appError":"unknown_method"}}}));
@@ -47,18 +57,30 @@ fn opened_with_methods(wire: &mut Wire, features: &[&str], history: Vec<Value>, 
             method => panic!("unexpected request {method:?}"),
         }
     }
+    wire.2 = true;
 }
 
 /// Answers the Session's method table, listing the suggestion methods when
 /// `listed` and no methods otherwise.
 fn methods(wire: &mut Wire, listed: bool) {
     let request = wire.read("session.methods");
-    let methods = if listed {
-        json!([{"name":"session.suggestion.request"},{"name":"session.suggestion.respond"}])
+    let mut methods = if listed {
+        json!([{"name":"session.suggestion.request","mutating":true},{"name":"session.suggestion.respond","mutating":true}])
     } else {
         json!([])
     };
+    for name in [
+        "session.input.pending",
+        "session.exec.pending",
+        "session.turn.get",
+    ] {
+        methods
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":name,"mutating":false}));
+    }
     wire.reply(&request, json!({"methods":methods}));
+    wire.2 = true;
 }
 
 /// A turn that ended `Completed` on `main`.
@@ -201,24 +223,40 @@ fn a_pending_question_keeps_the_interface_from_asking() {
     daemon.join().unwrap();
 }
 
-/// The goal of `main`, as a user's change input carries it.
-fn goal(sequence: u64, text: &str) -> Value {
-    json!({"id":format!("goal-{sequence}"),"sequence":sequence,"create_at":1,
-    "type":"input","name":"message","data":{"blocks":[
-        {"type":"raw","key":"goal:objective","text":format!(
-            "<dim-goal kind=\"goal\" op=\"set\" branch=\"main\">\nObjective:\n{text}\n\nGoal text.\n</dim-goal>")},
-        {"type":"raw","key":"goal:status","text":
-            "<dim-goal kind=\"status\" status=\"active\" branch=\"main\">\nThe goal for branch main is active.\n</dim-goal>"}
-    ]}})
-}
-
 #[test]
 fn an_active_goal_keeps_the_interface_from_asking() {
     let home = Home::new();
     let (arm, ready) = std::sync::mpsc::channel();
     let (settled, settle) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
-        opened(wire, &[], vec![goal(8, "Make the tests pass")]);
+        wire.hello(&["session.methods"]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let table = wire.read("session.methods");
+        wire.reply(&table, json!({"methods":[
+            {"name":"session.input.pending","mutating":false},
+            {"name":"session.exec.pending","mutating":false},
+            {"name":"session.turn.get","mutating":false},
+            {"name":"session.goal.get","mutating":false},
+            {"name":"session.suggestion.request","mutating":true},
+            {"name":"session.suggestion.respond","mutating":true}
+        ]}));
+        wire.2 = true;
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let (mut startup, mut goal_read) = (0, false);
+        while startup < 2 || !goal_read {
+            let request = wire.read_any();
+            match request["method"].as_str().unwrap() {
+                "account.providers" => { wire.reply(&request, json!([])); startup += 1; },
+                "session.context.usage" => { startup += 1; wire.reply(&request, json!({"contextWindow":256000.0,"outputTokens":32000.0,"thresholdTokens":200000.0,"estimatedInputTokens":1849.0,"baselineSource":"estimate"})); },
+                "session.goal.get" => {
+                    wire.reply(&request, json!({"branchId":"main","through":8,"goal":{"objective":"Make the tests pass","status":{"kind":"active"},"evaluator":false}}));
+                    goal_read = true;
+                }
+                method => panic!("unexpected {method}"),
+            }
+        }
         ready.recv_timeout(PATIENCE).unwrap();
         completed(wire, "turn-1");
         wire.quiet(Duration::from_millis(300));

@@ -55,13 +55,12 @@ export const part = definePlugin({
           const page = await timeline.query({
             scope: 'branch',
             include_publishing: true,
-            from_sequence: 1n,
-            order_by: 'sequence',
-            direction: 'ascending',
-            limit: through,
-            offset: 0n,
+            through: through,
+            query: { select: { kind: 'events' } },
+            page: { limit: through },
           })
-          for (const event of page.events) await step(event, false)
+          if (page.result.kind !== 'events') throw new Error('expected event rows')
+          for (const { event } of page.result.events) await step(event, false)
         }
         return through
       },

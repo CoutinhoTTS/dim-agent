@@ -4,6 +4,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter on/off · r reload · Ctrl+R refresh · Esc close" => {
             "Enter activar/desactivar · r recargar · Ctrl+R actualizar · Esc cerrar"
         }
+        "i install · Ctrl+R refresh · Esc close" => "i instalar · Ctrl+R actualizar · Esc cerrar",
+        "Press i to install {name}." => "Pulsa i para instalar {name}.",
+        "not installed" => "no instalado",
         "Locked: Dim needs it, so it cannot be turned off." => {
             "Bloqueado: Dim lo necesita, así que no se puede desactivar."
         }

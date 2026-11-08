@@ -7,8 +7,8 @@ use crate::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    Branch, Names, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPredicate, TimelineQueryScope,
+    Branch, Names, QueryFilter, QueryOperand, QueryOutput, QueryPage, QuerySelect, QuerySpec,
+    QueryValue, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -89,43 +89,92 @@ async fn compact(branch: &Branch, cancel: &CancellationToken) -> Result<Value, R
                 .query(TimelineQuery {
                     scope: TimelineQueryScope::Branch,
                     include_publishing: false,
-                    from_event: None,
-                    from_sequence: Some(after + 1),
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Ascending,
-                    kinds: vec!["context/compaction".into()],
-                    flags: Vec::new(),
-                    event_id: None,
-                    predicate: Some(TimelineQueryPredicate {
-                        path: "command".into(),
-                        value: json!(command),
+                    from: Some(TimelinePosition {
+                        branch_id: branch.id().into(),
+                        sequence: after + 1,
                     }),
-                    limit: NonZeroU64::MIN,
-                    offset: 0,
+                    through: Some(head),
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: vec!["context/compaction".into()],
+                                },
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "data.command".into(),
+                                    },
+                                    values: vec![json!(command)],
+                                },
+                            ],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: vec![
+                                "position.sequence".into(),
+                                "data.status".into(),
+                                "data.reason".into(),
+                                "data.error".into(),
+                            ],
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: NonZeroU64::MIN,
+                        after: None,
+                    }),
                 })
-                .await?
-                .events
-                .into_iter()
-                .next();
-            if let Some(event) = result {
-                let EventKind::ContextCompaction(data) = &event.kind else {
-                    unreachable!("matched a compaction")
+                .await?;
+            let QueryOutput::Rows { rows } = result.result else {
+                unreachable!("field selection returns rows")
+            };
+            if let Some(row) = rows.into_iter().next() {
+                let [
+                    QueryValue::Value { value: sequence },
+                    QueryValue::Value {
+                        value: Value::String(status),
+                    },
+                    reason,
+                    error,
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("compaction has a sequence and status")
                 };
-                return match &data.outcome {
-                    ContextCompactionResult::Completed { .. } => {
-                        reply(json!({"status": "completed", "sequence": event.sequence}))
-                    }
-                    ContextCompactionResult::Skipped { reason, .. } => {
+                return match status.as_str() {
+                    "completed" => reply(json!({"status": "completed", "sequence": sequence})),
+                    "skipped" => {
+                        let QueryValue::Value { value: reason } = reason else {
+                            unreachable!("skipped compaction has a reason")
+                        };
                         reply(json!({"status": "skipped", "reason": reason}))
                     }
-                    ContextCompactionResult::Failed { error, .. } => {
+                    "failed" => {
+                        let QueryValue::Value {
+                            value: Value::String(error),
+                        } = error
+                        else {
+                            unreachable!("failed compaction has an error")
+                        };
                         Err(RpcError::app(-32000, "compaction_failed", error.clone()))
                     }
-                    ContextCompactionResult::Cancelled { reason } => Err(RpcError::app(
-                        -32000,
-                        "compaction_cancelled",
-                        reason.clone(),
-                    )),
+                    "cancelled" => {
+                        let QueryValue::Value {
+                            value: Value::String(reason),
+                        } = reason
+                        else {
+                            unreachable!("cancelled compaction has a reason")
+                        };
+                        Err(RpcError::app(
+                            -32000,
+                            "compaction_cancelled",
+                            reason.clone(),
+                        ))
+                    }
+                    _ => unreachable!("compaction status follows the event contract"),
                 };
             }
             after = head;

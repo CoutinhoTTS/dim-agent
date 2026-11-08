@@ -142,7 +142,7 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     // The reply is read from the published fork after its build returns, so a copied child's
     // branch/create-failed may already be published; branch/resume at at + 2 is the floor.
     assert!(
-        (at + 2..=at + 2 + children.len() as u64).contains(&reply_sequence),
+        (at + 2..=fork.sequence("main").unwrap()).contains(&reply_sequence),
         "the reply names the fork's main head when it is read: {reply_sequence}"
     );
     let mut copied = vec![];
@@ -543,13 +543,24 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fork_of_a_leader_does_not_stop_the_source_member() {
     let store = Store::new();
-    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut config = store.config();
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
+    let (server, agent) = launch_with_agent(
+        Arc::new(super::collaboration::GateTools(gate.clone())),
+        config,
+    )
+    .await;
     let mut client = Client::new_version(&server, false, 3).await;
     let created = client
         .rpc(
             "session.create",
-            json!({"cwd": std::env::temp_dir(), "tools": ["echo", "wait", "agent"],
-                "permissionPolicy": {"allowedTools": ["echo", "wait", "agent"]}}),
+            json!({"cwd": std::env::temp_dir(), "tools": ["echo", "wait", "agent", "hold"],
+                "permissionPolicy": {"allowedTools": ["echo", "wait", "agent", "hold"]}}),
         )
         .await;
     let lead = forked(&created);
@@ -557,8 +568,7 @@ async fn a_fork_of_a_leader_does_not_stop_the_source_member() {
         .as_str()
         .unwrap()
         .to_owned();
-    let request =
-        json!({"action":"request","agentId":agent_id,"prompt":"tool:wait {\"millis\":1500}"});
+    let request = json!({"action":"request","agentId":agent_id,"prompt":"tool:hold {}"});
     turn(&mut client, &lead, &format!("tool:agent {request}")).await;
     let leader = agent.get_session(&lead).unwrap();
     let events = history(&leader, "main").await;
@@ -609,6 +619,7 @@ async fn a_fork_of_a_leader_does_not_stop_the_source_member() {
         !keys(&history(&member_session, "main").await).contains(&"stop/interrupt"),
         "the fork did not stop the source's member"
     );
+    gate.add_permits(1);
     let mut reported = false;
     for _ in 0..500 {
         let events = history(&leader, "main").await;

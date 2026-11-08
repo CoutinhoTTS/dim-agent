@@ -612,9 +612,14 @@ export default definePlugin({
     }
     await dispatcher.consume('example-counter', ['input/message'], async () => {
       const page = await timeline.query({
-        scope: 'branch', include_publishing: true, direction: 'ascending', kinds: ['input/message'], limit: 1024n, offset: 0n,
+        scope: 'branch', include_publishing: true,
+        query: {
+          filter: { op: 'in', value: { kind: 'field', path: 'kind' }, values: ['input/message'] },
+          select: { kind: 'count' },
+        },
       })
-      page.events.forEach(fold)
+      if (page.result.kind !== 'count') throw new Error('expected input count')
+      count = Number(page.result.count)
       return BigInt(page.through)
     }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })

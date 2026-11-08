@@ -477,9 +477,12 @@ WorkspaceTools 不变。
 - `x` 再 `y` 结束所选线；`main` 上被拒绝。
 - 提问和审批都带线的标签，两条线问同一件事也能分辨（提问显示 `(branch NAME)`，审批显示 `Permission on branch NAME`）。
 - `main` 与一条线之间的消息，在发送方读作已发出（它的 `branch` 工具调用），在接收方读作已收到（`◂ from C`）。
-- 切换显示的线就在一条边界行（`line C`）之下换一份记录，和切换 Session 一样，因为终端的回滚缓冲只追加。一条线的记录从它的事件折叠而来，显示与否都在折叠，所以打开一条线不读历史。
+- 切换显示的线就在一条边界行（`line C`）之下换一份记录，和切换 Session 一样，因为终端的回滚缓冲只追加。发现分支时只保留任务目录和分支历史状态，不保留每条线的完整对话。首次从 `/lines` 或侧边视图打开一条线时，读取并保留它的[有限对话窗口](../../design/clients.md#opening-a-conversation-with-a-bounded-window)，此前发现失败也一样。窗口之外仍可操作的工作通过状态所有者接口恢复。选中线时另行请求显示详情。
 
 **分支目录。** `session.branches {sessionId}`（v3，按与 `session.history` 相同的准入规则，在 `hello.features` 里与其他会话方法一起列出）为每条线回答一条记录：它的身份（`branchId`，有的话还有 `parentBranchId`、`branchPoint` 和 `createEvent`）、按 `TimelineInfo.source` 给出的 `source`、`state`（`open`、`ending` 或 `ended`）、`head`，处于结束中或已结束的线还有 `endEvent`。`main` 排第一，其余按 `branchId` 顺序。回复不分页：它随线的数量增长，而线的数量由 Session 自己的使用决定，不随历史增长。答案归 `TimelineTree`（`directory()`）；`branches()` 列出尚未结束的线（`open` 和 `ending`），供持有活动线的调用方使用。
+
+目录读取不访问历史，显示字段为空或省略。`session.branch.get {sessionId, branchId}`（v3，在 `hello.features` 单独声明）读取一条线的目录记录和显示详情：`purpose` 为创建提示的首行；`cutMessages` 为该分叉点继承的用户输入数，排除截止位置前已删除的输入；`end` 为可用的 `BranchEndData`。main 的前两项为空，没有可读结束事实时 `end` 为空。该读取由 TimelineTree 完成点查与固定前缀计数；未知分支和读取失败在本次详情调用中报错，不阻断目录列举，不写事实，也不重新打开结束的线。CLI 在选中一条线时才读取详情。
+
 
 `head` 有三条规则，决定客户端能用它做什么：
 
@@ -530,7 +533,7 @@ WorkspaceTools 不变。
 新增的公开内容：
 
 - 两种事件；
-- 两个 RPC 方法；
+- 三个 RPC 方法：`session.branch_end`、`session.branches` 和 `session.branch.get`；
 - 两个 TreeCommands 方法：`end(id, source)` 和 `page(id, after, limit)`；
 - `TimelineInfo.source`，由 BranchLine 和 Goal 读取；
 - `branch` 工具的新输入。

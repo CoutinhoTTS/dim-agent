@@ -4,6 +4,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter on/off · r reload · Ctrl+R refresh · Esc close" => {
             "Enter オン/オフ · r 再読み込み · Ctrl+R 更新 · Esc 閉じる"
         }
+        "i install · Ctrl+R refresh · Esc close" => "i インストール · Ctrl+R 更新 · Esc 閉じる",
+        "Press i to install {name}." => "i キーで {name} をインストールします。",
+        "not installed" => "未インストール",
         "Locked: Dim needs it, so it cannot be turned off." => {
             "ロック中：Dim に必要なため、オフにできません。"
         }
