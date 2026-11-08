@@ -47,7 +47,7 @@ impl HostDispatch for ForeignEventHub {
             "publish" => {
                 let request: PublishRequest = request(args)?;
                 Ok(Value::future(async move {
-                    crate::publish::publish(&shared, &caller, request)
+                    crate::publish::publish(shared, &caller, request)
                         .await
                         .map(Into::into)
                         .map_err(bridge_error)
@@ -98,6 +98,6 @@ impl EventHub {
         ctx: &Ctx,
         request: crate::model::PublishRequest,
     ) -> Result<Json, EventHubError> {
-        crate::publish::publish(&self.shared, ctx, request).await
+        crate::publish::publish(self.shared.clone(), ctx, request).await
     }
 }

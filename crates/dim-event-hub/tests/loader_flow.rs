@@ -1,15 +1,15 @@
 //! The flows that need the product loader and a controllable `sessions`
 //! service: the factory rebuild keeps the install's state, a delete racing a
-//! subscribe, a retry after a failed put, a changed guide written before the
-//! next event, and the install's shared delivery budget (design §2.1, §2.4,
-//! §2.5, §3.2, §3.3).
+//! subscribe, a retry after a failed put, a retry while the first append is
+//! paused, a changed guide written before the next event, and the install's
+//! shared delivery budget (design §2.1, §2.4, §2.5, §3.2, §3.3).
 mod support;
 
 use dim_agent_types::InputMode;
 use dim_event_hub::{DeclareRequest, PublishRequest, ToTarget, TypeDeclaration};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
-use support::fixture::{FailingSessionFiles, LoaderFixture};
+use support::fixture::{CountingSessionFiles, FailingSessionFiles, LoaderFixture};
 use support::wait_for;
 
 fn im_declaration() -> DeclareRequest {
@@ -139,6 +139,54 @@ async fn a_retry_after_a_failed_put_answers_repeated() {
         calls,
         "the retry writes nothing"
     );
+}
+
+/// A publish that holds its event lock runs in a task EventHub owns: dropping
+/// the caller while its input is in flight frees neither the lock nor the
+/// write, so a retry with the same id waits for it and answers `repeated` with
+/// one put in all (design §2.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retry_while_the_first_append_is_paused_answers_repeated() {
+    let files = Arc::new(CountingSessionFiles::default());
+    let fixture = LoaderFixture::mount_with_session_files(Some(files.clone())).await;
+    fixture.producer.declare(im_declaration()).await.unwrap();
+    fixture.subscribe("branch", &["im.*"], None).await.unwrap();
+    let gate = fixture.sessions.gate();
+    let mut request = event("huge");
+    request.body = format!("{}\n{}", "x".repeat(6000), "tail");
+
+    // The first publish's put lands, then its input call is held at the gate.
+    let first = {
+        let producer = fixture.producer.clone();
+        let request = request.clone();
+        tokio::spawn(async move { producer.publish(request).await })
+    };
+    wait_for("the first input in flight", || gate.max() >= 1).await;
+
+    // Dropping the caller's future frees no lock: the publish task owns it.
+    first.abort();
+    let _ = first.await;
+
+    let retry = {
+        let producer = fixture.producer.clone();
+        let request = request.clone();
+        tokio::spawn(async move { producer.publish(request).await })
+    };
+    assert!(
+        !retry.is_finished(),
+        "the retry waits for the first publish's lock"
+    );
+    gate.release();
+    let receipt = retry.await.unwrap().unwrap();
+    let delivery = &receipt["deliveries"][0];
+    assert_eq!(delivery["status"], json!("delivered"), "{receipt}");
+    assert_eq!(delivery["repeated"], json!(true), "{receipt}");
+    assert!(delivery.get("truncated").is_none(), "{receipt}");
+    // The subscribe's guide write took `input-1`, so the event's input is
+    // the second the fixture committed.
+    assert_eq!(delivery["inputId"], json!("input-2"), "{receipt}");
+    assert_eq!(delivery["sequence"], json!(2), "{receipt}");
+    assert_eq!(files.puts().len(), 1, "one put for the one event");
 }
 
 /// A redeclared source's new guide is written to a subscribed branch before

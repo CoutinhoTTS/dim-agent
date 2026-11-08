@@ -925,3 +925,72 @@ impl SessionFilesService for FailingSessionFiles {
         Box::pin(async { Err(failed()) })
     }
 }
+
+/// A `sessionFiles` service that records every put and stores nothing: the
+/// retry test counts the one put a body over the limit makes (design §3.2).
+#[derive(Default)]
+pub struct CountingSessionFiles {
+    puts: Mutex<Vec<(String, String)>>,
+}
+
+impl CountingSessionFiles {
+    /// The puts recorded so far, as `(session, name)`, in order.
+    pub fn puts(&self) -> Vec<(String, String)> {
+        self.puts.lock().unwrap().clone()
+    }
+}
+
+impl SessionFilesService for CountingSessionFiles {
+    fn put(
+        &self,
+        session_id: String,
+        name: String,
+        content: Vec<u8>,
+        _: CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<StoredSessionFile, SessionFileError>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.puts
+            .lock()
+            .unwrap()
+            .push((session_id.clone(), name.clone()));
+        let bytes = content.len() as u64;
+        Box::pin(async move {
+            Ok(StoredSessionFile {
+                file_id: format!("file-{session_id}-{name}"),
+                path: PathBuf::from(format!("/{session_id}/{name}")),
+                bytes,
+            })
+        })
+    }
+    fn register(
+        &self,
+        _: String,
+        _: PathBuf,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), SessionFileError>> + Send + '_>,
+    > {
+        Box::pin(async { Ok(()) })
+    }
+    fn owns(
+        &self,
+        _: String,
+        _: PathBuf,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, SessionFileError>> + Send + '_>,
+    > {
+        Box::pin(async { Ok(false) })
+    }
+    fn owned_paths(
+        &self,
+        _: String,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<PathBuf>, SessionFileError>> + Send + '_>,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}

@@ -3,6 +3,7 @@
 //! receipt, and the publish's subscription changes in one transaction after
 //! its deliveries settle.
 use crate::{
+    catalog::Declaration,
     error::{EventHubError, SessionsFailure, TRANSPORT},
     hub::Shared,
     model::{BODY_LIMIT, PREVIEW_BYTES, PublishRequest, Target, validate_publish},
@@ -109,9 +110,11 @@ enum Planned {
     Dispatch(DeliveryJob),
 }
 
-/// Publishes one event for the row that owns `ctx` (design A.2).
+/// Publishes one event for the row that owns `ctx` (design A.2). The
+/// arguments and the caller's hold of the source answer before the task
+/// starts; everything after runs in it.
 pub(crate) async fn publish(
-    shared: &Shared,
+    shared: Arc<Shared>,
     ctx: &Ctx,
     request: PublishRequest,
 ) -> Result<Value, EventHubError> {
@@ -137,6 +140,26 @@ pub(crate) async fn publish(
                 request.source, request.r#type
             ))
         })?;
+    // Once the publish starts it runs to completion in a task EventHub owns:
+    // a caller that drops its reply, or a reload, neither stops it nor frees
+    // the event lock (design §2.4).
+    tokio::spawn(publish_to_completion(
+        shared,
+        request,
+        declaration,
+        declared_mode,
+    ))
+    .await
+    .map_err(|error| EventHubError::transport(format!("the publish task ended: {error}")))?
+}
+
+/// One publish from its argument checks to its receipt (design §2.4).
+async fn publish_to_completion(
+    shared: Arc<Shared>,
+    request: PublishRequest,
+    declaration: Declaration,
+    declared_mode: InputMode,
+) -> Result<Value, EventHubError> {
     let event_id = request
         .id
         .clone()
@@ -150,7 +173,7 @@ pub(crate) async fn publish(
     let truncated = request.body.len() > BODY_LIMIT;
     let guide_digest = digest(&declaration.guide);
     let repeated = if truncated {
-        looked_up(shared, &plans, &submission).await
+        looked_up(&shared, &plans, &submission).await
     } else {
         HashMap::new()
     };
@@ -159,7 +182,7 @@ pub(crate) async fn publish(
         .filter(|plan| !repeated.contains_key(&(plan.session_id.clone(), plan.branch_id.clone())))
         .collect();
     let files = if truncated {
-        overflow_files(shared, &pending, &request.body).await
+        overflow_files(&shared, &pending, &request.body).await
     } else {
         HashMap::new()
     };
@@ -237,8 +260,8 @@ pub(crate) async fn publish(
     let refreshes: Vec<GuideRecord> = refreshes.into_iter().flatten().collect();
     // A Session Agents says is gone takes its subscriptions with it (design
     // §3.4); the notice stays the prompt path.
-    reconcile_closed(shared, &deliveries).await;
-    if let Err(error) = apply_changes(shared, &deliveries, &refreshes).await {
+    reconcile_closed(&shared, &deliveries).await;
+    if let Err(error) = apply_changes(&shared, &deliveries, &refreshes).await {
         // The receipt stands and the in-memory set keeps its old value; the
         // next publish whose outcome changes it writes again (Appendix B).
         tracing::warn!(%error, "EventHub could not record a publish's subscription changes");
