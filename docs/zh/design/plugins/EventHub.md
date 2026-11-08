@@ -45,7 +45,7 @@ flowchart LR
 
 EventHub 是一个内置原生插件，位于新 crate `crates/dim-event-hub`。产品装配像安装 Scheduler 那样安装它，即 `dim_agent_scheduler::install` 的同一位置 `crates/dimcode/src/main.rs:31`，并通过 `AgentBuilder::optional_plugin` 作为可选功能安装 `crates/dim-agent-runtime/src/assembly.rs:300-311`，所以缺少它所需服务的宿主仍能启动并打开 Session。它的插件行名为 `eventhub`，即 PluginManager 使用的行 id，因此 PluginManager 可以像关闭其他内置插件一样关闭它，见 [PluginManager §2](PluginManager.md)。关掉之后，生产方拿不到 `eventHub` 服务，其他一切不变。
 
-进程部件在每次 `apply` 里创建一个子行：通知行，在服务可读之后发出 `eventhub/ready`。它不是 loader 行，也没有自己的行；`ctx.plugin` 给它本代的生命周期，正如 AgentScope 创建它的 `Sessions` 子行(`crates/dim-app-server/src/agents.rs:2153`)，运行时的装配创建它的 `PartMounter`(`crates/dim-agent-runtime/src/assembly.rs:1055`)。ADR 002 D2 不禁止它：它不接线任何其他插件，也不适配任何其他插件的接口。它宣布的是自己父行提供的服务，而生产方按可选方式读取该服务，见 2.1。
+进程部件在每次 `apply` 里创建一个子行：通知行，在服务可读之后发出 `eventhub/ready`。它不是 loader 行，也没有自己的行；`ctx.plugin` 给它本代的生命周期，正如 AgentScope 创建它的 `Sessions` 子行(`crates/dim-app-server/src/agents.rs:2153`)，运行时的装配创建它的 `PartMounter`(`crates/dim-agent-runtime/src/assembly.rs:1055`)。ADR 002 D2 不禁止它：它不接线任何其他插件，也不适配任何其他插件的接口。它宣布的是自己父行提供的服务，而生产方读取该服务：Rust 与 Cordis 行按可选方式读取，`definePlugin` 行通过 inject 读取，见 2.1。
 
 进程部件注入 `pluginFiles`，所以没有订阅文件根目录时它不装载：此时宿主没有 `eventHub` 服务、没有 `eventhub.*` 方法，也没有指南条目。EventHub 不保存内存订阅，因此不会有任何东西被静默丢失。想要 EventHub 的宿主提供它为 Scheduler 已经提供的同一个根目录(`crates/dim-app-server/src/cli.rs:519-522`)。
 
@@ -65,7 +65,9 @@ EventHub 是一个内置原生插件，位于新 crate `crates/dim-event-hub`。
 
 **状态的所有者。** `install` 创建一份实例状态，行的构建函数捕获它，正如 `PluginManagerPlugin` 持有它的 `Arc<State>`(`crates/dim-app-server/src/lib.rs:941-951`)。状态持有目录、Session 锁(3.3)、事件锁(2.4)与投递预算(2.5)。它挺过行的每一次重新 apply——Agents、`pluginFiles`、`managementMethods` 或 `partRegistry` 重载之后，以及 `eventhub` 行被关闭再打开之后——并随进程结束。由此有两个行为，且只陈述一次：关闭再打开 EventHub 保留每一条声明，所以生产方不会再次声明；EventHub 关闭期间，生产方找不到服务，也无法发布。声明只随它的生产方行结束，靠声明时登记的那个 effect 撤回。同一行再次声明会原地替换指南与类型：保留该声明的 token，不再登记第二个 effect，所以生产方可以在每次通知时都声明一次。另一行的来源仍然是 `duplicate_source`，见 A.1。
 
-生产方声明来源时不要求 EventHub 在场。它先登记 `eventhub/ready` 的监听器，再读取服务；只要找到服务就声明，无论是在自己的 `apply` 里还是在收到这条通知时；`publish` 回答 `unknown_source` 时再声明一次。先监听意味着两步之间发出的通知不会被错过；而错过一条通知只会推迟声明，`unknown_source` 的回答会补上它，这正是 [插件合同 §5.3](../plugin-contract.md#53-总线事件) 允许的。`eventhub/ready` 只留一种情形：生产方在进程里 EventHub 的第一次 `apply` 之前就已装载。配合 `unknown_source`，这条通知是这类生产方完成声明的唯一路径。它在每次 `apply` 提供出服务、且该提供可被读取之后发出：一行只在提供方活跃时才能读到另一行的服务，而部件在 `apply` 返回时才变为活跃，所以这条通知来自进程部件在 `apply` 里创建的那个依赖的通知行，rutis 在服务可读的那一刻装载它，见 1、6。
+Rust 部件或 Cordis 行声明来源时不要求 EventHub 在场。它先登记 `eventhub/ready` 的监听器，再读取服务；只要找到服务就声明，无论是在自己的 `apply` 里还是在收到这条通知时；`publish` 回答 `unknown_source` 时再声明一次。先监听意味着两步之间发出的通知不会被错过；而错过一条通知只会推迟声明，`unknown_source` 的回答会补上它，这正是 [插件合同 §5.3](../plugin-contract.md#53-总线事件) 允许的。`eventhub/ready` 只留一种情形：生产方在进程里 EventHub 的第一次 `apply` 之前就已装载。配合 `unknown_source`，这条通知是这类生产方完成声明的唯一路径。它在每次 `apply` 提供出服务、且该提供可被读取之后发出：一行只在提供方活跃时才能读到另一行的服务，而部件在 `apply` 返回时才变为活跃，所以这条通知来自进程部件在 `apply` 里创建的那个依赖的通知行，rutis 在服务可读的那一刻装载它，见 1、6。
+
+用 TypeScript SDK 的 `definePlugin` 写成的行读不到它没有 inject 的名字，所以它 inject `eventHub`。该行只在 EventHub 提供服务期间装载，并随 EventHub 重载。它在自己的 `apply` 里声明，既不需要可选读取，也不需要 `eventhub/ready`。它的声明随它的行结束，和每一条声明一样。
 
 目录不持久化。进程重启后它就是已装载的行重新做出的一组声明，所以未装载的来源没有可订阅的类型，而已存储的订阅比它的生产方活得更久，见 2.2。
 
@@ -135,7 +137,7 @@ GuideRecord {
 
 ### 2.6 被否决的替代方案
 
-**用总线事件代替服务调用。** rutis 总线事件不存储、也没有回复，见 [rutis 用法 §5](../rutis-usage.md#5-事件总线)。在 EventHub 重载或关闭期间发布的事件会无声消失，没有任何回执。[插件契约 §5.3](../plugin-contract.md#53-总线事件) 要求错过一条总线事件只能推迟一个决定、不能改变它，而这里事件本身就是内容。总线能带来的解耦仍然保留：生产方只依赖一个可选名字，EventHub 不依赖任何生产方。
+**用总线事件代替服务调用。** rutis 总线事件不存储、也没有回复，见 [rutis 用法 §5](../rutis-usage.md#5-事件总线)。在 EventHub 重载或关闭期间发布的事件会无声消失，没有任何回执。[插件契约 §5.3](../plugin-contract.md#53-总线事件) 要求错过一条总线事件只能推迟一个决定、不能改变它，而这里事件本身就是内容。总线能带来的解耦仍然保留：生产方只依赖那一个服务名字，EventHub 不依赖任何生产方。
 
 **用清单键代替运行时 `declare`。** 内置 Rust 生产方没有 `dim-plugin.json`，而一条声明路径要同时服务两种语言。来源恰好在其代码装载期间存在，这是清单表达不了的。
 
@@ -257,7 +259,7 @@ sequenceDiagram
 
 EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 id `eventhub:<source>:<eventId>`、`eventhub-guide:<subscriptionId>:<source>`、`eventhub-guide-retire:<subscriptionId>:<source>` 与 `eventhub-guide-refresh:<source>:<uuid>`、存储文件 `eventhub/subscriptions.json`、Session 文件名 `event.txt`，以及总线事件 `eventhub/ready`。
 
-`eventHub` 服务是生产方唯一需要的名字，而生产方只在它存在时读它：Node 里是 `ctx.get`，Rust 里是用进程 key 的 `ctx.get_at`，从不是注入的依赖，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字) 与 A.3。它监听 `eventhub/ready` 来得知何时声明，见 2.1。生产方从不要求 EventHub 在场，EventHub 也不依赖任何生产方。
+`eventHub` 服务是生产方唯一需要的名字。Rust 部件只在它存在时用 `ctx.get_at` 与进程 key 读取，Cordis 行同样用 `ctx.get` 读取，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字) 与 A.3；两者都不 inject 它。用 TypeScript SDK 的 `definePlugin` 写成的行则 inject 它，因为它读不到没有 inject 的名字，见 2.1。EventHub 不依赖任何生产方。
 
 ## 7. 安全
 
@@ -286,7 +288,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 i
 | §1 插件、部件与 Capability 边界 | 没有部件是 Capability：进程部件不折叠任何东西，Session 部件登记一个指南条目和一个工具。App Server 里不放任何业务代码 |
 | ADR 002 D1 作用域跟随所有者 | 目录与订阅跨 Session、比它们活得更久，所以归进程部件。指南条目解释的是一个 Session 各分支都可能携带的标记，所以归 Session 部件。没有分支状态，所以没有分支部件 |
 | ADR 002 D2 不设接线模块 | EventHub 不是接线模块：它拥有业务状态，即订阅和目录，其生命周期跨 Session 与生产方，并且不适配任何其他插件的接口。Scheduler 是进程插件持有状态并向 Session 写输入的先例 |
-| ADR 002 D3 依赖跟随作用域 | EventHub 依赖进程的核心服务，并经 Agents 写输入；生产方读取可选的 `eventHub` 名字。核心中没有任何东西依赖 EventHub，EventHub 的重载或失败只影响它自己的功能 |
+| ADR 002 D3 依赖跟随作用域 | EventHub 依赖进程的核心服务，并经 Agents 写输入；生产方读取那一个 `eventHub` 名字：`definePlugin` 行通过 inject，Rust 与 Cordis 行按可选方式。核心中没有任何东西依赖 EventHub，EventHub 的重载或失败只影响它自己的功能 |
 | ADR 002 D4 结构与业务配置分离 | 行的启用与否归 PluginManager。订阅是 EventHub 自己存储里的业务状态，使用时读取，没有 Settings 来源，也不触发重载；它只能经 EventHub 的接口写入，因为每次变更都必须同时写出指南输入 |
 | ADR 002 D5 合同语言中立 | `eventHub`、`eventhub.*` 与各标记都以名字、作用域、数据方法和 `{code, message}` 错误给出；Rust 写法见附录 F |
 | ADR 008 D2 不写交付状态 | 本文只陈述设计 |
@@ -525,7 +527,7 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 8. 订阅与发布都要求类型已声明 `unknown_type`；另一行的来源是 `duplicate_source`；来源卸载后失去其类型，而已存储的订阅保留。
 9. 删除目标 Session 无论已加载还是未加载，都经 `agent/session-deleted` 移除它的订阅；错过的通知留下一条 `session_closed` 的订阅并显示其失败。
 10. `events` 工具的 `subscribe` 与 `unsubscribe` 以 `persistent_configuration` 准入，`sources` 与 `list` 以 `session` 准入；工具拒绝另一个 Session 的 `subscriptionId`，携带 `dim-event` 标记的请求携带序号 130 的条目及其信任类别、无需回答与回复工具三组句子，见 [面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)。
-11. 未安装 EventHub 时，生产方的可选读取什么也找不到，它不发布，宿主与它的 Session 与今天一样。
+11. 未安装 EventHub 时，生产方的可选读取什么也找不到，inject `eventHub` 的 TypeScript 行不装载，什么也不发布，宿主与它的 Session 与今天一样。
 12. 安装的状态挺过工厂重建：把内置 `eventhub` 行关闭再打开保留每一条声明，生产方只声明一次；关闭再打开之后的发布无需第二次声明即可投递。在 EventHub 第一次 `apply` 之前装载的生产方在 `eventhub/ready` 时声明，它的事件随之到达。
 13. 删除与订阅竞争：订阅持有 Session 锁期间到达的删除，在记录存储之后移除它，该 Session 不留下任何订阅。EventHub 关闭期间被删除的 Session 的已存储订阅，在下一次 `apply` 被移除；已关闭但仍可恢复的 Session 的订阅保留。
 14. put 失败后的重试：第一次发布的预览以 `truncated` 投递；用同一个 `id` 重试回答 `repeated: true`、原来的 id、不含 `truncated`，且不写文件。
@@ -548,9 +550,9 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 
 - **服务。** `EventHub` 是一个 Rust 类型，名字为 `eventHub`，即 `names::name_of`，见 `crates/dim-agent-runtime/src/names.rs:24-53`；它的安装函数在进程上登记该名字，见 `names::register::<EventHub>(builder.catalog_mut(), None)` 与 `crates/dim-agent-runtime/src/names.rs:63-89`，正如 Scheduler 登记自己的名字 `crates/dim-agent-scheduler/src/lib.rs:70-71`。进程部件在 `names.key::<EventHub>()` 上为 Rust 调用方提供它，并在 `host_key("eventHub")` 上为其他语言提供一个 `HostDispatch`，这就是 `guideEntries` 采用的形式，见 `crates/dim-agent-capabilities/src/prompt_guide.rs:376-382`。
 - **身份。** `declare` 与 `publish` 接收调用方的 `ctx`，即 `EventHub::declare(&self, ctx: &Ctx, request)`。dispatch 在 `invoke` 内读取 `rutis_bridge::session::caller_row()` 并使用该行的上下文，与 `ForeignGuideEntries` 相同，见 `crates/dim-agent-capabilities/src/prompt_guide.rs:266-298`；取不到行的调用是 `no_caller_row`。声明登记为调用方上下文的一个 effect，因此随该行结束。
-- **可选读取。** 生产方持有 `Key<EventHub>`，每次调用用 `ctx.get_at(&key)` 读取；EventHub 未安装、Pending 或重载时它回答 `None`，所以依赖不门控任何东西，见 [rutis 用法 A.3](../rutis-usage.md#a3-已定的问题)。同一形式用于读取 `sessionFiles`，即 `Key<SessionFilesHost>`，见 `crates/dim-agent-capabilities/src/host.rs:1002-1038`，以及 `sessions`，即在 `host_key("sessions")` 上的 `Key<dyn HostDispatch>`，见 `crates/dim-agent-scheduler/src/methods.rs:44,56`。
-- **声明通知。** 生产方先监听再读取：`ctx.listen::<dim_event_hub::Ready>()`，即名字为 `eventhub/ready` 的公开 `Event` 类型，然后 `ctx.get_at(&key)`；收到通知时再次读取该 key 并声明，见 2.1。监听器持有一个类型，而不是一个运行中的 EventHub，所以在 EventHub 之前装载的生产方也能听到第一次提供它的那次 `apply`。通知本身由进程部件的一个依赖行发出，而不是在它的 `apply` 里：一行的服务只在部件活跃时才可被其他行读取，而部件在 `apply` 返回时才变为活跃。每次通知都声明不会增加 effect，因为重复声明是原地替换，见 A.1。
+- **可选读取。** Rust 生产方持有 `Key<EventHub>`，每次调用用 `ctx.get_at(&key)` 读取；EventHub 未安装、Pending 或重载时它回答 `None`，所以依赖不门控任何东西，见 [rutis 用法 A.3](../rutis-usage.md#a3-已定的问题)。`definePlugin` 行则 inject 该名字，见 2.1。同一形式用于读取 `sessionFiles`，即 `Key<SessionFilesHost>`，见 `crates/dim-agent-capabilities/src/host.rs:1002-1038`，以及 `sessions`，即在 `host_key("sessions")` 上的 `Key<dyn HostDispatch>`，见 `crates/dim-agent-scheduler/src/methods.rs:44,56`。
+- **声明通知。** Rust 或 Cordis 生产方先监听再读取：`ctx.listen::<dim_event_hub::Ready>()`，即名字为 `eventhub/ready` 的公开 `Event` 类型，然后 `ctx.get_at(&key)`；收到通知时再次读取该 key 并声明，见 2.1。`definePlugin` 行不需要这条通知：它 inject 该名字并在 `apply` 里声明，见 2.1。监听器持有一个类型，而不是一个运行中的 EventHub，所以在 EventHub 之前装载的生产方也能听到第一次提供它的那次 `apply`。通知本身由进程部件的一个依赖行发出，而不是在它的 `apply` 里：一行的服务只在部件活跃时才可被其他行读取，而部件在 `apply` 返回时才变为活跃。每次通知都声明不会增加 effect，因为重复声明是原地替换，见 A.1。
 - **投递。** `sessions.input` 就是在 `Key<dyn HostDispatch>` 上的一次 `invoke("input", json!([args]))`，见 `crates/dim-agent-scheduler/src/engine.rs:611-633`；回复是 `{inputId, sequence}`，错误码见 [session access A.6](../contracts/session-access.md#a6-错误)。
 - **存储。** 订阅文件使用 `PluginFileTransactions`，即 `dim_app_server::plugin_files::PluginFileTransactions`，见 `crates/dim-agent-scheduler/src/runs.rs:7,221-240`。
 - **Session 部件** 注入 `guideEntries` 与 `toolRegistry`，读取 `sessionIdentity` 与 `sessionConfig`，并在 `apply` 中登记条目，与 Scheduler 的部件相同，见 `crates/dim-agent-scheduler/src/session.rs:147-201`。
-- **TypeScript。** `npm/plugin.d.ts` 在 `sessions` 旁边声明这个服务：`EventHub`(`declare` 与 `publish`)、A.1 与 A.2 的请求和回复类型，以及列出附录 C 全部码的 `EventHubErrorThrown`。TypeScript 行用 `ctx.use<EventHub>('eventHub')` 读取服务，并通过它先声明、再发布。
+- **TypeScript。** `npm/plugin.d.ts` 在 `sessions` 旁边声明这个服务：`EventHub`(`declare` 与 `publish`)、A.1 与 A.2 的请求和回复类型，以及列出附录 C 全部码的 `EventHubErrorThrown`。用 `definePlugin` 写成的行 inject `eventHub`，并用 `ctx.use<EventHub>('eventHub')` 读取它，在 `apply` 里声明；原始 Cordis 行则用 `ctx.get('eventHub')` 读取，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字)。
