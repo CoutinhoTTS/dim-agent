@@ -497,6 +497,10 @@
   },
   {
     "from": "xtask",
+    "to": "dim-event-hub"
+  },
+  {
+    "from": "xtask",
     "to": "dim-goal"
   },
   {

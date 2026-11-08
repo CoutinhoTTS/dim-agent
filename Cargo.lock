@@ -5871,6 +5871,7 @@ dependencies = [
  "dim-agent-types",
  "dim-app-server",
  "dim-client",
+ "dim-event-hub",
  "dim-goal",
  "dim-modality",
  "dim-session-title",

@@ -132,6 +132,18 @@
 //!   "description": "Two independent fixes, one of them on a line",
 //!   "message": "Make the failing tests pass.",
 //!   "calls": [{"method": "session.goal.set", "params": {"objective": "Keep the suite green."}}],
+//!   "sources": [{
+//!     "name": "chat",
+//!     "guide": "The team cannot see this conversation; answer through chat_reply.",
+//!     "types": [{"type": "chat.message", "description": "A chat message.", "mode": "turn"}],
+//!     "subscribe": {"types": ["chat.message"]},
+//!     "replyTool": "chat_reply"
+//!   }],
+//!   "events": [{
+//!     "source": "chat", "type": "chat.message", "id": "m-1",
+//!     "title": "The failing test", "body": "What does parse() do with an empty line?",
+//!     "whenToolCall": "read"
+//!   }],
 //!   "steers": [
 //!     {"afterSeconds": 30.0, "text": "Also update the README."},
 //!     {"whenToolCall": "config.py", "text": "DEFAULT_TIMEOUT is 45 now."}
@@ -152,6 +164,28 @@
 //!   Session id into `params.sessionId`; a branch defaults to `main` the
 //!   way the methods treat it. A call that fails fails the run, and the
 //!   error names the method.
+//! - `sources` declares the event producers a scenario runs with and the
+//!   Session's subscription to them. One producer row is installed, only
+//!   when `sources` is present, and it declares every source through the
+//!   `eventHub` service; `types` is that declaration's event types, and
+//!   `guide` is the source's guide. The runner subscribes `main` to
+//!   `subscribe.types` after `calls` and before the message, with the
+//!   declaration done first, so the guide is written as the live
+//!   `eventhub:guide:<name>` block from the first turn. `replyTool` names
+//!   an optional tool the row registers for the scenario's Session: it
+//!   takes `{messageId, text}`, records the call in the run's record and
+//!   answers `sent`. A declaration or a subscription that fails fails the
+//!   run, naming the source.
+//! - `events` publishes each event through the same service: `source`,
+//!   `type`, `id`, `title`, `body`, `attributes` and exactly one trigger,
+//!   `afterSeconds` or `whenToolCall`, under the steers' rule. Each receipt
+//!   goes in the run's record, and a receipt that is not `delivered` — no
+//!   deliveries, or one whose status is not `delivered` — fails the run,
+//!   naming the event. A run does not end while an event is still to be
+//!   published, the same as for a pending steer, and a delivery starts a
+//!   turn unless its mode is `append`. The mode is the subscription's,
+//!   otherwise the event type's declared mode; a delivered receipt carries
+//!   none of its own.
 //! - `message` is the operator's first message, submitted to `main`. A steer
 //!   is one more operator message to `main`, sent when the run reaches
 //!   `afterSeconds` of wall clock or, for `whenToolCall`, when a
@@ -229,23 +263,28 @@ use crate::summary_eval::{
 use dim_agent_capabilities::{
     context_model::{output_allowance, window_facts},
     host::{
-        ModelHost, ModelSelectionHost, ModelStopReason, ProviderConnectionResolver,
-        ResolveContextModel,
+        HostFuture, ModelHost, ModelSelectionHost, ModelStopReason, ProviderConnectionResolver,
+        ResolveContextModel, ToolExecutionContext,
     },
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
-use dim_agent_runtime::AgentBuilder;
+use dim_agent_runtime::{AgentBuilder, Names, PartRegistry, PartScope};
 use dim_agent_types::{
     InputMode, Message, ModelConfig, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt,
+    ToolCall, ToolDefinition, ToolResult, ToolSource,
 };
 use dim_app_server::RunningServer;
 use dim_client::{Client, ConnectionConfig, Message as WireMessage, Server as WireServer};
+use dim_event_hub::{DeclareRequest, EventHub, PublishRequest, TypeDeclaration};
 use futures_util::StreamExt;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -318,6 +357,10 @@ const TEXTS: &[(&str, TextMember)] = &[
     (
         "goal/continuation",
         TextMember::Rust(|overrides, text| overrides.goal_continuation = Some(text)),
+    ),
+    (
+        "eventhub/entry",
+        TextMember::Rust(|overrides, text| overrides.eventhub_entry = Some(text)),
     ),
 ];
 
@@ -642,6 +685,8 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
         judge_calls: run.judge_calls,
         temperature_dropped: run.temperature_dropped,
         decline_retries: run.decline_retries,
+        events: run.events,
+        reply_calls: run.reply_calls,
         probes,
     })
 }
@@ -734,6 +779,8 @@ async fn rejudge_one(
         judge_calls: judging.calls,
         temperature_dropped: Some(judging.temperature_dropped),
         decline_retries: saved.decline_retries,
+        events: saved.events.clone(),
+        reply_calls: saved.reply_calls.clone(),
         probes: judging.probes,
     })
 }
@@ -774,6 +821,14 @@ struct SavedRun {
     /// before the runner recorded it.
     #[serde(default)]
     decline_retries: Option<u32>,
+    /// The events the run published, as the run recorded them; `None` in a
+    /// record written before the runner published any.
+    #[serde(default)]
+    events: Vec<EventRecord>,
+    /// The reply-tool calls the run made; empty in a record written before
+    /// the runner recorded them.
+    #[serde(default)]
+    reply_calls: Vec<ReplyCall>,
     #[serde(default)]
     probes: Vec<SavedProbe>,
 }
@@ -1309,10 +1364,73 @@ struct ScenarioFile {
     /// Session method calls made before the message, in order.
     #[serde(default)]
     calls: Vec<Call>,
+    /// The EventHub sources the runner declares and subscribes the Session
+    /// to before the message.
+    #[serde(default)]
+    sources: Vec<Source>,
+    /// The events the runner publishes while the run is under way.
+    #[serde(default)]
+    events: Vec<EventSpec>,
     #[serde(default)]
     steers: Vec<Steer>,
     budget: Budget,
     probes: Vec<Probe>,
+}
+/// One source a scenario declares through the `eventHub` service and
+/// subscribes its Session's `main` branch to (EventHub design A.1, A.3).
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Source {
+    pub(crate) name: String,
+    /// The source's manual for the model, as the declaration carries it.
+    pub(crate) guide: String,
+    /// The declaration's event types.
+    pub(crate) types: Vec<SourceType>,
+    pub(crate) subscribe: Subscribed,
+    /// The tool name the runner registers for the Session, when the guide
+    /// names one; the tool takes `{messageId, text}` and answers `sent`.
+    #[serde(default)]
+    pub(crate) reply_tool: Option<String>,
+}
+/// One entry of a source's declared types (EventHub design A.1).
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SourceType {
+    pub(crate) r#type: String,
+    #[serde(default)]
+    pub(crate) description: String,
+    pub(crate) mode: InputMode,
+}
+/// The subscription a scenario's source asks for (EventHub design A.3).
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Subscribed {
+    pub(crate) types: Vec<String>,
+    #[serde(default)]
+    pub(crate) mode: Option<InputMode>,
+}
+/// One event the runner publishes, and when: the steers' trigger rule.
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EventSpec {
+    pub(crate) source: String,
+    pub(crate) r#type: String,
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) title: Option<String>,
+    pub(crate) body: String,
+    #[serde(default)]
+    pub(crate) attributes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) after_seconds: Option<f64>,
+    #[serde(default)]
+    pub(crate) when_tool_call: Option<String>,
+    /// The mode the delivery arrives with: the subscription's, otherwise the
+    /// event type's declared mode. It comes from the scenario's declarations,
+    /// not from the receipt, which carries a mode for no delivery
+    /// (EventHub design §3.1).
+    #[serde(skip)]
+    pub(crate) mode: InputMode,
 }
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1370,6 +1488,8 @@ pub(crate) struct Scenario {
     pub(crate) directory: PathBuf,
     pub(crate) message: String,
     pub(crate) calls: Vec<Call>,
+    pub(crate) sources: Vec<Source>,
+    pub(crate) events: Vec<EventSpec>,
     pub(crate) steers: Vec<Steer>,
     pub(crate) budget: Budget,
     probes: Vec<Probe>,
@@ -1412,7 +1532,7 @@ pub(crate) fn read_scenarios(directory: &Path) -> Result<Vec<Scenario>> {
 fn into_scenario(
     id: String,
     directory: PathBuf,
-    raw: ScenarioFile,
+    mut raw: ScenarioFile,
 ) -> std::result::Result<Scenario, String> {
     if raw.budget.turns == 0 {
         return Err("budget.turns must be positive".into());
@@ -1443,6 +1563,80 @@ fn into_scenario(
             return Err(format!("call {}: params must be an object", call.method));
         }
     }
+    if raw.sources.is_empty() && !raw.events.is_empty() {
+        return Err("an event needs the source it comes from declared in sources".into());
+    }
+    let mut names = BTreeSet::new();
+    let mut tools = BTreeSet::new();
+    for source in &raw.sources {
+        if source.name.trim().is_empty() {
+            return Err("a source needs a name".into());
+        }
+        if !names.insert(source.name.clone()) {
+            return Err(format!("source {}: the name is used twice", source.name));
+        }
+        if source.types.is_empty() {
+            return Err(format!("source {}: declare at least one type", source.name));
+        }
+        if source.subscribe.types.is_empty() {
+            return Err(format!(
+                "source {}: subscribe to at least one type",
+                source.name
+            ));
+        }
+        if let Some(tool) = &source.reply_tool {
+            if tool.trim().is_empty() {
+                return Err(format!(
+                    "source {}: the reply tool needs a name",
+                    source.name
+                ));
+            }
+            if !tools.insert(tool.clone()) {
+                return Err(format!(
+                    "source {}: the reply tool {tool} is used twice",
+                    source.name
+                ));
+            }
+        }
+    }
+    for event in &mut raw.events {
+        match (&event.after_seconds, &event.when_tool_call) {
+            (Some(after), None) if *after > 0. => {}
+            (None, Some(trigger)) if !trigger.is_empty() => {}
+            _ => {
+                return Err(format!(
+                    "an event sets exactly one of afterSeconds (positive) and whenToolCall (non-empty): {}",
+                    event.id
+                ));
+            }
+        }
+        if event.id.trim().is_empty() {
+            return Err("an event needs an id".into());
+        }
+        let Some(source) = raw
+            .sources
+            .iter()
+            .find(|source| source.name == event.source)
+        else {
+            return Err(format!(
+                "event {}: source {} is not declared in sources",
+                event.id, event.source
+            ));
+        };
+        let Some(declared) = source
+            .types
+            .iter()
+            .find(|declared| declared.r#type == event.r#type)
+        else {
+            return Err(format!(
+                "event {}: type {} is not declared by source {}",
+                event.id, event.r#type, event.source
+            ));
+        };
+        // The mode the delivery arrives with: the subscription's, otherwise
+        // the event type's declared mode (EventHub design §3.1).
+        event.mode = source.subscribe.mode.unwrap_or(declared.mode);
+    }
     if raw.probes.is_empty() {
         return Err("a scenario needs at least one probe".into());
     }
@@ -1467,6 +1661,8 @@ fn into_scenario(
         directory,
         message: raw.message,
         calls: raw.calls,
+        sources: raw.sources,
+        events: raw.events,
         steers: raw.steers,
         budget: raw.budget,
         probes: raw.probes,
@@ -1506,6 +1702,12 @@ struct RunRecord {
     /// How many declines the runner sent again after `question_not_pending`;
     /// `None` in a record written before the runner recorded it.
     decline_retries: Option<u32>,
+    /// One entry per event the run published, in order: the receipt EventHub
+    /// answered (EventHub design A.2). A receipt that is not `delivered`
+    /// fails the run and is recorded here as it came.
+    events: Vec<EventRecord>,
+    /// One entry per reply-tool call the run's tools recorded, in order.
+    reply_calls: Vec<ReplyCall>,
     probes: Vec<ProbeRecord>,
 }
 impl RunRecord {
@@ -1653,12 +1855,18 @@ async fn run_once(
         node: options.node.clone(),
         js_runtime: options.js_runtime.clone(),
     };
+    let producer = Arc::new(ProducerState::default());
     let server = app_server::serve_home(
         &run_home,
         &workspace,
         options.out.join("command-output"),
         settings.clone(),
-        |builder| observe(builder),
+        |builder| {
+            observe(builder);
+            if !scenario.sources.is_empty() {
+                install_producer(builder, &scenario.sources, producer.clone());
+            }
+        },
     )
     .await?;
     let started = Instant::now();
@@ -1674,6 +1882,7 @@ async fn run_once(
     instrument.judge_window.get_or_insert(limits);
     let finished = match drive_once(
         &server, &settings, &run_home, &workspace, scenario, &model, &judge, limits, cancel,
+        &producer,
     )
     .await
     {
@@ -1707,6 +1916,8 @@ async fn run_once(
         judge_calls: finished.judging.calls,
         temperature_dropped: Some(finished.judging.temperature_dropped),
         decline_retries: Some(driven.decline_retries),
+        events: producer.events(),
+        reply_calls: producer.reply_calls(),
         probes: finished.judging.probes,
     })
 }
@@ -1781,6 +1992,7 @@ async fn drive_once(
     judge: &ModelSelection,
     limits: JudgeWindow,
     cancel: &CancellationToken,
+    producer: &ProducerState,
 ) -> Result<Finished> {
     let socket = settings
         .unix_path
@@ -1801,7 +2013,7 @@ async fn drive_once(
     if settings.defaults.is_some() {
         wait_for_plugins(&mut client).await?;
     }
-    let mut driven = drive(&mut client, scenario, workspace, model).await;
+    let mut driven = drive(&mut client, scenario, workspace, model, producer).await;
     if driven.session.is_empty() {
         return Ok(Finished {
             driven,
@@ -2001,7 +2213,20 @@ async fn drive(
     scenario: &Scenario,
     workspace: &Path,
     model: &ModelSelection,
+    producer: &ProducerState,
 ) -> Driven {
+    if !scenario.sources.is_empty()
+        && let Err(error) = declare_sources(producer, &scenario.sources).await
+    {
+        return Driven {
+            session: String::new(),
+            stop: "error",
+            turns: 0,
+            window: None,
+            decline_retries: 0,
+            error: Some(error),
+        };
+    }
     let created = client
         .rpc(
             "session.create",
@@ -2085,6 +2310,23 @@ async fn drive(
             return driven;
         }
     }
+    for source in &scenario.sources {
+        let mut params = json!({
+            "types": source.subscribe.types.clone(),
+            "target": {"sessionId": session, "branchId": "main"},
+        });
+        if let Some(mode) = source.subscribe.mode {
+            params["mode"] = json!(mode);
+        }
+        if let Err(error) = client.rpc("eventhub.subscribe", params).await {
+            driven.stop = "error";
+            driven.error = Some(format!(
+                "the subscription of {} failed: {error}",
+                source.name
+            ));
+            return driven;
+        }
+    }
     if let Err(error) = submit(client, &session, &scenario.message, None).await {
         driven.stop = "error";
         driven.error = Some(error);
@@ -2099,6 +2341,13 @@ async fn drive(
         .map(|steer| (steer, false))
         .collect();
     let mut last_event = Instant::now();
+    // The events still to publish, and whether each was.
+    let mut events: Vec<(EventSpec, bool)> = scenario
+        .events
+        .iter()
+        .cloned()
+        .map(|event| (event, false))
+        .collect();
     // An input the runner submitted is outstanding until a turn starts for it
     // or the run consumes it; a line that has done neither is not idle.
     let mut awaiting = true;
@@ -2116,6 +2365,19 @@ async fn drive(
                 return driven;
             }
         }
+        match fire_events_due(producer, &mut events, started).await {
+            Ok(published) => {
+                if published {
+                    awaiting = true;
+                    last_event = Instant::now();
+                }
+            }
+            Err(error) => {
+                driven.stop = "error";
+                driven.error = Some(error);
+                return driven;
+            }
+        }
         if let Err(error) =
             retry_declines(client, &session, &mut declines, &mut driven.decline_retries).await
         {
@@ -2123,7 +2385,8 @@ async fn drive(
             driven.error = Some(error);
             return driven;
         }
-        let pending = steers.iter().any(|(_, fired)| !fired);
+        let pending =
+            steers.iter().any(|(_, fired)| !fired) || events.iter().any(|(_, fired)| !fired);
         if started.elapsed().as_secs_f64() >= scenario.budget.seconds {
             driven.stop = "seconds";
             break;
@@ -2143,7 +2406,7 @@ async fn drive(
                 }
             }
         }
-        let wait = wait_time(&steers, started, &scenario.budget);
+        let wait = wait_time(&steers, &events, started, &scenario.budget);
         match tokio::time::timeout(wait, client.next()).await {
             Ok(Ok(WireMessage::Notice { method, params })) => {
                 last_event = Instant::now();
@@ -2182,6 +2445,19 @@ async fn drive(
                         }
                         match fire_triggered(client, &session, &mut steers, &event).await {
                             Ok(submitted) => awaiting |= submitted,
+                            Err(error) => {
+                                driven.stop = "error";
+                                driven.error = Some(error);
+                                return driven;
+                            }
+                        }
+                        match fire_events_triggered(producer, &mut events, &event).await {
+                            Ok(published) => {
+                                if published {
+                                    awaiting = true;
+                                    last_event = Instant::now();
+                                }
+                            }
                             Err(error) => {
                                 driven.stop = "error";
                                 driven.error = Some(error);
@@ -2401,6 +2677,414 @@ async fn decline_once(
     }
 }
 
+/// One reply-tool call the run's tools recorded, in the order they arrived.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReplyCall {
+    pub(crate) tool: String,
+    pub(crate) message_id: String,
+    pub(crate) text: String,
+}
+
+/// One event a run published, and the receipt EventHub answered (EventHub
+/// design A.2).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EventRecord {
+    pub(crate) source: String,
+    pub(crate) r#type: String,
+    pub(crate) id: String,
+    pub(crate) receipt: Value,
+}
+
+/// The scenario producer's state: its row's context and the `eventHub`
+/// service, as its `apply` or an `eventhub/ready` notice last found them,
+/// plus what the run's reply tools and publishes recorded.
+#[derive(Default)]
+pub(crate) struct ProducerState {
+    installed: Mutex<Option<(Ctx, Option<Arc<EventHub>>)>>,
+    reply_calls: Mutex<Vec<ReplyCall>>,
+    events: Mutex<Vec<EventRecord>>,
+}
+
+impl ProducerState {
+    fn install(&self, ctx: Ctx, hub: Option<Arc<EventHub>>) {
+        *self.installed.lock().unwrap() = Some((ctx, hub));
+    }
+    pub(crate) fn hub(&self) -> Option<Arc<EventHub>> {
+        self.installed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|(_, hub)| hub.clone())
+    }
+    fn ctx(&self) -> std::result::Result<Ctx, String> {
+        self.installed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(ctx, _)| ctx.clone())
+            .ok_or_else(|| "the scenario producer row has not applied".to_owned())
+    }
+    async fn declare(&self, request: DeclareRequest) -> std::result::Result<(), String> {
+        let hub = self
+            .hub()
+            .ok_or_else(|| "eventHub is not installed".to_owned())?;
+        hub.declare(&self.ctx()?, request)
+            .await
+            .map_err(|error| format!("{}: {}", error.code, error.message))
+    }
+    /// Publishes one event through the service, records its receipt, and
+    /// fails when the receipt is not `delivered`; answers whether the
+    /// delivery starts a turn (EventHub design §3.1, A.2).
+    async fn publish(&self, event: &EventSpec) -> std::result::Result<bool, String> {
+        let hub = self
+            .hub()
+            .ok_or_else(|| "eventHub is not installed".to_owned())?;
+        let request = PublishRequest {
+            source: event.source.clone(),
+            r#type: event.r#type.clone(),
+            id: Some(event.id.clone()),
+            title: event.title.clone(),
+            body: event.body.clone(),
+            attributes: event.attributes.clone(),
+            to: Vec::new(),
+        };
+        let receipt = hub
+            .publish(&self.ctx()?, request)
+            .await
+            .map_err(|error| format!("event {}: {}: {}", event.id, error.code, error.message))?;
+        self.events.lock().unwrap().push(EventRecord {
+            source: event.source.clone(),
+            r#type: event.r#type.clone(),
+            id: event.id.clone(),
+            receipt: receipt.clone(),
+        });
+        let deliveries = receipt["deliveries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if deliveries.is_empty()
+            || deliveries
+                .iter()
+                .any(|delivery| delivery["status"] != json!("delivered"))
+        {
+            return Err(format!(
+                "event {}: the receipt is not delivered: {receipt}",
+                event.id
+            ));
+        }
+        // A delivered receipt carries no mode (EventHub design §3.1), so the
+        // scenario's own declaration says how the delivery arrives.
+        Ok(starts_turn(event.mode))
+    }
+    pub(crate) fn events(&self) -> Vec<EventRecord> {
+        self.events.lock().unwrap().clone()
+    }
+    pub(crate) fn reply_calls(&self) -> Vec<ReplyCall> {
+        self.reply_calls.lock().unwrap().clone()
+    }
+    fn record_reply(&self, tool: &str, message_id: String, text: String) {
+        self.reply_calls.lock().unwrap().push(ReplyCall {
+            tool: tool.to_owned(),
+            message_id,
+            text,
+        });
+    }
+}
+
+/// Whether a delivery starts a turn: `append` joins the context without one
+/// (EventHub design §3.1).
+fn starts_turn(mode: InputMode) -> bool {
+    mode != InputMode::Append
+}
+
+/// The declaration a scenario's source makes (EventHub design A.1).
+fn declaration(source: &Source) -> DeclareRequest {
+    DeclareRequest {
+        source: source.name.clone(),
+        guide: source.guide.clone(),
+        types: source
+            .types
+            .iter()
+            .map(|declared| TypeDeclaration {
+                r#type: declared.r#type.clone(),
+                description: declared.description.clone(),
+                mode: declared.mode,
+            })
+            .collect(),
+    }
+}
+
+/// Installs the one producer row a scenario runs with: it reads the
+/// `eventHub` service optionally, declares every source, and registers the
+/// sources' reply tools for the Session (EventHub design §2.1’s producer
+/// pattern; the tool registration follows
+/// `crates/dim-agent-scheduler/src/session.rs`).
+pub(crate) fn install_producer(
+    builder: &mut AgentBuilder,
+    sources: &[Source],
+    state: Arc<ProducerState>,
+) {
+    let sources = sources.to_vec();
+    builder.plugin(move |names| {
+        Ok(Box::new(ScenarioProducer::new(
+            names,
+            sources.clone(),
+            state.clone(),
+        )?) as Box<dyn DynPlugin>)
+    });
+}
+
+struct ScenarioProducer {
+    state: Arc<ProducerState>,
+    hub: Key<EventHub>,
+    parts: Key<PartRegistry>,
+    sources: Vec<Source>,
+}
+
+impl ScenarioProducer {
+    fn new(
+        names: &Names<'_>,
+        sources: Vec<Source>,
+        state: Arc<ProducerState>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            state,
+            hub: names.key()?,
+            parts: names.key()?,
+            sources,
+        })
+    }
+}
+
+impl DynPlugin for ScenarioProducer {
+    fn name(&self) -> &str {
+        "ScenarioProducer"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        // The Session part registry gates the row; `eventHub` itself is read
+        // optionally with `get_at` and heard through `eventhub/ready`
+        // (EventHub design §2.1).
+        vec![self.parts.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let state = self.state.clone();
+            let key = self.hub.clone();
+            // The notice first, then the read: a service provided between the
+            // two steps is not missed (EventHub design §2.1).
+            {
+                let state = state.clone();
+                let key = key.clone();
+                let listen_ctx = ctx.clone();
+                ctx.listen::<dim_event_hub::Ready>().on(move |_, _| {
+                    let state = state.clone();
+                    let key = key.clone();
+                    let ctx = listen_ctx.clone();
+                    async move {
+                        let hub = ctx.get_at(&key);
+                        state.install(ctx.clone(), hub);
+                        Ok(None)
+                    }
+                })?;
+            }
+            let hub = ctx.get_at(&key);
+            state.install(ctx.clone(), hub);
+            let tools: Vec<String> = self
+                .sources
+                .iter()
+                .filter_map(|source| source.reply_tool.clone())
+                .collect();
+            let reply_state = self.state.clone();
+            ctx.require_at(&self.parts)?.register(
+                ctx,
+                PartScope::Session,
+                "ScenarioProducerSession",
+                move |mount| {
+                    Ok(Some(Box::new(ScenarioReplySession::new(
+                        mount.names,
+                        tools.clone(),
+                        reply_state.clone(),
+                    )?)))
+                },
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The producer's Session part: the reply tools the scenario's sources name.
+struct ScenarioReplySession {
+    tools: Key<ToolRegistry>,
+    tool_names: Vec<String>,
+    state: Arc<ProducerState>,
+}
+
+impl ScenarioReplySession {
+    fn new(
+        names: &Names<'_>,
+        tool_names: Vec<String>,
+        state: Arc<ProducerState>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            tools: names.key()?,
+            tool_names,
+            state,
+        })
+    }
+}
+
+impl DynPlugin for ScenarioReplySession {
+    fn name(&self) -> &str {
+        "ScenarioProducerSession"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tools.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let tools = ctx.require_at(&self.tools)?;
+            for name in &self.tool_names {
+                tools.register(
+                    ctx,
+                    ToolContribution {
+                        definition: reply_definition(name),
+                        handler: Arc::new(ReplyTool {
+                            name: name.clone(),
+                            state: self.state.clone(),
+                        }),
+                    },
+                )?;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The reply tool a scenario's source names: it takes `{messageId, text}`,
+/// records the call in the run's record and answers `sent`.
+struct ReplyTool {
+    name: String,
+    state: Arc<ProducerState>,
+}
+
+impl ToolHandler for ReplyTool {
+    fn execute(
+        &self,
+        call: ToolCall,
+        _context: ToolExecutionContext,
+        _cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async move {
+            let input = Value::Object(call.input);
+            let Some(message_id) = input["messageId"].as_str() else {
+                return Ok(ToolResult::error(format!(
+                    "{}: invalid_params\nmessageId is required",
+                    self.name
+                )));
+            };
+            let Some(text) = input["text"].as_str() else {
+                return Ok(ToolResult::error(format!(
+                    "{}: invalid_params\ntext is required",
+                    self.name
+                )));
+            };
+            self.state
+                .record_reply(&self.name, message_id.to_owned(), text.to_owned());
+            Ok(ToolResult::text("sent"))
+        })
+    }
+}
+
+/// A reply tool's declaration.
+fn reply_definition(name: &str) -> ToolDefinition {
+    let mut tool = definition(
+        name,
+        "Replies to a message from this source, by the message's id.",
+        json!({
+            "type": "object",
+            "required": ["messageId", "text"],
+            "additionalProperties": false,
+            "properties": {
+                "messageId": {"type": "string", "description": "The id attribute of the event message being answered."},
+                "text": {"type": "string", "description": "The reply to send."}
+            }
+        }),
+    );
+    tool.source = ToolSource::Extension;
+    tool
+}
+
+/// Declares every source through the producer row before the Session
+/// subscribes: the subscription checks the catalog, and the service appears
+/// once EventHub applies (EventHub design §2.1, A.1, A.3).
+async fn declare_sources(
+    producer: &ProducerState,
+    sources: &[Source],
+) -> std::result::Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while producer.hub().is_none() {
+        if Instant::now() >= deadline {
+            return Err("the eventHub service is not installed".into());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for source in sources {
+        producer
+            .declare(declaration(source))
+            .await
+            .map_err(|error| format!("source {}: {error}", source.name))?;
+    }
+    Ok(())
+}
+
+/// Publishes the timed events that are due, and whether it published one.
+async fn fire_events_due(
+    producer: &ProducerState,
+    events: &mut [(EventSpec, bool)],
+    started: Instant,
+) -> std::result::Result<bool, String> {
+    let mut published = false;
+    for (event, fired) in events.iter_mut() {
+        let due = event
+            .after_seconds
+            .is_some_and(|after| started.elapsed().as_secs_f64() >= after);
+        if due && !*fired {
+            *fired = true;
+            producer.publish(event).await?;
+            published = true;
+        }
+    }
+    Ok(published)
+}
+
+/// Publishes the events whose `whenToolCall` substring the notice's
+/// `step/tool-use` event carries, and whether it published one.
+async fn fire_events_triggered(
+    producer: &ProducerState,
+    events: &mut [(EventSpec, bool)],
+    notice: &Value,
+) -> std::result::Result<bool, String> {
+    if notice["type"] != "step" || notice["name"] != "tool-use" {
+        return Ok(false);
+    }
+    let data = notice["data"].to_string();
+    let mut published = false;
+    for (event, fired) in events.iter_mut() {
+        let triggered = event
+            .when_tool_call
+            .as_ref()
+            .is_some_and(|trigger| data.contains(trigger.as_str()));
+        if triggered && !*fired {
+            *fired = true;
+            producer.publish(event).await?;
+            published = true;
+        }
+    }
+    Ok(published)
+}
+
 /// The `session.submit` params. A mode names how `main` takes the input: a
 /// steer ends a wait and replaces a request that has produced no output yet,
 /// while the operator's first message carries no mode and is queued.
@@ -2475,7 +3159,12 @@ async fn fire_triggered(
 
 /// How long to wait for the next notice: until the next timed steer, the
 /// quiet check or the wall-clock budget, whichever comes first.
-fn wait_time(steers: &[(Steer, bool)], started: Instant, budget: &Budget) -> Duration {
+fn wait_time(
+    steers: &[(Steer, bool)],
+    events: &[(EventSpec, bool)],
+    started: Instant,
+    budget: &Budget,
+) -> Duration {
     let mut wait = QUIET;
     let until = |seconds: f64| {
         let left = seconds - started.elapsed().as_secs_f64();
@@ -2484,6 +3173,11 @@ fn wait_time(steers: &[(Steer, bool)], started: Instant, budget: &Budget) -> Dur
     wait = wait.min(until(budget.seconds));
     for (steer, fired) in steers {
         if let (Some(after), false) = (steer.after_seconds, *fired) {
+            wait = wait.min(until(after));
+        }
+    }
+    for (event, fired) in events {
+        if let (Some(after), false) = (event.after_seconds, *fired) {
             wait = wait.min(until(after));
         }
     }
@@ -3467,6 +4161,8 @@ mod tests {
             directory: PathBuf::new(),
             message: "message".into(),
             calls: Vec::new(),
+            sources: Vec::new(),
+            events: Vec::new(),
             steers: Vec::new(),
             budget: Budget {
                 turns: 4,
@@ -3499,6 +4195,8 @@ mod tests {
             judge_calls: Vec::new(),
             temperature_dropped: Some(false),
             decline_retries: Some(0),
+            events: Vec::new(),
+            reply_calls: Vec::new(),
             probes: verdicts
                 .iter()
                 .map(|(id, verdict)| ProbeRecord {
@@ -3592,6 +4290,59 @@ mod tests {
         .unwrap();
         assert_eq!(both.goal_objective.as_deref(), Some("first"));
         assert_eq!(both.goal_continuation.as_deref(), Some("second"));
+    }
+
+    /// A delivery starts a turn unless its mode is `append`, and the mode is
+    /// the subscription's when it sets one, otherwise the event type's
+    /// declared mode: a delivered receipt carries none of its own (EventHub
+    /// design §3.1).
+    #[test]
+    fn an_event_starts_a_turn_unless_its_mode_is_append() {
+        fn event_mode(
+            directory: &std::path::Path,
+            subscribe: Value,
+            declared: Value,
+        ) -> (InputMode, bool) {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "message",
+                "sources": [{
+                    "name": "chat",
+                    "guide": "Messages from the team's chat.",
+                    "types": [{
+                        "type": "chat.message",
+                        "description": "A message from the team's chat.",
+                        "mode": declared
+                    }],
+                    "subscribe": {"types": ["chat.message"], "mode": subscribe}
+                }],
+                "events": [{
+                    "source": "chat", "type": "chat.message", "id": "m-1",
+                    "body": "question", "whenToolCall": "read"
+                }],
+                "budget": {"turns": 1, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }))
+            .unwrap();
+            let scenario = into_scenario("case".into(), directory.to_path_buf(), file).unwrap();
+            let mode = scenario.events[0].mode;
+            (mode, starts_turn(mode))
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-event-mode-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        assert_eq!(
+            event_mode(&directory, json!("append"), json!("queue")),
+            (InputMode::Append, false),
+            "the subscription's mode wins over the type's, and append starts no turn"
+        );
+        assert_eq!(
+            event_mode(&directory, Value::Null, json!("queue")),
+            (InputMode::Queue, true),
+            "without a subscription mode the declared one applies, and queue starts a turn"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A scenario's steers are the operator's: they go out in Steer mode, so
@@ -6590,6 +7341,21 @@ mod tests {
             .map(|line| line["event"]["data"]["mode"].clone())
     }
 
+    /// Whether any string in a request body carries `needle`: a request is
+    /// JSON, so a text with quotes in it is compared through the parsed
+    /// value, never through the escaped bytes.
+    fn carried(request: &str, needle: &str) -> bool {
+        fn holds(value: &Value, needle: &str) -> bool {
+            match value {
+                Value::String(text) => text.contains(needle),
+                Value::Array(items) => items.iter().any(|item| holds(item, needle)),
+                Value::Object(map) => map.values().any(|item| holds(item, needle)),
+                _ => false,
+            }
+        }
+        serde_json::from_str::<Value>(request).is_ok_and(|value| holds(&value, needle))
+    }
+
     /// The line of a run's export holding the first request whose messages do
     /// not extend its line's previous request's: the request a history change
     /// produced.
@@ -7391,7 +8157,14 @@ mod tests {
         let mut client = driver_client(socket).await;
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 10.;
-        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+        )
+        .await;
         let _ = std::fs::remove_dir_all(directory);
         // The budget writes `seconds`, so `error` is the run ending on the
         // reply, not on its budget.
@@ -7417,7 +8190,14 @@ mod tests {
         let mut client = driver_client(socket).await;
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 10.;
-        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+        )
+        .await;
         let _ = std::fs::remove_dir_all(directory);
         // The budget writes `seconds`, so `idle` is the retry ending the run.
         assert_eq!(driven.stop, "idle", "{:?}", driven.error);
@@ -7445,7 +8225,14 @@ mod tests {
         let mut client = driver_client(socket).await;
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 10.;
-        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+        )
+        .await;
         // The peer reads a request only after the driver sent it, so the
         // counts are final once it has read the last one.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -7477,7 +8264,14 @@ mod tests {
         let mut client = driver_client(socket).await;
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 10.;
-        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+        )
+        .await;
         // The peer reads a request only after the driver sent it, so the
         // counts are final once it has read the last one.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -7509,7 +8303,14 @@ mod tests {
         let mut client = driver_client(socket).await;
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 10.;
-        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+        )
+        .await;
         // The peer reads a request only after the driver sent it, so the
         // count is final once it has read the last one.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -7540,7 +8341,14 @@ mod tests {
         let mut client = driver_client(socket).await;
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 10.;
-        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+        )
+        .await;
         let _ = std::fs::remove_dir_all(directory);
         assert_eq!(driven.stop, "error", "{:?}", driven.error);
         let error = driven.error.unwrap_or_default();
@@ -7566,7 +8374,14 @@ mod tests {
         let mut client = driver_client(socket).await;
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 10.;
-        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+        )
+        .await;
         // The peer reads a request only after the driver sent it, so the
         // count is final once it has read the last one.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -7596,7 +8411,14 @@ mod tests {
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 30.;
         let started = Instant::now();
-        let driven = drive(&mut client, &scenario, &std::env::temp_dir(), &peer_model()).await;
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+        )
+        .await;
         let elapsed = started.elapsed();
         let _ = std::fs::remove_dir_all(directory);
         assert_eq!(driven.stop, "idle", "{:?}", driven.error);
@@ -7851,6 +8673,122 @@ mod tests {
                 continuation,
                 "{arm}: Goal's continuation input is in the export"
             );
+        }
+    }
+
+    /// A scenario's source and event reach a run: the subscription writes the
+    /// source's guide as a live block, the event is published at the tool
+    /// call and delivered to `main` with its marker, the reply tool the
+    /// source names records the answer, and the request after the event
+    /// carries the order-130 entry — the candidate arm's request carrying the
+    /// candidate text in place of the shipped `ENTRY` (EventHub design A.6).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_event_reaches_the_run_and_the_reply_tool_records_the_answer() {
+        const CANDIDATE: &str = "CANDIDATE EVENTHUB ENTRY TEXT";
+        const GUIDE: &str = "The team cannot see this conversation; answer through chat_reply.";
+        const REPLY: &str = "PARSE-SKIPS-EMPTY-LINES.";
+        const QUESTION: &str = "What does parse() do with an empty line?";
+        /// The judge's verdict, a `chat_reply` call the first time a request
+        /// carries the event, and a `read` of the workspace file until its
+        /// text is in the request.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| {
+                if text.contains(QUESTION) && !text.contains(REPLY) {
+                    return Some(tool_call(
+                        "chat_reply",
+                        &json!({"messageId": "m-1", "text": REPLY}).to_string(),
+                    ));
+                }
+                (!text.contains(FILE_TEXT)).then(|| tool_call("read", r#"{"path":"notes.txt"}"#))
+            })
+        }
+        let fixture = Fixture::start(
+            "eventhub-entry",
+            answers,
+            json!({
+                "message": "Read notes.txt and tell me what it says.",
+                "sources": [{
+                    "name": "chat",
+                    "guide": GUIDE,
+                    "types": [{
+                        "type": "chat.message",
+                        "description": "A message from the team's chat.",
+                        "mode": "queue"
+                    }],
+                    "subscribe": {"types": ["chat.message"]},
+                    "replyTool": "chat_reply"
+                }],
+                "events": [{
+                    "source": "chat",
+                    "type": "chat.message",
+                    "id": "m-1",
+                    "title": "The failing test",
+                    "body": QUESTION,
+                    "whenToolCall": "read"
+                }],
+                "budget": {"turns": 6, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let candidate = overrides(&pairs(&[("eventhub/entry", CANDIDATE)])).unwrap();
+        for (arm, overrides) in [("current", Overrides::default()), ("candidate", candidate)] {
+            let record = run_arm(&fixture, &options, arm, &overrides, 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert!(!record.failed, "{arm}");
+            assert_eq!(record.events.len(), 1, "{arm}: one event was published");
+            let receipt = &record.events[0].receipt;
+            assert_eq!(
+                receipt["deliveries"][0]["status"],
+                json!("delivered"),
+                "{arm}: {receipt}"
+            );
+            assert_eq!(
+                record.reply_calls.len(),
+                1,
+                "{arm}: the reply tool was called once: {:?}",
+                record.reply_calls
+            );
+            assert_eq!(record.reply_calls[0].tool, "chat_reply", "{arm}");
+            assert_eq!(record.reply_calls[0].message_id, "m-1", "{arm}");
+            assert_eq!(record.reply_calls[0].text, REPLY, "{arm}");
+            let requests = fixture.arm(arm);
+            assert!(
+                requests.iter().any(|request| carried(
+                    request,
+                    "<dim-event source=\"chat\" type=\"chat.message\" id=\"m-1\">"
+                )),
+                "{arm}: the event's input carries the dim-event marker"
+            );
+            assert!(
+                requests.iter().any(|request| carried(
+                    request,
+                    &format!("<dim-event-guide source=\"chat\">{GUIDE}</dim-event-guide>")
+                )),
+                "{arm}: the guide block is live"
+            );
+            let entry = dim_event_hub::ENTRY;
+            if arm == "current" {
+                assert!(
+                    requests.iter().any(|request| carried(request, entry)),
+                    "the current arm's request carries the shipped entry"
+                );
+                assert!(
+                    requests.iter().all(|request| !carried(request, CANDIDATE)),
+                    "the current arm never carries the candidate text"
+                );
+            } else {
+                assert!(
+                    requests.iter().any(|request| carried(request, CANDIDATE)),
+                    "the candidate arm's request carries the candidate text"
+                );
+                assert!(
+                    requests.iter().all(|request| !carried(request, entry)),
+                    "the candidate arm never carries the shipped entry"
+                );
+            }
         }
     }
 

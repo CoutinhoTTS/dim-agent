@@ -23,7 +23,7 @@
         "reads": []
       },
       {
-        "id": 70,
+        "id": 71,
         "parent": 2,
         "name": "Attachments",
         "state": "Active",
@@ -53,7 +53,7 @@
         ]
       },
       {
-        "id": 69,
+        "id": 70,
         "parent": 2,
         "name": "goal",
         "state": "Active",
@@ -98,6 +98,110 @@
             "external": true
           }
         ]
+      },
+      {
+        "id": 69,
+        "parent": 2,
+        "name": "eventhub",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::methods::ManagementMethods",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::plugin_files::PluginFileTransactions",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dyn rutis_bridge::session::services::HostDispatch#sessions",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "provider": 44,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::methods::ManagementMethods",
+            "scope": null,
+            "provider": 9,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::plugin_files::PluginFileTransactions",
+            "scope": null,
+            "provider": 13,
+            "generation": 1
+          },
+          {
+            "service": "dyn rutis_bridge::session::services::HostDispatch#sessions",
+            "scope": null,
+            "provider": 36,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "provider": 44,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::methods::ManagementMethods",
+            "provider": 9,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::plugin_files::PluginFileTransactions",
+            "provider": 13,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dyn rutis_bridge::session::services::HostDispatch#sessions",
+            "provider": 36,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 75,
+        "parent": 69,
+        "name": "eventhub-ready",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_event_hub::bridge::EventHub",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_event_hub::bridge::EventHub",
+            "scope": null,
+            "provider": 69,
+            "generation": 1
+          }
+        ],
+        "reads": []
       },
       {
         "id": 68,
@@ -3108,6 +3212,12 @@
         "removing": false
       },
       {
+        "service": "dim_event_hub::bridge::EventHub",
+        "provider": 69,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_modality::engine::ModalityTasks#modalityTasks",
         "provider": 66,
         "generation": 1,
@@ -3134,6 +3244,12 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#callChannel",
         "provider": 11,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#eventHub",
+        "provider": 69,
         "generation": 1,
         "removing": false
       },
