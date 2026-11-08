@@ -37,6 +37,10 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Sessions and branches are plugins, not loader instances](design/thin-instances.md): Session and branch scopes as plain plugins that mark their group on rutis 0.19.3, so creation reads no loader table (#594)
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions](adr/README.md)
+- [ADR 022 — Timeline 属性查询与正文重建](adr/022-event-property-queries.md)（中文）：目标 API 与模块结构、属性查询、业务状态恢复和正文释放
+- [Timeline 属性查询与消费端改造](design/timeline-property-query.md)（中文）：查询契约、SQL 与内容解码、恢复和请求构造的修改方案
+- [输入、轮次及活动输出的当前状态读取](design/input-state-read.md)：输入队列、轮次身份和输出字符水位
+- [Goal 属性查询与状态恢复](design/plugins/Goal-property-queries.md)（中文）：统一状态记录下的查询对象、状态来源、剩余遍历和删除重算提案
 - [Rust agent design documents](architecture/README.md#design-documents)
 - [Owner-independent Timeline instances](design/collaboration-timeline.md) (#335)
 - [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (#427)（[中文](zh/design/timeline-branches.md)）
@@ -99,4 +103,5 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
 - [Timeline export](design/appserver/timeline-export.md) (ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
+- [Tool origin read](design/tool-origin-read.md) — point lookup for tool arguments outside a transcript window.
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

@@ -161,6 +161,35 @@ impl Default for Subagents {
     }
 }
 impl Subagents {
+    pub(crate) fn pending(
+        &mut self,
+        session: &str,
+        request: &dim_agent_types::PendingDelegation,
+    ) -> Value {
+        let run = Run {
+            id: json!([self.activation, request.event_id]).to_string(),
+            parent_tool: tool_id(
+                "main",
+                &request.request.request_id,
+                &request.request.call_id,
+            ),
+            description: request.request.prompt.chars().take(4096).collect(),
+            started: request.started_at as f64 / 1000.,
+            state: if request.delivery.is_some() {
+                "running"
+            } else {
+                "pending"
+            },
+            ended: None,
+            summary: None,
+            reason: None,
+            incomplete: false,
+        };
+        let snapshot = run.event(session);
+        self.runs.insert(request.event_id.clone(), run);
+        snapshot
+    }
+
     pub(crate) fn event(&mut self, session: &str, event: &Event) -> Vec<Value> {
         let mut output = Vec::new();
         if event.sequence <= self.through {

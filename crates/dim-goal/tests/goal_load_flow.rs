@@ -388,7 +388,7 @@ async fn pursuit_6_7_10_a_reload_creates_no_second_evaluator() {
 /// whole branch. The restored branch's request and step facts stay unread, and
 /// the goal folded before them still decides the turn it ended.
 #[tokio::test]
-async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
+async fn e2_a_rebuild_reads_goal_candidates_and_control_fields() {
     // `branch.rs`'s `KEYS`: the fold's kinds and the Dispatcher's subscription.
     const KEYS: [&str; 13] = [
         "branch/start",
@@ -490,36 +490,28 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
         assert!(kinds.contains(&kind), "the history holds {kind}: {kinds:?}");
     }
 
-    let expected: Vec<String> = KEYS.iter().map(|kind| (*kind).to_owned()).collect();
-    let rebuilds: Vec<Read> = env
-        .reads()
-        .into_iter()
-        .filter(|read| read.include_publishing && read.kinds == expected)
-        .collect();
+    let reads = env.reads();
     assert!(
-        !rebuilds.is_empty(),
-        "the restore ran the full fold and the store saw its read"
+        reads
+            .iter()
+            .all(|read| !read.kinds.iter().map(String::as_str).eq(KEYS)),
+        "no full-kind event replay: {reads:?}"
     );
-    for read in rebuilds {
-        assert_eq!(
-            read.branch, "main",
-            "the rebuild reads the branch it folds: {read:?}"
-        );
-    }
-    // The cheap path reads the inputs and the opening in one scan (D4).
-    let scan: Vec<String> = [
-        "input/message",
-        "input/deleted",
-        "branch/start",
-        "session/forked",
-    ]
-    .iter()
-    .map(|kind| (*kind).to_owned())
-    .collect();
+    let controls: Vec<_> = reads
+        .iter()
+        .filter(|read| read.kinds == ["turn/end"])
+        .collect();
+    assert!(!controls.is_empty(), "restore reads the ending turn");
+    assert!(controls.iter().all(|read| matches!(&read.select, dim_agent_runtime::QuerySelect::Fields { fields } if fields == &["position.sequence", "data.turn_id", "data.status"])), "turn errors and reasons are not restored: {controls:?}");
+    assert!(reads.iter().any(|read| matches!(&read.select, dim_agent_runtime::QuerySelect::Fields { fields } if fields == &["position.sequence", "id", "data.submission_id", "data.blocks"])), "Goal candidates carry explicit fields: {reads:?}");
+    let scan: Vec<String> = ["input/message"]
+        .iter()
+        .map(|kind| (*kind).to_owned())
+        .collect();
     let probes: Vec<Read> = env
         .reads()
         .into_iter()
-        .filter(|read| read.include_publishing && read.kinds == scan)
+        .filter(|read| read.kinds == scan)
         .collect();
     assert!(
         !probes.is_empty(),
@@ -529,16 +521,10 @@ async fn e2_a_rebuild_reads_only_the_kinds_the_fold_reads() {
     env.close().await;
 }
 
-/// The inherited goal check reads one ancestor at a time, each page bounded
-/// below the one before it, so its reads stay proportional to the prefix
-/// rather than to its square, and none of them is keyed on the branch being
-/// opened (A11).
 #[tokio::test]
-async fn e2_an_inherited_check_reads_its_ancestor_page_by_page() {
+async fn e2_an_inherited_check_skips_unrelated_inputs() {
     let env = Env::start_refusing().await;
     let mut seed = env.seed_new("load-inherited").await;
-    // More than three pages of inputs and no goal block anywhere: the check
-    // walks the whole prefix and finds nothing.
     let mut inputs = Vec::new();
     for index in 0..200 {
         inputs.push(seed.append("main", user(&format!("note {index}"), InputMode::Queue)));
@@ -570,12 +556,12 @@ async fn e2_an_inherited_check_reads_its_ancestor_page_by_page() {
     seed.finish().await;
 
     let env = env.restore_seeded("load-inherited").await;
-    // 200 inputs read 64 to a page, newest first from the cut: 64, 64, 64 and
-    // a short page of 8.
-    let pages = 200_usize.div_ceil(64);
+    let pages = 3;
     let scan_read = |read: &Read| {
         read.kinds == ["input/message".to_owned()]
             && read.direction == TimelineQueryDirection::Descending
+            && read.branch == "main"
+            && read.through == cut
     };
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
@@ -597,36 +583,22 @@ async fn e2_an_inherited_check_reads_its_ancestor_page_by_page() {
     assert_eq!(
         scan.len(),
         pages,
-        "one page per 64 facts, not one read per row: {scan:?}"
+        "unrelated inputs produce no rows to paginate: {scan:?}"
     );
     for read in &scan {
         assert_eq!(
             read.branch, "main",
             "the check reads the ancestor, never the branch it opens: {read:?}"
         );
-        assert_eq!(
-            read.offset, 0,
-            "a page starts at its own bound, not at an offset: {read:?}"
-        );
         assert_eq!(read.limit, 64, "a page keeps 64 facts: {read:?}");
         assert_eq!(
             read.from, 1,
             "a descending page is bounded by its through: {read:?}"
         );
-        assert!(
-            !read.include_publishing,
-            "the check reads only what the ancestor published: {read:?}"
-        );
     }
-    // Each page starts below the oldest fact of the one before it: the cut,
-    // then the fact before the 64th newest, the 128th, and the 192nd.
-    let bounds: Vec<u64> = scan.iter().map(|read| read.through).collect();
-    let expected: Vec<u64> = std::iter::once(cut)
-        .chain((1..pages).map(|page| inputs[199 - 64 * page].sequence))
-        .collect();
     assert_eq!(
-        bounds, expected,
-        "the pages walk the prefix downward without skipping: {scan:?}"
+        scan[0].through, cut,
+        "the check uses the fixed ancestor cut"
     );
     env.close().await;
 }
@@ -1023,43 +995,18 @@ async fn e2_a_branch_without_a_goal_skips_the_full_fold() {
         env.settled("main").await.is_empty(),
         "no goal, so nothing is written"
     );
-    const KEYS: [&str; 13] = [
-        "branch/start",
-        "session/forked",
-        "branch/create",
-        "branch/create-failed",
-        "branch/ended",
-        "input/message",
-        "input/consumed",
-        "input/deleted",
-        "turn/start",
-        "turn/end",
-        "stop/interrupt",
-        "exec/started",
-        "exec/ended",
-    ];
-    let expected: Vec<String> = KEYS.iter().map(|kind| (*kind).to_owned()).collect();
     let reads = env.reads();
     let reads = &reads[before..];
     let full: Vec<&Read> = reads
         .iter()
-        .filter(|read| read.include_publishing && read.kinds == expected)
+        .filter(|read| matches!(read.select, dim_agent_runtime::QuerySelect::Events))
         .collect();
     assert!(full.is_empty(), "the full fold never runs: {full:?}");
-    // The cheap path reads the inputs and the opening in one scan (D4).
-    let scan: Vec<String> = [
-        "input/message",
-        "input/deleted",
-        "branch/start",
-        "session/forked",
-    ]
-    .iter()
-    .map(|kind| (*kind).to_owned())
-    .collect();
-    let probes: Vec<&Read> = reads
+    let scan: Vec<String> = ["input/message"]
         .iter()
-        .filter(|read| read.include_publishing && read.kinds == scan)
+        .map(|kind| (*kind).to_owned())
         .collect();
+    let probes: Vec<&Read> = reads.iter().filter(|read| read.kinds == scan).collect();
     assert!(
         !probes.is_empty(),
         "the rebuild probes for a goal: {reads:?}"
@@ -1111,42 +1058,18 @@ async fn e2_a_start_clear_with_old_key_retires_skips_the_full_fold() {
         1,
         "the opening's clear is the only Goal input; the rebuild writes nothing"
     );
-    const KEYS: [&str; 13] = [
-        "branch/start",
-        "session/forked",
-        "branch/create",
-        "branch/create-failed",
-        "branch/ended",
-        "input/message",
-        "input/consumed",
-        "input/deleted",
-        "turn/start",
-        "turn/end",
-        "stop/interrupt",
-        "exec/started",
-        "exec/ended",
-    ];
-    let expected: Vec<String> = KEYS.iter().map(|kind| (*kind).to_owned()).collect();
     let reads = env.reads();
     let reads = &reads[before..];
     let full: Vec<&Read> = reads
         .iter()
-        .filter(|read| read.include_publishing && read.kinds == expected)
+        .filter(|read| matches!(read.select, dim_agent_runtime::QuerySelect::Events))
         .collect();
     assert!(full.is_empty(), "the full fold never runs: {full:?}");
-    let scan: Vec<String> = [
-        "input/message",
-        "input/deleted",
-        "branch/start",
-        "session/forked",
-    ]
-    .iter()
-    .map(|kind| (*kind).to_owned())
-    .collect();
-    let probes: Vec<&Read> = reads
+    let scan: Vec<String> = ["input/message"]
         .iter()
-        .filter(|read| read.include_publishing && read.kinds == scan)
+        .map(|kind| (*kind).to_owned())
         .collect();
+    let probes: Vec<&Read> = reads.iter().filter(|read| read.kinds == scan).collect();
     assert!(
         !probes.is_empty(),
         "the rebuild probes the newest Goal block: {reads:?}"
@@ -1159,90 +1082,120 @@ async fn e2_a_start_clear_with_old_key_retires_skips_the_full_fold() {
 /// pair by the record, so the branch's own history still reads as no goal and
 /// the rebuild keeps the cheap path.
 #[tokio::test]
-async fn e2_a_clear_batch_takes_the_cheap_rebuild() {
-    let env = Env::start_refusing().await;
-    let mut seed = env.seed_new("load-clear-batch").await;
-    seed.append(
-        "main",
-        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
-            parent: None,
-            create_event: None,
-        }),
-    );
-    let set = seed.append(
-        "main",
-        message(
-            vec![raw(&texts::set("main", "ship it"), None, false)],
-            InputMode::Queue,
-        ),
-    );
-    seed.append(
-        "main",
-        message(
-            vec![raw(
-                &texts::set_state(
-                    "main",
-                    "ship it",
-                    &texts::Answer::After(set.sequence),
+async fn e2_a_clear_batch_takes_the_cheap_rebuild_unless_its_trigger_was_deleted() {
+    for withdrawn in [false, true] {
+        let env = Env::start_refusing().await;
+        let mut seed = env.seed_new("load-clear-batch").await;
+        seed.append(
+            "main",
+            dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+                parent: None,
+                create_event: None,
+            }),
+        );
+        let set = seed.append(
+            "main",
+            message(
+                vec![raw(&texts::set("main", "ship it"), None, false)],
+                InputMode::Queue,
+            ),
+        );
+        seed.append(
+            "main",
+            message(
+                vec![raw(
+                    &texts::set_state(
+                        "main",
+                        "ship it",
+                        &texts::Answer::After(set.sequence),
+                        false,
+                    ),
+                    Some("goal:state"),
                     false,
-                ),
+                )],
+                InputMode::Append,
+            ),
+        );
+        let record = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
+            handover: None,
+            submission_id: Some("test:clear-record".into()),
+            user: None,
+            blocks: vec![raw(
+                &texts::cleared("main", &texts::Answer::Trigger("test:clear".into())),
                 Some("goal:state"),
-                false,
+                true,
             )],
-            InputMode::Append,
-        ),
-    );
-    let record = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
-        submission_id: Some("test:clear-record".into()),
-        user: None,
-        blocks: vec![raw(
-            &texts::cleared("main", &texts::Answer::Trigger("test:clear".into())),
-            Some("goal:state"),
-            true,
-        )],
-        mode: Some(InputMode::Append),
-        handover: None,
-    });
-    let trigger = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
-        submission_id: Some("test:clear".into()),
-        user: None,
-        blocks: vec![raw(&texts::clear("main"), None, false)],
-        mode: Some(InputMode::Append),
-        handover: None,
-    });
-    seed.append_batch("main", vec![record, trigger]);
-    seed.finish().await;
+            mode: Some(InputMode::Append),
+        });
+        let trigger = dim_agent_types::EventKind::InputMessage(dim_agent_types::InputMessageData {
+            handover: None,
+            submission_id: Some("test:clear".into()),
+            user: None,
+            blocks: vec![raw(&texts::clear("main"), None, false)],
+            mode: Some(InputMode::Append),
+        });
+        let batch = seed.append_batch("main", vec![record, trigger]);
+        if withdrawn {
+            seed.append(
+                "main",
+                dim_agent_types::EventKind::InputDeleted(dim_agent_types::InputDeletedData {
+                    input_id: batch[1].id.clone(),
+                }),
+            );
+        }
+        seed.finish().await;
 
-    let before = env.reads().len();
-    let env = env.restore_seeded("load-clear-batch").await;
-    assert_eq!(
-        env.writes("main").await.len(),
-        4,
-        "the set and its record, the clear's record and its trigger; the rebuild writes nothing"
-    );
-    let reads = env.reads();
-    let reads = &reads[before..];
-    let full: Vec<&Read> = reads
-        .iter()
-        .filter(|read| read.kinds.len() == 13 && read.include_publishing)
-        .collect();
-    assert!(full.is_empty(), "the full fold never runs: {full:?}");
-    let scan = [
-        "input/message",
-        "input/deleted",
-        "branch/start",
-        "session/forked",
-    ]
-    .iter()
-    .map(|kind| (*kind).to_owned())
-    .collect::<Vec<_>>();
-    assert!(
-        reads
+        let before = env.reads().len();
+        let env = env.restore_seeded("load-clear-batch").await;
+        if withdrawn {
+            env.settled("main").await;
+            let keys = env.keys("main").await;
+            assert_eq!(
+                keys.len(),
+                1,
+                "the withdrawn clear restores one live Goal key"
+            );
+            assert_eq!(keys[0].0, "goal:state");
+            assert!(
+                keys[0].1.contains("ship it") && keys[0].1.contains(r#"status="active""#),
+                "the withdrawn clear cannot erase the previous goal: {keys:?}"
+            );
+            assert_eq!(
+                env.writes("main").await.len(),
+                5,
+                "restore writes one compensating state record"
+            );
+            let env = env.restore().await;
+            assert_eq!(
+                env.writes("main").await.len(),
+                5,
+                "a second restore writes nothing"
+            );
+            env.close().await;
+            continue;
+        }
+        assert_eq!(
+            env.writes("main").await.len(),
+            4,
+            "the set and its record, the clear's record and its trigger; the rebuild writes nothing"
+        );
+        let reads = env.reads();
+        let reads = &reads[before..];
+        let full: Vec<&Read> = reads
             .iter()
-            .any(|read| read.include_publishing && read.kinds == scan),
-        "the rebuild probes the newest Goal block: {reads:?}"
-    );
-    env.close().await;
+            .filter(|read| matches!(read.select, dim_agent_runtime::QuerySelect::Events))
+            .collect();
+        assert!(full.is_empty(), "the full fold never runs: {full:?}");
+        let scan = ["input/message"]
+            .iter()
+            .map(|kind| (*kind).to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            reads.iter().any(|read| read.kinds == scan),
+            "the rebuild probes the newest Goal block: {reads:?}"
+        );
+        env.close().await;
+    }
 }
 
 /// R6.1: a deletion whose compensating record never committed. The fold
@@ -1357,18 +1310,13 @@ async fn e3_a_rebuild_restates_the_state_a_deletion_left_published() {
         .filter(|read| read.kinds.iter().map(String::as_str).eq(KEYS))
         .collect();
     assert!(
-        !full.is_empty(),
-        "the deletion sends the rebuild to the full fold: {reads:?}"
+        full.is_empty(),
+        "deletion restores properties, not the complete event fold: {reads:?}"
     );
-    let scan = [
-        "input/message",
-        "input/deleted",
-        "branch/start",
-        "session/forked",
-    ]
-    .iter()
-    .map(|kind| (*kind).to_owned())
-    .collect::<Vec<_>>();
+    let scan = ["input/message"]
+        .iter()
+        .map(|kind| (*kind).to_owned())
+        .collect::<Vec<_>>();
     assert!(
         reads
             .iter()
@@ -1622,12 +1570,7 @@ async fn e3_a_restatement_yields_to_the_record_a_later_decision_writes() {
 /// fold and failing on the unpublished branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e3_a_change_waits_for_the_branch_rebuild() {
-    const SCAN: [&str; 4] = [
-        "input/message",
-        "input/deleted",
-        "branch/start",
-        "session/forked",
-    ];
+    const SCAN: [&str; 2] = ["branch/start", "session/forked"];
     let env = Env::start_gated().await;
     // The child's scan, not any read main still owes.
     let (entered, release) = env.gated().hold_read_other_than(&SCAN, Some("main"));
@@ -1714,6 +1657,139 @@ async fn e3_a_change_waits_for_the_branch_rebuild() {
         record.text,
         texts::cleared(&child, &texts::trigger(&trigger)),
         "the record states the change applied to the complete fold"
+    );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn records_pair_with_the_original_next_input_across_candidate_pages() {
+    for (gap, candidate) in [(false, false), (false, true), (true, false)] {
+        let env = Env::start().await;
+        let mut seed = env.seed_new("pair-position").await;
+        seed.append(
+            "main",
+            dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+                parent: None,
+                create_event: None,
+            }),
+        );
+        for _ in 0..255 {
+            seed.append(
+                "main",
+                message(
+                    vec![raw("<dim-goal invalid>", None, false)],
+                    InputMode::Append,
+                ),
+            );
+        }
+        let state = texts::set_state(
+            "main",
+            "paired objective",
+            &texts::Answer::Trigger("pair".into()),
+            false,
+        );
+        seed.append(
+            "main",
+            message(
+                vec![raw(&state, Some("goal:state"), false)],
+                InputMode::Append,
+            ),
+        );
+        if gap {
+            seed.append(
+                "main",
+                dim_agent_types::EventKind::Text(dim_agent_types::DeltaData {
+                    turn_id: "t".into(),
+                    request_id: "r".into(),
+                    delta: "not a Goal input".into(),
+                }),
+            );
+        }
+        let mut trigger = input_message(
+            if candidate {
+                vec![raw("<dim-goal invalid>", None, false)]
+            } else {
+                vec![]
+            },
+            InputMode::Append,
+        );
+        trigger.submission_id = Some("pair".into());
+        seed.append("main", dim_agent_types::EventKind::InputMessage(trigger));
+        seed.finish().await;
+        let env = env.restore_seeded("pair-position").await;
+        env.goal("edit", serde_json::json!({"objective": "edited objective"}))
+            .await
+            .unwrap();
+        let writes = env.settled("main").await;
+        let record = writes
+            .iter()
+            .rev()
+            .find(|block| block.marker.contains(r#"kind="state""#))
+            .unwrap();
+        if gap {
+            assert!(
+                record.marker.contains(r#"status="none""#),
+                "a filtered-out event breaks the pair: {record:?}"
+            );
+        } else {
+            assert!(
+                record.marker.contains(r#"status="active""#),
+                "the adjacent non-candidate input pairs: {record:?}"
+            );
+            assert!(record.text.contains("edited objective"));
+        }
+        env.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_cleared_goal_still_ends_its_unfinished_evaluator_on_load() {
+    let env = Env::start().await;
+    let mut seed = env.seed_new("cleared-evaluator").await;
+    seed.append(
+        "main",
+        dim_agent_types::EventKind::BranchStart(dim_agent_types::BranchStartData {
+            parent: None,
+            create_event: None,
+        }),
+    );
+    let (evaluation, _) = seed_evaluation(&mut seed, "eval");
+    let record = input_message(
+        vec![raw(
+            &texts::cleared("main", &texts::Answer::Trigger("clear".into())),
+            Some("goal:state"),
+            true,
+        )],
+        InputMode::Append,
+    );
+    let mut trigger = input_message(
+        vec![raw(&texts::clear("main"), None, false)],
+        InputMode::Append,
+    );
+    trigger.submission_id = Some("clear".into());
+    seed.append_batch(
+        "main",
+        vec![
+            dim_agent_types::EventKind::InputMessage(record),
+            dim_agent_types::EventKind::InputMessage(trigger),
+        ],
+    );
+    seed.finish().await;
+    let env = env.restore_seeded("cleared-evaluator").await;
+    wait_ended(
+        &env,
+        "main",
+        BranchSource::Host {
+            operation_id: format!("goal:evaluate:{evaluation}"),
+        },
+    )
+    .await;
+    let writes = env.settled("main").await;
+    assert!(
+        !writes
+            .iter()
+            .any(|block| block.marker.contains(r#"kind="continuation""#)),
+        "a cleared goal only settles its evaluator"
     );
     env.close().await;
 }

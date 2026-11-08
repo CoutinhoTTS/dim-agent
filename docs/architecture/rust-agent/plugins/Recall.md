@@ -7,20 +7,23 @@ the model the history of its own branch. Design:
 ## Recall
 
 Owner: [recall.rs](../../../../crates/dim-agent-capabilities/src/recall.rs).
-Registers the Session `recall` tool. A call resolves the calling branch from
-`ToolExecutionContext.branch_id` and reads that history backwards through
-`Branch::query`: the chain scope, descending, the kinds the narrative folds, one
-page of events per call, continued until the answer is met. A call reads the
-published head of its branch once, before the first page, and starts every page
-at that sequence, so the selection is fixed for the whole call: a fact published
-while the read runs is outside it, and the offsets stay on one contiguous suffix.
-It does not fold while it pages: it stops when the collected pages reach the turn
-or the count the answer needs and folds them once; a search whose fold finds
-fewer matches than a page finishes the read and folds the whole chain once more,
-so a call folds at most twice. It answers from the collected suffix: the
-turn index, one turn, one thing in full, or a search. The turn a page cuts is
-not told; everything after it is folded as the whole history folds it, so a page
-boundary changes what was read, never the answer.
+Registers the Session `recall` tool. Each call pins the calling branch head and
+queries through `Branch::query`. The index selects the newest 21 turn positions
+and streams their narrow control fields. It reads only opening input titles and
+counts tool starts; response bodies are not needed for turn summaries.
+
+Search pages at most 128 origin positions at a time. A supported text term uses
+`TextCandidate` to narrow input, reply and tool origins through their identities;
+Recall verifies the rendered business text. Short, non-ASCII and fixed-label
+searches retain the metadata candidate path. At most eight candidate origins have
+their related bodies loaded together. Rejected bodies are released after that
+batch; only the 21 result lines needed for pagination remain.
+
+Opening one thing reads its identity and related facts. Opening a turn resolves
+its boundaries, then pages origins and loads their bodies in batches of eight.
+All paths share the pinned cutoff. No path retries by loading the complete chain
+into memory. Storage can still scan metadata when no safe text index applies;
+this is not a constant-time search guarantee.
 
 ### Dependencies
 
@@ -59,9 +62,9 @@ line bounds, the read-only preset, a long turn, interrupted outputs, the
 argument errors, a 120-turn history whose index, search and newest thing
 answer from bounded pages, and a child branch paging through its inherited
 prefix.
-[recall_pages.rs](../../../../crates/dim-agent-capabilities/tests/recall_pages.rs)
-counts the folds of a no-match search over two history lengths: the count stays
-at two, so the work does not grow with the pages read.
+[storage_flow/recall.rs](../../../../crates/dim-app-server/tests/storage_flow/recall.rs)
+compares the production SQLite search and index with the complete narrative,
+including a search term split across durable output deltas and fallback terms.
 [transport_flow/recall.rs](../../../../crates/dim-app-server/tests/transport_flow/recall.rs)
 finds `recall` in the tool table of both the product and the `--models`
 profile.

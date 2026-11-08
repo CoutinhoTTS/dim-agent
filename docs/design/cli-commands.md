@@ -53,7 +53,7 @@ order, not alphabetically or by recent use. The menu draws no category column:
 ```text
 /new /resume /models /compact /usage
 /effort /fast /agent /permissions /settings
-/branch /fork /lines /timeline /queue /export /goal
+/branch /fork /lines /timeline /queue /export /earlier /goal
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
@@ -314,22 +314,15 @@ active, the count from the first continuation, and the line works toward it.
 a goal an evaluator judges keeps its judge through `/goal edit`, which writes only the objective.
 A `/pursue` form is Pursuit's later option (§10) and is not part of this contract.
 
-**Reading the goal.** The client folds the goal from the branch events it already reads, by Goal
-A.3's rule: the newest live `goal:state` record is the goal; on a history written before the record,
-the latest live `goal:objective` block is the objective and the latest live `goal:status` block is
-the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue deleted leaves
-the fold. It adds no query method and asks Goal no question. `/goal` with no arguments prints usage
-before that fold. Before it picks between `set` and `edit` the client reads the line up to its
-published head. After a write, it folds the events that write produced before printing: the line
-prompt reads them again, and the terminal UI waits for them among the line's live events. The
-report is released at the `sequence` the method returned, for every daemon: a daemon built from main
-answers with the same sequence and publishes the old keys, and the command must not stay parked
-waiting for a record such a daemon never writes. The state shown and the method chosen come from the
-events, never from a guess taken from the reply. The
-fold starts over at the line's own opening — its
-`branch/start`, or the `session/forked` a fork writes after the facts it copied — so a new line has
-no goal and a forked Session's `main` never shows the copied one (Goal §2, A11). A v3 client
-receives that opening, so a fork reads the same here as it does in Goal.
+**Reading the goal.** The client reads `session.goal.get` for the shown branch
+([Goal A.3](plugins/Goal.md#a3-reading-the-goal)). `/goal` without arguments prints
+usage and that state. Before choosing `set` or `edit`, it reads the current state;
+after a write, it reads again before reporting the result. Goal interprets its
+records, legacy keys, deletion and branch-opening rules. The client neither
+replays history to make this decision nor infers an absent goal from a transcript
+window. A failed state read reports an error and admits no guessed write; a
+successful state read remains usable if the transcript failed. A daemon without
+the read method reports that limitation instead of falling back to full history.
 
 **When Goal is not loaded.** The Session lists the methods it serves (`session.methods`). When
 `session.goal.set` is not among them, `/goal` prints `Goal is not available on this daemon.` and makes
@@ -2730,3 +2723,21 @@ with its `branchId`, a duplicate live event, every reply in the table above, res
 the prompt before or during the reply, Ctrl+C and EOF before and after the turn settles, a reply
 drained after Ctrl+C, and `exec` exiting 3 for questions on `main`, on a child branch and after
 the turn settled, while a result read before its call asks nothing.
+
+
+### Loading earlier conversation
+
+`/earlier` reads the next bounded older window for the shown branch, retaining its original
+cutoff and advancing its backward cursor. Fullscreen PageUp at the loaded top runs the same
+action. TUI prepends projected rows; line mode prints a labelled older segment. Neither changes
+live event/state cutoffs or resubmits an input. Opening uses the separate read-stop
+and whole-page retention budgets in the [client window contract](clients.md#opening-a-conversation-with-a-bounded-window);
+additional older rows are retained only when the user explicitly loads them. Raw pages are released
+after projection. Export remains a complete fixed-prefix read.
+
+```text
+[earlier content not loaded]  <- /earlier, or PageUp at the loaded top
+older requested rows
+initial window
+live output
+```

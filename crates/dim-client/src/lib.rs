@@ -2,6 +2,7 @@
 
 pub mod callback;
 pub mod question;
+pub mod window;
 pub mod wire;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;

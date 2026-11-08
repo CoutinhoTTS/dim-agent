@@ -40,6 +40,7 @@ use crate::{
     configure, mcp, permission, session_create_from_options, session_create_params, update,
 };
 
+mod inventory;
 mod member;
 mod tasks;
 mod workflow;
@@ -48,7 +49,6 @@ use tasks::{BranchHistory, HistoryRequest, StopBatch};
 use workflow::WorkflowReads;
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
-const HISTORY_PAGE: u64 = 256;
 const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
 /// The complete Provider editing interface, without legacy write fallbacks.
 const PROVIDER_METHODS: [&str; 4] = [
@@ -268,9 +268,8 @@ struct Worker {
     task_history_queue: std::collections::VecDeque<String>,
     /// A stale request still occupies this slot until its reply arrives.
     task_history_request: Option<HistoryRequest>,
-    /// A `/goal` waiting for its line's history or for the event its write
-    /// produced, advanced by [`Worker::poll_goal`].
-    goal_pending: Option<PendingGoal>,
+    methods: std::collections::HashSet<String>,
+    model_through: u64,
     task_stops: Option<StopBatch>,
     workflow: WorkflowReads,
     members: Members,
@@ -331,20 +330,6 @@ struct MemberDetailRead {
     branch_id: String,
     request_id: String,
     allow: bool,
-}
-
-/// A `/goal` waiting on the shown line: the reader must finish the line's
-/// history before the call is chosen, and the event a write produced must be
-/// folded before the report prints. Both waits resume from the loop, so the
-/// command never holds the branch reader while it waits.
-struct PendingGoal {
-    request: crate::goal::Request,
-    branch: String,
-    /// The attachment this command was issued on; a switch drops the wait.
-    projection_id: u64,
-    /// The call sent, and the sequence of the event it wrote, once the reply
-    /// arrived.
-    written: Option<(crate::goal::Call, u64)>,
 }
 
 struct OutputWatch {
@@ -432,7 +417,8 @@ async fn run(
         task_history: Default::default(),
         task_history_queue: Default::default(),
         task_history_request: None,
-        goal_pending: None,
+        methods: Default::default(),
+        model_through: 0,
         task_stops: None,
         workflow: WorkflowReads::default(),
         members: Members::default(),
@@ -477,7 +463,6 @@ async fn run(
             worker.send(Update::Failed(error.to_string()));
             break;
         }
-        worker.poll_goal().await;
         worker.poll_task_stops().await;
         worker.poll_workflow().await;
         worker.poll_context().await;
@@ -509,6 +494,12 @@ async fn run(
                             no_session(&error)
                         },
                     ));
+                    continue;
+                }
+                if matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
+                    && worker.task_history.get(&worker.focus).is_some_and(|history| history.error.is_some())
+                {
+                    worker.send(Update::SubmitNotSent("Conversation state could not be read; retry the read before submitting".into()));
                     continue;
                 }
                 if let Err(error) = worker.command(command).await {
@@ -555,39 +546,6 @@ struct WebToggled {
     open: bool,
     #[serde(default)]
     url: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct History {
-    events: Vec<Event>,
-    through: u64,
-    next_after: u64,
-    done: bool,
-}
-
-impl History {
-    fn decode(value: serde_json::Value, after: u64, through: Option<u64>) -> Result<Self, String> {
-        let page: Self = serde_json::from_value(value)
-            .map_err(|error| format!("Invalid history reply: {error}"))?;
-        if through.is_some_and(|through| through != page.through)
-            || page.through > dim_agent_types::JS_MAX_SAFE_INTEGER
-            || page.next_after < after
-            || page.next_after > page.through
-            || (!page.done && page.next_after == after)
-            || (page.done && page.next_after != page.through)
-        {
-            return Err("Invalid history page cursor".into());
-        }
-        let mut sequence = after;
-        for event in &page.events {
-            if event.sequence <= sequence || event.sequence > page.next_after {
-                return Err("History event is outside its page or unordered".into());
-            }
-            sequence = event.sequence;
-        }
-        Ok(page)
-    }
 }
 
 #[derive(Deserialize)]
@@ -852,8 +810,9 @@ impl Worker {
             .await?;
         // Without a record, find the model in the catalog: this is the only
         // caller of `list()` besides `/resume`, and only for an older server.
+        self.model_through = attached.sequence;
         let model_preferences = attached.model_preferences;
-        let model = match model.or(attached.model) {
+        let model = match attached.model.or(model) {
             Some(model) => model,
             None => self.model_of(&session_id).await?,
         };
@@ -879,6 +838,16 @@ impl Worker {
         self.mcp_required.clear();
         self.model = Some(configuration.clone());
         self.discover_branch("main");
+        if self.client.supports(&["session.branches"]) {
+            let directory: dim_client::wire::BranchDirectory = self
+                .client
+                .typed("session.branches", json!({"sessionId":self.session_id}))
+                .await?;
+            for entry in directory.branches {
+                self.projection.directory(&entry);
+                self.discover_branch(&entry.branch_id);
+            }
+        }
         self.poll_task_history().await?;
         let features = self.model_features(&model).await;
         self.send(Update::Ready(configuration));
@@ -970,26 +939,21 @@ impl Worker {
     }
 
     async fn suggestion_offered(&mut self) -> bool {
-        #[derive(serde::Deserialize)]
-        struct Decl {
-            name: String,
-        }
-        #[derive(serde::Deserialize)]
-        struct Table {
-            methods: Vec<Decl>,
-        }
         if !self.client.offers("session.methods") {
             return false;
         }
         match self
             .client
-            .typed::<Table>("session.methods", json!({"sessionId": self.session_id}))
+            .typed::<dim_client::wire::MethodTable>(
+                "session.methods",
+                json!({"sessionId": self.session_id}),
+            )
             .await
         {
-            Ok(table) => table
-                .methods
-                .iter()
-                .any(|decl| decl.name == "session.suggestion.request"),
+            Ok(table) => {
+                self.methods = table.methods.into_iter().map(|decl| decl.name).collect();
+                self.methods.contains("session.suggestion.request")
+            }
             Err(_) => false,
         }
     }
@@ -1409,6 +1373,7 @@ impl Worker {
                 }
             }
             Command::Rename(title) => self.rename(title).await,
+            Command::Earlier => self.earlier(),
             Command::Goal(request) => self.goal(request).await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
@@ -2083,120 +2048,44 @@ impl Worker {
         self.send(Update::Renamed(reply));
     }
 
-    /// `/goal`: the shown line's goal, written by the method the request
-    /// names. The call is chosen only once the reader has finished the line's
-    /// history, so a fold the interface has not caught up with cannot pick
-    /// the wrong method; the report waits for the event a write produced, so
-    /// it shows the state after it.
     async fn goal(&mut self, request: crate::goal::Request) {
-        if self.goal_pending.is_some() {
-            self.report(
-                "Goal: a /goal is still in progress on this line".into(),
-                true,
-            );
+        if self.session_id.is_empty() {
+            self.report(format!("Goal: {NO_SESSION}"), true);
             return;
         }
         if !crate::goal::available(&mut self.client, &self.session_id).await {
             self.report(crate::goal::NOT_AVAILABLE.into(), true);
             return;
         }
-        if self.session_id.is_empty() {
-            self.report(format!("Goal: {NO_SESSION}"), true);
-            return;
-        }
-        self.goal_pending = Some(PendingGoal {
-            request,
-            branch: self.focus.clone(),
-            projection_id: self.projection_id,
-            written: None,
-        });
-        self.poll_goal().await;
-    }
-
-    /// Advances the parked `/goal` from the loop: the task-history reader's
-    /// `done` releases the call, and the write's own event releases the
-    /// report. A line that is still loading or has no reply leaves it parked;
-    /// the reader's reply or its failure resumes it.
-    async fn poll_goal(&mut self) {
-        let Some(pending) = &self.goal_pending else {
-            return;
-        };
-        if pending.projection_id != self.projection_id {
-            self.goal_pending = None;
-            return;
-        }
-        let branch = pending.branch.clone();
-        if let Some((call, sequence)) = pending.written {
-            // The method writes a change input and replies with its sequence.
-            // The report is released at that sequence for every daemon, as on
-            // main: a daemon that publishes the old keys answers with the same
-            // sequence but writes no record, and must not leave the command
-            // parked (R6). The displayed goal follows the newest record or the
-            // old-key state as it arrives through the keyed projection.
-            if self.cursors.get(&branch).copied().unwrap_or(0) >= sequence {
-                self.finish_goal(&branch, Some(call));
+        let branch = self.focus.clone();
+        let result = async {
+            let params = json!({"sessionId": self.session_id, "branchId": branch});
+            let mut state: dim_agent_types::GoalRead = self
+                .client
+                .typed("session.goal.get", params.clone())
+                .await?;
+            let call = crate::goal::call(&request, state.goal.as_ref());
+            if let Some(call) = call {
+                let mut write = params.clone();
+                if let Some(objective) = crate::goal::objective(&request) {
+                    write["objective"] = json!(objective);
+                }
+                self.client.rpc(call.method(), write).await?;
+                state = self.client.typed("session.goal.get", params).await?;
             }
-            return;
-        }
-        let history = self
-            .task_history
-            .get(&branch)
-            .expect("the shown line is discovered");
-        if let Some(error) = history.error.clone() {
-            self.goal_pending = None;
-            self.report(format!("Goal: {error}"), true);
-            return;
-        }
-        if !history.done {
-            return;
-        }
-        let request = self
-            .goal_pending
-            .as_ref()
-            .expect("parked goal")
-            .request
-            .clone();
-        let Some(call) = crate::goal::call(&request, self.goal_on(&branch).as_ref()) else {
-            self.finish_goal(&branch, None);
-            return;
-        };
-        let mut params = json!({"sessionId": self.session_id, "branchId": branch});
-        if let Some(objective) = crate::goal::objective(&request) {
-            params["objective"] = json!(objective);
-        }
-        #[derive(Deserialize)]
-        struct Written {
-            sequence: u64,
-        }
-        match self.client.typed::<Written>(call.method(), params).await {
-            Ok(written) => {
-                self.goal_pending.as_mut().expect("parked goal").written =
-                    Some((call, written.sequence));
+            let report = crate::goal::report(&branch, call, state.goal.as_ref()).join("\n");
+            if let Some(projection) = transcript_mut(&mut self.projection, &mut self.lines, &branch)
+            {
+                projection.goal = state.goal;
             }
-            Err(error) => {
-                self.goal_pending = None;
-                let text = match crate::client::app_error(&error) {
-                    Some("unknown_method") => crate::goal::NOT_AVAILABLE.to_owned(),
-                    _ => format!("Goal: {error}"),
-                };
-                self.report(text, true);
-            }
+            self.changed();
+            Ok::<_, crate::Error>(report)
         }
-    }
-
-    /// Reports the parked `/goal` with the fold it now holds.
-    fn finish_goal(&mut self, branch: &str, call: Option<crate::goal::Call>) {
-        self.goal_pending = None;
-        let goal = self.goal_on(branch);
-        self.report(
-            crate::goal::report(branch, call, goal.as_ref()).join("\n"),
-            false,
-        );
-    }
-
-    /// The goal folded on `branch`, from the projection that draws it.
-    fn goal_on(&self, branch: &str) -> Option<crate::goal::Goal> {
-        self.projection_on(branch).goal()
+        .await;
+        match result {
+            Ok(report) => self.report(report, false),
+            Err(error) => self.report(format!("Goal: {error}"), true),
+        }
     }
 
     /// Whether a request made from a snapshot still addresses this
@@ -2288,7 +2177,7 @@ impl Worker {
                     self.member_approval_reply(read, result).await?;
                     return Ok(());
                 }
-                self.reply(id, result)?;
+                self.reply(id, result).await?;
                 return Ok(());
             }
         };
@@ -3844,7 +3733,7 @@ impl Worker {
     }
 
     /// A reply to a request sent without waiting for it.
-    fn reply(
+    async fn reply(
         &mut self,
         id: u64,
         result: Result<serde_json::Value, client::RpcError>,
@@ -3922,7 +3811,7 @@ impl Worker {
             return Ok(());
         }
         if self.members.owns(id) {
-            self.member_reply(id, result);
+            self.member_reply(id, result).await;
             return Ok(());
         }
         if self
@@ -3930,7 +3819,7 @@ impl Worker {
             .as_ref()
             .is_some_and(|request| request.id == id)
         {
-            return self.task_history_reply(result);
+            return self.task_history_reply(result).await;
         }
         if self.task_stops.as_ref().is_some_and(|batch| {
             batch
@@ -4057,6 +3946,14 @@ impl Worker {
     }
 
     fn apply(&mut self, branch_id: &str, event: Event) {
+        if branch_id == "main"
+            && event.sequence > self.model_through
+            && let EventContent::Configuration(configuration) = &event.content
+        {
+            self.model_through = event.sequence;
+            self.model = Some(configuration.clone());
+            self.send(Update::Ready(configuration.clone()));
+        }
         self.discover_task_branches(&event);
         if let Some(line) = self.lines.get_mut(branch_id)
             && event.sequence > line.cursor
@@ -4070,12 +3967,6 @@ impl Worker {
         }
         *cursor = event.sequence;
         self.discover_workflow(branch_id, &event);
-        if branch_id == "main"
-            && let EventContent::Configuration(configuration) = &event.content
-        {
-            self.model = Some(configuration.clone());
-            self.send(Update::Ready(configuration.clone()));
-        }
         if branch_id == "main"
             && let EventContent::PermissionChanged(data) = &event.content
         {
@@ -4175,6 +4066,22 @@ impl Worker {
         self.focus = line;
         self.side = None;
         self.publish();
+        if self.focus != "main" && self.client.supports(&["session.branch.get"]) {
+            match self
+                .client
+                .typed::<dim_client::wire::BranchEntry>(
+                    "session.branch.get",
+                    json!({"sessionId":self.session_id,"branchId":self.focus}),
+                )
+                .await
+            {
+                Ok(entry) => {
+                    self.projection.directory(&entry);
+                    self.publish();
+                }
+                Err(error) => self.send(Update::Notice(format!("Branch details: {error}"))),
+            }
+        }
     }
 
     /// The transcript the screen shows: the focused line's, or `main`'s.

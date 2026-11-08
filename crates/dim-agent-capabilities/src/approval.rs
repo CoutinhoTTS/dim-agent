@@ -12,7 +12,9 @@ use crate::{
     permission::{Decision, Permission},
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, rebuild_facts,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, QueryComparison, QueryFilter,
+    QueryOperand, QueryOutput, QueryPage, QuerySelect, QuerySpec, QueryValue, Timeline,
+    TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData,
@@ -22,6 +24,7 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::{
     collections::HashMap,
+    num::NonZeroU64,
     sync::{Arc, Mutex},
 };
 use tokio::sync::oneshot;
@@ -228,30 +231,98 @@ impl Approval {
         }
         result.await.unwrap_or(Err(ApprovalRespondError::Closed))
     }
-    /// Ends the requests an earlier generation left open. They were settled
-    /// at its unload unless the process stopped.
-    fn rebuild(&self, events: &[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> {
-        let mut open = Vec::new();
-        for event in events {
-            match &event.kind {
-                EventKind::ApprovalRequest(data) => open.push(data.approval_id.clone()),
-                EventKind::ApprovalRespond(ApprovalRespondData { approval_id, .. })
-                | EventKind::ApprovalCancelled(ApprovalCancelledData { approval_id, .. }) => {
-                    open.retain(|id| id != approval_id)
-                }
-                _ => {}
+    async fn rebuild(&self) -> dim_agent_runtime::Result<u64> {
+        let through = self.timeline.committed();
+        let mut request = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::Compare {
+                            left: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            comparison: QueryComparison::Eq,
+                            right: QueryOperand::Value {
+                                value: "approval/request".into(),
+                            },
+                        },
+                        QueryFilter::Not {
+                            condition: Box::new(QueryFilter::Exists {
+                                condition: Box::new(QueryFilter::And {
+                                    conditions: vec![
+                                        QueryFilter::In {
+                                            value: QueryOperand::Field {
+                                                path: "kind".into(),
+                                            },
+                                            values: vec![
+                                                "approval/respond".into(),
+                                                "approval/cancelled".into(),
+                                            ],
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "data.approval_id".into(),
+                                            },
+                                            comparison: QueryComparison::Eq,
+                                            right: QueryOperand::Outer {
+                                                path: "data.approval_id".into(),
+                                            },
+                                        },
+                                    ],
+                                }),
+                            }),
+                        },
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["data.approval_id".into()],
+                },
+                group_by: Vec::new(),
+                pick: None,
+                order_by: Vec::new(),
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(256).expect("a page contains identities"),
+                after: None,
+            }),
+        };
+        loop {
+            let reply = self.timeline.query(request.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("approval recovery selects identity fields")
+            };
+            for row in rows {
+                let Some(QueryValue::Value {
+                    value: serde_json::Value::String(approval_id),
+                }) = row.values.into_iter().next()
+                else {
+                    return Err(AgentError::fault(
+                        "Approval",
+                        "an approval request has no approval identity",
+                    ));
+                };
+                self.timeline.append(
+                    EventKind::ApprovalCancelled(ApprovalCancelledData {
+                        approval_id,
+                        reason: "Approval cancelled: execution did not survive recovery".into(),
+                    })
+                    .into(),
+                )?;
             }
+            let Some(next) = reply.next else {
+                break;
+            };
+            request
+                .page
+                .as_mut()
+                .expect("identity queries are paged")
+                .after = Some(next);
         }
-        for approval_id in open {
-            self.timeline.append(
-                EventKind::ApprovalCancelled(ApprovalCancelledData {
-                    approval_id,
-                    reason: "Approval cancelled: execution did not survive recovery".into(),
-                })
-                .into(),
-            )?;
-        }
-        Ok(())
+        Ok(through)
     }
     fn consume(&self, event: &AgentEvent) {
         let EventKind::ApprovalRespond(data) = &event.kind else {
@@ -357,7 +428,6 @@ impl DynPlugin for ApprovalPlugin {
             })?;
             let rebuild = service.clone();
             let live = service.clone();
-            let timeline = service.timeline.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -365,16 +435,7 @@ impl DynPlugin for ApprovalPlugin {
                     ["approval/respond"].map(String::from).to_vec(),
                     Arc::new(move || {
                         let rebuild = rebuild.clone();
-                        let timeline = timeline.clone();
-                        Box::pin(async move {
-                            let reply = rebuild_facts(
-                                &timeline,
-                                &["approval/request", "approval/respond", "approval/cancelled"],
-                            )
-                            .await?;
-                            rebuild.rebuild(&reply.events)?;
-                            Ok(reply.through)
-                        })
+                        Box::pin(async move { rebuild.rebuild().await })
                     }),
                     Arc::new(move |event| {
                         live.consume(&event);

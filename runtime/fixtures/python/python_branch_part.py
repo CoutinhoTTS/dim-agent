@@ -34,26 +34,30 @@ async def apply(ctx, config):
             await written
 
     async def rebuild():
-        start = None
-        while True:
+        cutoff = int(await dispatcher.committed())
+        cursor = None
+        while cutoff > 0:
             query = {
                 "scope": "branch",
                 "include_publishing": True,
-                "order_by": "sequence",
-                "direction": "ascending",
-                "kinds": ["input/message", "turn/start", "turn/end"],
-                "limit": PAGE,
-                "offset": 0,
+                "through": cutoff,
+                "query": {
+                    "filter": {
+                        "op": "in",
+                        "value": {"kind": "field", "path": "kind"},
+                        "values": ["input/message", "turn/start", "turn/end"],
+                    },
+                    "select": {"kind": "events"},
+                },
+                "page": {"limit": PAGE, "after": cursor},
             }
-            if start is not None:
-                query["from_sequence"] = start
             page = await timeline.query(query)
-            events = page["events"]
-            for event in events:
-                step(event, False)
-            if not events or len(events) < PAGE:
-                return int(page["through"])
-            start = int(events[-1]["sequence"]) + 1
+            for row in page["result"]["events"]:
+                step(row["event"], False)
+            cursor = page.get("next")
+            if cursor is None:
+                break
+        return cutoff
 
     await dispatcher.consume(
         "python-branch-fixture", ["input/message", "turn/start", "turn/end"], rebuild, release

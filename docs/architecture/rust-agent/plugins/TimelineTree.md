@@ -2,6 +2,13 @@
 
 The TimelineTree plugin registers TimelineTree in every Session and TreeTimeline in every branch.
 
+The single-line display read also belongs to TimelineTree. The directory itself
+is read without history I/O; display details are requested separately. It reads the
+creation prompt and end fact by position, and counts user inputs at the inherited
+cutoff with a scalar query. Ended prefixes use the tree's stored branch chain;
+this does not widen the public own-line-only `TreeCommands.query` contract.
+The App Server only maps these owner-produced properties into its wire fields.
+
 ## TimelineTree
 
 Owner: [timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs).
@@ -37,8 +44,8 @@ ended line too, and `page` reads an open or ended line from the store at its
 head, rebuilding stored request bodies. `batch_end`
 checks a cursor against that line's atomic batch boundaries.
 `query` selects one line's own facts: it forwards to the
-Timeline while open and uses the ended head after closing, with the event
-query's anchors, selection, ordering and paging. It rejects chain scope.
+Timeline while open and uses the ended head after closing, with the property
+query's fixed cutoff, selection and continuation. It rejects chain scope.
 
 A child's opening input
 is the identity block, and when the prefix it inherits holds a live parent
@@ -50,8 +57,10 @@ failure (branch/create-failed). Each line's node publishes the
 sequence of its latest `turn/end`, which the line's BranchLine waits on for the
 parent block (design
 [§7.1.1](../../../design/timeline-branches.md#711-the-parent-block-branchparent)). `TreeCommands` also
-answers whether a line's parent has new activity past a sequence, through the
-one event query ([ADR 019](../../../adr/019-event-query.md)). Candidate branches remain private until opening
+answers whether a line's parent has new activity past a sequence with an
+existence query over operator inputs and tool uses. Opening and end checks
+select lifecycle fields; inherited parent state selects the last matching
+keyed input and reads only its keys and retire flags. Candidate branches remain private until opening
 receipts/dispatch fences and initial input acceptance succeed. Creation retains
 its fixed ancestry cut even if a waiter disappears. One opening budget requests
 cancellation; rollback and accepted host work must still settle. Cleanup closes
@@ -80,7 +89,7 @@ Session close, and closing is not deletion of persisted history.
 | 作用域 | Session |
 | 注入 | `S:GuideEntries`、`S:SessionIdentity`、`S:TimelineFactory`、`S:dyn TimelineStore` |
 | 提供 | `S:TimelineTree`、`S:TreeCommands`、`S:dyn HostDispatch#treeCommands`、`S:dyn TimelineTreeControl` |
-| 被注入于 | `BranchLine`、`BranchTool`、`InputMethods`、`PromptSuggestion`、`Recall`、`ShellInput`、`TreeTimeline`、`Wait`、`WorkspaceTools` |
+| 被注入于 | `BranchLine`、`BranchTool`、`InputMethods`、`LoopMethods`、`PromptSuggestion`、`Questions`、`Recall`、`ShellInput`、`ToolMethods`、`TreeTimeline`、`Wait`、`WorkspaceTools` |
 <!-- /generated -->
 
 ## TreeTimeline

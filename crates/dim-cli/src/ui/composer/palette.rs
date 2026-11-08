@@ -443,6 +443,7 @@ mod tests {
             "timeline",
             "queue",
             "export",
+            "earlier",
             "goal",
             "tasks",
             "rename",

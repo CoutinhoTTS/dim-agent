@@ -437,6 +437,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (31, "", false),
             (32, "", false),
             (33, "", false),
+            (34, "", false),
+            (35, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -468,7 +470,19 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else {
                 ""
             };
-            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees}
+            let submission = if version < 35 {
+                "DROP INDEX timeline_input_submissions;"
+            } else {
+                ""
+            };
+            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees} {submission}
+                DROP INDEX timeline_events_requests;
+                DROP INDEX timeline_events_inputs;
+                DROP INDEX timeline_events_users;
+                DROP TRIGGER timeline_text_delete;
+                DROP TABLE timeline_text;
+                DROP TABLE timeline_text_fts;
+                DROP TABLE timeline_text_tails;
                 DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
@@ -497,8 +511,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 35));
-                INSERT INTO agent_store_format VALUES (35);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37));
+                INSERT INTO agent_store_format VALUES (37);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

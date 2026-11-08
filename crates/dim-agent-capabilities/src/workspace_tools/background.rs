@@ -11,7 +11,9 @@ use crate::{
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
 };
 use dim_agent_runtime::{
-    AgentError, Dispatcher, Names, SessionLifecycle, Timeline, TimelineIdentity, rebuild_facts,
+    AgentError, Dispatcher, Names, QueryFilter, QueryOperand, QueryOutput, QueryPage, QuerySelect,
+    QuerySpec, QueryValue, SessionLifecycle, Timeline, TimelineIdentity, TimelineQuery,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -452,55 +454,173 @@ impl BackgroundExec {
     /// not survive its owner: its `failed` terminal is written now and wakes
     /// when dispatched. Returns the waking `exec/ended` events that no input
     /// references yet: the previous generation stopped before posting them.
-    fn rebuild(&self, events: &[Arc<AgentEvent>]) -> Vec<(String, ExecEndedData, String)> {
-        let mut state = self.state.lock().unwrap();
-        let mut open = vec![];
-        let mut unposted: Vec<(String, ExecEndedData)> = vec![];
+    async fn rebuild(
+        &self,
+    ) -> dim_agent_runtime::Result<(u64, Vec<(String, ExecEndedData, String)>)> {
+        let through = self.timeline.committed();
+        let mut after = None;
+        let mut tasks = HashMap::new();
+        let mut open = Vec::new();
+        let mut unposted: Vec<(String, ExecEndedData)> = Vec::new();
         let mut closing = false;
-        for event in events {
-            match &event.kind {
-                EventKind::StopInterrupt(data) if data.scope == InterruptScope::Branch => {
-                    closing = true;
-                }
-                EventKind::ExecStarted(data) => {
-                    state.tasks.insert(
-                        data.task_id.clone(),
-                        Task::new(
-                            data.description.clone(),
-                            CancellationToken::new(),
-                            None,
-                            data.output_path.clone(),
-                        ),
-                    );
-                    open.push((data.task_id.clone(), data.output_path.clone()));
-                }
-                EventKind::ExecEnded(data) => {
-                    open.retain(|(task_id, _)| *task_id != data.task_id);
-                    if let Some(task) = state.tasks.get_mut(&data.task_id) {
-                        task.ended.send_replace(Some(data.clone()));
+        loop {
+            let reply = self
+                .timeline
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: None,
+                    through: Some(through),
+                    include_publishing: true,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: [
+                                "exec/started",
+                                "exec/ended",
+                                "stop/interrupt",
+                                "input/message",
+                            ]
+                            .map(Into::into)
+                            .to_vec(),
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: [
+                                "kind",
+                                "id",
+                                "data.task_id",
+                                "data.description",
+                                "data.output_path",
+                                "data.status",
+                                "data.result",
+                                "data.scope",
+                                "tags",
+                            ]
+                            .map(String::from)
+                            .to_vec(),
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: std::num::NonZeroU64::new(256).unwrap(),
+                        after,
+                    }),
+                })
+                .await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
+            };
+            for row in rows {
+                let [
+                    QueryValue::Value {
+                        value: serde_json::Value::String(kind),
+                    },
+                    QueryValue::Value {
+                        value: serde_json::Value::String(id),
+                    },
+                    task_id,
+                    description,
+                    output_path,
+                    status,
+                    result,
+                    scope,
+                    tags,
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("event has a kind and id")
+                };
+                match kind.as_str() {
+                    "stop/interrupt" => {
+                        if matches!(scope, QueryValue::Value { value: serde_json::Value::String(scope) } if scope == "branch")
+                        {
+                            closing = true;
+                        }
                     }
-                    if wakes(data) && !closing {
-                        unposted.push((event.id.clone(), data.clone()));
+                    "exec/started" => {
+                        let (
+                            QueryValue::Value {
+                                value: serde_json::Value::String(task_id),
+                            },
+                            QueryValue::Value {
+                                value: serde_json::Value::String(description),
+                            },
+                            QueryValue::Value {
+                                value: serde_json::Value::String(output_path),
+                            },
+                        ) = (task_id, description, output_path)
+                        else {
+                            unreachable!("exec start has task id, description and output path")
+                        };
+                        tasks.insert(
+                            task_id.clone(),
+                            Task::new(
+                                description.clone(),
+                                CancellationToken::new(),
+                                None,
+                                output_path.clone(),
+                            ),
+                        );
+                        open.push((task_id.clone(), output_path.clone()));
                     }
-                }
-                EventKind::InputMessage(_) => {
-                    if let Some(result) = tagged(event, WAKE_RESULT_TAG) {
-                        unposted.retain(|(id, _)| id != result);
+                    "exec/ended" => {
+                        let (
+                            QueryValue::Value {
+                                value: serde_json::Value::String(task_id),
+                            },
+                            QueryValue::Value { value: status },
+                            QueryValue::Value { value: result },
+                        ) = (task_id, status, result)
+                        else {
+                            unreachable!("exec end has task id, status and result")
+                        };
+                        let data = ExecEndedData {
+                            task_id: task_id.clone(),
+                            status: serde_json::from_value(status.clone())
+                                .expect("exec status follows the event contract"),
+                            result: serde_json::from_value(result.clone())
+                                .expect("exec result follows the event contract"),
+                        };
+                        open.retain(|(open_id, _)| open_id != task_id);
+                        if let Some(task) = tasks.get_mut(task_id) {
+                            task.ended.send_replace(Some(data.clone()));
+                        }
+                        if wakes(&data) && !closing {
+                            unposted.push((id.clone(), data));
+                        }
                     }
+                    "input/message" => {
+                        if let QueryValue::Value {
+                            value: serde_json::Value::Array(tags),
+                        } = tags
+                            && let Some(result) = tags.iter().find_map(|tag| {
+                                tag.as_str()
+                                    .and_then(|tag| tag.strip_prefix(WAKE_RESULT_TAG))
+                            })
+                        {
+                            unposted.retain(|(id, _)| id != result);
+                        }
+                    }
+                    _ => unreachable!("query selects background task lifecycle facts"),
                 }
-                _ => {}
+            }
+            after = reply.next;
+            if after.is_none() {
+                break;
             }
         }
         let unposted = unposted
             .into_iter()
             .map(|(id, data)| {
-                let name = state
-                    .tasks
+                let name = tasks
                     .get(&data.task_id)
                     .map_or_else(|| data.task_id.clone(), |task| task.description.clone());
                 (id, data, name)
             })
             .collect();
+        self.state.lock().unwrap().tasks = tasks;
         for (task_id, output_path) in open {
             let written = self.timeline.append(
                 EventKind::ExecEnded(ExecEndedData {
@@ -514,7 +634,7 @@ impl BackgroundExec {
                 tracing::warn!(%error, task_id, "recovery exec/ended was not written");
             }
         }
-        unposted
+        Ok((through, unposted))
     }
 
     /// Posts the wakes the previous generation lost, at load: like every
@@ -673,7 +793,6 @@ impl DynPlugin for BackgroundExecPlugin {
             })?;
             let consumer = service.clone();
             let read = service.clone();
-            let read_timeline = service.timeline.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -681,21 +800,10 @@ impl DynPlugin for BackgroundExecPlugin {
                     ["exec/ended", "stop/interrupt"].map(String::from).to_vec(),
                     Arc::new(move || {
                         let read = read.clone();
-                        let timeline = read_timeline.clone();
                         Box::pin(async move {
-                            let reply = rebuild_facts(
-                                &timeline,
-                                &[
-                                    "exec/started",
-                                    "exec/ended",
-                                    "stop/interrupt",
-                                    "input/message",
-                                ],
-                            )
-                            .await?;
-                            let unposted = read.rebuild(&reply.events);
+                            let (through, unposted) = read.rebuild().await?;
                             read.repost(unposted);
-                            Ok(reply.through)
+                            Ok(through)
                         })
                     }),
                     Arc::new(move |event| consumer.consume(Arc::new(event))),

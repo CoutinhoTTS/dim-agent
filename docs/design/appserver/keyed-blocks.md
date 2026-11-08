@@ -75,13 +75,24 @@ A `through` past the published head is invalid input, never clamped to the head:
 
 ## 3. Read algorithm and cost
 
-One descending scan, `TimelineQuery` with `kinds: ["input/message", "input/deleted", "branch/start", "session/forked"]`, `TimelineQueryDirection::Descending`, ordered by sequence, `limit` 256 per page. The scan starts at `through` and stops at the first opening event; everything below it is discarded. Pages advance by `from_sequence = min_sequence - 1` of the previous page, never by `offset`: the query's offset is skipping, and the storage reader fetches `offset + limit` rows before skipping them, so a deep walk by offset is quadratic in the page count. A page shorter than the limit means the selection is exhausted (ADR 019 D2). Cost is O(input/message and input/deleted rows above the opening), one zone query per page over `(session_id, branch_id, sequence)`; a 20,000-message branch is about 80 pages.
+At the caller's fixed `through`, select the latest opening position. Then
+read input identities, positions and blocks from that opening through the
+same cutoff, in descending event order, 256 matching inputs per page.
+The [property query](../timeline-property-query.md) selects inputs containing
+a keyed block and excludes inputs for which a matching `input/deleted` exists
+in that segment. The deletion relation uses the entire fixed segment on
+every page; the continuation limits only the returned inputs. No user content
+or unkeyed input is needed. Stop when the query returns no continuation.
 
-Deletions are collected in the same pass, without a second read. The ordering that makes it correct: InputQueue writes `input/deleted` only for an input it still holds unapplied — a withdrawal is decided when the input has neither `input/applied` nor a consumption — so the deletion event is always written after the input it removes. A descending scan therefore meets the deletion before it meets the block, and a block is live only when its input id is absent from the set collected so far. A `retire` block written by a deleted input is skipped by the same check, so it cannot end a key.
+A deleted input contributes neither live blocks nor retire blocks. The read
+holds only the keys already resolved and the resulting entries; it consumes
+and releases each page.
 
 Each event's keyed blocks are read in reverse block order (newest block of the input first), so the newest block of a key wins within one input as well as across inputs. A key already decided by a newer event is skipped; a `retire` of a key that has no newer live block records the key as closed for every older block. The cap is enforced while collecting, so an over-cap reply fails before the walk ends.
 
-No new storage capability is needed: kinds are pushed into the storage selection, and descending, range and limit already exist. What does not exist is a block-level key predicate — the query's predicate is one JSON scalar point path and rejects arrays — so the scan reads every input message above the opening, not only the keyed ones. A derived index on raw-block keys would be a derived object under ADR 019 D4 and is out of scope here.
+The query does not introduce a persistent index on block keys. Storage still
+has to inspect candidate input properties and deletion relations; output
+pagination does not promise constant total query work.
 
 The read follows the two-owner pattern of `session.history`: an open line is read through its Session (`Session::query`, which reads at the published head), an ended line through TimelineTree at its fixed head (`TreeCommands::query`). A line that ends while the call runs answers `branch_ended`; the read is then repeated through the tree at the fixed head. Unlike the `latestTurn` window, the read needs no native store: both owners serve it.
 

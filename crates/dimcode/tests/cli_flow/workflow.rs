@@ -1479,7 +1479,6 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
                 "settings.update",
             ],
         );
-        // A line opens from main; focusing it reads the line's own history.
         wire.notice(
             "session.event",
             json!({"sessionId":"session","branchId":"main","event":{
@@ -1488,18 +1487,10 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
                         "source":{"kind":"host","operation_id":"op-1"},
                         "prompt":"child work"}}}),
         );
-        let history = wire.read("session.history");
-        assert_eq!(history["params"]["branchId"], "line-1");
-        wire.reply(
-            &history,
-            json!({"events":[{"id":"start-line-1","sequence":10,"create_at":1,
-                    "type":"branch","name":"start","data":{"parent":"main"}}],
-                "through":10,"nextAfter":10,"done":true}),
-        );
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let transcript = wire.read("session.history");
         assert_eq!(transcript["params"]["branchId"], "line-1");
-        assert_eq!(transcript["params"]["after"], 0);
+        assert_eq!(transcript["params"]["latestTurn"], true);
         wire.reply(
             &transcript,
             json!({"events":[{"id":"start-line-1","sequence":10,"create_at":1,

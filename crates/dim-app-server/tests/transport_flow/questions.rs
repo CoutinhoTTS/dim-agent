@@ -103,6 +103,13 @@ async fn a_client_answers_a_waiting_question_through_rpc() {
         "{methods}"
     );
 
+    assert!(
+        methods["result"]["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"name":"session.question.pending","mutating":false}))
+    );
+
     submit(&mut client, &sid, ASK).await;
     let asked = step(&mut client, "tool-call").await;
     assert_eq!(asked["branchId"], "main");
@@ -112,6 +119,85 @@ async fn a_client_answers_a_waiting_question_through_rpc() {
     let request_id = request(&asked);
     let call_sequence = asked["event"]["sequence"].as_u64().unwrap();
     waiting(&mut client, &sid, &request_id, &call_id).await;
+
+    let pending = client
+        .rpc(
+            "session.question.pending",
+            json!({"sessionId":sid,"branchId":"main"}),
+        )
+        .await;
+    assert_ok(&pending);
+    assert_eq!(
+        pending["result"]["batches"],
+        json!([{
+            "eventId":asked["event"]["id"], "sequence":call_sequence,
+            "requestId":request_id, "calls":[call]
+        }])
+    );
+    assert!(pending["result"]["next"].is_null());
+    let through = pending["result"]["through"].clone();
+
+    let active = client
+        .rpc(
+            "session.turn.get",
+            json!({"sessionId":sid,"branchId":"main"}),
+        )
+        .await;
+    assert_ok(&active);
+    assert_eq!(
+        active["result"]["turn"]["turnId"],
+        asked["event"]["data"]["turn_id"]
+    );
+    assert_eq!(active["result"]["turn"]["ended"], false);
+    let queued = client.rpc("session.submit", json!({"sessionId":sid,"branchId":"main","text":"queued outside the transcript window","mode":"queue"})).await;
+    assert_ok(&queued);
+    let input_id = queued["result"]["event"]["id"].clone();
+    let inputs = client
+        .rpc(
+            "session.input.pending",
+            json!({"sessionId":sid,"branchId":"main"}),
+        )
+        .await;
+    assert_ok(&inputs);
+    assert_eq!(
+        inputs["result"]["inputs"].as_array().unwrap().len(),
+        1,
+        "{inputs}"
+    );
+    assert_eq!(inputs["result"]["inputs"][0]["inputId"], input_id);
+    assert_eq!(inputs["result"]["inputs"][0]["applied"], false);
+    assert!(inputs["result"]["inputs"][0].get("blocks").is_none());
+    let withdrawn = client
+        .rpc(
+            "session.input.withdraw",
+            json!({"sessionId":sid,"branchId":"main","inputId":input_id}),
+        )
+        .await;
+    assert_ok(&withdrawn);
+    loop {
+        let notice = client.notice("session.event").await;
+        if notice["params"]["event"]["sequence"] == withdrawn["result"]["sequence"] {
+            break;
+        }
+    }
+    let empty_inputs = client
+        .rpc(
+            "session.input.pending",
+            json!({"sessionId":sid,"branchId":"main"}),
+        )
+        .await;
+    assert_eq!(
+        empty_inputs["result"]["inputs"],
+        json!([]),
+        "{empty_inputs}"
+    );
+    let old_inputs = client
+        .rpc(
+            "session.input.pending",
+            json!({"sessionId":sid,"branchId":"main","through":inputs["result"]["through"]}),
+        )
+        .await;
+    assert_eq!(old_inputs["result"], inputs["result"]);
 
     let fork = client
         .rpc("session.fork", json!({"sessionId":sid,"at":call_sequence}))
@@ -187,6 +273,36 @@ async fn a_client_answers_a_waiting_question_through_rpc() {
             .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
             .await,
     );
+    let ended = client
+        .rpc(
+            "session.turn.get",
+            json!({"sessionId":sid,"branchId":"main","turnId":active["result"]["turn"]["turnId"]}),
+        )
+        .await;
+    assert_ok(&ended);
+    assert_eq!(ended["result"]["turn"]["ended"], true);
+    let old_turn = client
+        .rpc(
+            "session.turn.get",
+            json!({"sessionId":sid,"branchId":"main","through":active["result"]["through"]}),
+        )
+        .await;
+    assert_eq!(old_turn["result"], active["result"]);
+    let empty = client
+        .rpc(
+            "session.question.pending",
+            json!({"sessionId":sid,"branchId":"main"}),
+        )
+        .await;
+    assert_ok(&empty);
+    assert_eq!(empty["result"]["batches"], json!([]));
+    let old = client
+        .rpc(
+            "session.question.pending",
+            json!({"sessionId":sid,"branchId":"main","through":through}),
+        )
+        .await;
+    assert_eq!(old["result"], pending["result"]);
     server.shutdown();
     server.join().await.unwrap();
 }

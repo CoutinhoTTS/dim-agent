@@ -1,5 +1,4 @@
 use super::*;
-use dim_agent_capabilities::history::read_context_in;
 use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 
@@ -1863,7 +1862,8 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     );
     assert_eq!(client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":policy["result"]["policy"]})).await["error"]["data"]["appError"], "permission_conflict");
     async fn project_rule(session: &dim_agent_runtime::Session) -> (String, String) {
-        let context = read_context_in(session, "main", session.sequence("main").unwrap())
+        let context = dim_agent_capabilities::history::HistoryRenderer::default()
+            .context_in(session, "main", session.sequence("main").unwrap())
             .await
             .unwrap();
         let system = serde_json::to_string(
@@ -1903,7 +1903,8 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             )
             .await,
     );
-    let context = read_context_in(&session, "main", session.sequence("main").unwrap())
+    let context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .context_in(&session, "main", session.sequence("main").unwrap())
         .await
         .unwrap();
     assert_eq!(

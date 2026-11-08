@@ -2,7 +2,9 @@ use crate::assembly::OpeningAdvanced;
 use crate::core::TailLock;
 use crate::lifecycle::{CloseOnce, guarded};
 use crate::*;
-use dim_agent_types::{AgentEvent, EventKind, InputMessageData, InterruptScope, StopInterruptData};
+use dim_agent_types::{
+    AgentEvent, EventKind, InputMessageData, InterruptScope, StopInterruptData, TimelinePosition,
+};
 use rutis::Ctx;
 use rutis::host::{CtxHost, FiberView};
 use std::sync::{
@@ -387,12 +389,15 @@ impl TimelineContext {
         }
         data.validate()
             .map_err(|reason| AgentError::InvalidInput(reason.into()))?;
-        let result = self.timeline.input_checked(data, || {
-            if self.ended() {
-                return Err(AgentError::BranchEnded(self.id.clone()));
-            }
-            Ok(())
-        })?;
+        let result = self
+            .timeline
+            .input_checked(data, || {
+                if self.ended() {
+                    return Err(AgentError::BranchEnded(self.id.clone()));
+                }
+                Ok(())
+            })
+            .await?;
         match result {
             crate::core::Appended::Written(event) => Ok(event),
             crate::core::Appended::Existing(sequence) => self.committed_input(sequence).await,
@@ -425,12 +430,15 @@ impl TimelineContext {
                 .validate()
                 .map_err(|reason| AgentError::InvalidInput(reason.into()))?;
         }
-        let result = self.timeline.inputs_checked(inputs, || {
-            if self.ended() {
-                return Err(AgentError::BranchEnded(self.id.clone()));
-            }
-            Ok(())
-        })?;
+        let result = self
+            .timeline
+            .inputs_checked(inputs, || {
+                if self.ended() {
+                    return Err(AgentError::BranchEnded(self.id.clone()));
+                }
+                Ok(())
+            })
+            .await?;
         match result {
             crate::core::AppendedBatch::Written(events) => Ok(events),
             crate::core::AppendedBatch::Existing(sequences) => {
@@ -444,7 +452,11 @@ impl TimelineContext {
     }
     /// The committed input with submission id `id`, once it is published.
     pub(crate) async fn lookup(&self, id: &str) -> Result<Option<Arc<AgentEvent>>> {
-        let Some(input) = self.timeline.submission(id)? else {
+        let Some(input) = self
+            .timeline
+            .submission(id, self.timeline.committed())
+            .await?
+        else {
             return Ok(None);
         };
         let _ = self
@@ -458,56 +470,78 @@ impl TimelineContext {
                 .failure()
                 .unwrap_or_else(|| AgentError::Closed(self.id().into())));
         }
-        self.timeline
+        let reply = self
+            .timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
                 include_publishing: false,
-                from_event: None,
-                from_sequence: None,
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Ascending,
-                kinds: Vec::new(),
-                flags: Vec::new(),
-                event_id: Some(input.id),
-                predicate: None,
-                limit: std::num::NonZeroU64::MIN,
-                offset: 0,
+                from: Some(TimelinePosition {
+                    branch_id: self.id().into(),
+                    sequence: input.sequence,
+                }),
+                through: Some(input.sequence),
+                query: QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field { path: "id".into() },
+                        values: vec![input.id.into()],
+                    }),
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: std::num::NonZeroU64::MIN,
+                    after: None,
+                }),
             })
-            .await?
-            .events
+            .await?;
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        events
             .into_iter()
             .next()
+            .map(|row| Some(row.event))
             .ok_or_else(|| {
                 AgentError::Storage(format!("committed input {} is missing", input.sequence))
             })
-            .map(Some)
     }
-    /// The input at `sequence`, a submission this branch already holds. The
-    /// duplicate may arrive while its first write is still in flight, so the
-    /// read asks for the facts still publishing and not only what the query
-    /// bounds by default ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md#d3-replay-is-removed)).
+    /// Returns an already committed submission, including one awaiting publication.
     async fn committed_input(&self, sequence: u64) -> Result<Arc<AgentEvent>> {
-        self.timeline
+        let reply = self
+            .timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
                 include_publishing: true,
-                from_event: None,
-                from_sequence: Some(sequence),
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Ascending,
-                kinds: Vec::new(),
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: std::num::NonZeroU64::MIN,
-                offset: 0,
+                from: Some(TimelinePosition {
+                    branch_id: self.id().into(),
+                    sequence,
+                }),
+                through: Some(sequence),
+                query: QuerySpec {
+                    filter: None,
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: std::num::NonZeroU64::MIN,
+                    after: None,
+                }),
             })
-            .await?
-            .events
+            .await?;
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        events
             .into_iter()
             .next()
+            .map(|row| row.event)
             .ok_or_else(|| AgentError::Storage(format!("committed input {sequence} is missing")))
     }
+
     /// Waits until Loop has dispatched the Timeline tail and has no unclosed
     /// turn; returns that dispatched sequence.
     pub(crate) async fn idle(&self) -> Result<u64> {

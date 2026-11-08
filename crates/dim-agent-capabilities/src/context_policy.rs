@@ -1,23 +1,80 @@
 use crate::{
     history::{
         HistoryEntry, HistoryRenderer, chain_by_id, context_compaction, context_configuration,
-        digest_message, newest_chain, rising_chain, truncate_middle, user_message,
+        digest_message, truncate_middle, user_message,
     },
     host::*,
 };
 use dim_agent_runtime::{
-    ContextHistory, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryPredicate, TimelineQueryScope,
+    ContextHistory, QueryFilter, QueryOperand, QueryOutput, QueryPage, QuerySelect, QuerySpec,
+    QueryValue, Timeline, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    num::NonZeroU64,
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use std::{collections::HashMap, num::NonZeroU64, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
+
+fn newest_chain(
+    kind: Option<&str>,
+    through: u64,
+    filter: Option<QueryFilter>,
+    select: QuerySelect,
+) -> TimelineQuery {
+    let mut conditions: Vec<QueryFilter> = filter.into_iter().collect();
+    if let Some(kind) = kind {
+        conditions.push(QueryFilter::In {
+            value: QueryOperand::Field {
+                path: "kind".into(),
+            },
+            values: vec![kind.into()],
+        });
+    }
+    TimelineQuery {
+        scope: TimelineQueryScope::Chain,
+        include_publishing: false,
+        from: None,
+        through: Some(through),
+        query: QuerySpec {
+            filter: Some(QueryFilter::And { conditions }),
+            select,
+            group_by: vec![],
+            pick: Some(dim_agent_runtime::QueryPick::Last),
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: NonZeroU64::MIN,
+            after: None,
+        }),
+    }
+}
+
+fn rising_chain(
+    from: Option<TimelinePosition>,
+    through: u64,
+    kinds: &[&str],
+    select: QuerySelect,
+    page: QueryPage,
+) -> TimelineQuery {
+    TimelineQuery {
+        scope: TimelineQueryScope::Chain,
+        include_publishing: false,
+        from,
+        through: Some(through),
+        query: QuerySpec {
+            filter: Some(QueryFilter::In {
+                value: QueryOperand::Field {
+                    path: "kind".into(),
+                },
+                values: kinds.iter().map(|kind| (*kind).into()).collect(),
+            }),
+            select,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: Some(page),
+    }
+}
 
 /// Share of the input budget a compaction keeps verbatim, the keyed baseline
 /// included; provisional (#128, #428).
@@ -49,9 +106,6 @@ pub(crate) struct ContextPolicy {
     pub resolver: Arc<dyn ResolveContextModel>,
     pub strategy: Arc<dyn CompactionStrategy>,
     pub history: Arc<HistoryRenderer>,
-    /// The latest prepared request and its estimate, so `validate` checks
-    /// it without reading the context again; derived, a miss reads it.
-    prepared: Mutex<Option<(Arc<ModelRequest>, f64)>>,
 }
 pub(crate) struct Estimate {
     pub input: f64,
@@ -392,7 +446,6 @@ impl ContextPolicy {
                 resolver: resolver.clone(),
                 strategy: strategy.clone(),
                 history: history.clone(),
-                prepared: Mutex::new(None),
             })),
             (None, None) => Ok(None),
             _ => Err("ContextModelHost and CompactionStrategyHost must be bound together".into()),
@@ -424,7 +477,9 @@ impl ContextPolicy {
             let kept = match context.retained_entry(&history, &checkpoint.retain_from) {
                 Some(kept) => kept,
                 None => {
-                    let Some(position) = self.cut_position(&checkpoint.retain_from).await? else {
+                    let Some(position) =
+                        self.cut_position(&checkpoint.retain_from, through).await?
+                    else {
                         continue;
                     };
                     context.position_entry(&history, &position)
@@ -466,12 +521,31 @@ impl ContextPolicy {
     }
 
     /// Where the event `cut` sits in the branch chain, read by its id.
-    async fn cut_position(&self, cut: &str) -> Result<Option<TimelinePosition>, HostError> {
-        self.timeline
-            .query(chain_by_id(cut))
+    async fn cut_position(
+        &self,
+        cut: &str,
+        through: u64,
+    ) -> Result<Option<TimelinePosition>, HostError> {
+        let reply = self
+            .timeline
+            .query(chain_by_id(
+                cut,
+                through,
+                QuerySelect::Fields {
+                    fields: vec!["position".into()],
+                },
+            ))
             .await
-            .map(|reply| reply.positions.into_iter().next())
-            .map_err(|error| HostError::failed(error.to_string()))
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        Ok(rows.into_iter().next().map(|row| {
+            let [QueryValue::Value { value }] = row.values.as_slice() else {
+                unreachable!("event has a position")
+            };
+            serde_json::from_value(value.clone()).expect("position follows the query contract")
+        }))
     }
 
     /// The index of the first entry a cut keeps, resolving a cut the history
@@ -480,7 +554,7 @@ impl ContextPolicy {
         if let Some(kept) = view.context.retained_entry(&view.history, cut) {
             return Ok(kept);
         }
-        let position = self.cut_position(cut).await?.ok_or_else(|| {
+        let position = self.cut_position(cut, view.through).await?.ok_or_else(|| {
             HostError::failed(format!("Compaction cut {cut} is outside the branch chain"))
         })?;
         Ok(view.context.position_entry(&view.history, &position))
@@ -502,60 +576,99 @@ impl ContextPolicy {
             .into_iter()
             .map(|(branch, _)| branch)
             .collect();
-        let window = cut_window(&view.history, model);
+        let window = match cut_window(&view.history, model) {
+            Some(entry) => Some(
+                self.cut_position(&entry.event_id, through)
+                    .await?
+                    .ok_or_else(|| {
+                        HostError::failed("Retention boundary is outside the branch chain")
+                    })?,
+            ),
+            None => None,
+        };
         let mut events = Vec::new();
-        let mut from_event = window.map(|entry| entry.event_id.clone());
-        let mut repeated = false;
+        let mut after = None;
         loop {
-            let mut page = self
+            let reply = self
                 .timeline
                 .query(rising_chain(
-                    from_event.as_deref(),
-                    vec!["turn/start".into()],
-                    CUT_PAGE,
+                    window.clone(),
+                    through,
+                    &["turn/start"],
+                    QuerySelect::Fields {
+                        fields: vec!["id".into(), "position".into()],
+                    },
+                    QueryPage {
+                        limit: NonZeroU64::new(CUT_PAGE).unwrap(),
+                        after,
+                    },
                 ))
                 .await
                 .map_err(|error| HostError::failed(error.to_string()))?;
-            let complete = (page.events.len() as u64) < CUT_PAGE;
-            if repeated && !page.events.is_empty() {
-                page.events.remove(0);
-                page.positions.remove(0);
-            }
-            let next = page.events.last().map(|event| event.id.clone());
-            events.extend(
-                page.events
-                    .into_iter()
-                    .zip(page.positions)
-                    .map(|(event, position)| OrderEvent {
-                        id: event.id.clone(),
-                        position,
-                        turn_start: true,
-                        boundary: false,
-                    }),
-            );
-            if complete {
-                break;
-            }
-            let Some(next) = next else {
-                break;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
             };
-            from_event = Some(next);
-            repeated = true;
+            for row in rows {
+                let [
+                    QueryValue::Value {
+                        value: serde_json::Value::String(id),
+                    },
+                    QueryValue::Value { value: position },
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("event has an id and position")
+                };
+                events.push(OrderEvent {
+                    id: id.clone(),
+                    position: serde_json::from_value(position.clone())
+                        .expect("position follows the query contract"),
+                    turn_start: true,
+                    boundary: false,
+                });
+            }
+            after = reply.next;
+            if after.is_none() {
+                break;
+            }
         }
-        let page = self
+        let reply = self
             .timeline
-            .query(newest_chain(None, Some(through), None, 1))
+            .query(newest_chain(
+                None,
+                through,
+                None,
+                QuerySelect::Fields {
+                    fields: vec!["id".into(), "kind".into(), "position".into()],
+                },
+            ))
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        if let Some((event, position)) = page.events.into_iter().zip(page.positions).next()
-            && position.branch_id == self.timeline.branch_id()
-        {
-            events.push(OrderEvent {
-                id: event.id.clone(),
-                position,
-                turn_start: matches!(&event.kind, EventKind::TurnStart(_)),
-                boundary: true,
-            });
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        if let Some(row) = rows.into_iter().next() {
+            let [
+                QueryValue::Value {
+                    value: serde_json::Value::String(id),
+                },
+                QueryValue::Value {
+                    value: serde_json::Value::String(kind),
+                },
+                QueryValue::Value { value: position },
+            ] = row.values.as_slice()
+            else {
+                unreachable!("event has an id, kind and position")
+            };
+            let position: TimelinePosition = serde_json::from_value(position.clone())
+                .expect("position follows the query contract");
+            if position.branch_id == self.timeline.branch_id() {
+                events.push(OrderEvent {
+                    id: id.clone(),
+                    position,
+                    turn_start: kind == "turn/start",
+                    boundary: true,
+                });
+            }
         }
         let rank = |branch: &str| branches.iter().position(|name| name == branch);
         events.sort_by_key(|event| (rank(&event.position.branch_id), event.position.sequence));
@@ -566,25 +679,35 @@ impl ContextPolicy {
     /// since the branch's latest compaction attempt, of any trigger and any
     /// outcome (ContextCompaction §5.6).
     async fn regrown(&self, view: &View, model: &dyn ContextModel) -> Result<bool, HostError> {
-        let page = self
+        let reply = self
             .timeline
             .query(newest_chain(
                 Some("context/compaction-start"),
-                Some(view.through),
+                view.through,
                 None,
-                1,
+                QuerySelect::Fields {
+                    fields: vec!["position".into(), "data.through".into()],
+                },
             ))
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        let start =
-            page.events
-                .into_iter()
-                .zip(page.positions)
-                .next()
-                .and_then(|(event, position)| match &event.kind {
-                    EventKind::ContextCompactionStart(data) => Some((position, data.through)),
-                    _ => None,
-                });
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        let start = rows.into_iter().next().map(|row| {
+            let [
+                QueryValue::Value { value: position },
+                QueryValue::Value { value: through },
+            ] = row.values.as_slice()
+            else {
+                unreachable!("compaction start has a position and through")
+            };
+            let position: TimelinePosition = serde_json::from_value(position.clone())
+                .expect("position follows the query contract");
+            let through: u64 = serde_json::from_value(through.clone())
+                .expect("compaction bound follows the event contract");
+            (position, through)
+        });
         Ok(regrown(
             view,
             start.as_ref().map(|(at, through)| (at, *through)),
@@ -605,42 +728,51 @@ impl ContextPolicy {
         let branches = view.context.branches.clone();
         let reply = self
             .timeline
-            .query(chain_by_id(cut))
+            .query(chain_by_id(cut, view.through, QuerySelect::Events))
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        let cut_position = reply.positions.first().cloned();
-        let mut events: Vec<(TimelinePosition, Arc<AgentEvent>)> =
-            reply.positions.into_iter().zip(reply.events).collect();
-        let previous = self
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        let cut_position = events.first().map(|row| row.position.clone());
+        let mut events: Vec<(TimelinePosition, Arc<AgentEvent>)> = events
+            .into_iter()
+            .map(|row| (row.position, row.event))
+            .collect();
+        let reply = self
             .timeline
             .query(newest_chain(
                 Some("context/compaction"),
-                Some(view.through),
-                Some(TimelineQueryPredicate {
-                    path: "status".into(),
-                    value: json!("completed"),
+                view.through,
+                Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "data.status".into(),
+                    },
+                    values: vec!["completed".into()],
                 }),
-                1,
+                QuerySelect::Fields {
+                    fields: vec!["data.retain_from".into()],
+                },
             ))
             .await
-            .map_err(|error| HostError::failed(error.to_string()))?
-            .events
-            .into_iter()
-            .next()
-            .and_then(|event| match &event.kind {
-                EventKind::ContextCompaction(data) => match &data.outcome {
-                    ContextCompactionResult::Completed { retain_from, .. } => {
-                        Some(retain_from.clone())
-                    }
-                    _ => None,
-                },
-                _ => None,
-            });
-        let previous = match &previous {
-            Some(previous) => self
-                .cut_position(previous)
-                .await?
-                .map(|position| (previous.clone(), position)),
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        let previous = match rows.into_iter().next() {
+            Some(row) => {
+                let [
+                    QueryValue::Value {
+                        value: serde_json::Value::String(id),
+                    },
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("completed compaction has retain_from")
+                };
+                Some(self.cut_position(id, view.through).await?.ok_or_else(|| {
+                    HostError::failed("Compaction cut is outside the branch chain")
+                })?)
+            }
             None => None,
         };
         let turn = if turn_id.is_empty() {
@@ -650,98 +782,125 @@ impl ContextPolicy {
                 .timeline
                 .query(newest_chain(
                     Some("turn/start"),
-                    Some(view.through),
-                    Some(TimelineQueryPredicate {
-                        path: "turn_id".into(),
-                        value: json!(turn_id),
+                    view.through,
+                    Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "data.turn_id".into(),
+                        },
+                        values: vec![turn_id.into()],
                     }),
-                    1,
+                    QuerySelect::Fields {
+                        fields: vec!["position".into()],
+                    },
                 ))
                 .await
                 .map_err(|error| HostError::failed(error.to_string()))?;
-            reply.events.into_iter().zip(reply.positions).next()
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
+            };
+            rows.into_iter().next().map(|row| {
+                let [QueryValue::Value { value }] = row.values.as_slice() else {
+                    unreachable!("event has a position")
+                };
+                serde_json::from_value::<TimelinePosition>(value.clone())
+                    .expect("position follows the query contract")
+            })
         };
-        if let (Some((turn, _)), Some(at)) = (&turn, &cut_position) {
-            let window = [
-                "turn/start".to_owned(),
-                "input/message".to_owned(),
-                "input/consumed".to_owned(),
-            ]
-            .to_vec();
-            let mut from_event = Some(turn.id.clone());
-            let mut repeated = false;
+        let end = cut_position.as_ref().map(|at| QueryFilter::Or {
+            conditions: vec![
+                QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "position.branch_id".into(),
+                    },
+                    values: branches
+                        .iter()
+                        .take_while(|branch| *branch != &at.branch_id)
+                        .cloned()
+                        .map(Into::into)
+                        .collect(),
+                },
+                QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "position.branch_id".into(),
+                            },
+                            values: vec![at.branch_id.clone().into()],
+                        },
+                        QueryFilter::Compare {
+                            left: QueryOperand::Field {
+                                path: "position.sequence".into(),
+                            },
+                            comparison: dim_agent_runtime::QueryComparison::Le,
+                            right: QueryOperand::Value {
+                                value: at.sequence.into(),
+                            },
+                        },
+                    ],
+                },
+            ],
+        });
+        if let (Some(turn), Some(end)) = (turn, &end) {
+            let mut query = rising_chain(
+                Some(turn),
+                view.through,
+                &["turn/start", "input/message", "input/consumed"],
+                QuerySelect::Events,
+                QueryPage {
+                    limit: NonZeroU64::new(WINDOW_PAGE).unwrap(),
+                    after: None,
+                },
+            );
+            query.query.filter = Some(QueryFilter::And {
+                conditions: vec![query.query.filter.take().unwrap(), end.clone()],
+            });
             loop {
-                let mut page = self
+                let reply = self
                     .timeline
-                    .query(rising_chain(
-                        from_event.as_deref(),
-                        window.clone(),
-                        WINDOW_PAGE,
-                    ))
+                    .query(query.clone())
                     .await
                     .map_err(|error| HostError::failed(error.to_string()))?;
-                let complete = (page.events.len() as u64) < WINDOW_PAGE;
-                if repeated && !page.events.is_empty() {
-                    page.events.remove(0);
-                    page.positions.remove(0);
-                }
-                let next = page.events.last().map(|event| event.id.clone());
-                let mut passed = false;
-                for (event, position) in page.events.into_iter().zip(page.positions) {
-                    if later(&branches, &position, at) {
-                        passed = true;
-                        break;
-                    }
-                    events.push((position, event));
-                }
-                if complete || passed {
-                    break;
-                }
-                let Some(next) = next else {
-                    break;
+                let QueryOutput::Events { events: page } = reply.result else {
+                    unreachable!("event selection returns events")
                 };
-                from_event = Some(next);
-                repeated = true;
+                events.extend(page.into_iter().map(|row| (row.position, row.event)));
+                query.page.as_mut().unwrap().after = reply.next;
+                if query.page.as_ref().unwrap().after.is_none() {
+                    break;
+                }
             }
-            self.supply_inputs(&mut events).await?;
+            self.supply_inputs(&mut events, view.through).await?;
         }
-        let mut from_event = previous.as_ref().map(|(cut, _)| cut.clone());
         let mut tool_results = Vec::new();
-        let mut repeated = false;
+        let mut query = rising_chain(
+            previous,
+            view.through,
+            &["step/tool-result"],
+            QuerySelect::Events,
+            QueryPage {
+                limit: NonZeroU64::new(WINDOW_PAGE).unwrap(),
+                after: None,
+            },
+        );
+        if let Some(end) = end {
+            query.query.filter = Some(QueryFilter::And {
+                conditions: vec![query.query.filter.take().unwrap(), end],
+            });
+        }
         loop {
-            let mut page = self
+            let reply = self
                 .timeline
-                .query(rising_chain(
-                    from_event.as_deref(),
-                    vec!["step/tool-result".to_owned()],
-                    WINDOW_PAGE,
-                ))
+                .query(query.clone())
                 .await
                 .map_err(|error| HostError::failed(error.to_string()))?;
-            let complete = (page.events.len() as u64) < WINDOW_PAGE;
-            if repeated && !page.events.is_empty() {
-                page.events.remove(0);
-                page.positions.remove(0);
-            }
-            let next = page.events.last().map(|event| event.id.clone());
-            let mut passed = false;
-            for (event, position) in page.events.into_iter().zip(page.positions) {
-                if let Some(at) = &cut_position
-                    && later(&branches, &position, at)
-                {
-                    passed = true;
-                    break;
-                }
-                tool_results.push((position, event));
-            }
-            if complete || passed {
-                break;
-            }
-            let Some(next) = next else {
-                break;
+            let QueryOutput::Events { events: page } = reply.result else {
+                unreachable!("event selection returns events")
             };
-            from_event = Some(next);
-            repeated = true;
+            tool_results.extend(page.into_iter().map(|row| (row.position, row.event)));
+            query.page.as_mut().unwrap().after = reply.next;
+            if query.page.as_ref().unwrap().after.is_none() {
+                break;
+            }
         }
         events.sort_by_key(|(position, _)| {
             let rank = branches
@@ -762,25 +921,47 @@ impl ContextPolicy {
     async fn supply_inputs(
         &self,
         events: &mut Vec<(TimelinePosition, Arc<AgentEvent>)>,
+        through: u64,
     ) -> Result<(), HostError> {
-        let consumed: Vec<String> = events
+        let present: std::collections::HashSet<_> =
+            events.iter().map(|(_, event)| event.id.as_str()).collect();
+        let consumed: Vec<serde_json::Value> = events
             .iter()
             .filter_map(|(_, event)| match &event.kind {
-                EventKind::InputConsumed(data) => Some(data.input_id.clone()),
+                EventKind::InputConsumed(data) if !present.contains(data.input_id.as_str()) => {
+                    Some(data.input_id.clone().into())
+                }
                 _ => None,
             })
             .collect();
-        for id in consumed {
-            if events.iter().any(|(_, event)| event.id == id) {
-                continue;
-            }
-            let reply = self
-                .timeline
-                .query(chain_by_id(&id))
-                .await
-                .map_err(|error| HostError::failed(error.to_string()))?;
-            events.extend(reply.positions.into_iter().zip(reply.events));
-        }
+        let Some(limit) = NonZeroU64::new(consumed.len() as u64) else {
+            return Ok(());
+        };
+        let reply = self
+            .timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Chain,
+                include_publishing: false,
+                from: None,
+                through: Some(through),
+                query: QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field { path: "id".into() },
+                        values: consumed,
+                    }),
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage { limit, after: None }),
+            })
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let QueryOutput::Events { events: supplied } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        events.extend(supplied.into_iter().map(|row| (row.position, row.event)));
         Ok(())
     }
 
@@ -795,62 +976,80 @@ impl ContextPolicy {
         cancel: CancellationToken,
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<Arc<ModelRequest>, HostError> {
-        let (request, input) = self
-            .prepare_estimated(request, source, context, history, events, cancel, cancelled)
-            .await?;
-        *self.prepared.lock().unwrap() = Some((request.clone(), input));
-        Ok(request)
-    }
-
-    /// The prepared request and the trigger's estimate of it.
-    #[allow(clippy::too_many_arguments)]
-    async fn prepare_estimated(
-        &self,
-        request: Arc<ModelRequest>,
-        source: &ContextPrepareData,
-        context: PolicyContext,
-        history: Vec<HistoryEntry>,
-        events: Vec<Arc<AgentEvent>>,
-        cancel: CancellationToken,
-        cancelled: &(dyn Fn() -> String + Sync),
-    ) -> Result<(Arc<ModelRequest>, f64), HostError> {
         let boundary = history.last().map(|entry| entry.id.clone());
-        // An earlier attempt of this turn wrote these facts; they may still be
-        // waiting for publication, so the read adds the branch's tail.
         let mut reusable = Vec::new();
-        let mut from = source.through.saturating_add(1);
-        loop {
-            let reply = self
-                .timeline
-                .query(TimelineQuery {
-                    scope: TimelineQueryScope::Branch,
-                    include_publishing: true,
-                    from_event: None,
-                    from_sequence: Some(from),
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Ascending,
-                    kinds: vec!["context/compaction".into(), "context/budget".into()],
-                    flags: Vec::new(),
-                    event_id: None,
-                    predicate: Some(TimelineQueryPredicate {
-                        path: "turn_id".into(),
-                        value: json!(source.turn_id),
-                    }),
-                    limit: NonZeroU64::new(REUSE_PAGE).expect("a page keeps at least one event"),
-                    offset: 0,
-                })
-                .await
-                .map_err(|e| HostError::failed(e.to_string()))?;
-            let short = (reply.events.len() as u64) < REUSE_PAGE;
-            let last = reply.events.last().map(|event| event.sequence);
-            reusable.extend(reply.events.into_iter().filter(|event| match &event.kind {
-                EventKind::ContextCompaction(data) => data.through == source.through,
-                EventKind::ContextBudget(_) => true,
-                _ => unreachable!("the read selects the two compaction facts"),
-            }));
-            match last {
-                Some(last) if !short => from = last + 1,
-                _ => break,
+        let through = self.timeline.committed();
+        let mut after = None;
+        if source.through < through {
+            loop {
+                let reply = self
+                    .timeline
+                    .query(TimelineQuery {
+                        scope: TimelineQueryScope::Branch,
+                        include_publishing: true,
+                        from: Some(TimelinePosition {
+                            branch_id: self.timeline.branch_id(),
+                            sequence: source.through + 1,
+                        }),
+                        through: Some(through),
+                        query: QuerySpec {
+                            filter: Some(QueryFilter::And {
+                                conditions: vec![
+                                    QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "data.turn_id".into(),
+                                        },
+                                        values: vec![json!(source.turn_id)],
+                                    },
+                                    QueryFilter::Or {
+                                        conditions: vec![
+                                            QueryFilter::In {
+                                                value: QueryOperand::Field {
+                                                    path: "kind".into(),
+                                                },
+                                                values: vec!["context/budget".into()],
+                                            },
+                                            QueryFilter::And {
+                                                conditions: vec![
+                                                    QueryFilter::In {
+                                                        value: QueryOperand::Field {
+                                                            path: "kind".into(),
+                                                        },
+                                                        values: vec!["context/compaction".into()],
+                                                    },
+                                                    QueryFilter::In {
+                                                        value: QueryOperand::Field {
+                                                            path: "data.through".into(),
+                                                        },
+                                                        values: vec![json!(source.through)],
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                ],
+                            }),
+                            select: QuerySelect::Events,
+                            group_by: vec![],
+                            pick: None,
+                            order_by: vec![],
+                        },
+                        page: Some(QueryPage {
+                            limit: NonZeroU64::new(REUSE_PAGE)
+                                .expect("a page keeps at least one event"),
+                            after,
+                        }),
+                    })
+                    .await
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                let QueryOutput::Events { events } = reply.result else {
+                    unreachable!("event selection returns events")
+                };
+                reusable.extend(events.into_iter().map(|row| row.event));
+                after = reply.next;
+                if after.is_none() {
+                    break;
+                }
             }
         }
         let view = self
@@ -889,10 +1088,10 @@ impl ContextPolicy {
         });
         let recovery = provider_budget.is_some();
         if !recovery && estimate.input < model.threshold_tokens() {
-            return Ok((view.prepared, estimate.input));
+            return Ok(view.prepared);
         }
         if !recovery && !self.regrown(&view, model.as_ref()).await? {
-            return Ok((view.prepared, estimate.input));
+            return Ok(view.prepared);
         }
         let step = CompactionStep {
             turn_id: Some(source.turn_id.clone()),
@@ -927,7 +1126,7 @@ impl ContextPolicy {
                 if recovery && input > input_budget(model.as_ref()) {
                     return Err(recovery_overflow(&data.outcome, model.as_ref(), &view));
                 }
-                Ok((request, input))
+                Ok(request)
             }
             (ContextCompactionResult::Cancelled { reason }, _) => {
                 Err(HostError::Cancelled(reason.clone()))
@@ -938,7 +1137,7 @@ impl ContextPolicy {
             (ContextCompactionResult::Skipped { reason, .. }, _) if recovery => Err(
                 HostError::failed(format!("Context recovery could not compact: {reason}")),
             ),
-            _ => Ok((view.prepared, estimate.input)),
+            _ => Ok(view.prepared),
         }
     }
 
@@ -1442,25 +1641,13 @@ impl ContextPolicy {
             .resolve(request.clone(), cancel.clone())
             .await?;
         check_cancel(&cancel)?;
-        let prepared = self
-            .prepared
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|(prepared, _)| Arc::ptr_eq(prepared, &request) || **prepared == *request)
-            .map(|(_, input)| *input);
-        let input = match prepared {
-            Some(input) => input,
-            None => {
-                let events: Vec<Arc<AgentEvent>> = estimate_events(&self.timeline)
-                    .await
-                    .map_err(|error| HostError::failed(error.to_string()))?
-                    .into_iter()
-                    .map(|(_, event)| event)
-                    .collect();
-                self.estimate(&request, model.as_ref(), &events)?.input
-            }
-        };
+        let events: Vec<Arc<AgentEvent>> = estimate_events(&self.timeline)
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))?
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect();
+        let input = self.estimate(&request, model.as_ref(), &events)?.input;
         if input <= input_budget(model.as_ref()) {
             return Ok(());
         }
@@ -2453,64 +2640,78 @@ pub(crate) fn check_cancel(cancel: &CancellationToken) -> Result<(), HostError> 
     }
 }
 
-/// Whether `left` sits before `right` in the branch chain.
-fn earlier(branches: &[String], left: &TimelinePosition, right: &TimelinePosition) -> bool {
-    let rank = |branch: &str| branches.iter().position(|name| name == branch);
-    (rank(&left.branch_id), left.sequence) < (rank(&right.branch_id), right.sequence)
-}
-
-/// Whether `left` sits after `right` in the branch chain.
-fn later(branches: &[String], left: &TimelinePosition, right: &TimelinePosition) -> bool {
-    earlier(branches, right, left)
-}
-
 /// The facts a request's estimate compares against, oldest first on the
 /// chain: the newest provider usage, the model call it measured, the newest
 /// completed compaction and the newest adopted configuration. One page each.
 pub(crate) async fn estimate_events(
     timeline: &Timeline,
 ) -> dim_agent_runtime::Result<Vec<EstimateEvent>> {
+    let through = timeline.sequence();
     let mut facts: Vec<EstimateEvent> = Vec::new();
     let usage = timeline
-        .query(newest_chain(Some("model/usage"), None, None, 1))
+        .query(newest_chain(
+            Some("model/usage"),
+            through,
+            None,
+            QuerySelect::Events,
+        ))
         .await?;
-    let Some((usage_event, usage_position)) = usage.events.into_iter().zip(usage.positions).next()
-    else {
+    let QueryOutput::Events { events } = usage.result else {
+        unreachable!("event selection returns events")
+    };
+    let Some(row) = events.into_iter().next() else {
         return Ok(Vec::new());
     };
-    let EventKind::ModelUsage(data) = &usage_event.kind else {
-        unreachable!("the read selects one model/usage")
+    let EventKind::ModelUsage(data) = &row.event.kind else {
+        unreachable!("query selects model usage")
     };
     let request_id = data.request_id.clone();
-    facts.push((usage_position, usage_event));
-    let call = timeline
-        .query(newest_chain(
-            Some("model/call"),
-            None,
-            Some(TimelineQueryPredicate {
-                path: "request_id".into(),
-                value: json!(request_id),
+    let turn_id = data.turn_id.clone();
+    facts.push((row.position, row.event));
+    for (kind, filter) in [
+        (
+            "model/call",
+            Some(QueryFilter::And {
+                conditions: vec![
+                    QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "data.request_id".into(),
+                        },
+                        values: vec![request_id.into()],
+                    },
+                    QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "data.turn_id".into(),
+                        },
+                        values: vec![turn_id.into()],
+                    },
+                ],
             }),
-            1,
-        ))
-        .await?;
-    facts.extend(call.positions.into_iter().zip(call.events));
-    let compaction = timeline
-        .query(newest_chain(
-            Some("context/compaction"),
-            None,
-            Some(TimelineQueryPredicate {
-                path: "status".into(),
-                value: json!("completed"),
+        ),
+        (
+            "context/compaction",
+            Some(QueryFilter::In {
+                value: QueryOperand::Field {
+                    path: "data.status".into(),
+                },
+                values: vec!["completed".into()],
             }),
-            1,
-        ))
-        .await?;
-    facts.extend(compaction.positions.into_iter().zip(compaction.events));
-    let configured = timeline
-        .query(newest_chain(Some("context/configured"), None, None, 1))
-        .await?;
-    facts.extend(configured.positions.into_iter().zip(configured.events));
+        ),
+        ("context/configured", None),
+    ] {
+        let reply = timeline
+            .query(newest_chain(
+                Some(kind),
+                through,
+                filter,
+                QuerySelect::Events,
+            ))
+            .await?;
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        facts.extend(events.into_iter().map(|row| (row.position, row.event)));
+    }
     let branches: Vec<String> = timeline
         .ancestors()
         .into_iter()
