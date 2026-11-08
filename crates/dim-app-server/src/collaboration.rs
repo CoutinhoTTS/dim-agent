@@ -779,8 +779,10 @@ struct Request {
     cancelled_by_client: bool,
     /// A cancellation of this request is already being carried out: the first
     /// decision that met a published input withdrew the input or started the
-    /// wait, and a later decision records only its reason. Written under the
-    /// state lock, like `cancelled_by_client`.
+    /// wait, and a later decision records only its reason. A carry-out that
+    /// fails before it stops or withdraws anything clears the flag, so a
+    /// later decision starts the stop again. Written under the state lock,
+    /// like `cancelled_by_client`.
     carrying_out: bool,
     /// The reason a leader interrupt that covered this request names. The
     /// settle uses it for any cancelled outcome it derives, so the leader's
@@ -823,6 +825,21 @@ impl Stopping {
         Stopping {
             owner: owner.clone(),
             member: member.to_owned(),
+        }
+    }
+    /// One stage of the carry-out failed before it stopped or withdrew
+    /// anything: clears `carrying_out` on the request it was started for, so
+    /// a later cancel or interrupt starts the stop again. A record replaced
+    /// by a newer request keeps its own flag. The mark is still held while
+    /// this runs, so no new request can take the member before the mark goes.
+    fn failed(&self, input: &str) {
+        let mut state = self.owner.state.lock().unwrap();
+        if let Some(request) = state
+            .requests
+            .get_mut(&self.member)
+            .filter(|request| request.input_event_id.as_deref() == Some(input))
+        {
+            request.carrying_out = false;
         }
     }
 }
@@ -2232,13 +2249,34 @@ impl CollaborationSession {
     /// ended writes nothing.
     ///
     /// `stopping` holds the member's stopping mark across the effect and the
-    /// wait, and is dropped on every exit.
+    /// wait, and is dropped on every exit. A failure of either stage is
+    /// reported as it is and clears the request's `carrying_out` before the
+    /// mark goes, so a later cancel or interrupt starts the stop again.
     async fn carry_out_stop(
         self: &Arc<Self>,
         session: &Session,
         input: &str,
         reason: &str,
         stopping: Stopping,
+    ) -> dim_agent_runtime::Result<()> {
+        let stopping = Arc::new(stopping);
+        let result = self
+            .stop_request_input(session, input, reason, Arc::clone(&stopping))
+            .await;
+        if result.is_err() {
+            stopping.failed(input);
+        }
+        result
+    }
+
+    /// The effect and the wait of one carry-out; `carry_out_stop` holds the
+    /// mark across both and clears the request's flag when either fails.
+    async fn stop_request_input(
+        self: &Arc<Self>,
+        session: &Session,
+        input: &str,
+        reason: &str,
+        stopping: Arc<Stopping>,
     ) -> dim_agent_runtime::Result<()> {
         let mut after = 0;
         let mut open = None;
@@ -2288,30 +2326,38 @@ impl CollaborationSession {
         let input = input.to_owned();
         let reason = reason.to_owned();
         let wait = async move {
-            let _stopping = stopping;
-            loop {
-                tokio::select! {
-                    _ = stop.cancelled() => return Ok(()),
-                    _ = session.closed() => {
-                        return Err(AgentError::Closed(session.id().into()));
-                    }
-                    result = published.changed() => {
-                        if result.is_err() {
-                            return Ok(());
+            // The mark lives until this block ends, and a failure of the loop
+            // below clears the request's flag before it goes.
+            let result: dim_agent_runtime::Result<()> = async {
+                loop {
+                    tokio::select! {
+                        _ = stop.cancelled() => return Ok(()),
+                        _ = session.closed() => {
+                            return Err(AgentError::Closed(session.id().into()));
+                        }
+                        result = published.changed() => {
+                            if result.is_err() {
+                                return Ok(());
+                            }
                         }
                     }
-                }
-                match input_fate(&session, &input, &mut after, &mut open).await? {
-                    InputFate::Consumed(Some(turn)) => {
-                        stop_member_turn(&session, &turn, &reason)?;
-                        return Ok(());
+                    match input_fate(&session, &input, &mut after, &mut open).await? {
+                        InputFate::Consumed(Some(turn)) => {
+                            stop_member_turn(&session, &turn, &reason)?;
+                            return Ok(());
+                        }
+                        // The member deleted the input first: no turn will
+                        // consume it, so the wait ends with nothing to stop.
+                        InputFate::Consumed(None) | InputFate::Deleted => return Ok(()),
+                        InputFate::Pending => {}
                     }
-                    // The member deleted the input first: no turn will consume
-                    // it, so the wait ends with nothing to stop.
-                    InputFate::Consumed(None) | InputFate::Deleted => return Ok(()),
-                    InputFate::Pending => {}
                 }
             }
+            .await;
+            if result.is_err() {
+                stopping.failed(&input);
+            }
+            result
         };
         tasks.spawn(wait);
         Ok(())
