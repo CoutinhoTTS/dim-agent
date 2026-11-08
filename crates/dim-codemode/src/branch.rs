@@ -2,7 +2,7 @@ use crate::{
     config::CodeModeConfig,
     host::NestedToolHost,
     interpreter::run_program,
-    runs::{CodeModeRunner, CodeModeRuns},
+    runs::{CodeModeRunKey, CodeModeRunner, CodeModeRuns},
 };
 use dim_agent_capabilities::{
     host::{HostError, ToolExecutionContext},
@@ -55,11 +55,11 @@ impl DynPlugin for CodeModeBranchPlugin {
                 executor,
                 config: self.config.clone(),
             });
-            let branch_id = identity.branch_id.clone();
-            runs.insert(branch_id.clone(), branch);
+            let key = CodeModeRunKey::new(identity.session_id.clone(), identity.branch_id.clone());
+            runs.insert(key.clone(), branch);
             let cleanup = runs.clone();
             ctx.effect(move || async move {
-                cleanup.remove(&branch_id);
+                cleanup.remove(&key);
                 Ok(())
             })?;
             Ok(Effect::Done)

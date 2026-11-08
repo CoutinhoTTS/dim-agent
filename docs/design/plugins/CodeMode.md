@@ -24,8 +24,8 @@ not a second agent loop, a persistent REPL or a Workflow engine.
 
 | Part | Scope | Owns |
 | --- | --- | --- |
-| `CodeMode` | Process | The structural `CodeModeConfig` bounds, the process `CodeModeRuns` map from branch id to its runner, and the registrations of the Session and branch parts. |
-| `CodeModeSession` | Session | The `codemode` tool declaration and handler. The handler resolves the caller's branch in `CodeModeRuns` by the tool context's `branch_id`; it does not read Session state to find a branch. |
+| `CodeMode` | Process | The structural `CodeModeConfig` bounds, the process `CodeModeRuns` map from `(session id, branch id)` to its runner, and the registrations of the Session and branch parts. |
+| `CodeModeSession` | Session | The `codemode` tool declaration and handler. The handler resolves the caller's `(session id, branch id)` in `CodeModeRuns`; it does not read Session state to find a branch. |
 | `CodeModeBranch` | branch | One fresh QuickJS runtime per call, the `tools` bridge, child-call cancellation and the confirmed child effects copied onto the outer result. |
 | ToolExecutor nested invocation | branch, mechanism owner | The pinned `ToolBinding` lookup, Approval admission and the invoked tool's handler. This is not Code Mode business state. |
 | QuickJS runtime | branch | The execution boundary for model code. It receives only the serializable `tools` bridge. |
@@ -132,14 +132,16 @@ tools.call(name, arguments) -> Promise<ToolResult>
 ```
 
 The QuickJS context has no `process`, environment, filesystem, network, timer, child-process or
-module loader, and no Rust/host object. `tools.call` serializes arguments as JSON and rejects a
-non-object argument. A child `ToolResult` with `isError` becomes a catchable program error with
-`code` and `message`; other results are returned as the serialized `ToolResult`.
+module loader, and no Rust/host object. `tools.call` serializes arguments as JSON, rejects a
+non-object argument and rejects every name outside the filtered pinned set (so `codemode` cannot
+recurse). A child `ToolResult` with `isError` becomes a catchable program error with `code` and
+`message`; other results are returned as the serialized `ToolResult`.
 
-The runtime enforces at least `max_code_bytes`, `max_runtime_ms` (QuickJS interrupt handler),
-`max_memory_bytes` (QuickJS memory limit), `max_calls`, `max_parallel_calls` (semaphore),
+The runtime enforces at least `max_code_bytes`, `max_runtime_ms` (a Rust `timeout_at` around the
+program and a QuickJS interrupt handler), `max_memory_bytes` (QuickJS memory limit), `max_calls`,
+`max_parallel_calls` (a semaphore whose wait is selected against cancellation and the deadline),
 `max_single_result_bytes` and `max_output_bytes`. A synchronous loop is interrupted by the QuickJS
-handler; cancellation also sets the interrupt.
+handler; cancellation also sets the interrupt and wins over the program await.
 
 ### 2.3 Nested invocation contract
 
@@ -169,11 +171,12 @@ call is the existing ordered Timeline state:
 | confirmed child effects | CodeModeBranch | Copied onto the outer result before it returns |
 
 The branch creates a fresh `AsyncRuntime` and `AsyncContext` per call, sets the memory limit and the
-interrupt deadline, runs the program, and drops the context when it returns. The program's returned
-promise is awaited, so every child call the program awaits settles before the outer handler returns.
-A call the program drops is cancelled with the QuickJS context; durable settlement of such a call is
-deferred with the child-fact work in [#1276](https://github.com/arcships/dim/issues/1276). The
-first delivery does not claim the full reload parent gate.
+interrupt deadline, runs the program under `timeout_at` and a cancellation select, and drops the
+context when it returns. The program's returned promise is awaited, so every child call the program
+awaits settles before the outer handler returns. A call the program drops is cancelled with the
+QuickJS context; durable settlement of such a call is deferred with the child-fact work in
+[#1276](https://github.com/arcships/dim/issues/1276). The first delivery does not claim the full
+reload parent gate.
 
 Child effects are collected by invocation sequence, including effects from a child whose result is
 an error, and appended to the outer `ToolResult.effects`. The branch does not shorten, truncate or
@@ -208,7 +211,7 @@ and other clients need no decoder change; they already render the existing call 
 | Dependency | Scope | Consumer | Purpose |
 | --- | --- | --- | --- |
 | `partRegistry` | Process | `CodeMode` | Register `CodeModeSession` and `CodeModeBranch`. |
-| `CodeModeRuns` | Process | `CodeModeSession`, `CodeModeBranch` | Resolve the calling branch's runner; the process plugin provides it. |
+| `CodeModeRuns` | Process | `CodeModeSession`, `CodeModeBranch` | Resolve the calling Session and branch's runner; the process plugin provides it. |
 | `toolRegistry` | Session | `CodeModeSession` | Register the `codemode` tool. |
 | `ToolExecutor` | branch | `CodeModeBranch` | Read the pinned declarations and run child calls with Approval admission. |
 | `TimelineIdentity` | branch | `CodeModeBranch` | The calling branch id. |

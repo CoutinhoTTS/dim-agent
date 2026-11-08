@@ -3,7 +3,7 @@ use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
-use dim_agent_runtime::Names;
+use dim_agent_runtime::{Names, SessionIdentity};
 use dim_agent_types::{ToolResult, ToolSource};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
@@ -17,6 +17,7 @@ const DESCRIPTION: &str = "Run a bounded JavaScript program in an isolated Quick
 pub struct CodeModeSessionPlugin {
     runs: Key<CodeModeRuns>,
     tools: Key<ToolRegistry>,
+    identity: Key<SessionIdentity>,
     config: Arc<CodeModeConfig>,
 }
 
@@ -25,6 +26,7 @@ impl CodeModeSessionPlugin {
         Ok(Self {
             runs: names.key()?,
             tools: names.key()?,
+            identity: names.key()?,
             config,
         })
     }
@@ -36,18 +38,22 @@ impl DynPlugin for CodeModeSessionPlugin {
     }
 
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.runs.erase(), self.tools.erase()]
+        vec![self.runs.erase(), self.tools.erase(), self.identity.erase()]
     }
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let runs = ctx.require_at(&self.runs)?;
             let tools = ctx.require_at(&self.tools)?;
+            let identity = ctx.require_at(&self.identity)?;
             tools.register(
                 ctx,
                 ToolContribution {
                     definition: codemode_definition(&self.config),
-                    handler: Arc::new(CodeModeTool { runs }),
+                    handler: Arc::new(CodeModeTool {
+                        runs,
+                        session_id: identity.session_id.clone(),
+                    }),
                 },
             )?;
             Ok(Effect::Done)
@@ -102,6 +108,7 @@ struct CodeModeInput {
 
 struct CodeModeTool {
     runs: Arc<CodeModeRuns>,
+    session_id: String,
 }
 
 impl ToolHandler for CodeModeTool {
@@ -116,9 +123,12 @@ impl ToolHandler for CodeModeTool {
                 serde_json::from_value(serde_json::Value::Object(call.input)).map_err(|error| {
                     HostError::failed(format!("Invalid codemode arguments: {error}"))
                 })?;
-            let runner = self.runs.get(&context.branch_id).ok_or_else(|| {
-                HostError::failed("Code Mode is not available on the calling branch")
-            })?;
+            let runner = self
+                .runs
+                .get(&self.session_id, &context.branch_id)
+                .ok_or_else(|| {
+                    HostError::failed("Code Mode is not available on the calling branch")
+                })?;
             runner
                 .run(
                     input.code,

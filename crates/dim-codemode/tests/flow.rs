@@ -108,10 +108,15 @@ impl Fixture {
     }
 
     async fn session(&self) -> Session {
+        self.session_with_policy(PermissionPolicy::default()).await
+    }
+
+    async fn session_with_policy(&self, permission_policy: PermissionPolicy) -> Session {
         self.agent
             .create_session(SessionConfig {
                 tools: Some(vec!["codemode".into(), "echo".into()]),
                 interactive: false,
+                permission_policy,
                 ..SessionConfig::default()
             })
             .await
@@ -120,6 +125,32 @@ impl Fixture {
 
     async fn shutdown(self) {
         self.agent.close().await.unwrap();
+    }
+}
+
+async fn result(session: &Session, call_id: &str) -> ToolResult {
+    tokio::time::timeout(Duration::from_secs(10), session.idle("main"))
+        .await
+        .unwrap()
+        .unwrap();
+    let events = branch_events(session, "main", ..).await.unwrap();
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => data
+                .results
+                .iter()
+                .find(|result| result.call_id == call_id)
+                .map(|result| result.result.clone()),
+            _ => None,
+        })
+        .expect("the codemode result is committed")
+}
+
+fn text(result: &ToolResult) -> &str {
+    match &result.content {
+        ToolContent::Text(text) => text,
+        ToolContent::Blocks(_) => panic!("expected text"),
     }
 }
 
@@ -135,27 +166,60 @@ async fn the_program_calls_a_pinned_tool_and_the_outer_result_carries_its_value(
         .submit("run".into(), InputMode::Queue, "main")
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), session.idle("main"))
-        .await
-        .unwrap()
-        .unwrap();
-    let events = branch_events(&session, "main", ..).await.unwrap();
-    let result = events
-        .iter()
-        .find_map(|event| match &event.kind {
-            EventKind::ToolResult(data) => data
-                .results
-                .iter()
-                .find(|result| result.call_id == "c1")
-                .map(|result| result.result.clone()),
-            _ => None,
-        })
-        .expect("the codemode result is committed");
-    let text = match &result.content {
-        ToolContent::Text(text) => text,
-        ToolContent::Blocks(_) => panic!("expected text"),
-    };
-    assert_eq!(text, r#"{"content":"hello"}"#);
+    let result = result(&session, "c1").await;
+    assert_eq!(text(&result), r#"{"content":"hello"}"#);
     assert_eq!(result.is_error, None);
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_denied_child_is_a_catchable_program_error() {
+    let fixture = Fixture::new().await;
+    let session = fixture
+        .session_with_policy(PermissionPolicy {
+            disallowed_tools: vec!["echo".into()],
+            ..PermissionPolicy::default()
+        })
+        .await;
+    let code = r#"try { await tools.call("echo", {text: "x"}); return "allowed"; } catch (error) { return error.message; }"#;
+    fixture
+        .model
+        .push(&[("codemode", "c1", json!({ "code": code }))]);
+    session
+        .submit("run".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let result = result(&session, "c1").await;
+    let value: serde_json::Value = serde_json::from_str(text(&result)).unwrap();
+    assert!(
+        value.as_str().unwrap().contains("echo"),
+        "the denial names the tool: {value}"
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_sessions_with_main_branches_keep_their_own_runners() {
+    let fixture = Fixture::new().await;
+    let first = fixture.session().await;
+    let second = fixture.session().await;
+    fixture
+        .model
+        .push(&[("codemode", "c1", json!({ "code": "return \"first\";" }))]);
+    first
+        .submit("run first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let first_result = result(&first, "c1").await;
+    fixture
+        .model
+        .push(&[("codemode", "c2", json!({ "code": "return \"second\";" }))]);
+    second
+        .submit("run second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let second_result = result(&second, "c2").await;
+    assert_eq!(text(&first_result), "\"first\"");
+    assert_eq!(text(&second_result), "\"second\"");
     fixture.shutdown().await;
 }

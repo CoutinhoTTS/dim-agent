@@ -23,24 +23,45 @@ pub trait CodeModeRunner: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>>;
 }
 
+/// A branch id is session-local (`main` is every Session's default), so the
+/// process map is keyed by both ids.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CodeModeRunKey {
+    pub session_id: String,
+    pub branch_id: String,
+}
+
+impl CodeModeRunKey {
+    pub fn new(session_id: impl Into<String>, branch_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            branch_id: branch_id.into(),
+        }
+    }
+}
+
 /// The branch runners of one process. A branch part inserts its runner when
 /// it mounts and removes it when it closes; the Session tool resolves the
-/// caller's branch here, never from Session state.
+/// caller's Session and branch here, never from Session state.
 #[derive(Default)]
 pub struct CodeModeRuns {
-    runners: Mutex<HashMap<String, Arc<dyn CodeModeRunner>>>,
+    runners: Mutex<HashMap<CodeModeRunKey, Arc<dyn CodeModeRunner>>>,
 }
 
 impl CodeModeRuns {
-    pub fn get(&self, branch_id: &str) -> Option<Arc<dyn CodeModeRunner>> {
-        self.runners.lock().unwrap().get(branch_id).cloned()
+    pub fn get(&self, session_id: &str, branch_id: &str) -> Option<Arc<dyn CodeModeRunner>> {
+        self.runners
+            .lock()
+            .unwrap()
+            .get(&CodeModeRunKey::new(session_id, branch_id))
+            .cloned()
     }
 
-    pub fn insert(&self, branch_id: String, runner: Arc<dyn CodeModeRunner>) {
-        self.runners.lock().unwrap().insert(branch_id, runner);
+    pub fn insert(&self, key: CodeModeRunKey, runner: Arc<dyn CodeModeRunner>) {
+        self.runners.lock().unwrap().insert(key, runner);
     }
 
-    pub fn remove(&self, branch_id: &str) {
-        self.runners.lock().unwrap().remove(branch_id);
+    pub fn remove(&self, key: &CodeModeRunKey) {
+        self.runners.lock().unwrap().remove(key);
     }
 }

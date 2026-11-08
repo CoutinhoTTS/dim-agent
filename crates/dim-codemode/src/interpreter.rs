@@ -4,13 +4,17 @@ use dim_agent_types::{JsonObject, ToolCall, ToolEffect, ToolResult};
 use rquickjs::{AsyncContext, AsyncRuntime, Function, Object, Promise, prelude::*};
 use serde_json::json;
 use std::{
+    collections::HashSet,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::{
+    sync::Semaphore,
+    time::{Instant, timeout_at},
+};
 use tokio_util::sync::CancellationToken;
 
 const CODEMODE_TOOL: &str = "codemode";
@@ -50,6 +54,12 @@ pub(crate) async fn run_program(
             .collect::<Vec<_>>(),
         Err(message) => return Ok(ToolResult::error(message)),
     };
+    let allowed = Arc::new(
+        definitions
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<HashSet<_>>(),
+    );
     let definitions = Arc::new(definitions);
     let calls = Arc::new(AtomicU64::new(0));
     let parallel = Arc::new(Semaphore::new(config.max_parallel_calls.max(1)));
@@ -71,54 +81,55 @@ pub(crate) async fn run_program(
     let output_limit = config.max_output_bytes;
     let cancel_after = cancel.clone();
     let effects_after = effects.clone();
-    let result = context_handle
-        .async_with(async move |ctx| {
-            let globals = ctx.globals();
-            let tools = Object::new(ctx.clone())?;
+    let run = context_handle.async_with(async move |ctx| {
+        let globals = ctx.globals();
+        let tools = Object::new(ctx.clone())?;
 
-            let list_definitions = definitions.clone();
-            let list = Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
-                let list = list_definitions
+        let list_definitions = definitions.clone();
+        let list = Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
+            let list = list_definitions
+                .iter()
+                .map(|tool| json!({"name": tool.name, "description": tool.description}))
+                .collect::<Vec<_>>();
+            Ok(serde_json::to_string(&list).expect("tool summaries serialize"))
+        })?;
+        tools.set("list", list)?;
+
+        let describe_definitions = definitions.clone();
+        let describe = Function::new(
+            ctx.clone(),
+            move |name: String| -> rquickjs::Result<Option<String>> {
+                Ok(describe_definitions
                     .iter()
-                    .map(|tool| json!({"name": tool.name, "description": tool.description}))
-                    .collect::<Vec<_>>();
-                Ok(serde_json::to_string(&list).expect("tool summaries serialize"))
-            })?;
-            tools.set("list", list)?;
+                    .find(|tool| tool.name == name)
+                    .and_then(|tool| serde_json::to_string(tool).ok()))
+            },
+        )?;
+        tools.set("describe", describe)?;
 
-            let describe_definitions = definitions.clone();
-            let describe = Function::new(
-                ctx.clone(),
-                move |name: String| -> rquickjs::Result<Option<String>> {
-                    Ok(describe_definitions
-                        .iter()
-                        .find(|tool| tool.name == name)
-                        .and_then(|tool| serde_json::to_string(tool).ok()))
-                },
-            )?;
-            tools.set("describe", describe)?;
+        let call_scope = CallScope {
+            executor: executor.clone(),
+            context: context.clone(),
+            cancel: cancel.clone(),
+            count: calls.clone(),
+            parallel: parallel.clone(),
+            effects: effects.clone(),
+            allowed: allowed.clone(),
+            deadline,
+            max_calls,
+            single_limit: config.max_single_result_bytes,
+        };
+        let call = Function::new(
+            ctx.clone(),
+            Async(move |name: String, arguments: String| {
+                call_nested_tool(call_scope.clone(), name, arguments)
+            }),
+        )?;
+        tools.set("call", call)?;
+        globals.set("__codemodeTools", tools)?;
 
-            let call_scope = CallScope {
-                executor: executor.clone(),
-                context: context.clone(),
-                cancel: cancel.clone(),
-                count: calls.clone(),
-                parallel: parallel.clone(),
-                effects: effects.clone(),
-                max_calls,
-                single_limit: config.max_single_result_bytes,
-            };
-            let call = Function::new(
-                ctx.clone(),
-                Async(move |name: String, arguments: String| {
-                    call_nested_tool(call_scope.clone(), name, arguments)
-                }),
-            )?;
-            tools.set("call", call)?;
-            globals.set("__codemodeTools", tools)?;
-
-            let program = format!(
-                r#"
+        let program = format!(
+            r#"
 (async () => {{
   const __host = globalThis.__codemodeTools;
   globalThis.tools = {{
@@ -144,15 +155,19 @@ pub(crate) async fn run_program(
   return JSON.stringify(__value === undefined ? null : __value);
 }})()
 "#
-            );
-            let promise: Promise = ctx.eval(program)?;
-            let output: String = promise.into_future().await?;
-            Ok::<_, rquickjs::Error>(output)
-        })
-        .await;
+        );
+        let promise: Promise = ctx.eval(program)?;
+        let output: String = promise.into_future().await?;
+        Ok::<_, rquickjs::Error>(output)
+    });
+    let result = tokio::select! {
+        biased;
+        _ = cancel_after.cancelled() => None,
+        result = timeout_at(deadline, run) => result.ok(),
+    };
 
     match result {
-        Ok(output) => {
+        Some(Ok(output)) => {
             let result = if output.len() > output_limit {
                 ToolResult::error(format!(
                     "Code Mode output exceeds the {output_limit} byte limit"
@@ -162,7 +177,7 @@ pub(crate) async fn run_program(
             };
             Ok(with_effects(result, &effects_after))
         }
-        Err(error) => {
+        Some(Err(error)) => {
             if cancel_after.is_cancelled() {
                 Err(HostError::Cancelled("Code Mode program cancelled".into()))
             } else if instant_passed(deadline) {
@@ -173,6 +188,16 @@ pub(crate) async fn run_program(
             } else {
                 Ok(with_effects(
                     ToolResult::error(format!("Code Mode program failed: {error}")),
+                    &effects_after,
+                ))
+            }
+        }
+        None => {
+            if cancel_after.is_cancelled() {
+                Err(HostError::Cancelled("Code Mode program cancelled".into()))
+            } else {
+                Ok(with_effects(
+                    ToolResult::error("Code Mode program timed out"),
                     &effects_after,
                 ))
             }
@@ -188,6 +213,8 @@ struct CallScope {
     count: Arc<AtomicU64>,
     parallel: Arc<Semaphore>,
     effects: EffectLog,
+    allowed: Arc<HashSet<String>>,
+    deadline: Instant,
     max_calls: u64,
     single_limit: usize,
 }
@@ -204,14 +231,26 @@ async fn call_nested_tool(
             "the program exceeded its nested-call budget",
         ));
     }
-    let permit = match scope.parallel.acquire().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Ok(error_json(
-                "cancelled",
-                "the program stopped before the call started",
-            ));
+    if !scope.allowed.contains(&name) {
+        return Ok(error_json(
+            "not_allowed",
+            "the tool is not in this request's Code Mode tool list",
+        ));
+    }
+    let permit = tokio::select! {
+        biased;
+        _ = scope.cancel.cancelled() => {
+            return Ok(error_json("cancelled", "the program stopped before the call started"));
         }
+        _ = tokio::time::sleep_until(scope.deadline) => {
+            return Ok(error_json("timeout", "the call budget expired before the call started"));
+        }
+        permit = scope.parallel.acquire() => match permit {
+            Ok(permit) => permit,
+            Err(_) => {
+                return Ok(error_json("cancelled", "the program stopped before the call started"));
+            }
+        },
     };
     let input: JsonObject = match serde_json::from_str(&arguments) {
         Ok(input) => input,

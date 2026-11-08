@@ -5,7 +5,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_types::{ToolCall, ToolContent, ToolDefinition, ToolResult, ToolSource};
 use serde_json::json;
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 struct MockHost {
@@ -36,6 +36,10 @@ impl NestedToolHost for MockHost {
                     }]);
                     Ok(result)
                 }
+                "slow" => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok(ToolResult::text("slow"))
+                }
                 other => Ok(ToolResult::error(format!("unknown tool {other}"))),
             }
         })
@@ -56,7 +60,9 @@ fn host() -> Arc<MockHost> {
     Arc::new(MockHost {
         definitions: vec![
             definition("echo", "echo", json!({"type": "object"})),
+            definition("fail", "fail", json!({"type": "object"})),
             definition("write", "write", json!({"type": "object"})),
+            definition("slow", "slow", json!({"type": "object"})),
             codemode,
         ],
     })
@@ -105,7 +111,7 @@ async fn lists_only_request_tools() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["echo", "write"]);
+    assert_eq!(names, vec!["echo", "fail", "write", "slow"]);
 }
 
 #[tokio::test]
@@ -146,6 +152,84 @@ async fn child_effects_reach_the_outer_result() {
             path: "/tmp/codemode".into()
         }]
     );
+}
+
+#[tokio::test]
+async fn a_never_settling_promise_is_a_timeout() {
+    let config = CodeModeConfig {
+        max_runtime_ms: 50,
+        ..Default::default()
+    };
+    let result = run_program(
+        host(),
+        Arc::new(config),
+        "await new Promise(() => {}); return 1;".into(),
+        None,
+        None,
+        context(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("program settles");
+    assert_eq!(text(&result), "Code Mode program timed out");
+}
+
+#[tokio::test]
+async fn recursive_codemode_is_not_allowed() {
+    let result = run(
+        r#"try { await tools.call("codemode", {code: "return 1"}); } catch (error) { return error.code; }"#,
+        None,
+    )
+    .await;
+    let value: serde_json::Value = serde_json::from_str(text(&result)).unwrap();
+    assert_eq!(value, "not_allowed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_wins_over_a_synchronous_loop() {
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancel.cancel();
+    });
+    let result = run_program(
+        host(),
+        Arc::new(CodeModeConfig::default()),
+        "while (true) {}".into(),
+        None,
+        None,
+        context(),
+        token,
+    )
+    .await;
+    assert!(matches!(result, Err(HostError::Cancelled(_))));
+}
+
+#[tokio::test]
+async fn a_waiting_parallel_call_is_released_by_cancellation() {
+    let config = CodeModeConfig {
+        max_parallel_calls: 1,
+        ..Default::default()
+    };
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+    });
+    let result = run_program(
+        host(),
+        Arc::new(config),
+        r#"await Promise.all([tools.call("slow", {}), tools.call("slow", {})]); return "done";"#
+            .into(),
+        None,
+        None,
+        context(),
+        token,
+    )
+    .await;
+    assert!(matches!(result, Err(HostError::Cancelled(_))));
 }
 
 #[tokio::test]
