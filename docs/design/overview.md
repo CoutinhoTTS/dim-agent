@@ -102,6 +102,7 @@ Plugins never add wiring plugins (ADR 002 D2). Each need maps to a mechanism tha
 | Client method about a Session | A namespace registered with the Session's `sessionMethods`, which Rpc dispatches through the Session ([A.1](contracts/session-boundary.md#a1-method-contributions)) | Questions, Goal, SessionTitle, Attachments, ShellInput, InputQueue (`session.input.withdraw`) |
 | Host management method | A namespace a process plugin registers with `managementMethods`, looked up by Rpc per call | Existing management methods, Settings (business configuration, `settings.read`/`settings.update`/`settings.sources`/`settings.projects`, S8b, implemented), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
 | Reach other Sessions | Agents' `sessions` service (`launch`, `input`, `history`, `idle`, ...), as Collaboration does ([session access](contracts/session-access.md#a1-the-sessions-service)) | Scheduler, Workflow |
+| Hand an event to the Sessions that subscribed to it | The process service `eventHub`, which delivers each event through Agents' `sessions` service ([EventHub](plugins/EventHub.md)) | Producers: IM, SaaS and CI notifications, timers, other agents; a Session's `events` tool and clients' `eventhub.*` methods subscribe |
 
 ```mermaid
 flowchart LR

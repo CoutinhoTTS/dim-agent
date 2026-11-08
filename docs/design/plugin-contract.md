@@ -112,6 +112,7 @@ R4). This table says what each name Dim defines is for.
 | `auxiliaryModel` | process | the profile's model-selection owner | yes | Auxiliary model requests |
 | `pluginFiles` | process | host | yes, when the host supplies a root | A process part's own files |
 | `workflowFiles` | process | App Server | yes | Marked `#[rutis::service]` |
+| `eventHub` | process | EventHub | designed, not implemented | A producer declares a source and publishes an event; EventHub delivers it to the Sessions subscribed, through Agents' `sessions` ([EventHub](plugins/EventHub.md)) |
 | `collaborationMembers:<kind>` | process | the member provider | designed, not implemented | [ExternalAgent](plugins/ExternalAgent.md); registers with Collaboration when built (rutis usage R6) |
 | `treeCommands` | `session` | TimelineTree | yes | `input` by branch id, `create`, `list`, `info` |
 | `sessionIdentity` | `session` | SessionScope | yes | `get()`: `{sessionId, restored}` |
