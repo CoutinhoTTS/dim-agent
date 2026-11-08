@@ -32,6 +32,9 @@ const PINS: &str = include_str!("../../../runtime/runtimes.json");
 const NODE_PACKAGE: &str = include_str!("../../../runtime/package.json");
 const NODE_LOCK: &str = include_str!("../../../runtime/package-lock.json");
 const PYTHON_REQUIREMENTS: &str = include_str!("../../../runtime/python-requirements.txt");
+/// npm's cache for one install: a scratch directory beside or inside what is
+/// installed, removed before the call returns.
+const NPM_CACHE: &str = ".npm-cache";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -630,6 +633,27 @@ fn runtime_item(name: &'static str) -> Map<String, Value> {
     data
 }
 
+/// Why `RuntimeService::install_packages` failed (§5, §9 R1): its code and
+/// message.
+#[derive(Debug)]
+pub struct PackagesError {
+    pub code: &'static str,
+    pub message: String,
+}
+impl PackagesError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+impl std::fmt::Display for PackagesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
 /// The process service of RuntimeManager: what other process parts (and the
 /// `runtime` methods) call.
 pub struct RuntimeService {
@@ -932,6 +956,82 @@ impl RuntimeService {
                 self.tasks.lock().unwrap().push(task);
                 Ok(())
             }
+        }
+    }
+
+    /// Installs a plugin's locked npm dependencies into `dir` (§5, §9 R1):
+    /// when Node is off, turns it on and waits for its acquisition on this
+    /// service's own state, then runs the managed (or `system`) Node's own npm
+    /// over `dir/package-lock.json`, trying the registries in the plan's
+    /// order, and returns when npm exits.
+    ///
+    /// Nothing is recorded and nothing under `<home>/runtimes/` is written:
+    /// `dir` belongs to the caller, which renames or deletes it. npm's cache
+    /// is `dir/.npm-cache`, inside that directory, and is removed before
+    /// returning. `cancel` kills npm and leaves `dir` to its caller.
+    pub async fn install_packages(
+        self: &Arc<Self>,
+        dir: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<(), PackagesError> {
+        if cancel.is_cancelled() {
+            return Err(PackagesError::new("cancelled", "the call was cancelled"));
+        }
+        let index = Self::index(Kind::Node);
+        // Subscribed before the state is read, so a change between the read
+        // and the wait below is not missed.
+        let mut changes = self.changes.subscribe();
+        if !matches!(self.states.lock().unwrap()[index], State::Provided(_)) {
+            self.install(Kind::Node)
+                .map_err(|error| PackagesError::new("node_unavailable", error))?;
+        }
+        loop {
+            let failed = match &self.states.lock().unwrap()[index] {
+                State::Provided(_) => break,
+                State::Failed(reason) => Some(reason.clone()),
+                _ => None,
+            };
+            if let Some(reason) = failed {
+                return Err(PackagesError::new("node_unavailable", reason));
+            }
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    return Err(PackagesError::new(
+                        "cancelled",
+                        "Node was still being acquired",
+                    ));
+                }
+                changed = changes.recv() => {
+                    if matches!(changed, Err(broadcast::error::RecvError::Closed)) {
+                        return Err(PackagesError::new(
+                            "node_unavailable",
+                            "RuntimeManager stopped while Node was being acquired",
+                        ));
+                    }
+                }
+            }
+        }
+        let plan = self.plans.lock().unwrap()[index].clone();
+        let npm = npm_cli(&plan.interpreter);
+        if !npm.is_file() {
+            return Err(PackagesError::new(
+                "npm_unavailable",
+                format!("no npm at {}", npm.display()),
+            ));
+        }
+        let cache = dir.join(NPM_CACHE);
+        let installed = tokio::select! {
+            installed = install_locked(&plan, dir, &cache) => Some(installed),
+            () = cancel.cancelled() => None,
+        };
+        let _ = std::fs::remove_dir_all(&cache);
+        match installed {
+            None => Err(PackagesError::new(
+                "cancelled",
+                format!("npm ci in {} was cancelled", dir.display()),
+            )),
+            Some(Ok(())) => Ok(()),
+            Some(Err(reason)) => Err(PackagesError::new("install_failed", reason)),
         }
     }
 
@@ -1524,7 +1624,22 @@ async fn npm_ci(plan: &Plan, packages: &Path) -> Result<(), String> {
     std::fs::write(partial.join("package.json"), NODE_PACKAGE)
         .and_then(|()| std::fs::write(partial.join("package-lock.json"), NODE_LOCK))
         .map_err(|e| e.to_string())?;
-    let cache = sibling(packages, ".npm-cache");
+    let cache = sibling(packages, NPM_CACHE);
+    let installed = install_locked(plan, &partial, &cache).await;
+    let _ = std::fs::remove_dir_all(&cache);
+    if let Err(error) = installed {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(format!("Node packages not installed: {error}"));
+    }
+    std::fs::rename(&partial, packages).map_err(|e| e.to_string())
+}
+
+/// Runs `npm ci` inside `dir` with `plan`'s own npm over `dir`'s lock, trying
+/// each registry in the plan's order, and returns the failures joined when
+/// none succeeds. Both the runtime's own packages (`npm_ci`) and a plugin's
+/// locked dependencies (`RuntimeService::install_packages`) run here; the
+/// caller owns `dir` and `cache`.
+async fn install_locked(plan: &Plan, dir: &Path, cache: &Path) -> Result<(), String> {
     let mut errors = Vec::new();
     for registry in &plan.indexes {
         let mut command = tokio::process::Command::new(&plan.interpreter);
@@ -1539,25 +1654,18 @@ async fn npm_ci(plan: &Plan, packages: &Path) -> Result<(), String> {
                 "--registry",
                 registry,
             ])
-            .env("npm_config_cache", &cache)
-            .current_dir(&partial);
+            .env("npm_config_cache", cache)
+            .current_dir(dir);
         match run(command, "npm ci").await {
-            Ok(_) => {
-                errors.clear();
-                break;
-            }
+            Ok(_) => return Ok(()),
             Err(error) => errors.push(format!("{registry}: {error}")),
         }
     }
-    let _ = std::fs::remove_dir_all(&cache);
-    if !errors.is_empty() {
-        let _ = std::fs::remove_dir_all(&partial);
-        return Err(format!(
-            "Node packages not installed: {}",
-            errors.join("; ")
-        ));
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
-    std::fs::rename(&partial, packages).map_err(|e| e.to_string())
 }
 
 async fn pip_install(plan: &Plan, packages: &Path) -> Result<(), String> {

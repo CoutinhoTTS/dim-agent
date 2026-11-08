@@ -2841,7 +2841,8 @@
         "tokio::select",
         "tracing::warn",
         "unreachable",
-        "vec"
+        "vec",
+        "write"
       ]
     },
     {
