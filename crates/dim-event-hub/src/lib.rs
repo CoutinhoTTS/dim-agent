@@ -175,10 +175,6 @@ impl DynPlugin for EventHubPlugin {
                 store,
                 stop: ctx.cancellation_token(),
             });
-            // A notice missed while EventHub was off is repaired here: a
-            // stored subscription whose Session Agents says is gone is
-            // removed now (design §3.4).
-            publish::reconcile(shared.clone()).await;
             ctx.provide_as::<EventHub>(Arc::new(EventHub {
                 shared: shared.clone(),
             }))?;
@@ -188,6 +184,17 @@ impl DynPlugin for EventHubPlugin {
                     shared: shared.clone(),
                 }),
             )?;
+            // A notice missed while EventHub was off is repaired once the
+            // service exists: a stored subscription whose Session Agents says
+            // is gone is removed now, in a task of this generation that its
+            // cancellation ends (design §3.4).
+            {
+                let shared = shared.clone();
+                let stop = shared.stop.clone();
+                tokio::spawn(async move {
+                    stop.run_until_cancelled(publish::reconcile(shared)).await;
+                });
+            }
             ctx.require_at(&self.methods)?.register(
                 ctx,
                 management::NAMESPACE,

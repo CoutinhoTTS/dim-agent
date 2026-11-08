@@ -741,10 +741,28 @@ async fn a_subscription_deleted_while_off_is_removed_at_the_next_apply() {
         .unwrap();
     assert_eq!(enabled["status"], json!("running"), "{enabled}");
 
-    let listed: Value = client
-        .rpc("eventhub.subscriptions", json!({}))
-        .await
-        .unwrap();
+    // The reconciliation runs in a task of the new generation once the
+    // service is provided (design §3.4): read until it has removed the
+    // deleted Session's subscription.
+    let listed: Value = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let listed: Value = client
+                .rpc("eventhub.subscriptions", json!({}))
+                .await
+                .unwrap();
+            let gone = !listed["subscriptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|subscription| subscription["target"]["sessionId"] == json!(deleted));
+            if gone {
+                break listed;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the reconciliation removes the deleted Session's subscription");
     let sessions: Vec<&str> = listed["subscriptions"]
         .as_array()
         .unwrap()
