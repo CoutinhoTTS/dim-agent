@@ -155,6 +155,59 @@ async fn a_failed_subscription_file_write_retires_the_guide() {
     assert!(!fixture.file().exists());
 }
 
+/// A publish whose `sessions.input` call fails at the transport level answers
+/// `transport`, keeps the subscription and records it (design §2.3, Appendix
+/// C): the call says nothing about whether the write happened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_transport_failure_answers_transport_and_keeps_the_subscription() {
+    let (_directory, fixture) = mounted().await;
+    let subscription = fixture.subscribe("far", &["im.*"], None).await.unwrap();
+    fixture.sessions.fail_transport("eventhub:im:unknown");
+    let receipt = fixture.producer.publish(event("unknown")).await.unwrap();
+    assert_eq!(receipt["deliveries"][0]["status"], json!("failed"));
+    assert_eq!(receipt["deliveries"][0]["code"], json!("transport"));
+    let stored = fixture.subscriptions(None).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0]["id"], json!(subscription));
+    assert_eq!(
+        stored[0]["lastFailure"]["code"],
+        json!("transport"),
+        "{stored:?}"
+    );
+}
+
+/// A subscribe whose guide write fails at the transport level answers
+/// `transport`, stores nothing, and retires the guide in doubt after the ones
+/// it wrote (design §3.3, Appendix C).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscribe_whose_guide_write_fails_in_transport_stores_nothing() {
+    let (_directory, fixture) = mounted().await;
+    fixture.sessions.fail_transport("eventhub-guide:");
+    let error = fixture
+        .subscribe("session-1", &["im.*"], None)
+        .await
+        .unwrap_err();
+    assert_eq!(app_code(&error), "transport", "{error:?}");
+    assert!(fixture.subscriptions(None).await.is_empty());
+    assert!(!fixture.file().exists());
+
+    let calls = fixture.sessions.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].key_use(), Some("live"));
+    let retire = calls.last().unwrap();
+    assert_eq!(retire.key_use(), Some("retire"));
+    assert!(
+        retire
+            .submission_id
+            .starts_with("eventhub-guide-retire:sub_"),
+        "{retire:?}"
+    );
+    assert_eq!(
+        retire.text,
+        "<dim-event-guide source=\"im\"></dim-event-guide>"
+    );
+}
+
 /// One publish's `lastFailure` changes land in one transaction, after its
 /// deliveries settle; a failed write leaves the whole set as it was, and the
 /// next publish writes again (design §2.3, Appendix B).

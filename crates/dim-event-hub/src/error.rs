@@ -2,6 +2,11 @@
 //! it passes through (design A.1–A.3, Appendix C).
 use dim_app_server::plugin_files::PluginFileError;
 
+/// A `sessions` call whose outcome is unknown: the call failed or its reply
+/// could not be read, so whether the write happened is not known (design
+/// §2.3, Appendix C).
+pub const TRANSPORT: &str = "transport";
+
 /// A refused EventHub call: the code of Appendix C and the message its caller
 /// reads.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -41,6 +46,10 @@ impl EventHubError {
 
     pub fn failed(message: impl Into<String>) -> Self {
         Self::new("failed", message)
+    }
+
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::new(TRANSPORT, message)
     }
 }
 

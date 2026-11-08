@@ -3,7 +3,7 @@
 //! on removal, remove the record first and then retire the guide of a source
 //! no subscription on that branch names any more.
 use crate::{
-    error::{EventHubError, sessions_code},
+    error::{EventHubError, TRANSPORT, sessions_code},
     hub::Shared,
     model::{Origin, SubscribeRequest, Target, source_of, validate_subscribe},
     publish::sessions,
@@ -85,8 +85,15 @@ pub(crate) async fn subscribe(
             }
             Err(error) => {
                 // Refused after earlier guides were written: retire those by
-                // the `storage` rule before answering (design §3.3).
-                retire_unguarded(shared, &target, &subscription.id, written.keys()).await;
+                // the `storage` rule before answering (design §3.3). A
+                // transport failure leaves this guide in doubt, so it is
+                // retired too; a retire of a guide never written is an empty
+                // guide (Appendix C).
+                let mut retiring: Vec<&String> = written.keys().collect();
+                if error.code == TRANSPORT {
+                    retiring.push(source);
+                }
+                retire_unguarded(shared, &target, &subscription.id, retiring.into_iter()).await;
                 return Err(error);
             }
         }
@@ -272,7 +279,7 @@ pub(crate) async fn write_live_guide(
             sessions_code(&failure.code),
             format!("the guide input was refused: {}", failure.message),
         )),
-        Err(message) => Err(EventHubError::failed(format!(
+        Err(message) => Err(EventHubError::transport(format!(
             "the guide input was not delivered: {message}"
         ))),
     }

@@ -3,7 +3,7 @@
 //! receipt, and the publish's subscription changes in one transaction after
 //! its deliveries settle.
 use crate::{
-    error::{EventHubError, SessionsFailure},
+    error::{EventHubError, SessionsFailure, TRANSPORT},
     hub::Shared,
     model::{BODY_LIMIT, PREVIEW_BYTES, PublishRequest, Target, validate_publish},
     state::{InstanceState, MAX_DELIVERIES_IN_FLIGHT},
@@ -469,7 +469,7 @@ async fn deliver(
                 session_id: session_id.clone(),
                 branch_id: branch_id.clone(),
                 subscription_ids: subscription_ids.clone(),
-                code: "failed".into(),
+                code: TRANSPORT.into(),
                 message: "sessions.input answered without an input".into(),
             },
         },
@@ -492,11 +492,13 @@ async fn deliver(
                 }
             }
         }
+        // The call failed or its reply could not be read: whether the input
+        // was written is unknown (design Appendix C's `transport`).
         Err(message) => Delivery::Failed {
             session_id: session_id.clone(),
             branch_id: branch_id.clone(),
             subscription_ids: subscription_ids.clone(),
-            code: "failed".into(),
+            code: TRANSPORT.into(),
             message,
         },
     };

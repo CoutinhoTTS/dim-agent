@@ -59,6 +59,9 @@ struct Inner {
     /// A submission-id needle and the error code a matching input answers,
     /// so a test can refuse one guide write of a creation (design §3.3).
     refusals: Mutex<Vec<(String, &'static str)>>,
+    /// Submission-id needles whose input call fails at the transport level,
+    /// so the caller cannot know whether the write happened.
+    transports: Mutex<Vec<String>>,
     /// `session|branch|submission` to the input an accepted write committed,
     /// which `lookup` answers (design §2.4).
     accepted: Mutex<HashMap<String, (String, u64)>>,
@@ -83,6 +86,7 @@ impl Default for FakeSessions {
                 calls: Mutex::new(Vec::new()),
                 failures: Mutex::new(HashMap::new()),
                 refusals: Mutex::new(Vec::new()),
+                transports: Mutex::new(Vec::new()),
                 accepted: Mutex::new(HashMap::new()),
                 missing: Mutex::new(std::collections::HashSet::new()),
                 sequence: AtomicU64::new(0),
@@ -131,6 +135,16 @@ impl FakeSessions {
             .lock()
             .unwrap()
             .push((needle.to_owned(), code));
+    }
+    /// Makes any input whose submission id contains `needle` fail at the
+    /// transport level: the call itself fails, so whether the write happened
+    /// is unknown (design Appendix C).
+    pub fn fail_transport(&self, needle: &str) {
+        self.inner
+            .transports
+            .lock()
+            .unwrap()
+            .push(needle.to_owned());
     }
     /// Holds every input call until [`Gate::release`], counting those in
     /// flight.
@@ -236,6 +250,17 @@ impl HostDispatch for FakeSessions {
                     .map(|(_, code)| *code)
             });
         inner.calls.lock().unwrap().push(call.clone());
+        if inner
+            .transports
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|needle| call.submission_id.contains(needle.as_str()))
+        {
+            return Err(BridgeError::Transport(
+                "the fixture sessions link dropped".into(),
+            ));
+        }
         Ok(Value::future(async move {
             let gate = inner.gate.lock().unwrap().clone();
             if let Some(gate) = gate
