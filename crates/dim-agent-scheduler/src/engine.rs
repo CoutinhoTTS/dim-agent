@@ -9,7 +9,9 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 use dim_agent_capabilities::settings::SettingsScope;
-use dim_agent_types::{AgentEvent, EventKind, PermissionPolicy, PermissionPreset, TurnOutcome};
+use dim_agent_types::{
+    AgentEvent, EventKind, PermissionPolicy, PermissionPreset, TurnOutcome, markup::escaped,
+};
 use dim_app_server::settings::SettingsError;
 use rutis_bridge::session::{HostDispatch, settle};
 use serde_json::{Value, json};
@@ -629,14 +631,6 @@ pub(crate) async fn sessions(
             .unwrap_or("unknown")
             .to_owned()))
     }
-}
-
-pub(crate) fn escaped(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 async fn execute(shared: Arc<Shared>, job: Job, run: Run) {

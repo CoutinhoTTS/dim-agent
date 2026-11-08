@@ -8,9 +8,10 @@ use crate::{
     model::{Origin, SubscribeRequest, Target, source_of, validate_subscribe},
     publish::sessions,
     store::Subscription,
-    text::{digest, escaped, stamp},
+    text::{digest, stamp},
 };
 use chrono::Utc;
+use dim_agent_types::markup::escaped;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 

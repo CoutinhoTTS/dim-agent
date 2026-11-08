@@ -1985,6 +1985,22 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_types::markup",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types",
+      "file": "crates/dim-agent-types/src/markup.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_agent_types::markup::tests",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types::markup",
+      "file": "crates/dim-agent-types/src/markup.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_agent_types::member_approval",
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
@@ -19471,6 +19487,13 @@
     },
     {
       "from": "dim_agent_scheduler::engine",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "use dim_agent_types::markup::escaped"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::engine",
       "to": "dim_agent_types::permission",
       "references": [
         "path PermissionPolicy",
@@ -19990,7 +20013,6 @@
         "path sessions",
         "path target_gone",
         "use crate::engine::GRACE_SECONDS",
-        "use crate::engine::escaped",
         "use crate::engine::lookup_input",
         "use crate::engine::sessions",
         "use crate::engine::target_gone"
@@ -20019,6 +20041,13 @@
       "to": "dim_agent_scheduler::wakeup_pass",
       "references": [
         "path crate::wakeup_pass::pause"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "use dim_agent_types::markup::escaped"
       ]
     },
     {
@@ -20107,6 +20136,13 @@
       "to": "dim_agent_types::input",
       "references": [
         "mod input"
+      ]
+    },
+    {
+      "from": "dim_agent_types",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "mod markup"
       ]
     },
     {
@@ -20341,6 +20377,20 @@
         "path UserInput",
         "use crate::InputMode",
         "use crate::UserInput"
+      ]
+    },
+    {
+      "from": "dim_agent_types::markup",
+      "to": "dim_agent_types::markup::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_types::markup::tests",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "use super::escaped"
       ]
     },
     {

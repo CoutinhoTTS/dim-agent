@@ -10,11 +10,11 @@ use crate::{
     state::{InstanceState, MAX_DELIVERIES_IN_FLIGHT},
     store::{Document, GuideRecord, LastFailure, Store, Subscription},
     subscribe::{refresh_submission, write_live_guide},
-    text::{digest, escaped, preview, stamp},
+    text::{digest, preview, stamp},
 };
 use chrono::Utc;
 use dim_agent_capabilities::host::SessionFilesHost;
-use dim_agent_types::InputMode;
+use dim_agent_types::{InputMode, markup::escaped};
 use futures_util::{StreamExt, stream};
 use rutis::Ctx;
 use rutis::host::CtxHost;

@@ -22,18 +22,6 @@ impl Default for EventHubTexts {
     }
 }
 
-/// Escapes a value for one XML attribute or for element text, so a producer's
-/// text cannot open or close a tag (design §7). It is the function Scheduler's
-/// report uses (`crates/dim-agent-scheduler/src/engine.rs`), which is
-/// `pub(crate)` there and so is copied here.
-pub fn escaped(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 /// Whether `text` is one line: no line break of either convention.
 pub fn one_line(text: &str) -> bool {
     !text.contains(['\n', '\r'])
