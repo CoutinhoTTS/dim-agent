@@ -78,6 +78,9 @@ absent otherwise. The link names a Session, not its state: the parent may be clo
 parent is not in this store lists without the link, because the stored value is a foreign key and no row references a
 Session the store does not hold.
 
+Collaboration and member deletion follow this link only for a Session created with the member role. Deleting the parent
+of an imported historical Session clears that Session's catalog link and preserves its history.
+
 ### 3.2 Which creation entry writes which value
 
 | Entry | origin | parent |
@@ -212,7 +215,7 @@ This part writes no event, owns no Session or branch state and adds nothing to t
 | State | Owner | Written | Rebuilt |
 | --- | --- | --- | --- |
 | `agent_sessions.origin` | SessionStore's stored Session record | The creation transaction, once; later only an import replacing `unknown` | Not from the Timeline: it is creation input, so the projection property of [the catalog](session-catalog.md#4-events-and-state) does not extend to it. The v30 step backfills what the store already records (the leader link) and leaves the rest `unknown` |
-| `agent_sessions.leader_session_id` | same | Collaboration member creation ([#593](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)) | As stored |
+| `agent_sessions.leader_session_id` | same | Collaboration member creation ([#593](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)), Migration parent mapping, or deletion of a historical Session's parent | As stored |
 
 The class is display data for pickers. [Design rules §4 rule 9](../architecture/rust-agent/principles.md) keeps it out of
 the Timeline and out of the model's context; a Session's origin also never reaches model requests.

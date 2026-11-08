@@ -1001,6 +1001,7 @@ pub struct SessionItem {
     /// The creation origin the daemon reports (`client`, `acp`, `internal`,
     /// `unknown`); absent from a daemon that does not report one.
     pub origin: Option<String>,
+    pub parent_session_id: Option<String>,
 }
 
 /// The Session's stored title, unless it has none: empty, or the

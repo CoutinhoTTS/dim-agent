@@ -238,6 +238,10 @@ fn session_rows(items: Vec<SessionItem>, workspaces: bool) -> Vec<Item> {
             } else {
                 relative_time(item.updated_at, now)
             };
+            let detail = match &item.parent_session_id {
+                Some(parent) => format!("↑ {parent} · {detail}"),
+                None => detail,
+            };
             let mut row = Item::new(
                 item.id.clone(),
                 match tag(item.origin.as_deref()) {
@@ -334,6 +338,7 @@ mod tests {
             updated_at: 0,
             model: "p/m".into(),
             origin: Some("client".into()),
+            parent_session_id: None,
         }
     }
 

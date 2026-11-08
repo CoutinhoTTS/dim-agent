@@ -6780,6 +6780,7 @@ mod tests {
                     updated_at: u64::MAX,
                     model: "p/m".into(),
                     origin: None,
+                    parent_session_id: None,
                 })
                 .collect()));
             Prompt::Sessions(panel)
