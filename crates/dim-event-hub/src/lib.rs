@@ -13,11 +13,11 @@ mod management;
 mod model;
 mod publish;
 mod session;
+mod state;
 mod store;
 mod subscribe;
 mod text;
 
-use catalog::Catalog;
 use dim_agent_runtime::{AgentBuilder, Names, PartRegistry, PartScope};
 use dim_app_server::methods::ManagementMethods;
 use dim_app_server::plugin_files::PluginFileTransactions;
@@ -34,7 +34,8 @@ pub use model::{
     DeclareRequest, ListRequest, PublishRequest, SubscribeRequest, SubscribeTarget, ToTarget,
     TypeDeclaration, UnsubscribeRequest,
 };
-pub use store::{LastFailure, SUBSCRIPTIONS_FILE, Subscription};
+pub use state::InstanceState;
+pub use store::{GuideRecord, LastFailure, SUBSCRIPTIONS_FILE, Subscription};
 pub use text::{ENTRY, EventHubTexts};
 
 /// The process bus event that says the `eventHub` service is provided and
@@ -92,8 +93,15 @@ pub fn install(builder: &mut AgentBuilder) {
 pub fn install_with(builder: &mut AgentBuilder, texts: EventHubTexts) {
     dim_agent_runtime::names::register::<EventHub>(builder.catalog_mut(), None);
     let texts = Arc::new(texts);
+    // One state for the install (design §2.1): the factory captures it, so the
+    // catalog, the locks and the budget survive every reapply and every off
+    // and on of the row, and end with the process.
+    let state = Arc::new(InstanceState::default());
     builder.optional_plugin(move |names| {
-        Ok(Box::new(EventHubPlugin::new(names, texts.clone())?) as Box<dyn DynPlugin>)
+        Ok(
+            Box::new(EventHubPlugin::new(names, texts.clone(), state.clone())?)
+                as Box<dyn DynPlugin>,
+        )
     });
 }
 
@@ -103,28 +111,27 @@ pub struct EventHubPlugin {
     sessions: Key<dyn HostDispatch>,
     parts: Key<PartRegistry>,
     hub: Key<EventHub>,
-    /// Created once per plugin instance: a reapply keeps every declaration
-    /// (design §2.1).
-    catalog: Arc<Catalog>,
-    /// Created once per plugin instance: a creation in flight from the
-    /// previous generation still serializes with the new generation's
-    /// (design §3.3).
-    creation: Arc<tokio::sync::Mutex<()>>,
+    /// The install's state, captured by the factory (design §2.1): nothing
+    /// install-lifetime is created in `new` or `apply`.
+    state: Arc<InstanceState>,
     /// The guide entry the Session part registers (design A.6), from the
     /// row's factory configuration.
     texts: Arc<EventHubTexts>,
 }
 
 impl EventHubPlugin {
-    pub fn new(names: &Names<'_>, texts: Arc<EventHubTexts>) -> rutis::Result<Self> {
+    pub fn new(
+        names: &Names<'_>,
+        texts: Arc<EventHubTexts>,
+        state: Arc<InstanceState>,
+    ) -> rutis::Result<Self> {
         Ok(Self {
             files: names.key()?,
             methods: names.key()?,
             sessions: host_key("sessions"),
             parts: names.key()?,
             hub: names.key()?,
-            catalog: Arc::new(Catalog::default()),
-            creation: Arc::new(tokio::sync::Mutex::new(())),
+            state,
             texts,
         })
     }
@@ -158,11 +165,14 @@ impl DynPlugin for EventHubPlugin {
             let shared = Arc::new(Shared {
                 ctx: ctx.clone(),
                 sessions: sessions.clone(),
-                catalog: self.catalog.clone(),
-                creation: self.creation.clone(),
+                state: self.state.clone(),
                 store,
                 stop: ctx.cancellation_token(),
             });
+            // A notice missed while EventHub was off is repaired here: a
+            // stored subscription whose Session Agents says is gone is
+            // removed now (design §3.4).
+            publish::reconcile(shared.clone()).await;
             ctx.provide_as::<EventHub>(Arc::new(EventHub {
                 shared: shared.clone(),
             }))?;

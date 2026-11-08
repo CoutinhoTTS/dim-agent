@@ -120,23 +120,35 @@ impl ModelDriver for Script {
 }
 
 /// What a fixture producer learns in its own `apply`: its row's context and
-/// the `eventHub` service, when the host has one.
+/// the key it reads `eventHub` with on every call (design Appendix F), and how
+/// many times it declared.
 #[derive(Default)]
 pub struct ProducerState {
-    installed: Mutex<Option<(Ctx, Option<Arc<EventHub>>)>>,
+    installed: Mutex<Option<(Ctx, Option<Key<EventHub>>)>>,
+    declares: std::sync::atomic::AtomicUsize,
 }
 
 impl ProducerState {
-    fn install(&self, ctx: Ctx, hub: Option<Arc<EventHub>>) {
-        *self.installed.lock().unwrap() = Some((ctx, hub));
+    fn install(&self, ctx: Ctx, key: Option<Key<EventHub>>) {
+        *self.installed.lock().unwrap() = Some((ctx, key));
     }
     pub fn ctx(&self) -> Ctx {
         self.installed.lock().unwrap().as_ref().unwrap().0.clone()
     }
+    /// The service as the row reads it now: absent while EventHub is off or
+    /// reloading (design §2.1, Appendix F).
     pub fn hub(&self) -> Option<Arc<EventHub>> {
-        self.installed.lock().unwrap().as_ref().unwrap().1.clone()
+        let installed = self.installed.lock().unwrap();
+        let (ctx, key) = installed.as_ref()?;
+        ctx.get_at(key.as_ref()?)
+    }
+    /// How many declarations this producer made.
+    pub fn declares(&self) -> usize {
+        self.declares.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub async fn declare(&self, request: DeclareRequest) -> Result<(), EventHubError> {
+        self.declares
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let hub = self
             .hub()
             .ok_or_else(|| EventHubError::new("no_caller_row", "eventHub is not installed"))?;
@@ -185,14 +197,12 @@ impl DynPlugin for ProducerPart {
                     let key = key.clone();
                     let ctx = listen_ctx.clone();
                     async move {
-                        let hub = ctx.get_at(&key);
-                        state.install(ctx.clone(), hub);
+                        state.install(ctx.clone(), Some(key));
                         Ok(None)
                     }
                 })?;
             }
-            let hub = ctx.get_at(&key);
-            self.state.install(ctx.clone(), hub);
+            self.state.install(ctx.clone(), Some(key));
             Ok(Effect::Done)
         })
     }

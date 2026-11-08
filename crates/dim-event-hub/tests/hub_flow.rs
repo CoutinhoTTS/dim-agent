@@ -610,3 +610,116 @@ async fn the_host_without_event_hub_is_unchanged() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// Turning the built-in `eventhub` row off and on keeps the install's state:
+/// the one declaration survives the factory rebuild, and a publish after the
+/// cycle is delivered without a second declaration (design §2.1, Appendix D
+/// item 12). PluginManager is the product's own switch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turning_the_row_off_and_on_keeps_the_declaration() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path()).await;
+    producer
+        .declare(im_declaration("Messages from the IM service."))
+        .await
+        .unwrap();
+    subscribe(&mut client, &session, vec!["im.*"], None).await;
+
+    client
+        .rpc("plugin.disable", json!({"name": "eventhub"}))
+        .await
+        .unwrap();
+    // While EventHub is off the producer reads no service and cannot publish.
+    wait_for("eventHub off", || producer.hub().is_none()).await;
+    assert!(
+        producer.publish(im_event("off")).await.is_err(),
+        "no service while the row is off"
+    );
+
+    let enabled = client
+        .rpc("plugin.enable", json!({"name": "eventhub"}))
+        .await
+        .unwrap();
+    assert_eq!(enabled["status"], json!("running"), "{enabled}");
+    wait_for("eventHub on again", || producer.hub().is_some()).await;
+
+    let receipt = producer.publish(im_event("on")).await.unwrap();
+    assert_eq!(
+        receipt["deliveries"][0]["status"],
+        json!("delivered"),
+        "{receipt}"
+    );
+    assert_eq!(producer.declares(), 1, "the producer declared exactly once");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A notice missed while EventHub was off is repaired at the next apply: the
+/// deleted Session's subscriptions are removed, and a closed, restorable
+/// Session's stay (design §3.4, Appendix D item 13).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscription_deleted_while_off_is_removed_at_the_next_apply() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model).await;
+    let mut client = connect(&server).await;
+    let deleted = create_session(&mut client, home.path()).await;
+    let closed = create_session(&mut client, home.path()).await;
+    producer.declare(im_declaration("")).await.unwrap();
+    subscribe(&mut client, &deleted, vec!["im.*"], None).await;
+    subscribe(&mut client, &closed, vec!["im.*"], None).await;
+
+    client
+        .rpc("plugin.disable", json!({"name": "eventhub"}))
+        .await
+        .unwrap();
+    wait_for("eventHub off", || producer.hub().is_none()).await;
+    // While EventHub cannot hear, one Session is deleted and the other is
+    // closed with its rows kept.
+    client
+        .rpc("session.delete", json!({"sessionId": deleted}))
+        .await
+        .unwrap();
+    server
+        .agent()
+        .unwrap()
+        .get_session(&closed)
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+
+    let enabled = client
+        .rpc("plugin.enable", json!({"name": "eventhub"}))
+        .await
+        .unwrap();
+    assert_eq!(enabled["status"], json!("running"), "{enabled}");
+
+    let listed: Value = client
+        .rpc("eventhub.subscriptions", json!({}))
+        .await
+        .unwrap();
+    let sessions: Vec<&str> = listed["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|subscription| subscription["target"]["sessionId"].as_str())
+        .collect();
+    assert!(
+        !sessions.contains(&deleted.as_str()),
+        "the deleted Session's subscription is gone: {listed}"
+    );
+    assert!(
+        sessions.contains(&closed.as_str()),
+        "a closed, restorable Session keeps its subscription: {listed}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}

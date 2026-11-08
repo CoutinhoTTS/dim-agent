@@ -2,11 +2,11 @@
 //! it: `declare`, `eventhub.sources`, `eventhub.subscriptions`, and the
 //! deletion notice (design §2.1, §3.4, A.1, A.3).
 use crate::{
-    catalog::Catalog,
     error::EventHubError,
     model::{
         DeclareRequest, ListRequest, SubscribeRequest, UnsubscribeRequest, validate_declaration,
     },
+    state::InstanceState,
     store::{Store, Subscription},
 };
 use rutis::Ctx;
@@ -15,16 +15,14 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// The state one generation of the process part owns.
+/// The state one generation of the process part owns: what it captured when
+/// it applied. The catalog, the locks and the budget belong to the install
+/// (design §2.1, §2.4, §2.5); the store is this generation's reading of the
+/// subscription file.
 pub(crate) struct Shared {
     pub(crate) ctx: Ctx,
     pub(crate) sessions: Arc<dyn HostDispatch>,
-    pub(crate) catalog: Arc<Catalog>,
-    /// Serializes every `subscribe` and `unsubscribe` from its first check to
-    /// its last guide write or retire (design §3.3). It belongs to the plugin
-    /// instance, not this generation: an in-flight creation from the previous
-    /// generation still serializes with this one.
-    pub(crate) creation: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) state: Arc<InstanceState>,
     pub(crate) store: Arc<Store>,
     /// The generation's cancellation, passed to the files a publish stores.
     pub(crate) stop: CancellationToken,
@@ -37,11 +35,11 @@ impl Shared {
         request: DeclareRequest,
     ) -> Result<(), EventHubError> {
         validate_declaration(&request)?;
-        self.catalog.declare(ctx, &request)
+        self.state.catalog().declare(ctx, &request)
     }
 
     pub(crate) fn sources(&self) -> Value {
-        json!({ "sources": self.catalog.report() })
+        json!({ "sources": self.state.catalog().report() })
     }
 
     pub(crate) fn subscriptions(&self, request: ListRequest) -> Value {
@@ -59,23 +57,32 @@ impl Shared {
         json!({ "subscriptions": subscriptions })
     }
 
-    /// Removes every subscription whose target is the deleted Session, in one
-    /// transaction (design §3.4). A failed write leaves them, which the
-    /// design accepts as the cost of a missed notice; there is no caller to
-    /// answer.
-    pub(crate) async fn session_deleted(&self, session_id: &str) {
+    /// Removes every subscription whose target is `session_id` in one
+    /// transaction, under that Session's lock (design §3.3, §3.4): a
+    /// `subscribe` that wrote its guide before the delete stores its record
+    /// first, and this runs after it. A failed write leaves them; any error
+    /// of the reconciliation keeps them too (design §3.4).
+    pub(crate) async fn remove_session(&self, session_id: &str) {
+        let _session = self.state.session_lock(session_id).await;
         let target = session_id.to_owned();
         let result = self
             .store
-            .change(move |subscriptions| {
-                let before = subscriptions.len();
-                subscriptions.retain(|subscription| subscription.target.session_id != target);
-                Ok((subscriptions.len() != before, ()))
+            .change(move |document| {
+                let before = document.subscriptions.len();
+                document
+                    .subscriptions
+                    .retain(|subscription| subscription.target.session_id != target);
+                Ok((document.subscriptions.len() != before, ()))
             })
             .await;
         if let Err(error) = result {
             tracing::warn!(%error, session_id, "EventHub could not remove a deleted Session's subscriptions");
         }
+    }
+
+    /// The `agent/session-deleted` handler (design §3.4).
+    pub(crate) async fn session_deleted(&self, session_id: &str) {
+        self.remove_session(session_id).await;
     }
 
     pub(crate) async fn subscribe(

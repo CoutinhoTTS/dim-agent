@@ -201,6 +201,10 @@
   },
   {
     "from": "dim-event-hub",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-event-hub",
     "to": "dim-client"
   },
   {

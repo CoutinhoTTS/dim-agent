@@ -56,3 +56,13 @@ pub fn preview(text: &str, limit: usize) -> &str {
 pub fn stamp(instant: DateTime<Utc>) -> String {
     instant.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
+
+/// The SHA-256 of a source's guide, lowercase hex: what the subscription file
+/// records for one branch and source, and what a delivery compares against
+/// the current declaration (design §2.2, §3.3, A.5).
+pub fn digest(guide: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(guide.as_bytes());
+    format!("{:x}", hasher.finalize())
+}

@@ -23,9 +23,11 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 futures-util.workspace = true
+sha2 = "0.10.9"
 
 [dev-dependencies]
 rusqlite = "0.40.2"
+dim-agent-runtime = { workspace = true, features = ["testing"] }
 tempfile = "3"
 tokio.workspace = true
 serde_json.workspace = true

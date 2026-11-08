@@ -1,13 +1,15 @@
 //! Publish and delivery (design §2.3–§2.5, §3.1, §3.2, A.2): one input per
-//! target branch, at most eight deliveries at a time, one receipt, and the
-//! publish's subscription changes in one transaction after its deliveries
-//! settle.
+//! target branch, at most eight deliveries at a time across the install, one
+//! receipt, and the publish's subscription changes in one transaction after
+//! its deliveries settle.
 use crate::{
     error::{EventHubError, SessionsFailure},
     hub::Shared,
-    model::{BODY_LIMIT, PREVIEW_BYTES, PublishRequest, validate_publish},
-    store::{LastFailure, Subscription},
-    text::{escaped, preview, stamp},
+    model::{BODY_LIMIT, PREVIEW_BYTES, PublishRequest, Target, validate_publish},
+    state::{InstanceState, MAX_DELIVERIES_IN_FLIGHT},
+    store::{Document, GuideRecord, LastFailure, Store, Subscription},
+    subscribe::{refresh_submission, write_live_guide},
+    text::{digest, escaped, preview, stamp},
 };
 use chrono::Utc;
 use dim_agent_capabilities::host::SessionFilesHost;
@@ -18,10 +20,11 @@ use rutis::host::CtxHost;
 use rutis_bridge::session::{HostDispatch, settle};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
-/// How many deliveries of one publish run at a time (design §2.5).
-const MAX_IN_FLIGHT: usize = 8;
 /// The file name an overflowed body is stored as (design §3.2).
 const EVENT_FILE: &str = "event.txt";
 
@@ -46,6 +49,8 @@ pub(crate) enum Delivery {
         sequence: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         truncated: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        repeated: Option<bool>,
     },
     #[serde(rename_all = "camelCase")]
     Gone {
@@ -79,6 +84,31 @@ struct PlannedTarget {
     mode: InputMode,
 }
 
+impl PlannedTarget {
+    fn target(&self) -> Target {
+        Target {
+            session_id: self.session_id.clone(),
+            branch_id: self.branch_id.clone(),
+        }
+    }
+}
+
+/// The guide a delivery writes before its event: the current declaration's
+/// text and digest (design §3.3).
+struct GuideRefresh {
+    source: String,
+    guide: String,
+    digest: String,
+}
+
+/// One delivery to make, or one branch that already holds the event.
+enum Planned {
+    /// The branch holds this event's input already: a retry answers the first
+    /// input's ids without writing a file or a second input (design §3.2).
+    Already(Delivery),
+    Dispatch(DeliveryJob),
+}
+
 /// Publishes one event for the row that owns `ctx` (design A.2).
 pub(crate) async fn publish(
     shared: &Shared,
@@ -88,7 +118,8 @@ pub(crate) async fn publish(
     validate_publish(&request)?;
     let owner = ctx.instance();
     let declaration = shared
-        .catalog
+        .state
+        .catalog()
         .held_by(&request.source, owner)
         .ok_or_else(|| {
             EventHubError::unknown_source(format!(
@@ -110,24 +141,52 @@ pub(crate) async fn publish(
         .id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let plans = plan_targets(&shared.store.read(), &request, declared_mode);
+    let submission = submission_id(&request.source, &event_id);
+    // Two publishes of one id never interleave: the second finds the first's
+    // inputs and writes no file for a branch that holds one (design §2.4).
+    let _event = shared.state.event_lock(&submission).await;
+    let document = shared.store.document();
+    let plans = plan_targets(&document.subscriptions, &request, declared_mode);
     let truncated = request.body.len() > BODY_LIMIT;
-    let files = if truncated {
-        overflow_files(shared, &plans, &request.body).await
+    let guide_digest = digest(&declaration.guide);
+    let repeated = if truncated {
+        looked_up(shared, &plans, &submission).await
     } else {
         HashMap::new()
     };
-    let jobs: Vec<DeliveryJob> = plans
+    let pending: Vec<&PlannedTarget> = plans
+        .iter()
+        .filter(|plan| !repeated.contains_key(&(plan.session_id.clone(), plan.branch_id.clone())))
+        .collect();
+    let files = if truncated {
+        overflow_files(shared, &pending, &request.body).await
+    } else {
+        HashMap::new()
+    };
+    let planned: Vec<Planned> = plans
         .iter()
         .map(|plan| {
+            if let Some((input_id, sequence)) =
+                repeated.get(&(plan.session_id.clone(), plan.branch_id.clone()))
+            {
+                return Planned::Already(Delivery::Delivered {
+                    session_id: plan.session_id.clone(),
+                    branch_id: plan.branch_id.clone(),
+                    subscription_ids: plan.subscription_ids.clone(),
+                    input_id: input_id.clone(),
+                    sequence: *sequence,
+                    truncated: None,
+                    repeated: Some(true),
+                });
+            }
             let file = files.get(&plan.session_id).and_then(Option::as_ref);
             let text = event_text(request.title.as_deref(), &request.body, truncated);
-            DeliveryJob {
+            Planned::Dispatch(DeliveryJob {
                 session_id: plan.session_id.clone(),
                 branch_id: plan.branch_id.clone(),
                 subscription_ids: plan.subscription_ids.clone(),
                 mode: plan.mode,
-                submission_id: submission_id(&request.source, &event_id),
+                submission_id: submission.clone(),
                 marker: marker(
                     &request.source,
                     &request.r#type,
@@ -138,16 +197,52 @@ pub(crate) async fn publish(
                     &text,
                 ),
                 truncated: truncated && file.is_none(),
-            }
+                refresh: guide_refresh(
+                    &document,
+                    plan,
+                    &request.source,
+                    &declaration.guide,
+                    &guide_digest,
+                ),
+            })
         })
         .collect();
     let service = shared.sessions.clone();
-    let deliveries: Vec<Delivery> = stream::iter(jobs)
-        .map(|job| deliver(service.clone(), job))
-        .buffered(MAX_IN_FLIGHT)
+    let store = shared.store.clone();
+    let state = shared.state.clone();
+    let width = planned.len().max(1);
+    // Every pending delivery waits for one of the install's eight permits, so
+    // concurrent publishes share the budget (design §2.5); `buffered` keeps
+    // the receipt in target order.
+    let outcomes: Vec<(Delivery, Option<GuideRecord>)> = stream::iter(planned)
+        .map(|planned| {
+            let service = service.clone();
+            let store = store.clone();
+            let state = state.clone();
+            async move {
+                match planned {
+                    Planned::Already(delivery) => (delivery, None),
+                    Planned::Dispatch(job) => {
+                        let _permit = state.delivery_permit().await;
+                        deliver(service, store, state, job).await
+                    }
+                }
+            }
+        })
+        .buffered(width)
         .collect()
         .await;
-    apply_changes(shared, &deliveries).await;
+    let (deliveries, refreshes): (Vec<Delivery>, Vec<Option<GuideRecord>>) =
+        outcomes.into_iter().unzip();
+    let refreshes: Vec<GuideRecord> = refreshes.into_iter().flatten().collect();
+    // A Session Agents says is gone takes its subscriptions with it (design
+    // §3.4); the notice stays the prompt path.
+    reconcile_closed(shared, &deliveries).await;
+    if let Err(error) = apply_changes(shared, &deliveries, &refreshes).await {
+        // The receipt stands and the in-memory set keeps its old value; the
+        // next publish whose outcome changes it writes again (Appendix B).
+        tracing::warn!(%error, "EventHub could not record a publish's subscription changes");
+    }
     Ok(json!(Receipt {
         event_id,
         deliveries,
@@ -222,11 +317,41 @@ fn strongest(modes: &[InputMode]) -> Option<InputMode> {
     })
 }
 
-/// Stores an overflowed body once per target Session (design §3.2), and
-/// answers the file each Session got, if any.
-async fn overflow_files(
+/// The branches that already hold this event's input, by `sessions.lookup`
+/// (design §2.4, §3.2). Only an overflowed body asks: a body that fits writes
+/// no file, so a repeated input is already answered by the branch itself.
+async fn looked_up(
     shared: &Shared,
     plans: &[PlannedTarget],
+    submission: &str,
+) -> HashMap<(String, String), (String, u64)> {
+    let mut held = HashMap::new();
+    for plan in plans {
+        let args = json!({
+            "sessionId": plan.session_id,
+            "branchId": plan.branch_id,
+            "submissionId": submission,
+        });
+        if let Ok(Ok(value)) = sessions(shared.sessions.as_ref(), "lookup", args).await
+            && value["status"] == json!("accepted")
+            && let (Some(input_id), Some(sequence)) =
+                (value["inputId"].as_str(), value["sequence"].as_u64())
+        {
+            held.insert(
+                (plan.session_id.clone(), plan.branch_id.clone()),
+                (input_id.to_owned(), sequence),
+            );
+        }
+    }
+    held
+}
+
+/// Stores an overflowed body once per target Session (design §3.2), and
+/// answers the file each Session got, if any. A Session whose every branch
+/// already holds the input gets no file.
+async fn overflow_files(
+    shared: &Shared,
+    plans: &[&PlannedTarget],
     body: &str,
 ) -> HashMap<String, Option<dim_agent_capabilities::host::StoredSessionFile>> {
     let mut sessions: Vec<String> = Vec::new();
@@ -262,13 +387,37 @@ async fn overflow_files(
                 (session_id, stored)
             }
         })
-        .buffered(MAX_IN_FLIGHT)
+        .buffered(MAX_DELIVERIES_IN_FLIGHT)
         .collect()
         .await
 }
 
-/// One delivery's inputs: the branch, the mode, the marker and the
-/// submission id (design §2.4).
+/// The refresh a delivery writes before its event, when the branch's recorded
+/// guide differs from the current declaration (design §3.3). A branch reached
+/// only through `to` has no record and gets no guide write.
+fn guide_refresh(
+    document: &Document,
+    plan: &PlannedTarget,
+    source: &str,
+    guide: &str,
+    digest: &str,
+) -> Option<GuideRefresh> {
+    if plan.subscription_ids.is_empty() {
+        return None;
+    }
+    match document.guide(&plan.target(), source) {
+        Some(record) if record.digest == digest => None,
+        _ => Some(GuideRefresh {
+            source: source.to_owned(),
+            guide: guide.to_owned(),
+            digest: digest.to_owned(),
+        }),
+    }
+}
+
+/// One delivery's inputs: the branch, the mode, the marker, the submission id
+/// and, when the recorded guide is stale, the guide to write first (design
+/// §2.4, §3.3).
 struct DeliveryJob {
     session_id: String,
     branch_id: String,
@@ -277,24 +426,35 @@ struct DeliveryJob {
     submission_id: String,
     marker: String,
     truncated: bool,
+    refresh: Option<GuideRefresh>,
 }
 
-/// Delivers the event to one branch and answers its outcome (design §2.3).
-async fn deliver(service: std::sync::Arc<dyn HostDispatch>, job: DeliveryJob) -> Delivery {
+/// Delivers the event to one branch and answers its outcome, plus the guide
+/// record the delivery refreshed (design §2.3, §3.3).
+async fn deliver(
+    service: Arc<dyn HostDispatch>,
+    store: Arc<Store>,
+    state: Arc<InstanceState>,
+    job: DeliveryJob,
+) -> (Delivery, Option<GuideRecord>) {
+    let refreshed = match &job.refresh {
+        Some(refresh) => refresh_guide(&service, &store, &state, &job, refresh).await,
+        None => None,
+    };
     let (session_id, branch_id, subscription_ids) = (
         job.session_id.clone(),
         job.branch_id.clone(),
         job.subscription_ids.clone(),
     );
     let write = json!({
-        "sessionId": job.session_id,
-        "branchId": job.branch_id,
+        "sessionId": session_id.clone(),
+        "branchId": branch_id.clone(),
         "mode": job.mode,
         "submissionId": job.submission_id,
         "rawBlocks": [{ "text": job.marker }],
         "content": [],
     });
-    match sessions(service.as_ref(), "input", write).await {
+    let delivery = match sessions(service.as_ref(), "input", write).await {
         Ok(Ok(value)) => match (value["inputId"].as_str(), value["sequence"].as_u64()) {
             (Some(input_id), Some(sequence)) => Delivery::Delivered {
                 session_id: session_id.clone(),
@@ -303,6 +463,7 @@ async fn deliver(service: std::sync::Arc<dyn HostDispatch>, job: DeliveryJob) ->
                 input_id: input_id.to_owned(),
                 sequence,
                 truncated: job.truncated.then_some(true),
+                repeated: None,
             },
             _ => Delivery::Failed {
                 session_id: session_id.clone(),
@@ -338,14 +499,56 @@ async fn deliver(service: std::sync::Arc<dyn HostDispatch>, job: DeliveryJob) ->
             code: "failed".into(),
             message,
         },
+    };
+    (delivery, refreshed)
+}
+
+/// Writes the current guide to the branch before its event, under that
+/// Session's lock, and only while a stored subscription on that branch still
+/// names the source (design §3.3). A refresh that cannot be written leaves the
+/// record stale, so the next delivery tries again.
+async fn refresh_guide(
+    service: &Arc<dyn HostDispatch>,
+    store: &Arc<Store>,
+    state: &Arc<InstanceState>,
+    job: &DeliveryJob,
+    refresh: &GuideRefresh,
+) -> Option<GuideRecord> {
+    let target = Target {
+        session_id: job.session_id.clone(),
+        branch_id: job.branch_id.clone(),
+    };
+    let _session = state.session_lock(&job.session_id).await;
+    if !store.document().names_source(&target, &refresh.source) {
+        return None;
+    }
+    match write_live_guide(
+        service.as_ref(),
+        &target,
+        refresh_submission(&refresh.source),
+        &refresh.source,
+        &refresh.guide,
+    )
+    .await
+    {
+        Ok(()) => Some(GuideRecord {
+            target,
+            source: refresh.source.clone(),
+            digest: refresh.digest.clone(),
+        }),
+        Err(_) => None,
     }
 }
 
 /// Applies a publish's subscription changes in one transaction after its
 /// deliveries settle (design §2.3): `gone` removes each listed subscription,
-/// `failed` sets `lastFailure`, `delivered` clears it, each only when the
-/// value changes.
-async fn apply_changes(shared: &Shared, deliveries: &[Delivery]) {
+/// `failed` sets `lastFailure`, `delivered` clears it, and a refreshed guide
+/// records its digest, each only when the value changes.
+async fn apply_changes(
+    shared: &Shared,
+    deliveries: &[Delivery],
+    refreshes: &[GuideRecord],
+) -> Result<(), EventHubError> {
     let mut removed: HashSet<String> = HashSet::new();
     let mut cleared: HashSet<String> = HashSet::new();
     let mut failed: HashMap<String, String> = HashMap::new();
@@ -364,17 +567,20 @@ async fn apply_changes(shared: &Shared, deliveries: &[Delivery]) {
             } => failed.extend(subscription_ids.iter().map(|id| (id.clone(), code.clone()))),
         }
     }
-    if removed.is_empty() && cleared.is_empty() && failed.is_empty() {
-        return;
+    if removed.is_empty() && cleared.is_empty() && failed.is_empty() && refreshes.is_empty() {
+        return Ok(());
     }
     let now = stamp(Utc::now());
-    let result = shared
+    let refreshes = refreshes.to_vec();
+    shared
         .store
-        .change(move |subscriptions| {
-            let before = subscriptions.len();
-            subscriptions.retain(|subscription| !removed.contains(subscription.id.as_str()));
-            let mut changed = subscriptions.len() != before;
-            for subscription in subscriptions.iter_mut() {
+        .change(move |document| {
+            let before = document.subscriptions.len();
+            document
+                .subscriptions
+                .retain(|subscription| !removed.contains(subscription.id.as_str()));
+            let mut changed = document.subscriptions.len() != before;
+            for subscription in &mut document.subscriptions {
                 if let Some(code) = failed.get(subscription.id.as_str()) {
                     if subscription
                         .last_failure
@@ -395,13 +601,75 @@ async fn apply_changes(shared: &Shared, deliveries: &[Delivery]) {
                     changed = true;
                 }
             }
+            for record in &refreshes {
+                if document.names_source(&record.target, &record.source) {
+                    changed |= document.set_guide(&record.target, &record.source, &record.digest);
+                }
+            }
             Ok((changed, ()))
         })
+        .await
+}
+
+/// Asks Agents whether each Session a delivery failed `session_closed` for
+/// still exists, and removes the subscriptions of one it says is gone (design
+/// §3.4). An error keeps them.
+async fn reconcile_closed(shared: &Shared, deliveries: &[Delivery]) {
+    let mut sessions: Vec<String> = Vec::new();
+    for delivery in deliveries {
+        if let Delivery::Failed {
+            session_id, code, ..
+        } = delivery
+            && code == "session_closed"
+            && !sessions.contains(session_id)
+        {
+            sessions.push(session_id.clone());
+        }
+    }
+    for session_id in sessions {
+        if session_exists(shared, &session_id).await == Some(false) {
+            shared.remove_session(&session_id).await;
+        }
+    }
+}
+
+/// The reconciliation an `apply` runs: for each Session the stored
+/// subscriptions target, `sessions.exists`; a `false` removes that Session's
+/// subscriptions in one transaction, at most eight reads at a time (design
+/// §3.4). Any error keeps them.
+pub(crate) async fn reconcile(shared: Arc<Shared>) {
+    let mut sessions: Vec<String> = Vec::new();
+    for subscription in shared.store.read() {
+        if !sessions.contains(&subscription.target.session_id) {
+            sessions.push(subscription.target.session_id);
+        }
+    }
+    stream::iter(sessions)
+        .map(|session_id| {
+            let shared = shared.clone();
+            async move {
+                if session_exists(&shared, &session_id).await == Some(false) {
+                    shared.remove_session(&session_id).await;
+                }
+            }
+        })
+        .buffered(MAX_DELIVERIES_IN_FLIGHT)
+        .collect::<Vec<()>>()
         .await;
-    if let Err(error) = result {
-        // The receipt stands and the in-memory set keeps its old value; the
-        // next publish whose outcome changes it writes again (Appendix B).
-        tracing::warn!(%error, "EventHub could not record a publish's subscription changes");
+}
+
+/// `sessions.exists` (design §3.4, §9.2). An error or a malformed reply is
+/// `None`, which keeps the subscriptions.
+async fn session_exists(shared: &Shared, session_id: &str) -> Option<bool> {
+    match sessions(
+        shared.sessions.as_ref(),
+        "exists",
+        json!({ "sessionId": session_id }),
+    )
+    .await
+    {
+        Ok(Ok(value)) => value["exists"].as_bool(),
+        _ => None,
     }
 }
 

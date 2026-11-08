@@ -2,13 +2,21 @@
 //! `sessions` service, so a test can observe every input write, fail one on
 //! demand, and hold deliveries in flight together.
 #![allow(dead_code)]
+use super::wait_for;
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
+use dim_agent_capabilities::host::{
+    SessionFileError, SessionFileErrorCode, SessionFilesHost, SessionFilesService,
+    StoredSessionFile,
+};
 use dim_agent_capabilities::methods::{Owner, RpcError};
-use dim_agent_runtime::{Names, PartRegistry};
+use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Names, PartRegistry};
 use dim_agent_types::InputMode;
 use dim_app_server::methods::{ManagementMethods, ManagementMethodsPlugin};
 use dim_app_server::plugin_files::PluginFilesPlugin;
-use dim_event_hub::{DeclareRequest, EventHub, EventHubError, EventHubPlugin, TypeDeclaration};
+use dim_event_hub::{
+    DeclareRequest, EventHub, EventHubError, EventHubPlugin, InstanceState, TypeDeclaration,
+};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
 use rutis_bridge::session::{Error as BridgeError, HostDispatch, Reply, Value, host_key};
@@ -51,6 +59,11 @@ struct Inner {
     /// A submission-id needle and the error code a matching input answers,
     /// so a test can refuse one guide write of a creation (design §3.3).
     refusals: Mutex<Vec<(String, &'static str)>>,
+    /// `session|branch|submission` to the input an accepted write committed,
+    /// which `lookup` answers (design §2.4).
+    accepted: Mutex<HashMap<String, (String, u64)>>,
+    /// Session ids `exists` answers `false` for (design §3.4).
+    missing: Mutex<std::collections::HashSet<String>>,
     sequence: AtomicU64,
     gate: Mutex<Option<Arc<Gate>>>,
 }
@@ -70,6 +83,8 @@ impl Default for FakeSessions {
                 calls: Mutex::new(Vec::new()),
                 failures: Mutex::new(HashMap::new()),
                 refusals: Mutex::new(Vec::new()),
+                accepted: Mutex::new(HashMap::new()),
+                missing: Mutex::new(std::collections::HashSet::new()),
                 sequence: AtomicU64::new(0),
                 gate: Mutex::new(None),
             }),
@@ -94,6 +109,18 @@ impl FakeSessions {
     }
     pub fn accept(&self, session: &str) {
         self.inner.failures.lock().unwrap().remove(session);
+    }
+    /// Answers `exists` `false` for `session`, as a deleted Session does
+    /// (design §3.4).
+    pub fn deleted(&self, session: &str) {
+        self.inner
+            .missing
+            .lock()
+            .unwrap()
+            .insert(session.to_owned());
+    }
+    pub fn restored(&self, session: &str) {
+        self.inner.missing.lock().unwrap().remove(session);
     }
     /// Answers any input whose submission id contains `needle` with `code`,
     /// so one guide write of a creation fails while its others succeed
@@ -128,20 +155,51 @@ impl FakeSessions {
 
 impl HostDispatch for FakeSessions {
     fn methods(&self) -> Option<Json> {
-        Some(json!({ "input": "async" }))
+        Some(json!({ "input": "async", "lookup": "async", "exists": "async" }))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
-        if method != "input" {
-            return Err(BridgeError::Value(format!(
-                "the fixture sessions service has no method {method}"
-            )));
-        }
         let Json::Array(args) = args.json()? else {
             return Err(BridgeError::Value("expected one request object".into()));
         };
         let Ok([write]) = <[Json; 1]>::try_from(args) else {
             return Err(BridgeError::Value("expected one request object".into()));
         };
+        match method {
+            // The `sessions.lookup` reply (design §2.4).
+            "lookup" => {
+                let key = format!(
+                    "{}|{}|{}",
+                    write["sessionId"].as_str().unwrap_or_default(),
+                    write["branchId"].as_str().unwrap_or_default(),
+                    write["submissionId"].as_str().unwrap_or_default()
+                );
+                let held = self.inner.accepted.lock().unwrap().get(&key).cloned();
+                return Ok(Value::future(async move {
+                    Ok(match held {
+                        Some((input_id, sequence)) => json!({
+                            "ok": true,
+                            "value": { "status": "accepted", "inputId": input_id, "sequence": sequence },
+                        }),
+                        None => json!({ "ok": true, "value": { "status": "unknown" } }),
+                    }
+                    .into())
+                }));
+            }
+            // The `sessions.exists` read (design §3.4).
+            "exists" => {
+                let session = write["sessionId"].as_str().unwrap_or_default().to_owned();
+                let exists = !self.inner.missing.lock().unwrap().contains(&session);
+                return Ok(Value::future(async move {
+                    Ok(json!({ "ok": true, "value": { "exists": exists } }).into())
+                }));
+            }
+            "input" => {}
+            other => {
+                return Err(BridgeError::Value(format!(
+                    "the fixture sessions service has no method {other}"
+                )));
+            }
+        }
         let call = InputCall {
             session_id: write["sessionId"].as_str().unwrap_or_default().to_owned(),
             branch_id: write["branchId"].as_str().unwrap_or_default().to_owned(),
@@ -190,9 +248,17 @@ impl HostDispatch for FakeSessions {
             match code {
                 None => {
                     let sequence = inner.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                    let input_id = format!("input-{sequence}");
+                    inner.accepted.lock().unwrap().insert(
+                        format!(
+                            "{}|{}|{}",
+                            call.session_id, call.branch_id, call.submission_id
+                        ),
+                        (input_id.clone(), sequence),
+                    );
                     Ok(json!({
                         "ok": true,
-                        "value": { "inputId": format!("input-{sequence}"), "sequence": sequence },
+                        "value": { "inputId": input_id, "sequence": sequence },
                     })
                     .into())
                 }
@@ -265,13 +331,15 @@ impl Gate {
     }
 }
 
-/// The fixture producer's own state: its row's context and the `eventHub`
-/// service, as its `apply` or an `eventhub/ready` notice last found them,
-/// plus the declaration it makes whenever it finds the service (design §2.1).
+/// The fixture producer's own state: its row's context and the key it reads
+/// `eventHub` with on every call (design Appendix F: a producer reads the
+/// service per call), the declaration it makes whenever it finds the service
+/// (design §2.1), and how many times it declared.
 #[derive(Default)]
 pub struct ProducerState {
-    installed: Mutex<Option<(Ctx, Option<Arc<EventHub>>)>>,
+    installed: Mutex<Option<(Ctx, Key<EventHub>)>>,
     declaration: Mutex<Option<DeclareRequest>>,
+    declares: AtomicUsize,
 }
 
 impl ProducerState {
@@ -282,19 +350,28 @@ impl ProducerState {
     pub fn declaration(&self) -> Option<DeclareRequest> {
         self.declaration.lock().unwrap().clone()
     }
-    fn install(&self, ctx: Ctx, hub: Option<Arc<EventHub>>) {
-        *self.installed.lock().unwrap() = Some((ctx, hub));
+    fn install(&self, ctx: Ctx, key: Key<EventHub>) {
+        *self.installed.lock().unwrap() = Some((ctx, key));
     }
     pub fn ctx(&self) -> Ctx {
         self.installed.lock().unwrap().as_ref().unwrap().0.clone()
     }
+    /// The service as the row reads it now: absent while EventHub is off or
+    /// reloading (design §2.1, Appendix F).
     pub fn hub(&self) -> Option<Arc<EventHub>> {
-        self.installed.lock().unwrap().as_ref().unwrap().1.clone()
+        let installed = self.installed.lock().unwrap();
+        let (ctx, key) = installed.as_ref()?;
+        ctx.get_at(key)
+    }
+    /// How many declarations this producer made.
+    pub fn declares(&self) -> usize {
+        self.declares.load(Ordering::SeqCst)
     }
     pub async fn declare(
         &self,
         request: dim_event_hub::DeclareRequest,
     ) -> Result<(), EventHubError> {
+        self.declares.fetch_add(1, Ordering::SeqCst);
         let hub = self
             .hub()
             .ok_or_else(|| EventHubError::new("no_caller_row", "eventHub is not installed"))?;
@@ -315,7 +392,7 @@ impl ProducerState {
                 let Some(declaration) = self.declaration() else {
                     return Err(error);
                 };
-                hub.declare(&ctx, declaration).await?;
+                self.declare(declaration).await?;
                 hub.publish(&ctx, request).await
             }
             outcome => outcome,
@@ -354,19 +431,19 @@ impl DynPlugin for ProducerPart {
                     let key = key.clone();
                     let ctx = listen_ctx.clone();
                     async move {
-                        let hub = ctx.get_at(&key);
-                        state.install(ctx.clone(), hub.clone());
-                        if let (Some(hub), Some(declaration)) = (hub, state.declaration()) {
-                            let _ = hub.declare(&ctx, declaration).await;
+                        state.install(ctx.clone(), key);
+                        if let Some(declaration) = state.declaration()
+                            && let Err(error) = state.declare(declaration).await
+                        {
+                            tracing::warn!(%error, "the fixture producer could not declare");
                         }
                         Ok(None)
                     }
                 })?;
             }
-            let hub = ctx.get_at(&key);
-            state.install(ctx.clone(), hub.clone());
-            if let (Some(hub), Some(declaration)) = (hub, state.declaration())
-                && let Err(error) = hub.declare(ctx, declaration).await
+            state.install(ctx.clone(), key);
+            if let Some(declaration) = state.declaration()
+                && let Err(error) = state.declare(declaration).await
             {
                 tracing::warn!(%error, "the fixture producer could not declare");
             }
@@ -441,6 +518,7 @@ impl Fixture {
         root.provide_at::<dyn HostDispatch>(host_key("sessions"), Arc::new(sessions.clone()))
             .unwrap();
         let producer = Arc::new(ProducerState::default());
+        let state = Arc::new(InstanceState::default());
         let hub_key = names.key().unwrap();
         let hub = if producer_first {
             // The producer applies while EventHub provides nothing: its
@@ -454,15 +532,23 @@ impl Fixture {
                 .await
                 .unwrap();
             let hub = root.plugin(
-                EventHubPlugin::new(&names, Arc::new(dim_event_hub::EventHubTexts::default()))
-                    .unwrap(),
+                EventHubPlugin::new(
+                    &names,
+                    Arc::new(dim_event_hub::EventHubTexts::default()),
+                    state.clone(),
+                )
+                .unwrap(),
             );
             (&hub).await.unwrap();
             hub
         } else {
             let hub = root.plugin(
-                EventHubPlugin::new(&names, Arc::new(dim_event_hub::EventHubTexts::default()))
-                    .unwrap(),
+                EventHubPlugin::new(
+                    &names,
+                    Arc::new(dim_event_hub::EventHubTexts::default()),
+                    state.clone(),
+                )
+                .unwrap(),
             );
             (&hub).await.unwrap();
             (&root.plugin(ProducerPart {
@@ -611,4 +697,206 @@ pub fn directory() -> tempfile::TempDir {
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     directory
+}
+
+/// The product's assembly in a minimal host: the row builder builds EventHub
+/// from its factory on every generation, so the state the factory captured is
+/// the install's (design §2.1), while the `sessions` service is the fixture's
+/// fake, so a test can gate, refuse and look up every input.
+pub struct LoaderFixture {
+    pub host: MinimalHost,
+    pub sessions: FakeSessions,
+    pub producer: Arc<ProducerState>,
+    pub management: Arc<ManagementMethods>,
+    dir: tempfile::TempDir,
+}
+
+impl LoaderFixture {
+    /// Starts the host, with EventHub built by its factory.
+    pub async fn mount() -> Self {
+        Self::mount_with_session_files(None).await
+    }
+
+    /// [`mount`](Self::mount) with a `sessionFiles` service, whose puts a test
+    /// controls (design §3.2).
+    pub async fn mount_with_session_files(
+        session_files: Option<Arc<dyn SessionFilesService>>,
+    ) -> Self {
+        let dir = directory();
+        let path = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(path.join("eventhub")).unwrap();
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        // The product's catalog registers the names these rows build with
+        // (`crates/dim-app-server/src/lib.rs`).
+        *builder.catalog_mut() = dim_app_server::catalog();
+        builder
+            .plugin(|names| Ok(Box::new(PluginFilesPlugin::new(names, 0)?) as Box<dyn DynPlugin>));
+        builder.plugin(|names| {
+            Ok(Box::new(ManagementMethodsPlugin::new(names)?) as Box<dyn DynPlugin>)
+        });
+        dim_event_hub::install(&mut builder);
+        let producer = Arc::new(ProducerState::default());
+        let part = producer.clone();
+        builder.plugin(move |names| {
+            Ok(Box::new(ProducerPart {
+                name: "EventHubFixtureProducer".into(),
+                state: part.clone(),
+                hub: names.key::<EventHub>()?,
+            }) as Box<dyn DynPlugin>)
+        });
+        let sessions = FakeSessions::default();
+        let fake = sessions.clone();
+        let path = path.clone();
+        let host = MinimalHost::start_with(&builder, move |root, _| {
+            root.plugin(FileStoragePlugin::new(vec![path.clone()]));
+            root.provide_at::<dyn HostDispatch>(host_key("sessions"), Arc::new(fake.clone()))
+                .map_err(dim_agent_runtime::AgentError::from)?;
+            if let Some(session_files) = session_files {
+                root.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(session_files)))
+                    .map_err(dim_agent_runtime::AgentError::from)?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("the loader host assembles");
+        wait_for("the eventHub service", || producer.hub().is_some()).await;
+        let management = host.root().get::<ManagementMethods>().unwrap();
+        Self {
+            host,
+            sessions,
+            producer,
+            management,
+            dir,
+        }
+    }
+
+    /// Calls one `eventhub.*` method through its provider, the way Rpc does.
+    pub async fn call(&self, method: &str, params: Json) -> Result<Json, RpcError> {
+        let provider = match self.management.owner(method) {
+            Owner::Active(provider) => provider,
+            _ => panic!("{method} has no provider"),
+        };
+        let accepted = provider
+            .accept(
+                method.to_owned(),
+                params,
+                None,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .unwrap();
+        let reply = accepted.reply.await.unwrap();
+        let _ = accepted.settled.await;
+        reply
+    }
+
+    pub async fn subscribe(
+        &self,
+        session: &str,
+        types: &[&str],
+        mode: Option<&str>,
+    ) -> Result<String, RpcError> {
+        let mut params = json!({
+            "types": types,
+            "target": { "sessionId": session, "branchId": "main" },
+        });
+        if let Some(mode) = mode {
+            params["mode"] = json!(mode);
+        }
+        let reply = self.call("eventhub.subscribe", params).await?;
+        Ok(reply["subscriptionId"].as_str().unwrap().to_owned())
+    }
+
+    pub async fn unsubscribe(&self, subscription_id: &str) -> Result<(), RpcError> {
+        self.call(
+            "eventhub.unsubscribe",
+            json!({ "subscriptionId": subscription_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn subscriptions(&self, session: Option<&str>) -> Vec<Json> {
+        let params = match session {
+            Some(session) => json!({ "sessionId": session }),
+            None => json!({}),
+        };
+        self.call("eventhub.subscriptions", params).await.unwrap()["subscriptions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Emits the process notice a successful delete emits, from the host's
+    /// root as Agents does (design §9.1).
+    pub async fn session_deleted(&self, session: &str) {
+        self.host
+            .root()
+            .parallel(dim_app_server::SessionDeleted {
+                agent_id: "fixture-agent".into(),
+                session_id: session.to_owned(),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The subscription file's path on disk.
+    pub fn file(&self) -> PathBuf {
+        self.dir.path().join("eventhub/subscriptions.json")
+    }
+}
+
+/// A `sessionFiles` service whose every put fails: the marker keeps
+/// `truncated="true"` and the receipt `truncated: true` (design §3.2).
+pub struct FailingSessionFiles;
+
+fn failed() -> SessionFileError {
+    SessionFileError {
+        code: SessionFileErrorCode::Storage,
+        message: "the fixture refuses every file".into(),
+    }
+}
+
+impl SessionFilesService for FailingSessionFiles {
+    fn put(
+        &self,
+        _: String,
+        _: String,
+        _: Vec<u8>,
+        _: CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<StoredSessionFile, SessionFileError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(failed()) })
+    }
+    fn register(
+        &self,
+        _: String,
+        _: PathBuf,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), SessionFileError>> + Send + '_>,
+    > {
+        Box::pin(async { Err(failed()) })
+    }
+    fn owns(
+        &self,
+        _: String,
+        _: PathBuf,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, SessionFileError>> + Send + '_>,
+    > {
+        Box::pin(async { Err(failed()) })
+    }
+    fn owned_paths(
+        &self,
+        _: String,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<PathBuf>, SessionFileError>> + Send + '_>,
+    > {
+        Box::pin(async { Err(failed()) })
+    }
 }

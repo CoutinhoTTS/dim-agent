@@ -1992,6 +1992,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "env",
         "panic",
         "tokio::join",
         "vec"
@@ -19950,6 +19951,7 @@
       "from": "dim_app_server::agents::sessions::tests",
       "to": "dim_app_server",
       "references": [
+        "path crate::ServerConfig",
         "path crate::ServerConfig::default",
         "path crate::serve"
       ]
@@ -19965,6 +19967,7 @@
       "from": "dim_app_server::agents::sessions::tests",
       "to": "dim_app_server::agents::sessions",
       "references": [
+        "path ExistsRequest",
         "path InputWrite",
         "path LookupReply::Accepted",
         "path LookupRequest",

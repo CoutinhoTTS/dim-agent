@@ -70,18 +70,6 @@ fn ci_declaration() -> DeclareRequest {
     }
 }
 
-fn ci_event(id: &str) -> PublishRequest {
-    PublishRequest {
-        source: "ci".into(),
-        r#type: "ci.build".into(),
-        id: Some(id.into()),
-        title: None,
-        body: "build failed".into(),
-        attributes: Default::default(),
-        to: Vec::new(),
-    }
-}
-
 async fn mounted() -> (tempfile::TempDir, Fixture) {
     let directory = directory();
     let fixture = Fixture::mount(directory.path()).await;
@@ -348,43 +336,6 @@ async fn a_missed_notice_leaves_a_session_closed_failure() {
         stored[0]["lastFailure"]["code"],
         json!("session_closed"),
         "{stored:?}"
-    );
-}
-
-/// An EventHub reapply keeps every declaration: a row that declared before
-/// the reload publishes after it without declaring again (design §2.1,
-/// Appendix D item 12).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_reload_keeps_the_declarations() {
-    let (_directory, fixture) = mounted().await;
-    // A plain row, so nothing re-declares `ci` on the notice the reload
-    // emits: the declaration the test finds is the one the reload kept.
-    let (second, _view) = fixture.producer_row("EventHubReloadProducer").await;
-    second.declare(ci_declaration()).await.unwrap();
-    fixture.subscribe("reload", &["ci.*"], None).await.unwrap();
-    let before = second.hub().expect("the producer reads the service");
-
-    fixture.restart_hub().await;
-    // The reloaded generation announces itself once its service is readable.
-    wait_for("the reload's notice", || {
-        second
-            .hub()
-            .is_some_and(|after| !Arc::ptr_eq(&after, &before))
-    })
-    .await;
-
-    let sources = fixture.call("eventhub.sources", json!({})).await.unwrap();
-    let listed = sources["sources"].as_array().unwrap();
-    assert!(
-        listed.iter().any(|source| source["source"] == json!("ci")),
-        "the reload kept the declaration: {sources}"
-    );
-    // The reloaded generation delivers its events without a new declaration.
-    let receipt = second.publish(ci_event("reloaded")).await.unwrap();
-    assert_eq!(
-        receipt["deliveries"][0]["status"],
-        json!("delivered"),
-        "{receipt}"
     );
 }
 

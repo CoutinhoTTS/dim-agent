@@ -1,11 +1,12 @@
 //! The subscription file `eventhub/subscriptions.json` (design §2.2, A.5):
 //! one inner v1 JSON document inside the host's `{version, text}` envelope,
 //! which [`PluginFileTransactions`] reads and writes. The part reads the file
-//! once when it applies, holds the set in memory, and every change writes the
-//! file under the lock and then replaces the set.
+//! once when it applies, holds the subscriptions and the guide records in
+//! memory, and every change writes the file under the lock and then replaces
+//! the in-memory copy.
 use crate::{
     error::EventHubError,
-    model::{Origin, Target},
+    model::{Origin, Target, source_of},
 };
 use dim_agent_types::InputMode;
 use dim_app_server::plugin_files::{PluginFileError, PluginFileTransactions};
@@ -69,6 +70,87 @@ impl Subscription {
                     .all(|(name, value)| attributes.get(name) == Some(value))
             })
     }
+
+    /// Whether any of the subscription's types names `source` (design §3.3).
+    pub(crate) fn names_source(&self, source: &str) -> bool {
+        self.types
+            .iter()
+            .filter_map(|pattern| source_of(pattern))
+            .any(|named| named == source)
+    }
+}
+
+/// The guide last written on one branch for one source: the digest a
+/// delivery compares against the current declaration (design §2.2, A.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GuideRecord {
+    pub target: Target,
+    pub source: String,
+    pub digest: String,
+}
+
+/// The file's contents as the part holds them (design §2.2).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Document {
+    pub(crate) subscriptions: Vec<Subscription>,
+    pub(crate) guides: Vec<GuideRecord>,
+}
+
+impl Document {
+    /// The record of `source` on `target`'s branch, if one is stored.
+    pub(crate) fn guide(&self, target: &Target, source: &str) -> Option<&GuideRecord> {
+        self.guides
+            .iter()
+            .find(|record| record.target == *target && record.source == source)
+    }
+
+    /// Sets `source`'s record on `target`'s branch, replacing the branch's.
+    /// Answers whether the file changed.
+    pub(crate) fn set_guide(&mut self, target: &Target, source: &str, digest: &str) -> bool {
+        match self
+            .guides
+            .iter_mut()
+            .find(|record| record.target == *target && record.source == source)
+        {
+            Some(record) => {
+                if record.digest == digest {
+                    return false;
+                }
+                record.digest = digest.to_owned();
+                true
+            }
+            None => {
+                self.guides.push(GuideRecord {
+                    target: target.clone(),
+                    source: source.to_owned(),
+                    digest: digest.to_owned(),
+                });
+                true
+            }
+        }
+    }
+
+    /// Whether any stored subscription on `target`'s branch names `source`
+    /// (design §3.3).
+    pub(crate) fn names_source(&self, target: &Target, source: &str) -> bool {
+        self.subscriptions
+            .iter()
+            .any(|subscription| subscription.target == *target && subscription.names_source(source))
+    }
+
+    /// Drops every guide record no stored subscription backs, so the file
+    /// holds one record per subscribed branch and source (design A.5).
+    fn prune_guides(&mut self) -> bool {
+        let before = self.guides.len();
+        let subscriptions = &self.subscriptions;
+        self.guides.retain(|record| {
+            subscriptions.iter().any(|subscription| {
+                subscription.target == record.target && subscription.names_source(&record.source)
+            })
+        });
+        self.guides.len() != before
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,14 +158,16 @@ impl Subscription {
 struct SubscriptionFile {
     version: u32,
     subscriptions: Vec<Subscription>,
+    #[serde(default)]
+    guides: Vec<GuideRecord>,
 }
 
 /// Decodes the inner text of the file; `None` is a missing file, which holds
-/// no subscriptions. An unreadable or inconsistent document fails the part
-/// and leaves its bytes unchanged (design A.5).
-fn decode(text: Option<&str>) -> Result<Vec<Subscription>, String> {
+/// no subscriptions and no guide records. An unreadable or inconsistent
+/// document fails the part and leaves its bytes unchanged (design A.5).
+fn decode(text: Option<&str>) -> Result<Document, String> {
     let Some(text) = text else {
-        return Ok(Vec::new());
+        return Ok(Document::default());
     };
     let file: SubscriptionFile =
         serde_json::from_str(text).map_err(|error| format!("subscriptions.json: {error}"))?;
@@ -108,25 +192,45 @@ fn decode(text: Option<&str>) -> Result<Vec<Subscription>, String> {
             ));
         }
     }
-    Ok(file.subscriptions)
+    let mut recorded = HashSet::new();
+    for record in &file.guides {
+        if record.source.is_empty() || record.digest.is_empty() {
+            return Err("subscriptions.json has a guide record without a source".into());
+        }
+        if !recorded.insert((
+            &record.target.session_id,
+            &record.target.branch_id,
+            &record.source,
+        )) {
+            return Err(format!(
+                "subscriptions.json has two guide records for {}/{} of {}",
+                record.target.session_id, record.target.branch_id, record.source
+            ));
+        }
+    }
+    Ok(Document {
+        subscriptions: file.subscriptions,
+        guides: file.guides,
+    })
 }
 
-fn encode(subscriptions: &[Subscription]) -> String {
+fn encode(document: &Document) -> String {
     serde_json::to_string(&SubscriptionFile {
         version: FORMAT_VERSION,
-        subscriptions: subscriptions.to_vec(),
+        subscriptions: document.subscriptions.clone(),
+        guides: document.guides.clone(),
     })
     .expect("subscription records contain only serializable fields")
 }
 
-/// The subscription set: the file, the lock every change takes, and the
-/// in-memory copy publish reads.
+/// The file, the lock every change takes, and the in-memory copy publish
+/// reads.
 pub(crate) struct Store {
     files: Arc<PluginFileTransactions>,
     /// Serializes every change: the write and the in-memory replacement. A
-    /// publish reads the set without it.
+    /// publish reads the document without it.
     change: tokio::sync::Mutex<()>,
-    state: RwLock<Vec<Subscription>>,
+    state: RwLock<Document>,
 }
 
 impl Store {
@@ -134,38 +238,49 @@ impl Store {
         Self {
             files,
             change: tokio::sync::Mutex::new(()),
-            state: RwLock::new(Vec::new()),
+            state: RwLock::new(Document::default()),
         }
     }
 
     /// Reads the file once, when the part applies. A missing file is no
-    /// subscriptions; a corrupt one is an error, and its bytes stay unchanged.
-    pub(crate) async fn load(&self) -> Result<Vec<Subscription>, String> {
+    /// subscriptions and no guide records; a corrupt one is an error, and its
+    /// bytes stay unchanged.
+    pub(crate) async fn load(&self) -> Result<Document, String> {
         self.files
             .transact(SUBSCRIPTIONS_FILE, |current| (None, decode(current)))
             .await
             .map_err(|error| error.to_string())?
     }
 
-    /// Replaces the in-memory set, after a load or a successful change.
-    pub(crate) fn replace(&self, subscriptions: Vec<Subscription>) {
-        *self.state.write().expect("the subscription set") = subscriptions;
+    /// Replaces the in-memory copy, after a load or a successful change.
+    pub(crate) fn replace(&self, document: Document) {
+        *self.state.write().expect("the subscription set") = document;
     }
 
-    /// The set as it is now: what a publish matches against, and what
-    /// `eventhub.subscriptions` lists.
+    /// The subscriptions as they are now: what a publish matches against.
     pub(crate) fn read(&self) -> Vec<Subscription> {
+        self.state
+            .read()
+            .expect("the subscription set")
+            .subscriptions
+            .clone()
+    }
+
+    /// The whole document as it is now: the subscriptions and the guide
+    /// records a publish compares (design §2.2).
+    pub(crate) fn document(&self) -> Document {
         self.state.read().expect("the subscription set").clone()
     }
 
     /// Applies `change` under the store's lock. `change` returns whether it
-    /// modified the set, the value it answers with, and errors as its caller
-    /// answers them. On success the in-memory set is replaced with the set
-    /// the file now holds; a failed write leaves both the file and the set as
-    /// they were.
+    /// modified the document, the value it answers with, and errors as its
+    /// caller answers them. A modified document drops every guide record no
+    /// stored subscription backs (design A.5). On success the in-memory copy
+    /// is replaced with what the file now holds; a failed write leaves both
+    /// the file and the copy as they were.
     pub(crate) async fn change<R>(
         &self,
-        change: impl FnOnce(&mut Vec<Subscription>) -> Result<(bool, R), EventHubError> + Send + 'static,
+        change: impl FnOnce(&mut Document) -> Result<(bool, R), EventHubError> + Send + 'static,
     ) -> Result<R, EventHubError>
     where
         R: Send + 'static,
@@ -174,17 +289,17 @@ impl Store {
         let outcome = self
             .files
             .transact(SUBSCRIPTIONS_FILE, move |current| {
-                let mut subscriptions = match decode(current) {
-                    Ok(subscriptions) => subscriptions,
+                let mut document = match decode(current) {
+                    Ok(document) => document,
                     Err(error) => {
                         return (None, Err(EventHubError::storage(error)));
                     }
                 };
-                match change(&mut subscriptions) {
-                    Ok((true, value)) => (
-                        Some(encode(&subscriptions)),
-                        Ok((Some(subscriptions), value)),
-                    ),
+                match change(&mut document) {
+                    Ok((true, value)) => {
+                        document.prune_guides();
+                        (Some(encode(&document)), Ok((Some(document), value)))
+                    }
                     Ok((false, value)) => (None, Ok((None, value))),
                     Err(error) => (None, Err(error)),
                 }
@@ -194,16 +309,16 @@ impl Store {
             Ok(outcome) => outcome,
             Err(error) => return Err(storage_error(error)),
         };
-        let (subscriptions, value) = outcome?;
-        if let Some(subscriptions) = subscriptions {
-            self.replace(subscriptions);
+        let (document, value) = outcome?;
+        if let Some(document) = document {
+            self.replace(document);
         }
         Ok(value)
     }
 }
 
 /// A failed file transaction is the design's `storage`: the change did not
-/// happen and the in-memory set is unchanged (design A.5, Appendix C).
+/// happen and the in-memory copy is unchanged (design A.5, Appendix C).
 fn storage_error(error: PluginFileError) -> EventHubError {
     EventHubError::storage(error.to_string())
 }

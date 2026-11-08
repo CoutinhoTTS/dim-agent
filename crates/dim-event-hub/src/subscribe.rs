@@ -8,11 +8,11 @@ use crate::{
     model::{Origin, SubscribeRequest, Target, source_of, validate_subscribe},
     publish::sessions,
     store::Subscription,
-    text::{escaped, stamp},
+    text::{digest, escaped, stamp},
 };
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// At most this many subscriptions per Session (design §2.2).
 const PER_SESSION_LIMIT: usize = 32;
@@ -25,26 +25,27 @@ pub(crate) async fn subscribe(
     origin: Origin,
     request: SubscribeRequest,
 ) -> Result<Value, EventHubError> {
-    // One creation lock for the whole change, from the first check to the
-    // last guide write or retire (design §3.3): an unsubscribe cannot retire a
-    // guide this subscribe wrote before its record was stored.
-    let _creation = shared.creation.lock().await;
     let crate::model::CheckedSubscribe {
         types,
         matches,
         target,
     } = validate_subscribe(&request)?;
+    // One lock per target Session, from the first check to the last guide
+    // write or retire (design §3.3): an unsubscribe or a delete of the same
+    // Session cannot retire a guide this subscribe wrote before its record
+    // was stored.
+    let _session = shared.state.session_lock(&target.session_id).await;
     for pattern in &types {
         match source_of(pattern) {
             Some(source) if pattern.ends_with(".*") => {
-                if !shared.catalog.declares_source(source) {
+                if !shared.state.catalog().declares_source(source) {
                     return Err(EventHubError::unknown_type(format!(
                         "no declaration holds source {source}"
                     )));
                 }
             }
             Some(_) => {
-                if !shared.catalog.declares_type(pattern) {
+                if !shared.state.catalog().declares_type(pattern) {
                     return Err(EventHubError::unknown_type(format!(
                         "no declaration holds type {pattern}"
                     )));
@@ -69,32 +70,40 @@ pub(crate) async fn subscribe(
         last_failure: None,
     };
     let sources = named_sources(&subscription);
-    let mut written = BTreeSet::new();
+    let mut written = BTreeMap::new();
     for source in &sources {
-        match write_guide(shared, &target, &subscription.id, source).await {
+        let (guide, digest) = source_guide(shared, source)?;
+        match write_guide(shared, &target, &subscription.id, source, &guide).await {
             Ok(()) => {
-                written.insert(source.clone());
+                written.insert(source.clone(), digest);
             }
             // The input was committed although its publication is unconfirmed:
             // the subscription is stored and the guide is one of its sources
             // (design A.3).
             Err(error) if error.code == "publication_unknown" => {
-                written.insert(source.clone());
+                written.insert(source.clone(), digest);
             }
             Err(error) => {
                 // Refused after earlier guides were written: retire those by
                 // the `storage` rule before answering (design §3.3).
-                retire_unguarded(shared, &target, &subscription.id, &written).await;
+                retire_unguarded(shared, &target, &subscription.id, written.keys()).await;
                 return Err(error);
             }
         }
     }
     let created = subscription.clone();
+    let records: Vec<(String, String)> = written
+        .iter()
+        .map(|(source, digest)| (source.clone(), digest.clone()))
+        .collect();
     let outcome = shared
         .store
-        .change(move |subscriptions| {
-            check_limits_in(subscriptions, &created.target)?;
-            subscriptions.push(created);
+        .change(move |document| {
+            check_limits_in(&document.subscriptions, &created.target)?;
+            for (source, digest) in &records {
+                document.set_guide(&created.target, source, digest);
+            }
+            document.subscriptions.push(created);
             Ok((true, ()))
         })
         .await;
@@ -106,7 +115,7 @@ pub(crate) async fn subscribe(
                 // retire them for each source no stored subscription on that
                 // branch names, then answer `storage` (design §3.3,
                 // Appendix C).
-                retire_unguarded(shared, &target, &subscription.id, &written).await;
+                retire_unguarded(shared, &target, &subscription.id, written.keys()).await;
             }
             Err(error)
         }
@@ -119,23 +128,30 @@ pub(crate) async fn unsubscribe(
     shared: &Shared,
     subscription_id: &str,
 ) -> Result<Value, EventHubError> {
-    // Holds the creation lock from the lookup to the last retire, with
-    // `subscribe` (design §3.3).
-    let _creation = shared.creation.lock().await;
+    // The target is read first, so the Session's lock covers the whole change
+    // (design §3.3).
+    let Some(target) = shared
+        .store
+        .read()
+        .into_iter()
+        .find(|subscription| subscription.id == subscription_id)
+        .map(|subscription| subscription.target)
+    else {
+        return Err(subscription_unknown(subscription_id));
+    };
+    let _session = shared.state.session_lock(&target.session_id).await;
     let id = subscription_id.to_owned();
     let removed = shared
         .store
-        .change(move |subscriptions| {
-            let Some(index) = subscriptions
+        .change(move |document| {
+            let Some(index) = document
+                .subscriptions
                 .iter()
                 .position(|subscription| subscription.id == id)
             else {
-                return Err(EventHubError::new(
-                    "subscription_unknown",
-                    format!("no subscription {id}"),
-                ));
+                return Err(subscription_unknown(&id));
             };
-            Ok((true, subscriptions.remove(index)))
+            Ok((true, document.subscriptions.remove(index)))
         })
         .await?;
     for source in named_sources(&removed) {
@@ -144,6 +160,10 @@ pub(crate) async fn unsubscribe(
         }
     }
     Ok(json!({}))
+}
+
+fn subscription_unknown(id: &str) -> EventHubError {
+    EventHubError::new("subscription_unknown", format!("no subscription {id}"))
 }
 
 /// The sources a subscription's types name (design §3.3).
@@ -157,14 +177,7 @@ fn named_sources(subscription: &Subscription) -> BTreeSet<String> {
 
 /// Whether any stored subscription on `target`'s branch names `source`.
 fn still_named(shared: &Shared, target: &Target, source: &str) -> bool {
-    shared.store.read().iter().any(|subscription| {
-        subscription.target == *target
-            && subscription
-                .types
-                .iter()
-                .filter_map(|pattern| source_of(pattern))
-                .any(|named| named == source)
-    })
+    shared.store.document().names_source(target, source)
 }
 
 /// The creation limits, checked against the in-memory set before the guide
@@ -197,6 +210,21 @@ fn check_limits_in(subscriptions: &[Subscription], target: &Target) -> Result<()
     Ok(())
 }
 
+/// The current declaration's guide of `source` and its digest, the two things
+/// the subscription file records (design §2.2, §3.3).
+fn source_guide(shared: &Shared, source: &str) -> Result<(String, String), EventHubError> {
+    let guide = shared
+        .state
+        .catalog()
+        .source(source)
+        .map(|declaration| declaration.guide)
+        .ok_or_else(|| {
+            EventHubError::unknown_type(format!("no declaration holds source {source}"))
+        })?;
+    let digest = digest(&guide);
+    Ok((guide, digest))
+}
+
 /// Writes one source's guide input to the target branch (design §3.3): an
 /// `append` input whose single keyed block carries the source's guide.
 async fn write_guide(
@@ -204,27 +232,41 @@ async fn write_guide(
     target: &Target,
     subscription_id: &str,
     source: &str,
+    guide: &str,
 ) -> Result<(), EventHubError> {
-    let guide = shared
-        .catalog
-        .source(source)
-        .map(|declaration| declaration.guide)
-        .ok_or_else(|| {
-            EventHubError::unknown_type(format!("no declaration holds source {source}"))
-        })?;
-    let text = guide_block(source, Some(&guide));
+    write_live_guide(
+        shared.sessions.as_ref(),
+        target,
+        guide_submission(subscription_id, source),
+        source,
+        guide,
+    )
+    .await
+}
+
+/// One keyed `append` that writes `source`'s guide on a branch, under the
+/// caller's submission id (design §3.3). Subscribe uses
+/// `eventhub-guide:<subscriptionId>:<source>` and a delivery's refresh
+/// `eventhub-guide-refresh:<source>:<uuid>`.
+pub(crate) async fn write_live_guide(
+    service: &dyn rutis_bridge::session::HostDispatch,
+    target: &Target,
+    submission_id: String,
+    source: &str,
+    guide: &str,
+) -> Result<(), EventHubError> {
     let write = json!({
         "sessionId": target.session_id,
         "branchId": target.branch_id,
         "mode": "append",
-        "submissionId": guide_submission(subscription_id, source),
+        "submissionId": submission_id,
         "rawBlocks": [{
-            "text": text,
+            "text": guide_block(source, Some(guide)),
             "key": { "use": "live", "name": guide_key(source) },
         }],
         "content": [],
     });
-    match sessions(shared.sessions.as_ref(), "input", write).await {
+    match sessions(service, "input", write).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(failure)) => Err(EventHubError::new(
             sessions_code(&failure.code),
@@ -255,11 +297,11 @@ async fn retire_guide(shared: &Shared, target: &Target, subscription_id: &str, s
 
 /// Retires the guide of each source a failed creation named that no stored
 /// subscription on that branch names (design §3.3, Appendix C).
-async fn retire_unguarded(
+async fn retire_unguarded<'a>(
     shared: &Shared,
     target: &Target,
     subscription_id: &str,
-    sources: &BTreeSet<String>,
+    sources: impl Iterator<Item = &'a String>,
 ) {
     for source in sources {
         if !still_named(shared, target, source) {
@@ -270,7 +312,7 @@ async fn retire_unguarded(
 
 /// `<dim-event-guide source="im">guide</dim-event-guide>`, the guide escaped,
 /// or the empty element that retires the key (design §3.3, A.6).
-fn guide_block(source: &str, guide: Option<&str>) -> String {
+pub(crate) fn guide_block(source: &str, guide: Option<&str>) -> String {
     format!(
         "<dim-event-guide source=\"{}\">{}</dim-event-guide>",
         escaped(source),
@@ -279,11 +321,11 @@ fn guide_block(source: &str, guide: Option<&str>) -> String {
 }
 
 /// The key the guide block lives under (design §3.3).
-fn guide_key(source: &str) -> String {
+pub(crate) fn guide_key(source: &str) -> String {
     format!("eventhub:guide:{source}")
 }
 
-/// The submission id of a guide write (design §3.3).
+/// The submission id of a subscribe's guide write (design §3.3).
 fn guide_submission(subscription_id: &str, source: &str) -> String {
     format!("eventhub-guide:{subscription_id}:{source}")
 }
@@ -291,4 +333,9 @@ fn guide_submission(subscription_id: &str, source: &str) -> String {
 /// The submission id of a guide retire (design §3.3).
 fn retire_submission(subscription_id: &str, source: &str) -> String {
     format!("eventhub-guide-retire:{subscription_id}:{source}")
+}
+
+/// The submission id of a delivery's guide refresh (design §3.3).
+pub(crate) fn refresh_submission(source: &str) -> String {
+    format!("eventhub-guide-refresh:{source}:{}", uuid::Uuid::new_v4())
 }
