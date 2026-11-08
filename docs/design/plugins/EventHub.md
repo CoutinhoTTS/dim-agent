@@ -110,11 +110,11 @@ GuideRecord {
 | --- | --- | --- |
 | `delivered` | `{sessionId, branchId, subscriptionIds, inputId, sequence, truncated?, repeated?}` | stays |
 | `gone` | `{sessionId, branchId, subscriptionIds, code}` with `branch_missing` or `branch_ended` | each listed subscription is removed, because the target branch will not accept input again; the list is empty for a branch reached only through `to` |
-| `failed` | `{sessionId, branchId, subscriptionIds, code, message}` with any other `sessions` error: `session_closed`, `reloading`, `rejected`, `ambiguous`, `publication_unknown`, `failed` | each listed subscription stays, and `lastFailure` records the code |
+| `failed` | `{sessionId, branchId, subscriptionIds, code, message}` with any other `sessions` error or `transport`: `session_closed`, `reloading`, `rejected`, `ambiguous`, `publication_unknown`, `transport`, `failed` | each listed subscription stays, and `lastFailure` records the code |
 
 - `subscriptionIds` lists every matching subscription that directed this branch, and is empty for a branch reached only through `to`. The effect in the table applies to each listed subscription.
 - `repeated: true` says the branch already held this event's input, from a publish in this process; `inputId` and `sequence` name that input, and `truncated` is absent (2.4, 3.2).
-- A `failed` outcome is not a refusal: the input was not written, except for `publication_unknown`, where it was committed and its publication is in doubt. A producer that retries with the same `id` gets the same receipt (2.4).
+- A `failed` outcome is not a refusal: the input was not written, except in two cases where the write itself is in doubt: `publication_unknown`, where it was committed and its publication is in doubt, and `transport`, where the `sessions` call failed or its reply could not be read. A producer that retries with the same `id` gets the same receipt (2.4).
 - A subscription's `lastFailure` is written only when it changes: set to a new code, or cleared after a stored failure. All of one publish's `lastFailure` changes go in one transaction, after its deliveries settle. `eventhub.subscriptions` shows it, so a subscription that stopped working is visible without reading a receipt a producer no longer sends.
 
 ### 2.4 One event, one input per branch
@@ -383,7 +383,7 @@ publish { source: "im",
 | --- | --- | --- | --- |
 | `eventhub.sources` | `{}` | `{sources: [{source, guide, types: [{type, description, mode}]}]}` | `invalid_params` |
 | `eventhub.subscriptions` | `{sessionId?}` | `{subscriptions: [Subscription]}` | `invalid_params` |
-| `eventhub.subscribe` | `{types, match?, target: {sessionId, branchId?}, mode?}` | `{subscriptionId}` | `invalid_params`, `unknown_type`, `limit_reached`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `rejected`, `ambiguous`, `failed`, `storage` |
+| `eventhub.subscribe` | `{types, match?, target: {sessionId, branchId?}, mode?}` | `{subscriptionId}` | `invalid_params`, `unknown_type`, `limit_reached`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `rejected`, `ambiguous`, `failed`, `transport`, `storage` |
 | `eventhub.unsubscribe` | `{subscriptionId}` | `{}` | `invalid_params`, `subscription_unknown`, `storage` |
 
 - `subscribe` records `origin: "client"`; the tool records `"tool"`.
@@ -496,12 +496,14 @@ The entry now carries protocol only: EventHub delivers inward only, and an answe
 | `invalid_params` | `eventhub.*`, the tool | Shape, types or an empty field |
 | `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `rejected`, `ambiguous`, `failed` | `subscribe` | The target cannot take the guide input; nothing is stored |
 | `publication_unknown` | `subscribe` | The guide input was committed although its publication is unconfirmed; the subscription is stored |
+| `transport` | `publish`, `subscribe` | The `sessions` call failed or its reply could not be read, so whether the write happened is unknown. A `publish` keeps the subscription and records `transport` in `lastFailure`; a `subscribe` stores nothing and retires the guide in doubt together with the guides it wrote |
 | `storage` | `subscribe`, `unsubscribe` | The subscription file could not be written; the change did not happen and the in-memory set is unchanged. A `subscribe` retires the guide it wrote, for each source no stored subscription on that branch names, before it answers |
 
 Recovery:
 
 - **A lost `subscribe` reply** leaves the subscription recorded or not; the caller reads `eventhub.subscriptions` to find out. A repeated `subscribe` is a new subscription, not an idempotent one, so a client that is unsure reads first.
 - **A lost `publish` reply** is resolved by republishing with the same `id`: the branch accepts it once and the reply is the first input's receipt; a branch that already holds the input answers `repeated: true` (2.4).
+- **A `transport` receipt** is resolved by republishing with the same `id`: delivery is idempotent per branch, so the retry either writes the input or answers `repeated: true`.
 - **An `unknown_source` answer** means the calling row holds no declaration: it applied before EventHub's first apply, or it never declared. The producer declares again on the `eventhub/ready` path and retries with the same `id`; a source that is not declared stays `unknown_source` (2.1).
 - **A failed `lastFailure` write** is diagnostic only: the delivery already happened and the receipt is unchanged; the in-memory set keeps the old value, so the next publish whose outcome changes it attempts the write again.
 - **A failed subscription-file write** leaves the in-memory set as it was: the change did not happen and its call answers `storage`. A `subscribe` whose guide input was already written retires it first, for every source it named that no stored subscription on that branch names, with the unsubscribe form; a retire that cannot be written leaves its block for the next creation of that source to rewrite (3.3).
@@ -551,3 +553,4 @@ The contract is §6, A.1 to A.4; this section is its spelling ([rutis usage appe
 - **Delivery.** `sessions.input` is one `invoke("input", json!([args]))` over `Key<dyn HostDispatch>` (`crates/dim-agent-scheduler/src/engine.rs:611-633`); the reply is `{inputId, sequence}` and the error codes are [session access A.6](../contracts/session-access.md#a6-errors).
 - **Storage.** The subscription file uses `PluginFileTransactions` (`dim_app_server::plugin_files::PluginFileTransactions`, `crates/dim-agent-scheduler/src/runs.rs:7,221-240`).
 - **The Session part** injects `guideEntries` and `toolRegistry` and reads `sessionIdentity` and `sessionConfig`, registering the entry from `apply` as Scheduler's part does (`crates/dim-agent-scheduler/src/session.rs:147-201`).
+- **TypeScript.** `npm/plugin.d.ts` declares the service beside `sessions`: `EventHub` with `declare` and `publish`, the request and reply types of A.1 and A.2, and `EventHubErrorThrown` with every code of Appendix C. A TypeScript row reads the service with `ctx.use<EventHub>('eventHub')`, then declares and publishes through it.
