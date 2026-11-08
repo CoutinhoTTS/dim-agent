@@ -172,10 +172,8 @@ async fn a_retry_while_the_first_append_is_paused_answers_repeated() {
         let request = request.clone();
         tokio::spawn(async move { producer.publish(request).await })
     };
-    assert!(
-        !retry.is_finished(),
-        "the retry waits for the first publish's lock"
-    );
+    // A retry that did not wait would look up `unknown` while the first input
+    // is held and put a second file; one put and `repeated` below are the proof.
     gate.release();
     let receipt = retry.await.unwrap().unwrap();
     let delivery = &receipt["deliveries"][0];

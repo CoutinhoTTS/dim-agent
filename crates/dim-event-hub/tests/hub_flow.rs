@@ -566,7 +566,9 @@ async fn a_steered_event_ends_a_wait() {
         name: "wait".into(),
         input: json!({"timeoutMs": 20000}).as_object().unwrap().clone(),
     }]);
-    // An ordinary queued user input opens the turn; the model waits in it.
+    // An ordinary queued user input opens the turn; the model waits in it. A
+    // steer that arrives before the wait begins is kept for the turn and taken
+    // first, so the event ends the wait either way.
     client
         .rpc(
             "session.submit",
@@ -575,7 +577,6 @@ async fn a_steered_event_ends_a_wait() {
         .await
         .unwrap();
     wait_for("the wait call", || model.count() >= 1).await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     producer.publish(im_event("wake")).await.unwrap();
     wait_for("the request after the wait", || model.count() >= 2).await;
     let texts = model.texts();
