@@ -1533,7 +1533,7 @@ impl CollaborationSession {
     /// (branch close) covers every request of this branch.
     fn interrupt(self: &Arc<Self>, branch_id: &str, scope: InterruptScope) {
         let mut state = self.state.lock().unwrap();
-        let (raw_starts, retired, tasks) = {
+        let (raw_starts, retired) = {
             let State {
                 branches, requests, ..
             } = &mut *state;
@@ -1598,11 +1598,14 @@ impl CollaborationSession {
                     .filter_map(|id| branch.approvals.remove(&id))
                     .collect::<Vec<_>>()
             };
-            (raw_starts, retired, branch.tasks.clone())
+            (raw_starts, retired)
         };
         // The marks are taken in the same critical section, after the request
         // borrows above end; every request this decision marked starts here,
-        // with no wait between starts.
+        // with no wait between starts. Each start is its own task on
+        // Collaboration's tracker, so one member's slow first read or
+        // withdrawal delays no other start and no branch teardown waits on
+        // it.
         let starts: Vec<_> = raw_starts
             .into_iter()
             .map(|(member, session, input)| {
@@ -1611,14 +1614,12 @@ impl CollaborationSession {
             })
             .collect();
         drop(state);
-        if !starts.is_empty() {
+        for (session, input, stopping) in starts {
             let stops = self.clone();
-            tasks.spawn(async move {
-                for (session, input, stopping) in starts {
-                    let _ = stops
-                        .carry_out_stop(&session, &input, INTERRUPTED, stopping)
-                        .await;
-                }
+            self.collaboration.tasks.spawn(async move {
+                let _ = stops
+                    .carry_out_stop(&session, &input, INTERRUPTED, stopping)
+                    .await;
             });
         }
         self.spawn_retire(branch_id, retired);
@@ -2063,15 +2064,22 @@ impl CollaborationSession {
         if let Some(stopping) = stopping {
             // A leader interrupt is the earlier, broader decision, so it wins
             // when a client cancel also asked for the stop. The delivery is
-            // the first point the request's input exists.
+            // the first point the request's input exists. The carry-out runs
+            // as its own task on Collaboration's tracker, so the delivery and
+            // a branch close that waits it out do not wait on the member.
             let reason = if suppressed {
                 INTERRUPTED
             } else {
                 CANCELLED_BY_CLIENT
             };
-            let _ = self
-                .carry_out_stop(&peer.session, input.id.as_str(), reason, stopping)
-                .await;
+            let session = peer.session.clone();
+            let input = input.id.clone();
+            let stops = self.clone();
+            self.collaboration.tasks.spawn(async move {
+                let _ = stops
+                    .carry_out_stop(&session, &input, reason, stopping)
+                    .await;
+            });
         }
         Ok(CollaborationDelivery::Ok {
             agent_id: peer.agent_id,
@@ -2216,10 +2224,11 @@ impl CollaborationSession {
     /// request: the turn that consumed the request's input is stopped now
     /// when it has, and the input withdrawn while still unapplied. An input
     /// InputQueue already handed to Loop is stopped once its
-    /// `input/consumed` is published; that wait is detached on
-    /// Collaboration's process-wide task tracker, so it outlives the branch
-    /// record and the request it was decided for. The stop names that turn,
-    /// so a turn that already ended writes nothing.
+    /// `input/consumed` is published. The carry-out runs on Collaboration's
+    /// process-wide task tracker, so it outlives the branch record and the
+    /// request it was decided for, and no branch teardown waits on the
+    /// member. The stop names that turn, so a turn that already ended writes
+    /// nothing.
     ///
     /// `stopping` holds the member's stopping mark across the effect and the
     /// wait, and is dropped on every exit.
@@ -2469,9 +2478,14 @@ impl CollaborationSession {
             };
             if closing {
                 if let Some((input, Some(stopping))) = start {
-                    let _ = self
-                        .carry_out_stop(&session, &input, INTERRUPTED, stopping)
-                        .await;
+                    // Its own task on Collaboration's tracker, so teardown
+                    // does not wait on the member either.
+                    let stops = self.clone();
+                    self.collaboration.tasks.spawn(async move {
+                        let _ = stops
+                            .carry_out_stop(&session, &input, INTERRUPTED, stopping)
+                            .await;
+                    });
                 }
             } else {
                 let _ = session.interrupt("main", INTERRUPTED.into());

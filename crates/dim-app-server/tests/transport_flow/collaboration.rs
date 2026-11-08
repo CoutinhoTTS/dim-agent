@@ -4478,11 +4478,11 @@ async fn a_client_cancel_while_the_leaders_carry_out_runs_adds_no_second_stop() 
 }
 
 /// Issue #1254: a leader branch close carries the stop out at the stage the
-/// request's input reached. With the input handed to Loop but not yet
-/// consumed, the close withdraws nothing and parks its wait on the member's
-/// own facts; after the branch is gone, the wait stops the turn that consumes
-/// the input with the leader's reason, and the close's result is `leader
-/// closed`.
+/// request's input reached, off the branch's own teardown. With the input
+/// handed to Loop and not yet consumed, the close returns while the carry-out
+/// is parked on the member's facts; after the branch is gone, the carry-out
+/// lets the member consume the input and stops that turn with the leader's
+/// reason, and the close's result is `leader closed`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_leader_branch_close_stops_the_turn_that_consumed_the_request_input() {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -4522,27 +4522,28 @@ async fn a_leader_branch_close_stops_the_turn_that_consumed_the_request_input() 
                 .then_some(())
         })
         .await;
-        // Hold the carry-out's own check, so the close reaches it while the
-        // input is applied and not consumed.
+        // Hold the carry-out's own check of the member's facts: the close must
+        // return while the carry-out is parked there, because the carry-out
+        // rides Collaboration's tracker, not the branch's.
         let (checked, release_check, _) = store.arm(HoldKind::ConsumedNow(member.clone()));
         let closing = tokio::spawn(lead_session.close());
         checked
             .await
             .expect("the carry-out checks the member's facts");
-        release_check.release();
-        // The wait's own read is the next window: the withdrawal arms it.
-        let (entered_read, release_read, _) = store.arm(HoldKind::Consumed(member.clone()));
-        release.release();
-        entered_read
+        tokio::time::timeout(Duration::from_secs(5), closing)
             .await
-            .expect("the wait reads the member's consumed input");
-        closing.await.unwrap().unwrap();
+            .expect("the branch close returns while the carry-out is parked")
+            .unwrap()
+            .unwrap();
         assert!(
             agent.get_session(&member).is_some(),
             "the leader's close leaves the member open"
         );
 
-        release_read.release();
+        // The check saw the input applied and not consumed, so the carry-out
+        // waits for the turn that consumes it and stops that turn.
+        release_check.release();
+        release.release();
         turn_cancelled(&member_session, "interrupted by leader").await;
         assert_eq!(
             stop_reasons(&member_session).await,
