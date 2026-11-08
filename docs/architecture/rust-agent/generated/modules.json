@@ -43485,6 +43485,8 @@
       "from": "dim_migration::native",
       "to": "dim_app_server::protocol",
       "references": [
+        "path SessionOrigin",
+        "path SessionOrigin::Unknown",
         "use dim_app_server::protocol::SessionOrigin"
       ]
     },
@@ -43974,6 +43976,17 @@
       "references": [
         "path ModelId",
         "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_migration::source",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path SessionOrigin",
+        "path SessionOrigin::Acp",
+        "path SessionOrigin::Internal",
+        "path SessionOrigin::Unknown",
+        "use dim_app_server::protocol::SessionOrigin"
       ]
     },
     {

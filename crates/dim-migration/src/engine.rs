@@ -232,9 +232,9 @@ async fn execute_source(
         publish(owner, task).await?;
     }
     check(owner, &task.id).await?;
-    target.link_session_parents(imported.values().filter_map(|(child, parent)| {
+    target.link_session_parents(imported.values().filter_map(|(child_id, parent)| {
         let (parent, _) = imported.get(parent.as_ref()?)?;
-        Some((child.as_str(), parent.as_str()))
+        Some((child_id.as_str(), parent.as_str()))
     }))?;
     task.stage = "scheduler".into();
     task.processed = 0;
