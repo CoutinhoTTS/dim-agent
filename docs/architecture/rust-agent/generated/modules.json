@@ -3951,6 +3951,17 @@
       ]
     },
     {
+      "id": "dim_cli::model::session::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::model::session",
+      "file": "crates/dim-cli/src/model/session.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "json"
+      ]
+    },
+    {
       "id": "dim_cli::model::shell",
       "crate": "dim_cli",
       "parent": "dim_cli::model",
@@ -32216,6 +32227,13 @@
     },
     {
       "from": "dim_cli::model::session",
+      "to": "dim_cli::model::session::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellResult",
@@ -32259,6 +32277,14 @@
       "references": [
         "path Configuration",
         "use crate::wire::Configuration"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path PluginItem",
+        "use super::PluginItem"
       ]
     },
     {
@@ -32492,6 +32518,7 @@
         "path PluginAction::Disable",
         "path PluginAction::Enable",
         "path PluginAction::Install",
+        "path PluginAction::InstallOptional",
         "path PluginAction::Reload",
         "use crate::model::session::PluginAction"
       ]
@@ -37278,6 +37305,7 @@
         "path PluginAction::Disable",
         "path PluginAction::Enable",
         "path PluginAction::Install",
+        "path PluginAction::InstallOptional",
         "path PluginAction::Reload",
         "path PluginItem",
         "path PluginReply",
@@ -37411,6 +37439,7 @@
         "path PluginAction::Disable",
         "path PluginAction::Enable",
         "path PluginAction::Install",
+        "path PluginAction::InstallOptional",
         "path PluginAction::Reload",
         "path PluginItem",
         "path PluginReply",
@@ -46029,6 +46058,10 @@
     {
       "module": "dim_cli::plugin_command::tests",
       "path": "PluginAction::Install"
+    },
+    {
+      "module": "dim_cli::plugin_command::tests",
+      "path": "PluginAction::InstallOptional"
     },
     {
       "module": "dim_cli::plugin_command::tests",
