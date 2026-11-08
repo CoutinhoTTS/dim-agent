@@ -74,7 +74,7 @@
 ```mermaid
 flowchart LR
   C["客户端平面"] -->|"RPC"| H["宿主平面<br/>Session / branch 实例"]
-  H -->|"leaf 接缝：借 key"| L["逻辑 leaf<br/>Goal · Questions · Recall · Wait"]
+  H -->|"leaf 接缝：借 key"| L["逻辑 leaf<br/>Goal · Questions · Recall"]
   H -->|"资源接缝：数据服务"| R["资源 leaf<br/>exec · fs · OCR · MCP"]
   H -->|"状态接缝：data face"| D["远程 PG<br/>session state"]
 ```
@@ -358,7 +358,7 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 
 之前把“不能借”说成“不能 leaf”是错的：宿主资源能 leaf，只是不能把现有的对象接口借过去。资源 leaf 的代价是它自己实现本地执行（TS/Python 重写，或 Rust leaf host 复用 `HostPlatform`），宿主侧的使用者改成调用它提供的数据服务。
 
-“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上依赖全可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。纯逻辑第一批选 Goal、Questions、SessionTitle、Recall、Wait，它们覆盖工具注册、Session 方法、分支事实与事件四条路径。
+“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上依赖全可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。纯逻辑第一批选 Goal、Questions、SessionTitle、Recall；Wait 要等 `wait` 有了数据面才能进这一批（§4.9）。
 
 ```mermaid
 flowchart LR
@@ -369,7 +369,7 @@ flowchart LR
     S --> M
   end
   subgraph LEAF["leaf 运行时（本机 pipe 或远端 websocket）"]
-    G["部件副本<br/>Goal · Questions · SessionTitle<br/>Recall · Wait · BranchLine ..."]
+    G["部件副本<br/>Goal · Questions · SessionTitle<br/>Recall ..."]
     R["资源 leaf<br/>execHost · fsHost · db"]
   end
   M -->|"挂载副本，借 key"| G
