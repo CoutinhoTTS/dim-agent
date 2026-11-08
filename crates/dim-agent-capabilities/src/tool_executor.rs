@@ -34,6 +34,26 @@ pub struct ToolExecutor {
     state: Mutex<ToolState>,
     tasks: TaskTracker,
     errors: Mutex<Vec<AgentError>>,
+    binding: Arc<ToolBinding>,
+    approval: Arc<Approval>,
+}
+impl ToolExecutor {
+    /// The declarations the request pinned, for a program that may only see
+    /// the tools its own request declared.
+    pub fn definitions(&self, request_id: &str) -> Result<Vec<ToolDefinition>, String> {
+        self.binding.definitions(request_id)
+    }
+    /// Runs one child call of an outer tool through the same pinned binding
+    /// and Approval admission as a model call, without writing a second
+    /// `step/tool-call` batch. The caller owns the child's correlation.
+    pub async fn nested(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult, HostError> {
+        execute(&self.binding, &self.approval, call, context, cancel).await
+    }
 }
 pub struct ToolExecutorPlugin {
     pub emit_progress: bool,
@@ -82,6 +102,8 @@ impl DynPlugin for ToolExecutorPlugin {
                 state: Mutex::new(ToolState::default()),
                 tasks: TaskTracker::new(),
                 errors: Mutex::new(Vec::new()),
+                binding: binding.clone(),
+                approval: approval.clone(),
             });
             let closing = service.clone();
             ctx.effect(move || async move {

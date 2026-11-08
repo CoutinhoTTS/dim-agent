@@ -15937,6 +15937,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
+        "path ToolDefinition",
         "path ToolResult",
         "path ToolResult::error",
         "path kind",
