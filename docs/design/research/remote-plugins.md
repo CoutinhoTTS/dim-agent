@@ -353,15 +353,15 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 | --- | --- | --- |
 | 纯逻辑 leaf（今天） | GoalSession、Questions、Recall、BranchTool、SessionBroadcast、SessionBroadcastEnd、TreeTimeline | 依赖可借，且不提供宿主按类型查的服务；移植到 TS/Python 或 Rust leaf host |
 | 提供类型服务，需数据面 | Wait（`wait`）、BranchLine（`branchLine`）、InputQueue（`inputQueue`）、InputMethods（`submitChecks`）、PrepareModelHost（`prepareModelHost`） | 宿主代码用 `branch.service::<T>()` 或 `Key<T>` 查这些服务；先加数据面，或改由宿主自己跑 |
-| 改依赖后可 leaf | GoalBranch（`settingsService`）、SessionTitle（`settingsService`、`sessionStore`、`auxiliaryModelHost`）、SchedulerSession（`scheduleJobs`）、WorkflowSession（`workflowRuns`）、Attachments（`sessionFiles`）、PromptSuggestion（`modelHost`） | 把那个进程服务改成 `host_key` 上的 dispatcher |
+| 改依赖后可 leaf | GoalBranch（`settingsService` → `settings`）、SessionTitle（`settingsService` → `settings`，`sessionStore` → `sessionMetadata`，`auxiliaryModelHost` → `auxiliaryModel`）、SchedulerSession（`scheduleJobs`）、WorkflowSession（`workflowRuns`）、Attachments（`sessionFiles`）、PromptSuggestion（`modelHost`） | 把 Rust 类型键的注入换成数据面的名字；没有数据面的先加 dispatcher |
 | 资源 leaf | HostPlatform、FileStorage、SqliteStorage、WorkspaceTools、ShellSession、SkillsCatalog、Mcp、Modality、ExternalAgent、PluginManager、RuntimeManager | 在资源所在机器上跑，本地 I/O，对外提供数据服务；现有 Rust 实现放进 Rust leaf host 复用 |
 | 不是 leaf | SessionScope、BranchScope、mounter、SessionLoader、Rpc、Transport、ServerControl、Connection | 它们定义实例和入口，是 leaf 被挂载、被服务的一方 |
 
 之前把“不能借”说成“不能 leaf”是错的：宿主资源能 leaf，只是不能把现有的对象接口借过去。资源 leaf 的代价是它自己实现本地执行（TS/Python 重写，或 Rust leaf host 复用 `HostPlatform`），宿主侧的使用者改成调用它提供的数据服务。
 
-SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件还注入 `SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）；`settingsService`、`sessionStore`、`auxiliaryModelHost` 在 catalog 里都是 Rust-only，没有 `host_key` dispatcher，所以 leaf 解析不了。这和 GoalBranch 的 `settingsService` 是同一类，算“改依赖后可 leaf”。
+SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件注入 `SettingsService`、`SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）。这四个服务要的操作都已有数据面：`SettingsService` 的 `read_declared`/`register_declared` 是 `settings.read`/`settings.register`，`SessionStore` 的 `metadata`/`set_title` 是 `sessionMetadata.read`/`sessionMetadata.setTitle`，`AuxiliaryModelHost::complete` 是 `auxiliaryModel.complete`（`crates/dim-session-title/src/lib.rs:286`、`:297`、`:368`、`:441`–`:450`）；`PartRegistry::register` 对应跨语言的 `partRegistry.registerDefinition`，其余注入 `sessions`、`sessionIdentity`、`sessionConfig`、`sessionLifecycle`、`sessionMethods` 本来就跨语言。所以它不需要新 dispatcher，只要把这些类型键的调用换成数据面的名字——和 GoalBranch 的 `settingsService` → `settings` 是同一个动作。
 
-“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上依赖全可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。纯逻辑第一批选 Goal、Questions、Recall；Wait 要等 `wait` 有了数据面才能进这一批（§4.9），SessionTitle 要等它那三个进程服务有了 dispatcher。
+“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上依赖全可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。纯逻辑第一批选 Goal、Questions、Recall；Wait 要等 `wait` 有了数据面才能进这一批（§4.9），SessionTitle 要先做依赖替换（`settings`、`sessionMetadata`、`auxiliaryModel`），换完就只剩移植。
 
 ```mermaid
 flowchart LR
@@ -483,7 +483,7 @@ flowchart TB
 
 | 形状 | 例子 | 动作 |
 | --- | --- | --- |
-| 数据形 | `sessions`、`settings`、`treeCommands`、`timeline`、`toolRegistry`、`sessionMethods`、`guideEntries`、`partRegistry`；`managementMethods` 也有 dispatcher | 直接代理，无工作 |
+| 数据形 | `sessions`、`settings`、`treeCommands`、`timeline`、`toolRegistry`、`sessionMethods`、`sessionMetadata`、`auxiliaryModel`、`guideEntries`、`partRegistry`；`managementMethods` 也有 dispatcher | 直接代理，无工作 |
 | 数据内容、未标记 | `executionSettingsHost`、`toolchainSourceHost`、`sessionFilesHost`、`historyRenderer`、`selectableModelsHost` | 加 dispatcher；涉及 secret 的（provider/auth）先决定暴露面 |
 | 对象/句柄形 | `hostPlatform`、`fileStorage`、`sqliteStorage`、`timelineStore`、`toolHost`、`sessionLoader`、`mcpSession` | 拆成操作加句柄 id；实现留在所有者 |
 | 状态机/热路径 | `loopState`、`agentLoop`、`inputQueue`、`permission`、`approval`、`toolBinding`、`toolExecutor` | 不跨；需要时由所有者加数据面 |
@@ -501,7 +501,7 @@ flowchart TB
 | --- | --- | --- |
 | Goal | Session/branch 数据 | GoalSession 可移植；GoalBranch 的 `settingsService` 换 `settings` |
 | Questions、Recall、BranchTool、SessionBroadcast、TreeTimeline | 数据，且不提供宿主按类型查的服务 | 移植 |
-| SessionTitle | `settingsService`、`sessionStore`、`auxiliaryModelHost` 对象 | 换 `settings`，给 store 和 auxiliary model 加数据面 |
+| SessionTitle | `settingsService`、`sessionStore`、`auxiliaryModelHost` 对象 | 换 `settings`、`sessionMetadata`、`auxiliaryModel`，三个数据面已存在 |
 | Wait、BranchLine、InputQueue、InputMethods、PrepareModelHost | 提供 `wait`/`branchLine`/`inputQueue`/`submitChecks`/`prepareModelHost`，宿主按类型查 | 先加数据面，或改由宿主自己跑 |
 | PromptSuggestion | `modelHost` 对象 | 换 `auxiliaryModel`，或给 model 加 `complete` 数据面 |
 | Scheduler/Workflow 的 Session 部分 | `scheduleJobs`/`workflowRuns` 对象 | 加数据面 |
