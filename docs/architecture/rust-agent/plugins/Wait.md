@@ -6,8 +6,8 @@ The Wait plugin registers Wait in every Session and WaitBranch in every branch.
 
 Owner: [wait.rs](../../../../crates/dim-agent-capabilities/src/wait.rs).
 Registers the Session wait tool, resolving the caller's branch-local Wait
-service to await a matching task notice, a steer from the user or a line, an
-event delivered to the branch, a timeout or an interruption.
+service to await a matching task notice, a steer from the user or a line, a
+timeout or an interruption.
 
 ### Dependencies
 
@@ -33,18 +33,14 @@ The `wait` declaration is protocol as well
 ([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
 its schema, and the description's two sentences — "Wait until a background task
 (like exec or agent) finishes, the user or a line of this session sends you a
-steer, an event is delivered to this branch, or the timeout elapses." states
-when a wait ends, which the results repeat, and "Pass a taskId to wait for one
-specific task, or omit it to wake on any." states the call shape. Its result
-texts are protocol too.
+steer, or the timeout elapses." states when a wait ends, which the results
+repeat, and "Pass a taskId to wait for one specific task, or omit it to wake on
+any." states the call shape. Its result texts are protocol too.
 `wait ended: notification (<task ids>)` names the tasks that finished, and those
 ids are the task handles the model passes back to `wait` or `exec_stop`; `read`
 takes the output path from the `exec` result's `Output: <path>`. `wait ended:
 steer`, `wait ended: interrupted` and `wait ended: timeout` state the other ways
-a wait ends; `wait ended: event <source> <id>` states an EventHub delivery, and
-`; it is queued and arrives when this turn ends` says a `queue` delivery is
-held until the turn ends (EventHub design §9.3). The refusals — `wait taskId
-must be a string.`,
+a wait ends. The refusals — `wait taskId must be a string.`,
 `wait timeoutMs must be less than or equal to <limit>.`,
 `wait timeoutMs must be a positive integer.` and
 `wait is already running in this session.` — are protocol too: each names the
@@ -80,30 +76,19 @@ Provides branch-local wait state recording eligible arrivals during an open turn
 ### Events and lifetime
 
 Consumes `input/message`, `turn/start`, `turn/end`; produces no events directly.
-Tagged background notices, steer inputs and EventHub deliveries can end a wait;
-the input opening a turn does not. A delivery is recognised by its submission
-id's `eventhub:` prefix and its `queue` or `steer` mode: a `steer` delivery ends
-every wait, as any steer does, and a `queue` delivery only one that names no
-task; `append` deliveries and guide writes never end one. Turn end clears
-pending arrivals. It registers with `Dispatcher::consume` and rebuilds by
-selecting only the kind of the last `turn/start` or `turn/end` at the committed
-head, including its unpublished tail. Reload rebuilds only open-turn status, not
-old arrival notifications. Wait futures are caller-owned and use caller
-cancellation; the plugin does not spawn tasks. Only one wait can run per branch.
+Tagged background notices and steer inputs can end a wait; the input opening a
+turn does not. Turn end clears pending arrivals. It registers with
+`Dispatcher::consume` and rebuilds by selecting only the kind of the last
+`turn/start` or `turn/end` at the committed head, including its unpublished tail.
+Reload rebuilds only open-turn status, not old
+arrival notifications. Wait futures are caller-owned and use caller cancellation; the
+plugin does not spawn tasks. Only one wait can run per branch.
 
 ### Tests
 
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs):
 `wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_turn`,
-`wait_ends_on_a_steer_or_a_stop_and_refuses_a_second_wait`,
-`a_queued_event_ends_a_wait_without_a_task_id`,
-`a_steered_event_ends_a_wait_without_a_task_id`,
-`a_steered_event_ends_a_wait_with_a_task_id`,
-`a_queued_event_does_not_end_a_wait_with_a_task_id`,
-`an_append_event_does_not_end_a_wait`, `a_guide_input_does_not_end_a_wait`.
-The delivery end to end is
-[hub_flow.rs](../../../../crates/dim-event-hub/tests/hub_flow.rs):
-`a_delivered_event_ends_a_wait`.
+`wait_ends_on_a_steer_or_a_stop_and_refuses_a_second_wait`.
 
 <!-- generated:plugin WaitBranch — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

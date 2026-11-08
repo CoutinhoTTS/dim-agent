@@ -12,7 +12,7 @@ use crate::{
     text::{digest, escaped, preview, stamp},
 };
 use chrono::Utc;
-use dim_agent_capabilities::{host::SessionFilesHost, wait::EVENT_SUBMISSION_PREFIX};
+use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_types::InputMode;
 use futures_util::{StreamExt, stream};
 use rutis::Ctx;
@@ -675,12 +675,11 @@ async fn session_exists(shared: &Shared, session_id: &str) -> Option<bool> {
     }
 }
 
-/// The submission id every delivery of one event uses (design §2.4). It
-/// starts with the prefix Wait matches, so a delivery ends a wait on the
-/// branch (design §9.3); a guide write starts `eventhub-guide`, so a guide
-/// never does.
+/// The submission id every delivery of one event uses (design §2.4). The
+/// `eventhub:` prefix is a name EventHub alone owns; a guide write starts
+/// `eventhub-guide`, so a guide never shares it.
 pub(crate) fn submission_id(source: &str, event_id: &str) -> String {
-    format!("{EVENT_SUBMISSION_PREFIX}{source}:{event_id}")
+    format!("eventhub:{source}:{event_id}")
 }
 
 /// The marker's text: the title line and the body, or the start of the body

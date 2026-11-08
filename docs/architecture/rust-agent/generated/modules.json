@@ -16236,9 +16236,6 @@
         "path EventKind::InputMessage",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
-        "path InputMessageData",
-        "path InputMode",
-        "path InputMode::Queue",
         "path InputMode::Steer"
       ]
     },

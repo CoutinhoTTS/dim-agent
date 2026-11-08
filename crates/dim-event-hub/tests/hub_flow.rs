@@ -546,11 +546,11 @@ async fn deleting_a_subscribed_session_removes_its_subscriptions() {
     server.join().await.unwrap();
 }
 
-/// Appendix D item 11's wait half (design §9.3): an event delivered to a
-/// branch in an open turn ends a wait without a `taskId`, and the queued form
-/// tells the model where the event is.
+/// A `steer` delivery reaches the running turn at its next step and, like
+/// every steer, ends a wait without a `taskId`; the marker arrives in the
+/// same turn (design 3.1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_delivered_event_ends_a_wait() {
+async fn a_steered_event_ends_a_wait() {
     let home = home();
     let model = Arc::new(Script::default());
     let (server, producer) = start(home.path(), model.clone()).await;
@@ -560,31 +560,26 @@ async fn a_delivered_event_ends_a_wait() {
         .declare(im_declaration("The IM guide."))
         .await
         .unwrap();
-    subscribe(&mut client, &session, vec!["im.*"], None).await;
+    subscribe(&mut client, &session, vec!["im.*"], Some("steer")).await;
     model.push(vec![ToolCall {
         id: "wait-1".into(),
         name: "wait".into(),
         input: json!({"timeoutMs": 20000}).as_object().unwrap().clone(),
     }]);
-    // The first event opens the turn; the model waits in it.
-    producer.publish(im_event("first")).await.unwrap();
+    // An ordinary queued user input opens the turn; the model waits in it.
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "Hi."}),
+        )
+        .await
+        .unwrap();
     wait_for("the wait call", || model.count() >= 1).await;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     producer.publish(im_event("wake")).await.unwrap();
     wait_for("the request after the wait", || model.count() >= 2).await;
     let texts = model.texts();
-    assert!(
-        texts.contains("an event is delivered to this branch"),
-        "the description names the delivery: {texts}"
-    );
-    assert!(
-        texts.contains("wait ended: event im wake; it is queued and arrives when this turn ends"),
-        "{texts}"
-    );
-    // The turn ends, the held event is released, and its marker reaches the
-    // model in the next turn.
-    wait_for("the event's turn", || model.count() >= 3).await;
-    let texts = model.texts();
+    assert!(texts.contains("wait ended: steer"), "{texts}");
     assert!(texts.contains("id=\\\"wake\\\""), "{texts}");
 
     drop(client);

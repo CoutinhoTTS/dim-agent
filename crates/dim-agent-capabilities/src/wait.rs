@@ -32,12 +32,6 @@ use tokio_util::sync::CancellationToken;
 
 const WAIT_TOOL: &str = "wait";
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
-/// The submission id prefix of an EventHub delivery (EventHub design §9.3):
-/// an input whose submission id starts with it is a delivered event. A tag
-/// cannot mark one, because `sessions.input` has no field for a tag, so Wait
-/// matches the id instead. A guide write's id starts `eventhub-guide`, so it
-/// never matches; EventHub's `submission_id` uses this constant.
-pub const EVENT_SUBMISSION_PREFIX: &str = "eventhub:";
 
 /// The Wait plugin: the Session tool and the branch part.
 pub fn feature() -> dim_agent_runtime::Feature {
@@ -56,12 +50,6 @@ pub fn install(builder: &mut AgentBuilder) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Arrival {
     BackgroundTask(String),
-    /// An EventHub delivery (EventHub design §9.3).
-    Event {
-        source: String,
-        event_id: String,
-        mode: InputMode,
-    },
     Steer,
 }
 
@@ -72,13 +60,6 @@ pub enum WaitResult {
         waited_ms: u64,
     },
     UserSteer {
-        waited_ms: u64,
-    },
-    /// An event was delivered to the branch (EventHub design §9.3).
-    Event {
-        source: String,
-        event_id: String,
-        mode: InputMode,
         waited_ms: u64,
     },
     Timeout {
@@ -160,14 +141,6 @@ impl Wait {
                     state
                         .pending
                         .push_back(Arrival::BackgroundTask(task_id.to_owned()));
-                } else if let Some((source, event_id)) = event_arrival(data) {
-                    // An EventHub delivery ends a wait on its own terms: the
-                    // queued form says where the event is (design §9.3).
-                    state.pending.push_back(Arrival::Event {
-                        source,
-                        event_id,
-                        mode: data.effective_mode(),
-                    });
                 } else if data.effective_mode() == InputMode::Steer {
                     state.pending.push_back(Arrival::Steer);
                 } else {
@@ -180,29 +153,16 @@ impl Wait {
         }
     }
 
-    /// TS `takeMatchingInput`: a steer first, a steered event included, then a
-    /// matching task or, for a wait without one, a queued event; between those
-    /// two the earlier wins.
+    /// TS `takeMatchingInput`: any steer first, then a matching task.
     fn take(&self, task_id: Option<&str>) -> Option<Arrival> {
         let mut state = self.state.lock().unwrap();
         let index = state
             .pending
             .iter()
-            .position(|arrival| {
-                matches!(
-                    arrival,
-                    Arrival::Steer
-                        | Arrival::Event {
-                            mode: InputMode::Steer,
-                            ..
-                        }
-                )
-            })
+            .position(|arrival| *arrival == Arrival::Steer)
             .or_else(|| {
                 state.pending.iter().position(|arrival| match arrival {
-                    // A steered event was taken above, so this is a queued one.
                     Arrival::BackgroundTask(id) => task_id.is_none_or(|task_id| task_id == id),
-                    Arrival::Event { .. } => task_id.is_none(),
                     Arrival::Steer => false,
                 })
             })?;
@@ -252,16 +212,6 @@ impl Wait {
                         task_ids: vec![id],
                         waited_ms: waited(),
                     },
-                    Arrival::Event {
-                        source,
-                        event_id,
-                        mode,
-                    } => WaitResult::Event {
-                        source,
-                        event_id,
-                        mode,
-                        waited_ms: waited(),
-                    },
                 });
             }
             tokio::select! {
@@ -275,26 +225,10 @@ impl Wait {
     }
 }
 
-/// The event a delivery carries, when it is one: `eventhub:<source>:<eventId>`
-/// with a `queue` or `steer` mode (EventHub design §9.3). An `append` delivery
-/// never wakes work, and a guide's id starts `eventhub-guide`.
-fn event_arrival(data: &InputMessageData) -> Option<(String, String)> {
-    let mode = data.effective_mode();
-    if !matches!(mode, InputMode::Queue | InputMode::Steer) {
-        return None;
-    }
-    let rest = data
-        .submission_id
-        .as_deref()?
-        .strip_prefix(EVENT_SUBMISSION_PREFIX)?;
-    let (source, event_id) = rest.split_once(':')?;
-    Some((source.to_owned(), event_id.to_owned()))
-}
-
 fn wait_definition() -> ToolDefinition {
     let mut definition = definition(
         WAIT_TOOL,
-        "Wait until a background task (like exec or agent) finishes, the user or a line of this session sends you a steer, an event is delivered to this branch, or the timeout elapses. Pass a taskId to wait for one specific task, or omit it to wake on any.",
+        "Wait until a background task (like exec or agent) finishes, the user or a line of this session sends you a steer, or the timeout elapses. Pass a taskId to wait for one specific task, or omit it to wake on any.",
         json!({
             "type": "object",
             "properties": {
@@ -380,25 +314,6 @@ impl WaitTool {
                 "wait ended: steer".into(),
                 json!({"reason": "user_steer", "waitedMs": waited_ms}),
             ),
-            WaitResult::Event {
-                source,
-                event_id,
-                mode,
-                waited_ms,
-            } => {
-                // A queued event is held until this turn ends, so the result
-                // says where it is (EventHub design §9.3).
-                let content = match mode {
-                    InputMode::Queue => format!(
-                        "wait ended: event {source} {event_id}; it is queued and arrives when this turn ends"
-                    ),
-                    _ => format!("wait ended: event {source} {event_id}"),
-                };
-                (
-                    content,
-                    json!({"reason": "event", "source": source, "eventId": event_id, "waitedMs": waited_ms}),
-                )
-            }
             WaitResult::Interrupted { waited_ms } => (
                 "wait ended: interrupted".into(),
                 json!({"reason": "interrupted", "waitedMs": waited_ms}),

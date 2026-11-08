@@ -288,7 +288,7 @@ async fn start_full(
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     // The product's local-execution profile also installs Wait, so a branch
-    // can wait for a delivered event (design §9.3).
+    // can wait and a steer delivery ends its wait (design 3.1).
     dim_agent_capabilities::wait::install(&mut builder);
     defaults::mock_model_hosts_with_model(&mut builder, HistoryRenderer::default(), model);
     // The real workspace tools, so the model's `read` (Appendix D item 5)
@@ -379,8 +379,8 @@ pub async fn create_session(client: &mut Client, home: &Path) -> String {
     created["sessionId"].as_str().unwrap().to_owned()
 }
 
-/// [`create_session`] with `wait` as well: a branch that can wait for an
-/// event (design §9.3).
+/// [`create_session`] with `wait` as well: a branch that can wait and be
+/// woken by a steer (design 3.1).
 pub async fn create_wait_session(client: &mut Client, home: &Path) -> String {
     let created = client
         .rpc(
