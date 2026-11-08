@@ -775,7 +775,7 @@ async fn a_subscription_deleted_while_off_is_removed_at_the_next_apply() {
 /// the marker (design Appendix F, Appendix D item 1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn a_typescript_row_declares_and_publishes_through_the_service() {
+async fn node_a_typescript_row_declares_and_publishes_through_the_service() {
     let home = home();
     let (server, _producer) = start_typescript(home.path(), Arc::new(Script::default())).await;
     let mut client = connect(&server).await;
