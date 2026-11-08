@@ -112,7 +112,8 @@ flowchart LR
 | 大模块 | 默认 | 可远程形态 |
 | --- | --- | --- |
 | 实例核心（Loop、InputQueue、Permission、ToolExecutor、TimelineTree） | 宿主 | 不远程；热路径与顺序 |
-| 会话工具与方法（Goal、Questions、Recall、Wait、BranchTool） | 宿主或 leaf | leaf |
+| 会话工具与方法（Goal、Questions、Recall、BranchTool） | 宿主或 leaf | leaf |
+| Wait | 宿主 | `wait` 有数据面后才可 leaf（§4.9） |
 | 资源（exec、fs、PTY、OCR、MCP） | 资源 leaf | 外部挂载 |
 | 状态（Timeline、目录、设置、授权、文件行） | PG | 远程 store |
 | 模型 provider | 宿主或 leaf | 数据服务 |
