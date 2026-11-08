@@ -627,6 +627,8 @@ pub enum PluginAction {
     Reload(String),
     /// Install from a local directory and turn it on.
     Install(std::path::PathBuf),
+    /// Install a plugin Dim ships but did not install, and turn it on.
+    InstallOptional(String),
 }
 
 /// One name of `plugin.list` (PluginManager A.1).
@@ -648,6 +650,10 @@ pub struct PluginItem {
     pub waiting_for: Vec<String>,
     #[serde(default)]
     pub refused: Vec<PluginRefusal>,
+    /// Dim ships the plugin but did not install it: no candidate yet, and a
+    /// client offers Install instead of a toggle (PluginManager §3.6).
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -1258,5 +1264,46 @@ pub trait SessionPort {
     }
     fn stop(&self) {
         self.send(Command::Stop);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PluginItem;
+    use serde_json::json;
+
+    /// PluginManager §3.6: the item of an optional plugin that is not
+    /// installed decodes as it comes, with no status; an item that does not
+    /// carry the marker is not optional.
+    #[test]
+    fn an_uninstalled_optional_item_decodes() {
+        let item: PluginItem = serde_json::from_value(json!({
+            "name": "light-ocr",
+            "use": null,
+            "off": true,
+            "locked": false,
+            "candidates": [],
+            "optional": true,
+        }))
+        .unwrap();
+        assert_eq!(item.name, "light-ocr");
+        assert_eq!(item.in_use, None);
+        assert!(item.off);
+        assert!(!item.locked);
+        assert!(item.candidates.is_empty());
+        assert_eq!(item.status, None);
+        assert_eq!(item.error, None);
+        assert!(item.optional);
+
+        let plain: PluginItem = serde_json::from_value(json!({
+            "name": "web",
+            "use": "default",
+            "off": false,
+            "locked": false,
+            "candidates": [{"id": "default"}],
+            "status": "running",
+        }))
+        .unwrap();
+        assert!(!plain.optional);
     }
 }

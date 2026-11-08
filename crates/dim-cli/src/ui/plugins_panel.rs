@@ -1,6 +1,8 @@
 //! The `/plugins` panel: every plugin name PluginManager lists
 //! (`plugin.list`), with the candidate in use, its state and why; the
 //! selected one is turned on or off (off after a confirmation) or reloaded.
+//! A plugin Dim ships but did not install says so, and `i` installs it:
+//! its toggle never turns it on, since turning on installs nothing.
 //! `/plugins install PATH` opens it with the install's outcome.
 //!
 //! ```text
@@ -8,7 +10,7 @@
 //! │                                               │
 //! │ › web            running  default             │
 //! │   PluginManager  running  builtin  locked     │
-//! │   my-tool        failed   my-tool             │
+//! │   light-ocr      not installed                │
 //! │                                               │
 //! │   Uses default · candidates: builtin, default │
 //! │   Turned off web.                             │
@@ -30,6 +32,7 @@ use crate::ui::theme::ansi::fg;
 
 const HINT: &str = "Enter on/off · r reload · Ctrl+R refresh · Esc close";
 const WAITING_HINT: &str = "Enter open /runtime · o on/off · r reload · Esc close";
+const OPTIONAL_HINT: &str = "i install · Ctrl+R refresh · Esc close";
 const CONFIRM_HINT: &str = "Tab switch  Enter confirm  Esc cancel";
 const LOCKED: &str = "Locked: Dim needs it, so it cannot be turned off.";
 
@@ -96,7 +99,9 @@ impl PluginsPanel {
     ) {
         self.busy = false;
         let name = match action {
-            PluginAction::Install(_) => result.as_ref().ok().and_then(|reply| reply.name.clone()),
+            PluginAction::Install(_) | PluginAction::InstallOptional(_) => {
+                result.as_ref().ok().and_then(|reply| reply.name.clone())
+            }
             PluginAction::Enable(name)
             | PluginAction::Disable(name)
             | PluginAction::Reload(name) => Some(name.clone()),
@@ -154,6 +159,12 @@ impl PluginsPanel {
                 None => self.toggle(),
             },
             KeyCode::Char('o') => self.toggle(),
+            KeyCode::Char('i') => match self.items.get(self.selected) {
+                Some(item) if installable(item) => {
+                    self.change(PluginAction::InstallOptional(item.name.clone()))
+                }
+                _ => Effect::None,
+            },
             KeyCode::Char('r') => match self.items.get(self.selected) {
                 Some(item) => self.change(PluginAction::Reload(item.name.clone())),
                 None => Effect::None,
@@ -163,9 +174,17 @@ impl PluginsPanel {
     }
 
     /// Turns the selected name on, or off after a confirmation; a locked one
-    /// only says why it stays.
+    /// only says why it stays, and one Dim did not install points at `i`:
+    /// turning it on would install nothing.
     fn toggle(&mut self) -> Effect {
         match self.items.get(self.selected) {
+            Some(item) if installable(item) => {
+                self.message = Some(Ok(tf(
+                    "Press i to install {name}.",
+                    &[("name", &item.name)],
+                )));
+                Effect::None
+            }
             Some(item) if item.off => self.change(PluginAction::Enable(item.name.clone())),
             Some(item) if item.locked => {
                 self.message = Some(Err(t(LOCKED).to_owned()));
@@ -192,9 +211,11 @@ impl PluginsPanel {
         Effect::Plugin(action)
     }
 
-    /// The keys for the selected row: one that waits for a runtime opens it.
+    /// The keys for the selected row: one that waits for a runtime opens it,
+    /// one Dim did not install is installed.
     fn hint(&self) -> &'static str {
         match self.items.get(self.selected) {
+            Some(item) if installable(item) => t(OPTIONAL_HINT),
             Some(item) if waited_runtime(item).is_some() => t(WAITING_HINT),
             _ => t(HINT),
         }
@@ -293,9 +314,16 @@ impl PluginsPanel {
     }
 }
 
+/// A plugin Dim ships but did not install: nothing runs under the name yet,
+/// so it has no candidate.
+fn installable(item: &PluginItem) -> bool {
+    item.optional && item.candidates.is_empty()
+}
+
 /// A name's row: its state, the candidate in use and whether it is locked.
 fn row(item: &PluginItem) -> Row {
     let state = match item.status.as_deref() {
+        _ if installable(item) => t("not installed"),
         _ if item.off => t("off"),
         Some("running") => t("running"),
         Some("pending") => t("pending"),
@@ -332,15 +360,17 @@ fn row(item: &PluginItem) -> Row {
 /// What the selected name says about itself: `(line, is a problem)`.
 fn about(item: &PluginItem) -> Vec<(String, bool)> {
     let mut lines = Vec::new();
-    let candidates: Vec<&str> = item.candidates.iter().map(|c| c.id.as_str()).collect();
-    let mut summary = tf(
-        "Candidates: {candidates}",
-        &[("candidates", &candidates.join(", "))],
-    );
-    if let Some(in_use) = &item.in_use {
-        summary = format!("{} · {summary}", tf("Uses {use}", &[("use", in_use)]));
+    if !item.candidates.is_empty() {
+        let candidates: Vec<&str> = item.candidates.iter().map(|c| c.id.as_str()).collect();
+        let mut summary = tf(
+            "Candidates: {candidates}",
+            &[("candidates", &candidates.join(", "))],
+        );
+        if let Some(in_use) = &item.in_use {
+            summary = format!("{} · {summary}", tf("Uses {use}", &[("use", in_use)]));
+        }
+        lines.push((summary, false));
     }
-    lines.push((summary, false));
     if item.locked {
         lines.push((t(LOCKED).to_owned(), false));
     }
@@ -376,7 +406,7 @@ fn outcome(action: &PluginAction, reply: &PluginReply) -> String {
         PluginAction::Enable(name) => tf("Turned on {name}.", &[("name", name)]),
         PluginAction::Disable(name) => tf("Turned off {name}.", &[("name", name)]),
         PluginAction::Reload(name) => tf("Reloaded {name}.", &[("name", name)]),
-        PluginAction::Install(_) => {
+        PluginAction::Install(_) | PluginAction::InstallOptional(_) => {
             let name = reply.name.as_deref().unwrap_or_default();
             let id = reply.id.as_deref().unwrap_or_default();
             let text = if reply.enabled == Some(false) {
@@ -425,6 +455,23 @@ mod tests {
             error: None,
             waiting_for: Vec::new(),
             refused: Vec::new(),
+            optional: false,
+        }
+    }
+
+    /// Dim ships it but did not install it: no candidate, no status.
+    fn optional(name: &str) -> PluginItem {
+        PluginItem {
+            name: name.into(),
+            in_use: None,
+            off: true,
+            locked: false,
+            candidates: Vec::new(),
+            status: None,
+            error: None,
+            waiting_for: Vec::new(),
+            refused: Vec::new(),
+            optional: true,
         }
     }
 
@@ -597,6 +644,69 @@ mod tests {
         panel.handle_key(key(KeyCode::Down));
         let text = shown(&panel, 80, 12).join("\n");
         assert!(text.contains("waits for the python runtime"), "{text}");
+    }
+
+    /// A plugin Dim ships but did not install offers Install and its toggle
+    /// never turns it on: it shows the hint that names the action.
+    #[test]
+    fn an_uninstalled_optional_row_installs_and_its_toggle_only_hints() {
+        let mut panel = PluginsPanel::new();
+        panel.set_items(Ok(vec![optional("light-ocr")]));
+        let text = shown(&panel, 80, 14).join("\n");
+        assert!(text.contains("not installed"), "{text}");
+        assert!(text.contains("i install"), "{text}");
+
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::None
+        ));
+        let text = shown(&panel, 80, 14).join("\n");
+        assert!(text.contains("Press i to install light-ocr."), "{text}");
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Char('o'))),
+            Effect::None
+        ));
+
+        match panel.handle_key(key(KeyCode::Char('i'))) {
+            Effect::Plugin(action) => {
+                assert_eq!(action, PluginAction::InstallOptional("light-ocr".into()))
+            }
+            other => panic!("{other:?}"),
+        }
+        let reply = PluginReply {
+            id: Some("light-ocr".into()),
+            name: Some("light-ocr".into()),
+            enabled: Some(true),
+            ..PluginReply::default()
+        };
+        panel.set_result(
+            &PluginAction::InstallOptional("light-ocr".into()),
+            Ok(reply),
+            Ok(vec![item("light-ocr", "light-ocr", "running")]),
+        );
+        assert!(
+            shown(&panel, 80, 14)
+                .join("\n")
+                .contains("Installed light-ocr (light-ocr).")
+        );
+    }
+
+    /// Once an optional plugin is installed, its row turns on and off like
+    /// any other.
+    #[test]
+    fn an_installed_optional_row_toggles_like_any_other() {
+        let mut installed = item("light-ocr", "light-ocr", "off");
+        installed.optional = true;
+        let mut panel = PluginsPanel::new();
+        panel.set_items(Ok(vec![installed]));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Char('i'))),
+            Effect::None
+        ));
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Plugin(action) => assert_eq!(action, PluginAction::Enable("light-ocr".into())),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A failed change shows the method's message; an install names what
