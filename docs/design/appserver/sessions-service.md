@@ -25,7 +25,7 @@ for the old writer.
 ## 1. Summary
 
 Agents exposes the process service `sessions`, so a process plugin in any language can start and drive Sessions as
-Collaboration does. Its methods are `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle` and `delete`.
+Collaboration does. Its methods are `launch`, `input`, `lookup`, `exists`, `history`, `withdraw`, `stop`, `idle` and `delete`.
 Each one maps onto Agents' existing Session creation and admission (`AgentIndex`) and the public Session facade.
 `withdraw` forwards to the InputQueue withdrawal service that S1 added, and `delete` to S5c's `AgentIndex::delete`.
 
@@ -40,6 +40,9 @@ Each one maps onto Agents' existing Session creation and admission (`AgentIndex`
 - **Input.** `input` writes `input/message` through `Session::input` and replies once the event is published. The
   branch accepts each `submissionId` once: a resubmission writes nothing and replies the first input's receipt.
   `lookup` by `submissionId` reads the same index without writing.
+- **Exists.** `exists` answers whether a Session id still exists: `false` means it was deleted, and a closed,
+  restorable Session is `true`. It never acquires or restores a Session, so it has no effect on idle unload and
+  writes nothing.
 - **Idle.** `idle` is the facade's `Session::idle`: Loop has no open turn, nothing waits for publication, and
   dispatch has reached the tail. A pending approval or question keeps a turn open, so a caller bounds its wait with
   `stop`.
@@ -459,6 +462,17 @@ done) and `failed` (the command output or the rows could not be removed,
 [S5c §3.5](session-deletion-and-fork.md#35-idempotence-and-errors)). After `failed`, a Session the delete closed stays
 closed in this process with its rows kept (S5c D5): calls on it fail `session_closed` until a delete succeeds. A
 delete is idempotent, so the caller deletes again after any error or a lost reply (§8.7).
+
+### 6.9 exists
+
+`{sessionId}` → `{exists}`; errors `rejected`, `reloading`.
+
+The read answers whether the id has an owner or SessionStore records, which is what `acquire` reads before it restores
+anything (`crates/dim-app-server/src/agents.rs:832-843`): `false` means the Session was deleted, and a closed,
+restorable Session is `true`. It acquires nothing, takes no lease, restores no Session and writes no event, so it has
+no effect on idle unload. It exists for consumers that must reconcile their own records against Session deletion
+without polling a close that must not look like a deletion (EventHub §3.4). An Agents reload answers `reloading`;
+a caller keeps its records and asks again later.
 
 ## 7. Sequence
 
