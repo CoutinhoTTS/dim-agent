@@ -946,6 +946,107 @@ async fn an_uninstalled_optional_plugin_has_its_own_item() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// §3.6: `update` follows the entry a re-acquisition would act on, so an
+/// installed optional plugin that is off still offers the shipped version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_installed_optional_plugin_that_is_off_offers_its_update() {
+    let home = home();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", false)
+        .canonicalize()
+        .unwrap();
+    let fixture = FixtureNode::with("24.21.0", "true");
+    let config = runtime_config(
+        &home,
+        defaults_file(
+            json!({}),
+            json!({"ocr-fixture": shipped.display().to_string()}),
+        ),
+        fixture.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.disable",
+            json!({"name": "ocr-fixture"}),
+        )
+        .await,
+    );
+    // The shipped version changes while the name is off.
+    let manifest_path = shipped.join("dim-plugin.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["version"] = json!("1.1.0");
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let listed = item(&list, "ocr-fixture");
+    assert_eq!(listed["off"], true, "{list}");
+    assert_eq!(listed["update"]["version"], "1.1.0", "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.6: the `optional` marker is the entry's provenance, so it stays when
+/// a later release drops the name from the shipped map.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_installed_optional_plugin_keeps_its_marker_after_the_map_drops_it() {
+    let home = home();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", false)
+        .canonicalize()
+        .unwrap();
+    let fixture = FixtureNode::with("24.21.0", "true");
+    let config = runtime_config(
+        &home,
+        defaults_file(
+            json!({}),
+            json!({"ocr-fixture": shipped.display().to_string()}),
+        ),
+        fixture.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // The restart's default configuration still installs the plugin but no
+    // longer lists its name as optional.
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({})),
+        fixture.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let listed = item(&list, "ocr-fixture");
+    assert_eq!(listed["use"], "ocr-fixture", "{list}");
+    assert_eq!(listed["optional"], true, "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// §3.3: `plugin.enable`, `plugin.disable` and `plugin.reload` of an
 /// uninstalled optional name keep answering `plugin_not_found` with today's
 /// client description; nothing is installed and no runtime is requested.
