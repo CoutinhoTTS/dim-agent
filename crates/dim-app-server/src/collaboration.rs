@@ -801,14 +801,14 @@ struct State {
     /// that is still being carried out. A request to that member is refused
     /// `Busy` while a mark is held, so a stop reaches only the turn of the
     /// request it was decided for; the mark lasts until the carry-out ends:
-    /// the stop lands, the withdrawal deletes the input, the consuming turn
-    /// has ended, the member closes, or Collaboration stops.
+    /// the stop lands, the input is deleted, the consuming turn has ended,
+    /// the member closes, or Collaboration stops.
     stopping: BTreeMap<String, usize>,
 }
 
 /// Holds a member's stopping mark until the carry-out ends, however it does:
-/// the stop lands, the withdrawal deletes the input, the consuming turn has
-/// ended, the member closes, or Collaboration stops.
+/// the stop lands, the input is deleted, the consuming turn has ended, the
+/// member closes, or Collaboration stops.
 struct Stopping {
     owner: Arc<CollaborationSession>,
     member: String,
@@ -2224,11 +2224,12 @@ impl CollaborationSession {
     /// request: the turn that consumed the request's input is stopped now
     /// when it has, and the input withdrawn while still unapplied. An input
     /// InputQueue already handed to Loop is stopped once its
-    /// `input/consumed` is published. The carry-out runs on Collaboration's
-    /// process-wide task tracker, so it outlives the branch record and the
-    /// request it was decided for, and no branch teardown waits on the
-    /// member. The stop names that turn, so a turn that already ended writes
-    /// nothing.
+    /// `input/consumed` is published; one deleted before any turn consumed
+    /// it ends the carry-out with nothing to stop. The carry-out runs on
+    /// Collaboration's process-wide task tracker, so it outlives the branch
+    /// record and the request it was decided for, and no branch teardown
+    /// waits on the member. The stop names that turn, so a turn that already
+    /// ended writes nothing.
     ///
     /// `stopping` holds the member's stopping mark across the effect and the
     /// wait, and is dropped on every exit.
@@ -2241,13 +2242,21 @@ impl CollaborationSession {
     ) -> dim_agent_runtime::Result<()> {
         let mut after = 0;
         let mut open = None;
-        if let Some(turn) = consuming_turn(session, input, &mut after, &mut open).await? {
-            stop_member_turn(session, &turn, reason)?;
-            return Ok(());
-        }
-        // Subscribed before the withdrawal, so no publication between the two
-        // is missed by the wait below.
+        // Subscribed before the first check, so a consumption or a deletion
+        // published while it reads, or between it and the withdrawal, still
+        // wakes the wait below: whatever the check cannot see happened after
+        // this subscription, and the wait checks after every change.
         let mut published = session.publication("main")?.watch();
+        match input_fate(session, input, &mut after, &mut open).await? {
+            InputFate::Consumed(Some(turn)) => {
+                stop_member_turn(session, &turn, reason)?;
+                return Ok(());
+            }
+            // A consumed input whose turn already ended, and a deleted one
+            // that no turn will consume, leave nothing to stop.
+            InputFate::Consumed(None) | InputFate::Deleted => return Ok(()),
+            InputFate::Pending => {}
+        }
         match session
             .service::<dim_agent_capabilities::input_queue::InputQueue>("main")?
             .withdraw(
@@ -2268,11 +2277,11 @@ impl CollaborationSession {
         // it is the one to stop. Waiting for its `input/consumed` names that
         // turn, the documented `consumed < interrupt` order, instead of
         // racing its application. The carry-out ends when the stop lands, when
-        // the withdrawal deletes the input, when the consuming turn has ended,
-        // when the member closes, or when Collaboration stops: not on the
-        // branch's abort and not on the request's settle, because a branch
-        // close settles the request while the member may not have consumed
-        // yet.
+        // the withdrawal deletes the input, when the member client deletes it
+        // first, when the consuming turn has ended, when the member closes, or
+        // when Collaboration stops: not on the branch's abort and not on the
+        // request's settle, because a branch close settles the request while
+        // the member may not have consumed yet.
         let stop = self.collaboration.stop.clone();
         let tasks = self.collaboration.tasks.clone();
         let session = session.clone();
@@ -2292,9 +2301,15 @@ impl CollaborationSession {
                         }
                     }
                 }
-                if let Some(turn) = consuming_turn(&session, &input, &mut after, &mut open).await? {
-                    stop_member_turn(&session, &turn, &reason)?;
-                    return Ok(());
+                match input_fate(&session, &input, &mut after, &mut open).await? {
+                    InputFate::Consumed(Some(turn)) => {
+                        stop_member_turn(&session, &turn, &reason)?;
+                        return Ok(());
+                    }
+                    // The member deleted the input first: no turn will consume
+                    // it, so the wait ends with nothing to stop.
+                    InputFate::Consumed(None) | InputFate::Deleted => return Ok(()),
+                    InputFate::Pending => {}
                 }
             }
         };
@@ -2613,16 +2628,25 @@ fn stop_member_turn(session: &Session, turn: &str, reason: &str) -> dim_agent_ru
     Ok(())
 }
 
-/// The turn that consumed `input`, from the member's own facts: the
-/// `turn/start` open at the input's `input/consumed`. The open turn is
-/// tracked across pages and checks, so a page that begins inside a turn
-/// still names it.
-async fn consuming_turn(
+/// What the member's Timeline says about the request's input: a turn consumed
+/// it (with the turn open at that moment, if one was), it was deleted and no
+/// turn will run for it, or neither fact is published yet.
+enum InputFate {
+    Consumed(Option<String>),
+    Deleted,
+    Pending,
+}
+
+/// The fate of `input`, from the member's own facts: the `turn/start` open at
+/// the input's `input/consumed`, the input's `input/deleted`, or neither of
+/// them yet. The open turn is tracked across pages and checks, so a page
+/// that begins inside a turn still names it.
+async fn input_fate(
     session: &Session,
     input: &str,
     after: &mut u64,
     open: &mut Option<String>,
-) -> dim_agent_runtime::Result<Option<String>> {
+) -> dim_agent_runtime::Result<InputFate> {
     // One published head for the whole check, so the answer cannot change
     // under the reader while it pages: a check answers for the moment it
     // starts, and the caller's next check sees whatever has been published
@@ -2634,7 +2658,7 @@ async fn consuming_turn(
             *after,
             256,
             through,
-            &["input/consumed", "turn/start", "turn/end"],
+            &["input/consumed", "input/deleted", "turn/start", "turn/end"],
         )
         .await?;
         for event in &events {
@@ -2646,13 +2670,16 @@ async fn consuming_turn(
                     }
                 }
                 EventKind::InputConsumed(data) if data.input_id == input => {
-                    return Ok(open.clone());
+                    return Ok(InputFate::Consumed(open.clone()));
+                }
+                EventKind::InputDeleted(data) if data.input_id == input => {
+                    return Ok(InputFate::Deleted);
                 }
                 _ => {}
             }
         }
         if next <= *after {
-            return Ok(None);
+            return Ok(InputFate::Pending);
         }
         *after = next;
     }

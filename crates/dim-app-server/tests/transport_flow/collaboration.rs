@@ -4848,6 +4848,140 @@ async fn a_leader_branch_close_starts_every_covered_carry_out() {
     .unwrap();
 }
 
+/// Issue #1254: a client attached to the member can delete the request's
+/// input before the leader's carry-out withdraws it. No turn will consume a
+/// deleted input, so the carry-out ends with nothing to stop and the
+/// member's stopping mark goes with it: the request settles cancelled, no
+/// stop is written, and the next request to the same member is accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_withdraw_of_the_request_input_ends_the_carried_out_stop() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, gate) =
+            launch_held_team(store.clone()).await;
+        let (member, member_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+        let deliveries = async |session: &Session| {
+            events(session)
+                .await
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::CollaborationDelivered(data) => Some(data.delivery.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<CollaborationDelivery>>()
+        };
+
+        // The member's own turn is held at its applied append: its queue
+        // stays in the `starting` window and its Loop phase stays `Idle`, so
+        // the request below is admitted, and its input waits behind that
+        // turn instead of being handed to Loop.
+        let (entered, release, _) = store.arm(HoldKind::Applied(member.clone()));
+        say(&mut client, &member, "tool:hold {}".to_owned(), "queue").await;
+        entered.await.expect("the member applies its own input");
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        // The request is recorded before its input is written, so a cancel
+        // that answers `cancelled` proves the request was admitted while the
+        // member's phase was still `Idle`; one that answers `idle` wrote
+        // nothing.
+        poll("the request is admitted", async || {
+            let cancelled = client
+                .rpc(
+                    "session.collaboration.cancel",
+                    json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+                )
+                .await;
+            (cancelled["result"]["status"] == "cancelled").then_some(())
+        })
+        .await;
+
+        // Hold the carry-out's own check, so the member's client withdraws
+        // the request's input before the leader's withdrawal runs.
+        let (checked, release_check, _) = store.arm(HoldKind::ConsumedNow(member.clone()));
+        release.release();
+        checked
+            .await
+            .expect("the carry-out checks the member's facts");
+        let (input, _) = request_input(&member_session, "tool:hold").await;
+
+        // The member's own client deletes the input while InputQueue still
+        // holds it unapplied, so the withdrawal deletes rather than
+        // `notHeld`, and its reply follows the published `input/deleted`.
+        let withdrawn = client
+            .rpc(
+                "session.input.withdraw",
+                json!({"sessionId": member, "branchId": "main", "inputId": input,
+                    "reason": "the member took it back"}),
+            )
+            .await;
+        assert_ok(&withdrawn);
+        assert_eq!(withdrawn["result"]["status"], "deleted", "{withdrawn}");
+        release_check.release();
+
+        // The member's held turn ends on its own, and the request settles
+        // from the cancel with no stop written: the deleted input never got
+        // a turn.
+        gate.add_permits(1);
+        let outcomes = poll("the cancelled request settles", async || {
+            let outcomes = result_of(&events(&lead_session).await, &member);
+            (outcomes.len() >= 2).then_some(outcomes)
+        })
+        .await;
+        assert_eq!(
+            outcomes.last(),
+            Some(&CollaborationOutcome::Cancelled {
+                reason: "cancelled by the client".into()
+            }),
+            "{outcomes:?}"
+        );
+        assert!(
+            stop_reasons(&member_session).await.is_empty(),
+            "a deleted input writes no stop"
+        );
+
+        // The member takes new work: the mark did not outlive the carry-out.
+        let before = deliveries(&lead_session).await.len();
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:echo {\"text\":\"after\"}"}),
+            ),
+            "queue",
+        )
+        .await;
+        let delivery = poll("the next request's delivery", async || {
+            deliveries(&lead_session).await.get(before).cloned()
+        })
+        .await;
+        assert!(
+            matches!(delivery, CollaborationDelivery::Ok { .. }),
+            "the member takes new work after the deleted input: {delivery:?}"
+        );
+        let outcomes = poll("the next request settles", async || {
+            let outcomes = result_of(&events(&lead_session).await, &member);
+            (outcomes.len() >= 3).then_some(outcomes)
+        })
+        .await;
+        assert_eq!(outcomes.last(), Some(&CollaborationOutcome::Completed));
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 /// The Team relation decides who may cancel: another leader's member and an
 /// unknown id are both `team_member_not_found`, and a member Session answers
 /// `invalid_params`.
