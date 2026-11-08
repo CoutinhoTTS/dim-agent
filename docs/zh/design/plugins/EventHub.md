@@ -418,7 +418,7 @@ schema 是封闭的，即 `additionalProperties: false`。动作不接收的参�
 Manage this session's event subscriptions. sources lists the sources that publish events and their event types. subscribe subscribes a branch of this session, this branch unless branchId names another, to event types, each an exact type or <source>.*; match keeps only events whose attributes equal every given pair. unsubscribe removes one of this session's subscriptions by subscriptionId, and list shows them. Each event arrives on the branch as a <dim-event> message. mode decides when: queue waits until the current turn ends, steer reaches the running turn at its next step and ends a running wait, and append adds the event without starting a turn; without mode, the type's declared mode applies. Subscribe only when the user asks you to follow events. If you will wait for an event within this turn, subscribe with mode steer.
 ```
 
-声明的 schema 与结果形状属于协议；它的描述与协调语句属于策略，随承载它的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 §9.2。拒绝在结果第一行回答与 A.3 相同的码，形式为 `<code>: <message>`。
+声明的 schema 与结果形状属于协议。A.6 逐句给出描述的类别：两句是策略，随承载它们的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 §9.2，其余都是协议。拒绝在结果第一行回答与 A.3 相同的码，形式为 `<code>: <message>`。
 
 ### A.5 订阅文件
 
@@ -584,5 +584,5 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 - **声明通知。** Rust 或 Cordis 生产方先监听再读取：`ctx.listen::<dim_event_hub::Ready>()`，即名字为 `eventhub/ready` 的公开 `Event` 类型，然后 `ctx.get_at(&key)`；收到通知时再次读取该 key 并声明，见 2.1。`definePlugin` 行不需要这条通知：它 inject 该名字并在 `apply` 里声明，见 2.1。监听器持有一个类型，而不是一个运行中的 EventHub，所以在 EventHub 之前装载的生产方也能听到第一次提供它的那次 `apply`。通知本身由进程部件的一个依赖行发出，而不是在它的 `apply` 里：一行的服务只在部件活跃时才可被其他行读取，而部件在 `apply` 返回时才变为活跃。每次通知都声明不会增加 effect，因为重复声明是原地替换，见 A.1。
 - **投递。** `sessions.input` 就是在 `Key<dyn HostDispatch>` 上的一次 `invoke("input", json!([args]))`，见 `crates/dim-agent-scheduler/src/engine.rs:611-633`；回复是 `{inputId, sequence}`，错误码见 [session access A.6](../contracts/session-access.md#a6-错误)。
 - **存储。** 订阅文件使用 `PluginFileTransactions`，即 `dim_app_server::plugin_files::PluginFileTransactions`，见 `crates/dim-agent-scheduler/src/runs.rs:7,221-240`。
-- **Session 部件** 注入 `guideEntries`、`toolRegistry` 与 `eventSubscriptions`，读取 `sessionIdentity` 与 `sessionConfig`，并在 `apply` 中登记条目与 `events` 工具，与 Scheduler 的部件相同，见 `crates/dim-agent-scheduler/src/session.rs:147-201`。
+- **Session 部件** 注入 `guideEntries`、`toolRegistry`、`sessionIdentity` 与 `eventSubscriptions`，并在 `apply` 中登记条目与 `events` 工具，与 Scheduler 的部件相同，见 `crates/dim-agent-scheduler/src/session.rs:147-201`。
 - **TypeScript。** `npm/plugin.d.ts` 在 `sessions` 旁边声明这个服务：`EventHub`(`declare` 与 `publish`)、A.1 与 A.2 的请求和回复类型，以及列出附录 C 全部码的 `EventHubErrorThrown`。用 `definePlugin` 写成的行 inject `eventHub`，并用 `ctx.use<EventHub>('eventHub')` 读取它，在 `apply` 里声明；原始 Cordis 行则用 `ctx.get('eventHub')` 读取，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字)。
