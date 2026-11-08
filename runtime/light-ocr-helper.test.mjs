@@ -45,6 +45,32 @@ const ERROR_CODES = {
   postprocess_failed: 'local_runtime_failed',
 }
 
+// The model package whose `bundle/normalized-config.json` resource limits
+// IMAGE_LIMITS copies, at the version the lock installs.
+const MODEL = '@arcships/light-ocr-model-ppocrv6-small'
+const MODEL_VERSION = '0.3.4'
+
+// The limits the image engine must carry: MODEL_VERSION's bundle resource
+// limits with Modality's page bound as `maxPixels`.
+const IMAGE_LIMITS = {
+  maxWidth: 10000,
+  maxHeight: 10000,
+  maxPixels: 25000000,
+  maxDetectionSide: 4000,
+  maxDetectionCandidates: 3000,
+  maxRecognitionBatchSize: 8,
+  maxRecognitionWidth: 3200,
+  maxTemporaryBytes: 536870912,
+}
+
+test('the copied image limits belong to the model version the lock installs', () => {
+  const lock = JSON.parse(readFileSync(path.join(pluginSource, 'package-lock.json'), 'utf8'))
+  const model = lock.packages[`node_modules/${MODEL}`]
+  assert.ok(model !== undefined, `${MODEL} is not in package-lock.json`)
+  assert.equal(model.version, MODEL_VERSION,
+    `IMAGE_LIMITS in helper.cjs copies ${MODEL} ${MODEL_VERSION}'s bundle/normalized-config.json resource limits; both must change together`)
+})
+
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00])
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
 const PDF = Buffer.from('%PDF-1.7\nfixture document\n%%EOF\n')
@@ -219,7 +245,7 @@ test('an image becomes one page, in text and layout mode', t => {
     const result = run(context, ['--input', input, '--artifacts', context.artifacts, '--output-mode', mode], settings)
     assert.deepEqual(succeeded(result), { ok: true, pageCount: 1 })
     assert.deepEqual(result.calls, [
-      { call: 'createEngine', options: { execution: { provider: 'cpu' } } },
+      { call: 'createEngine', options: { execution: { provider: 'cpu' }, reducedLimits: IMAGE_LIMITS } },
       { call: 'recognizeEncoded', length: PNG.length, options: { applyExif: true } },
       { call: 'createEngine.close' },
     ])
@@ -231,6 +257,37 @@ test('an image becomes one page, in text and layout mode', t => {
     })
     assert.equal(readFileSync(path.join(context.artifacts, 'text.txt'), 'utf8'), 'DIMCODE\nOCR\nlow')
   }
+})
+
+test('an image above the page pixel bound is refused before recognition', t => {
+  const context = makeContext(t)
+  const input = writeFile(context.root, 'photo.png', PNG)
+  const result = run(context, ['--input', input, '--artifacts', context.artifacts], {
+    recognizeEncoded: { imageWidth: 6000, imageHeight: 5000 },
+  })
+  const error = refused(result, 'resource_limit_exceeded')
+  assert.ok(error.message.includes('Decoded image dimensions exceed engine limits'), error.message)
+  assert.deepEqual(artifactsOf(context), [])
+  assert.deepEqual(result.calls, [
+    { call: 'createEngine', options: { execution: { provider: 'cpu' }, reducedLimits: IMAGE_LIMITS } },
+    { call: 'recognizeEncoded', length: PNG.length, options: { applyExif: true } },
+    { call: 'createEngine.close' },
+  ])
+})
+
+test('an image at exactly the page pixel bound is accepted', t => {
+  const context = makeContext(t)
+  const input = writeFile(context.root, 'photo.png', PNG)
+  const result = run(context, ['--input', input, '--artifacts', context.artifacts], {
+    recognizeEncoded: { imageWidth: 5000, imageHeight: 5000, lines: [] },
+  })
+  assert.deepEqual(succeeded(result), { ok: true, pageCount: 1 })
+  assert.deepEqual(artifactsOf(context), ['result.json', 'text.txt'])
+  assert.deepEqual(document(context), {
+    text: '',
+    pageCount: 1,
+    pages: [{ page: 1, text: '', width: 5000, height: 5000, regions: [] }],
+  })
 })
 
 test('a PDF in text mode never resolves a page renderer', t => {

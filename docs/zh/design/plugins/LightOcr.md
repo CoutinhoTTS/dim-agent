@@ -96,7 +96,7 @@ helper 遵循 Modality 已定义的 helper 契约（Modality §A.2）：
 
 ### 4.2 图像
 
-图像输入只读一次，用 `createEngine({execution: {provider: "cpu"}}).recognizeEncoded(bytes, {applyExif: true})` 识别。结果是一页：`page` 为 1，`width` 与 `height` 取自 `imageWidth` 与 `imageHeight`，`regions` 取自 `lines`（`text`、`confidence`、`box` 作为多边形），`text` 由各行按阅读顺序连接。图像输入不产生 `page-NNNN.png`：它未被栅格化，`layout` 模式下其页面的 `imagePath` 缺席，因为输入本身就是页面图像。`invalid_image`、`unsupported_pixel_format` 或 `invalid_argument` 的 `OcrError` 是类型化拒绝 `invalid_input`。
+图像输入只读一次，用 `createEngine({execution: {provider: "cpu"}, reducedLimits: {maxPixels: 25_000_000, …}}).recognizeEncoded(bytes, {applyExif: true})` 识别。引擎以缩减后的引擎上限携带 Modality 的 25,000,000 像素页面界限：facade 原样透传 `reducedLimits`（0.5.9 的 `packages/light-ocr/src/index.d.ts` 第 11–15 行；其形状见 `packages/runtime/src/index.d.ts`:63–66），binding 要求每个旧字段并逐一校验（`bindings/node/src/addon.cpp`:447–484），且引擎只能缩减其 bundle 的上限（`docs/native-api.md`:344），因此这个界限没有点名的字段保持锁定 bundle 自身的值；这些被复制的上限属于 lock 安装的模型版本，lock 更新改变该版本时测试会失败。超过该界限的图像在识别开始前就是 `resource_limit_exceeded`：binding 先读编码头，在解码或推理之前把解码尺寸与该 `maxPixels` 比较（`bindings/node/src/encoded_image.cpp`:228、241–243）。结果是一页：`page` 为 1，`width` 与 `height` 取自 `imageWidth` 与 `imageHeight`，`regions` 取自 `lines`（`text`、`confidence`、`box` 作为多边形），`text` 由各行按阅读顺序连接。图像输入不产生 `page-NNNN.png`：它未被栅格化，`layout` 模式下其页面的 `imagePath` 缺席，因为输入本身就是页面图像。`invalid_image`、`unsupported_pixel_format` 或 `invalid_argument` 的 `OcrError` 是类型化拒绝 `invalid_input`。
 
 ### 4.3 PDF
 

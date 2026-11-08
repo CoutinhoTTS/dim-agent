@@ -40,11 +40,17 @@ if (settings.require !== undefined) throw new Error(settings.require.throw)
 exports.createEngine = async function createEngine(options) {
   log({ call: 'createEngine', options })
   fail(settings.createEngine?.throw)
+  const maxPixels = options?.reducedLimits?.maxPixels
   return {
     async recognizeEncoded(bytes, callOptions) {
       log({ call: 'recognizeEncoded', length: bytes.length, options: callOptions })
       fail(settings.recognizeEncoded?.throw)
       const spec = settings.recognizeEncoded ?? {}
+      // The real engine checks the decoded size against the engine's
+      // `maxPixels` while it decodes, before inference.
+      if (typeof maxPixels === 'number' && spec.imageWidth * spec.imageHeight > maxPixels) {
+        throw new OcrError('resource_limit_exceeded', 'Decoded image dimensions exceed engine limits')
+      }
       return { imageWidth: spec.imageWidth, imageHeight: spec.imageHeight, lines: spec.lines ?? [] }
     },
     async close() {

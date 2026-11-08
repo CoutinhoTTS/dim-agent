@@ -12,6 +12,22 @@ const MAX_FILE_BYTES = 104_857_600
 const DPI = 150
 const MAX_MESSAGE = 4096
 
+/** The limits the image engine carries: the pinned model bundle's own
+ * resource limits (`@arcships/light-ocr-model-ppocrv6-small` 0.3.4,
+ * `bundle/normalized-config.json`) with Modality's page bound as `maxPixels`.
+ * An engine may only reduce its bundle's limits, and `reducedLimits` must
+ * carry every legacy field, so the untouched limits stay the bundle's. */
+const IMAGE_LIMITS = {
+  maxWidth: 10_000,
+  maxHeight: 10_000,
+  maxPixels: MAX_PAGE_PIXELS,
+  maxDetectionSide: 4_000,
+  maxDetectionCandidates: 3_000,
+  maxRecognitionBatchSize: 8,
+  maxRecognitionWidth: 3_200,
+  maxTemporaryBytes: 512 * 1024 * 1024,
+}
+
 /** The platform package of each light-ocr platform identity, as the facade's
  * own document API names them. */
 const PLATFORM_PACKAGES = {
@@ -174,7 +190,7 @@ function page(number, width, height, lines) {
 }
 
 async function images(api, bytes) {
-  const engine = await api.createEngine({ execution: { provider: 'cpu' } })
+  const engine = await api.createEngine({ execution: { provider: 'cpu' }, reducedLimits: IMAGE_LIMITS })
   try {
     const result = await engine.recognizeEncoded(bytes, { applyExif: true })
     return [page(1, result.imageWidth, result.imageHeight, result.lines)]
