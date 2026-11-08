@@ -25,6 +25,7 @@ provider and the methods it serves to other languages. This table says which to 
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented when the host supplies an authorized product root and provisions parent directories; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
+| Publish events to subscribed branches | `eventHub`, process | Implemented by EventHub: `declare` and `publish`, served to the calling row. A row that applies first waits for `eventhub/ready` before it reads the service. |
 | Read current branch permissions or host defaults | `sessionPermissions`, process | Generated from Agents: `permission({sessionId, branchId})` and `permissionDefaults({})`. |
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
 | Read/update business configuration | `settings`, process | Owner registration, read/write and Settings event delivery implemented; a row registers its sources with `register` in its `apply`. |
@@ -473,6 +474,60 @@ Uint8Array, typed directory entries or void and throw `WorkflowFilesErrorThrown`
 without native root indices or caller context arguments. Mutating methods decode
 package selectors but refuse them as `invalid_path` before I/O. Project enablement
 and definition semantics remain with Settings and the Workflow package.
+
+## Publishing events
+
+Declare `inject: ['eventHub']` and use `ctx.use<EventHub>('eventHub')`. EventHub serves
+this process service to every language of a row; it has `declare` and `publish` and
+nothing else, so a producer cannot create or remove another Session's subscriptions.
+The injected name gates the row: it starts once EventHub provides the service and
+unloads with it. Register the `eventhub/ready` listener before reading, declare at
+`apply` and on that notice, and declare again when a publish answers `unknown_source`.
+`declare` names the source, its guide (the text the model reads for its marker) and its
+types ([EventHub §2.1](design/plugins/EventHub.md#21-the-catalog-of-sources-and-types)).
+`publish` answers one receipt per target branch: `delivered` carries the `inputId` and
+`sequence`, `gone` a branch that takes no more input, and `failed` a `code` that says
+whether the write is in doubt — `transport` means the `sessions` call failed or its reply
+could not be read. A retry with the same `id` is safe: delivery is idempotent per branch,
+and a branch that already holds the input answers `repeated: true`. The
+[producer fixture](../runtime/fixtures/event-hub-producer.ts) is this row with the retry.
+
+```ts
+import { definePlugin } from '@arcships/rutis'
+import type { EventHub, EventHubDeclaration, EventHubErrorThrown } from 'dimcode/plugin'
+
+export default definePlugin({
+  name: 'ExampleProducer',
+  inject: ['eventHub'],
+  provides: {},
+  apply(ctx) {
+    const hub = ctx.use<EventHub>('eventHub')
+    const declaration: EventHubDeclaration = {
+      source: 'example',
+      guide: 'An `example.ping` event says the producer is alive; no reply is needed.',
+      types: [{ type: 'example.ping', description: 'A liveness ping', mode: 'queue' }],
+    }
+    const publish = async () => {
+      await hub.declare(declaration)
+      const request = { source: 'example', type: 'example.ping', id: 'ping-1', body: 'hello' }
+      try {
+        const reply = await hub.publish(request)
+        const failures = reply.deliveries.filter(delivery => delivery.status === 'failed')
+        if (failures.length > 0) console.warn('publish answered', failures)
+      } catch (error) {
+        const failure = error as EventHubErrorThrown
+        // unknown_source: this row holds no declaration, so declare and retry
+        // with the same id, which each branch accepts once.
+        if (failure.code !== 'unknown_source') throw failure
+        await hub.declare(declaration)
+        await hub.publish(request)
+      }
+    }
+    ctx.on('eventhub/ready', publish)
+    return publish()
+  },
+})
+```
 
 ## Session tools and client methods
 

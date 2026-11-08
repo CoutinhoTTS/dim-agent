@@ -171,11 +171,71 @@ export interface Sessions {
   launch(request: LaunchRequest): Promise<SessionsResult<LaunchReply>>;
   input(request: InputWrite): Promise<SessionsResult<InputReceipt>>;
   lookup(request: LookupRequest): Promise<SessionsResult<LookupReply>>;
+  /** Whether the id still exists: absent means deleted, and a closed,
+   * restorable Session exists. Reads only; never acquires or restores a
+   * Session. */
+  exists(request: { sessionId: string }): Promise<SessionsResult<{ exists: boolean }>>;
   history(request: HistoryRequest): Promise<SessionsResult<HistoryPage>>;
   withdraw(request: WithdrawRequest): Promise<SessionsResult<WithdrawReply>>;
   stop(request: StopRequest): Promise<SessionsResult<SequenceReply>>;
   idle(request: SessionRef): Promise<SessionsResult<SequenceReply>>;
   delete(request: { sessionId: string }): Promise<SessionsResult<Record<string, never>>>;
+}
+
+/** One type an `eventHub` source declares (design A.1). */
+export interface EventHubType {
+  type: string;
+  description: string;
+  mode: 'queue' | 'steer' | 'append';
+}
+/** `eventHub.declare`: a source whose declaration lasts while the calling row
+ * is loaded (design A.1). */
+export interface EventHubDeclaration {
+  source: string;
+  guide: string;
+  types: EventHubType[];
+}
+/** One explicit target of a publish (design A.2). */
+export interface EventHubTarget {
+  sessionId: string;
+  branchId?: string;
+  mode?: 'queue' | 'steer' | 'append';
+}
+/** `eventHub.publish` (design A.2). */
+export interface EventHubPublishRequest {
+  source: string;
+  type: string;
+  /** At most 128 bytes; absent: a UUID. Retrying with the same id is idempotent per branch. */
+  id?: string;
+  title?: string;
+  body: string;
+  attributes?: Record<string, string>;
+  to?: EventHubTarget[];
+}
+/** One target branch's outcome of a publish (design 2.3). */
+export type EventHubDelivery =
+  | { status: 'delivered'; sessionId: string; branchId: string; subscriptionIds: string[];
+      inputId: string; sequence: number; truncated?: boolean; repeated?: boolean }
+  | { status: 'gone'; sessionId: string; branchId: string; subscriptionIds: string[];
+      code: 'branch_missing' | 'branch_ended' }
+  | { status: 'failed'; sessionId: string; branchId: string; subscriptionIds: string[];
+      code: 'session_closed' | 'reloading' | 'rejected' | 'ambiguous' |
+        'publication_unknown' | 'transport' | 'failed'; message: string };
+/** `publish`'s reply, after every target has an outcome (design A.2). */
+export interface EventHubPublishReply { eventId: string; deliveries: EventHubDelivery[] }
+/** The codes the `eventHub` service throws (design Appendix C): its own and
+ * the `sessions` codes it answers unchanged. */
+export type EventHubErrorThrown = import('./branch-services.js').RustError<'EventHubError',
+  'invalid_params' | 'invalid_event' | 'invalid_declaration' | 'duplicate_source' |
+  'no_caller_row' | 'unknown_source' | 'unknown_type' | 'too_large' | 'storage' |
+  'transport' | 'failed' | 'session_closed' | 'branch_missing' | 'branch_ended' |
+  'reloading' | 'rejected' | 'ambiguous' | 'publication_unknown', undefined>;
+/** Process service `eventHub`, provided by EventHub to producer rows. A row
+ * reads it with `ctx.use<EventHub>('eventHub')`; it is optional, so a row
+ * that applied first listens for `eventhub/ready` before reading. */
+export interface EventHub {
+  declare(declaration: EventHubDeclaration): Promise<void>;
+  publish(request: EventHubPublishRequest): Promise<EventHubPublishReply>;
 }
 
 /** The host's creation-time snapshot (`sessionConfig.get()`, `ToolCall.config`);
