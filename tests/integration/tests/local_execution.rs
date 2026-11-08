@@ -2201,3 +2201,139 @@ async fn wait_ends_on_a_steer_or_a_stop_and_refuses_a_second_wait() {
     session.close().await.unwrap();
     harness.shutdown().await;
 }
+
+/// The input an EventHub delivery writes: its submission id starts with the
+/// prefix Wait matches (EventHub design §9.3).
+fn event_input(source: &str, event_id: &str, mode: InputMode) -> InputMessageData {
+    InputMessageData {
+        submission_id: Some(format!("eventhub:{source}:{event_id}")),
+        ..InputMessageData::text("event", Some(mode))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queued_event_ends_a_wait_without_a_task_id() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs": 20000}))])
+        .await;
+    until(&session, "tool call", |events| {
+        count(events, "step/tool-call") == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    session
+        .input(event_input("im", "e1", InputMode::Queue), "main")
+        .await
+        .unwrap();
+    let events = until(&session, "event", |events| wait_texts(events).len() == 1).await;
+    assert_eq!(
+        wait_texts(&events),
+        vec!["wait ended: event im e1; it is queued and arrives when this turn ends"]
+    );
+    let structured = results(&events)[0].structured_content.clone().unwrap();
+    assert_eq!(structured["reason"], "event");
+    assert_eq!(structured["source"], "im");
+    assert_eq!(structured["eventId"], "e1");
+    assert!(structured["waitedMs"].is_u64());
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steered_event_ends_a_wait_without_a_task_id() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs": 20000}))])
+        .await;
+    until(&session, "tool call", |events| {
+        count(events, "step/tool-call") == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    session
+        .input(event_input("im", "e2", InputMode::Steer), "main")
+        .await
+        .unwrap();
+    let events = until(&session, "event", |events| wait_texts(events).len() == 1).await;
+    assert_eq!(wait_texts(&events), vec!["wait ended: event im e2"]);
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_event_does_not_end_a_wait_with_a_task_id() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[("wait", json!({"taskId": "exec-other", "timeoutMs": 1500}))],
+        )
+        .await;
+    until(&session, "tool call", |events| {
+        count(events, "step/tool-call") == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    session
+        .input(event_input("im", "e3", InputMode::Queue), "main")
+        .await
+        .unwrap();
+    let events = until(&session, "timeout", |events| wait_texts(events).len() == 1).await;
+    assert_eq!(wait_texts(&events), vec!["wait ended: timeout"]);
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_append_event_does_not_end_a_wait() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs": 1500}))])
+        .await;
+    until(&session, "tool call", |events| {
+        count(events, "step/tool-call") == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    session
+        .input(event_input("im", "e4", InputMode::Append), "main")
+        .await
+        .unwrap();
+    let events = until(&session, "timeout", |events| wait_texts(events).len() == 1).await;
+    assert_eq!(wait_texts(&events), vec!["wait ended: timeout"]);
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guide_input_does_not_end_a_wait() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs": 1500}))])
+        .await;
+    until(&session, "tool call", |events| {
+        count(events, "step/tool-call") == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    session
+        .input(
+            InputMessageData {
+                submission_id: Some("eventhub-guide:sub_test:im".into()),
+                ..InputMessageData::text("guide", Some(InputMode::Append))
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    let events = until(&session, "timeout", |events| wait_texts(events).len() == 1).await;
+    assert_eq!(wait_texts(&events), vec!["wait ended: timeout"]);
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
