@@ -74,7 +74,7 @@
 ```mermaid
 flowchart LR
   C["客户端平面"] -->|"RPC"| H["宿主平面<br/>Session / branch 实例"]
-  H -->|"leaf 接缝：借 key"| L["逻辑 leaf<br/>Goal · Questions · Recall"]
+  H -->|"leaf 接缝：借 key"| L["逻辑 leaf<br/>Questions"]
   H -->|"资源接缝：数据服务"| R["资源 leaf<br/>exec · fs · OCR · MCP"]
   H -->|"状态接缝：data face"| D["远程 PG<br/>session state"]
 ```
@@ -112,7 +112,8 @@ flowchart LR
 | 大模块 | 默认 | 可远程形态 |
 | --- | --- | --- |
 | 实例核心（Loop、InputQueue、Permission、ToolExecutor、TimelineTree） | 宿主 | 不远程；热路径与顺序 |
-| 会话工具与方法（Questions、SessionBroadcastEnd） | 宿主或 leaf | leaf |
+| 会话工具与方法（Questions） | 宿主或 leaf | leaf |
+| SessionBroadcastEnd | 宿主 | 有 idle release 数据面后可 leaf（§4.2） |
 | WorkflowSession | leaf | 已经是 TS leaf |
 | Goal、Recall、BranchTool | 宿主 | 需 `tree.info`/`tree.query`、change 写入或 `branchLine` 数据面（§4.2） |
 | Wait | 宿主 | `wait` 有操作面后才可 leaf（§4.9） |
@@ -349,7 +350,7 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 按依赖和资源位置，Dim 的部件分六档。判据不是“inject 全是数据”：
 
 - 每个 `inject` 在 `host_key` 上有 dispatcher；宿主按类型查的服务（`branch.service::<T>()`、`Key<T>`）也算消费者。
-- 部件只能使用 dispatcher 上声明的方法。`#[service(skip)]` 的 `TreeCommands::get`、`branch.service::<BranchLine>()`、`TimelineTree` 的私有方法都不算。
+- 部件只能使用 dispatcher 上声明的方法。`#[service(skip)]` 的 `TreeCommands::get`、`branch.service::<BranchLine>()`、`TimelineTree` 的私有方法都不算。注入服务里 `#[serde(skip)]` 的字段也拿不到，例如 `SessionIdentity.unloading`。
 - 部件不能捕获进程内创建的非服务 Rust 状态（例如 `GoalSession` 的 `Changes`）。
 
 三条同时成立，才可能 leaf。
@@ -357,8 +358,8 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 | 档 | 部件 | 怎么 leaf |
 | --- | --- | --- |
 | 已经是 leaf | WorkflowSession | 本来就是 TypeScript，`workflowRuns` 是 `call: async` 数据面；把 runtime 连接换成远程即可 |
-| 纯逻辑 leaf（今天） | Questions、SessionBroadcastEnd | inject 可借，只用 dispatched 方法，且不提供宿主按类型查的服务；移植到 TS/Python 或 Rust leaf host |
-| 用了 skipped/私有 API，需数据面 | Goal（`Changes` 捕获、`TreeCommands::get`、`settings`）、Recall（`get`、`branch.sequence/query`）、BranchTool（`get`、`branch.service::<BranchLine>()`）、TreeTimeline（私有 tree）、SessionBroadcast（内部状态） | 先给 `tree.info`/`tree.query`、`branchLine`、Goal 的 change 写入补数据面，或把这些部件留在宿主 |
+| 纯逻辑 leaf（今天） | Questions | inject 可借，只用 dispatched 方法，且不提供宿主按类型查的服务；移植到 TS/Python 或 Rust leaf host |
+| 用了 skipped/私有 API，需数据面 | Goal（`Changes` 捕获、`TreeCommands::get`）、Recall（`get`、`branch.sequence/query`）、BranchTool（`get`、`branch.service::<BranchLine>()`）、TreeTimeline（私有 tree）、SessionBroadcast（内部状态）、SessionBroadcastEnd（`SessionIdentity.unloading` 是 `#[serde(skip)]`） | 先给 `tree.info`/`tree.query`、`branchLine`、Goal 的 change 写入、SessionBroadcastEnd 的 idle release 补数据面，或把这些部件留在宿主 |
 | 提供类型服务，需操作面 | Wait（`wait` 返回 `WaitResult`、收 `CancellationToken`）、BranchLine（`branchLine`）、InputQueue（`inputQueue`）、InputMethods（`submitChecks`）、PrepareModelHost（`prepareModelHost`） | 宿主用 `branch.service::<T>()` 或 `Key<T>` 查；先加操作面/数据面，或改由宿主自己跑 |
 | 换现有数据面后可 leaf | SessionTitle（`settingsService` → `settings`，`sessionStore` → `sessionMetadata`，`auxiliaryModelHost` → `auxiliaryModel`）、SchedulerSession（`scheduleJobs`、`wakeups`）、Attachments（`sessionFilesHost`，目标名 `sessionFiles`）、PromptSuggestion（`modelHost`、`providerConnectionResolver`、`promptSuggestionSettingsHost`） | 把 Rust 类型键的注入换成已有数据面的名字；没有对应数据面的先加 |
 | 资源 leaf | HostPlatform、FileStorage、SqliteStorage、WorkspaceTools、ShellSession、SkillsCatalog、Mcp、Modality、ExternalAgent、PluginManager、RuntimeManager | 在资源所在机器上跑，本地 I/O，对外提供数据服务；现有 Rust 实现放进 Rust leaf host 复用 |
@@ -368,7 +369,9 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 
 SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件注入 `SettingsService`、`SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）。这四个服务要的操作都已有数据面：`SettingsService` 的 `read_declared`/`register_declared` 是 `settings.read`/`settings.register`，`SessionStore` 的 `metadata`/`set_title` 是 `sessionMetadata.read`/`sessionMetadata.setTitle`，`AuxiliaryModelHost::complete` 是 `auxiliaryModel.complete`（`crates/dim-session-title/src/lib.rs:286`、`:297`、`:368`、`:441`–`:450`）；`PartRegistry::register` 对应跨语言的 `partRegistry.registerDefinition`，其余注入 `sessions`、`sessionIdentity`、`sessionConfig`、`sessionLifecycle`、`sessionMethods` 本来就跨语言。所以它不需要新 dispatcher，只要把这些类型键的调用换成数据面的名字——和 GoalBranch 的 `settingsService` → `settings` 是同一个动作。
 
-“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。第一批选 Questions、SessionBroadcastEnd；WorkflowSession 已经是一个 TS leaf，可以直接作为第一个远程 leaf 验证；SessionTitle 换完三个名字后进下一批；Wait 要等操作面，Goal/Recall/BranchTool/TreeTimeline/SessionBroadcast 要先补数据面。
+SessionBroadcastEnd 也不在第一档：它只注入 `SessionIdentity`（`crates/dim-agent-capabilities/src/session_broadcast.rs:192`–`:193`），但卸载 effect 读 `identity.unloading.is_cancelled()`（`:214`），用来区分“实例空闲释放”和“业务关闭”。`SessionIdentity.unloading` 是 `#[serde(skip)]`（`crates/dim-agent-runtime/src/config.rs:118`–`:119`），`sessionIdentity.get` 只回 `{sessionId, restored}`（`:128`–`:130`）。leaf 拿不到这个 token，只能在每次卸载都发 `Closed`（空闲释放也会被当成关闭）或从不发，事件契约随部件位置改变。所以在 `sessionIdentity` 或 `sessionLifecycle` 上加一个 idle release/close 的数据面之前，它留在宿主。
+
+“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。第一批选 Questions；WorkflowSession 已经是一个 TS leaf，可以直接作为第一个远程 leaf 验证；SessionTitle 换完三个名字后进下一批；SessionBroadcastEnd 要等 idle release 数据面；Wait 要等操作面；Goal/Recall/BranchTool/TreeTimeline/SessionBroadcast 要先补数据面。
 
 ```mermaid
 flowchart LR
@@ -379,7 +382,7 @@ flowchart LR
     S --> M
   end
   subgraph LEAF["leaf 运行时（本机 pipe 或远端 websocket）"]
-    G["部件副本<br/>Questions · SessionBroadcastEnd<br/>WorkflowSession（TS）"]
+    G["部件副本<br/>Questions<br/>WorkflowSession（TS）"]
     R["资源 leaf<br/>execHost · fsHost · db"]
   end
   M -->|"挂载副本，借 key"| G
@@ -392,8 +395,8 @@ flowchart LR
 flowchart TB
   ALL["Dim 部件"] --> KIND{"它需要什么？"}
   KIND -->|"已经是 TS leaf"| ALREADY["已经是 leaf<br/>WorkflowSession<br/>workflowRuns 是数据面"]
-  KIND -->|"inject 可借且只用 dispatched 方法"| PURE["纯逻辑 leaf<br/>Questions · SessionBroadcastEnd"]
-  KIND -->|"用了 skipped/私有 API"| PRIV["需数据面<br/>Goal · Recall · BranchTool<br/>TreeTimeline · SessionBroadcast"]
+  KIND -->|"inject 可借且只用 dispatched 方法"| PURE["纯逻辑 leaf<br/>Questions"]
+  KIND -->|"用了 skipped/私有 API"| PRIV["需数据面<br/>Goal · Recall · BranchTool<br/>TreeTimeline · SessionBroadcast · SessionBroadcastEnd"]
   KIND -->|"提供宿主按类型查的服务"| TYPED["需操作面<br/>Wait · BranchLine · InputQueue<br/>InputMethods · PrepareModelHost"]
   KIND -->|"换现有数据面"| FIX["换名后可 leaf<br/>SessionTitle · SchedulerSession<br/>Attachments · PromptSuggestion"]
   KIND -->|"本机的 FS / 进程 / DB"| RES["资源 leaf<br/>HostPlatform · FileStorage · SqliteStorage<br/>WorkspaceTools · ShellSession · SkillsCatalog<br/>Mcp · Modality · PluginManager"]
@@ -511,9 +514,10 @@ flowchart TB
 | 插件/部件 | 现状 | 动作 |
 | --- | --- | --- |
 | WorkflowSession | 已经是 TypeScript leaf；`workflowRuns` 是 `call: async` 数据面 | 直接作为远程 leaf 验证；不做数据面 |
-| Questions、SessionBroadcastEnd | inject 可借，只用 dispatched 方法 | 移植 |
+| Questions | inject 可借，只用 dispatched 方法 | 移植 |
+| SessionBroadcastEnd | 只依赖 `sessionIdentity`，但在卸载 effect 读 `unloading`（`#[serde(skip)]`）区分 idle release 与业务关闭 | 先给 idle release/close 加数据面，再移植 |
 | SessionTitle | 三个 Rust 类型键，数据面已存在 | 换 `settings`、`sessionMetadata`、`auxiliaryModel`，再移植 |
-| Goal | `GoalSession` 捕获 `Changes`、调 `TreeCommands::get`（skip）；`GoalBranch` 要 `settingsService` | 给 change 写入、`tree.info`/`tree.query`、`settings` 补数据面，或留宿主 |
+| Goal | `GoalSession` 捕获 `Changes`、调 `TreeCommands::get`（skip）；`GoalBranch` 要 `settingsService` | `GoalBranch` 换现有的 `settings`；给 change 写入、`tree.info`/`tree.query` 补数据面，或留宿主 |
 | Recall、BranchTool | `TreeCommands::get`、`branch.sequence/query`、`branch.service::<BranchLine>()` | 补 `tree.info`/`tree.query` 和 `branchLine` 数据面，或留宿主 |
 | TreeTimeline、SessionBroadcast | 私有 tree / 内部状态 | 留宿主，或先设计数据面 |
 | Wait、BranchLine、InputQueue、InputMethods、PrepareModelHost | 提供 `wait`/`branchLine`/`inputQueue`/`submitChecks`/`prepareModelHost`；Wait 收 `CancellationToken`、返回 `WaitResult` | 先加操作面/数据面，或留宿主 |
@@ -531,7 +535,7 @@ flowchart TB
 顺序：
 
 1. WorkflowSession 放到远程 runtime（它已经是 TS leaf，不需要形状改造）。
-2. 移植 Questions、SessionBroadcastEnd。
+2. 移植 Questions；SessionBroadcastEnd 等 idle release 数据面。
 3. SessionTitle 换 `settings`、`sessionMetadata`、`auxiliaryModel` 三个名字。
 4. Goal、Recall、BranchTool 补 tree/change 数据面；SchedulerSession、Attachments、PromptSuggestion 补各自数据面。
 5. 资源 leaf；存储见 #1298，不在本路线。
@@ -587,8 +591,8 @@ flowchart TB
 | 类型 | 名字 | 改法 |
 | --- | --- | --- |
 | 数据内容、未标记 | `executionSettingsHost`、`toolchainSourceHost`、`sessionFilesHost`、`historyRenderer`、`selectableModelsHost`、`auxiliaryModelHost`、`promptSuggestionSettingsHost`、`worktreeAssociations`、`listenAddresses`、`sessionClientsHost`、`hooksService`、`mcpService`、`skillsCatalog`、`uiExtensions`、`loader`、`agentIndex`、`collaborationDirectory`、`credentialVariablesHost`、`reservedMethods`、`agentConfig`、`collaborationConfig`、`skillsConfig`、`initialPromptConfiguration`、`promptRegistry`、`toolSourcesView`、`faultReporter`、`branchOpening`、`configurationPublisher`、`configureControl`、`fileReads` | 定义 serde 类型加 `#[rutis::service]`，catalog 标 `data`。带回调的（`submitChecks`、`uiExtensions` 的部分方法）回调按引用跨，但不能在锁里同步调用 |
-| 操作服务 / 类型面 | `wait`、`branchLine`、`inputQueue`、`submitChecks`、`prepareModelHost` | 先设计操作面（`start`/`wait`/`result`）或留宿主；`wait` 收 `CancellationToken`、返回 `WaitResult`，不是 serde 数据 |
-| 对象→操作 | `hostPlatform`、`fileStorage`、`sqliteStorage`、`sessionStore`、`timelineStore`、`toolHost`、`sessionLoader`、`timelineFactory`、`mcpSession`、`collaborationSession`、`backgroundExec`、`approval`、`permission`、`inputQueue` | 发 id，拆成 `start`/`wait`/`kill`、`open`/`read`/`write`/`close`、`append`/`query`/`ack`、`decide`/`cancel`；实现留在所有者 |
+| 操作服务 / 类型面 | `wait`、`branchLine`、`submitChecks`、`prepareModelHost` | 先设计操作面（`start`/`wait`/`result`）或留宿主；`wait` 收 `CancellationToken`、返回 `WaitResult`，不是 serde 数据 |
+| 对象→操作 | `hostPlatform`、`fileStorage`、`sqliteStorage`、`sessionStore`、`timelineStore`、`toolHost`、`sessionLoader`、`timelineFactory`、`mcpSession`、`collaborationSession`、`backgroundExec`、`approval`、`permission` | 发 id，拆成 `start`/`wait`/`kill`、`open`/`read`/`write`/`close`、`append`/`query`/`ack`、`decide`/`cancel`；实现留在所有者 |
 | 新接口直接按数据设计 | `execHost`、`fsHost`、`dbHost` | 资源 leaf 和远程 DB 不包旧对象，直接定义操作 |
 
 每个服务的改造流程：
@@ -645,7 +649,7 @@ flowchart TB
 ### 阶段 0b：远程 leaf
 
 - 把 Node/Python runtime row 的 `Launcher`（本机 pipe）换成 websocket 连接，或新增一条远程 runtime 行；同一个 Dim 插件在远端 leaf 里跑，它的 Session/branch 部件挂进宿主实例。
-- 先选 WorkflowSession（它已经是 TS leaf），或移植 Questions、SessionBroadcastEnd；不要选依赖 `HostPlatform` 或 `SettingsService` 的。
+- 先选 WorkflowSession（它已经是 TS leaf），或移植 Questions；不要选依赖 `HostPlatform` 或 `SettingsService` 的。
 - 这一步不需要 Rust leaf host；Rust 插件另说。
 
 ### 阶段 1：一次性 exec
