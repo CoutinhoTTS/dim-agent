@@ -153,7 +153,8 @@ pub(crate) async fn publish(
     .map_err(|error| EventHubError::transport(format!("the publish task ended: {error}")))?
 }
 
-/// One publish from its argument checks to its receipt (design §2.4).
+/// One publish from taking its event lock to its receipt, in the task
+/// `publish` spawns (design §2.4).
 async fn publish_to_completion(
     shared: Arc<Shared>,
     request: PublishRequest,
