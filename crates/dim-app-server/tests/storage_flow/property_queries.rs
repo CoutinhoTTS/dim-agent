@@ -967,6 +967,34 @@ async fn text_candidates_survive_output_merging_reopen_fork_and_session_deletion
         panic!("logical fragment count")
     };
     assert_eq!(count, 3);
+    let mut single = fields(&["id"]);
+    single.filter = Some(QueryFilter::And {
+        conditions: vec![
+            eq("kind", json!("step/text")),
+            QueryFilter::TextCandidate {
+                field: "data".into(),
+                partition_by: vec![],
+                terms: vec!["here".into()],
+            },
+        ],
+    });
+    let dim_agent_runtime::QueryOutput::Rows { rows } = store
+        .query(&scope(1003), &single, Some(&page(16)))
+        .await
+        .unwrap()
+        .result
+    else {
+        panic!("one matching logical fragment");
+    };
+    assert_eq!(rows.len(), 1);
+    for (select, expected) in [
+        (QuerySelect::Count, json!({"kind":"count","count":1})),
+        (QuerySelect::Exists, json!({"kind":"exists","exists":true})),
+    ] {
+        single.select = select;
+        let reply = store.query(&scope(1003), &single, None).await.unwrap();
+        assert_eq!(serde_json::to_value(reply.result).unwrap(), expected);
+    }
     for term in ["中文", "İ", "again\0afterzero", "un", "afterzero"] {
         let mut fallback = query.clone();
         let Some(QueryFilter::And { conditions }) = &mut fallback.filter else {
