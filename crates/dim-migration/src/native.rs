@@ -5,7 +5,6 @@ use crate::{
 use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::{BranchRecord, SessionConfig, StoredEvent};
 use dim_agent_types::*;
-use dim_app_server::protocol::SessionOrigin;
 use dim_app_server::storage::SqliteStorage;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -406,20 +405,6 @@ impl Native {
             },
             session,
         )))
-    }
-
-    pub fn classify_session(&self, session: &str, origin: SessionOrigin) -> Result<()> {
-        if origin != SessionOrigin::Unknown {
-            self.db
-                .lock()
-                .unwrap()
-                .execute(
-                    "UPDATE agent_sessions SET origin=?2 WHERE session_id=?1 AND origin='unknown'",
-                    params![session, origin.as_str()],
-                )
-                .map_err(failure)?;
-        }
-        Ok(())
     }
 
     pub fn link_session_parents<'a>(

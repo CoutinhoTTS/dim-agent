@@ -293,7 +293,6 @@ async fn session(
     };
     if let Some((outcome, session)) = target.session_receipt(&data.id, &digest)? {
         if outcome == Outcome::AlreadyImported {
-            target.classify_session(&session, data.origin)?;
             record_history(owner, task, &historical, &session, outcome).await?;
         }
         return Ok(result(outcome, session, archive.omitted));

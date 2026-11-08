@@ -53,7 +53,9 @@ Provider 与 Provider 选择由 Provider 的转换生成：Migration 从快照�
 
 会话目录分类遵循 [Session 分类](../appserver/session-classification.md)。旧设置的 `agentProfile: "reviewer"`、布尔值为真的 `__approvalReviewer`、`__subagentOrigin`、`__workflowAgentOrigin`、非空 `parentSessionId`，以及指向会话的 `subagent` 关系，标为 `internal`。父 ID 优先取设置，其次取唯一的 `subagent` 来源。没有内部来源时，显式的 `__sessionSource: "acp"` 标为 `acp`。缺少显式来源的旧记录须同时具有 ACP 的两个数组 `additionalDirectories` 和 `mcpServers`，且无指向该会话的关系，才沿用旧版 ACP 判定。其余来源保持 `unknown`。
 
-导入匹配已有回执时，只补写仍为 `unknown` 的来源。会话阶段结束时，用本次已导入或匹配已有回执的目标 ID 补齐父关系。父会话缺失、已删除、暂缓或导入失败时保留内部分类，后续重试可补齐关系。已有父关系保留，自引用和闭环不写入。关系补写只改变目录元数据，历史会话的协作角色和权限由普通导入规则确定。
+会话来源在首次写入目标库时确定。使用旧版导入器写入 Alpha 目标库的会话需重置目标库，再从原 v2 来源重新导入以获得分类。
+
+会话阶段结束时，用本次已导入或匹配已有回执的目标 ID 补齐父关系。父会话缺失、已删除、暂缓或导入失败时保留内部分类，后续重试可补齐关系。已有父关系保留，自引用和闭环不写入。关系补写只改变目录元数据，历史会话的协作角色和权限由普通导入规则确定。
 
 完整历史与模型有效上下文分别保存。界面通过正常历史投影逐条查看旧消息；模型使用旧版有效摘要及未压缩后缀，保留 `user`、`assistant`、`tool_result` 角色与工具配对。回退边界、私有输入、重试展示和压缩边界在来源解析时确定，不能让展示需要扩大续聊上下文。
 

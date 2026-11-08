@@ -147,7 +147,7 @@ fn snapshot(home: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_session_catalog_repairs_existing_imports_and_keeps_children_inert() {
+async fn legacy_session_catalog_classifies_new_imports_and_keeps_children_inert() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(
         directory.path(),
@@ -242,12 +242,6 @@ async fn legacy_session_catalog_repairs_existing_imports_and_keeps_children_iner
         .unwrap()
     };
     let original_count = event_count(&native);
-    native
-        .execute(
-            "UPDATE agent_sessions SET origin='unknown',leader_session_id=NULL",
-            [],
-        )
-        .unwrap();
     drop(native);
     let target_config = target.join("config.json");
     assert_eq!(

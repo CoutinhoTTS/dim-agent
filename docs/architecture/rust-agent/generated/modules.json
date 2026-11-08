@@ -43483,15 +43483,6 @@
     },
     {
       "from": "dim_migration::native",
-      "to": "dim_app_server::protocol",
-      "references": [
-        "path SessionOrigin",
-        "path SessionOrigin::Unknown",
-        "use dim_app_server::protocol::SessionOrigin"
-      ]
-    },
-    {
-      "from": "dim_migration::native",
       "to": "dim_app_server::storage::catalog",
       "references": [
         "path dim_app_server::storage::initialize_session_catalog"
