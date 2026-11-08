@@ -126,8 +126,22 @@ impl TimelineStore for MemoryTimelineStore {
     }
     fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            if self.batch_end_at(key, sequence).await? > sequence {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {sequence} is inside an atomic batch"
+                )));
+            }
+            Ok(())
+        })
+    }
+    fn batch_end_at<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(async move {
             if sequence == 0 {
-                return Ok(());
+                return Ok(0);
             }
             let sessions = self.0.lock().unwrap();
             let session = sessions.get(&key.session_id).ok_or_else(|| {
@@ -140,12 +154,7 @@ impl TimelineStore for MemoryTimelineStore {
             let record = branch.events.get((sequence - 1) as usize).ok_or_else(|| {
                 AgentError::Storage(format!("Timeline has no sequence {sequence}"))
             })?;
-            if record.batch_end > sequence {
-                return Err(AgentError::InvalidInput(format!(
-                    "sequence {sequence} is inside an atomic batch"
-                )));
-            }
-            Ok(())
+            Ok(record.batch_end)
         })
     }
     fn append(

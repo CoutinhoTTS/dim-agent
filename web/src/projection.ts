@@ -12,7 +12,7 @@
  * `rows` re-renders only the rows that changed.
  */
 import { failureLine } from "./failures"
-import { GoalFold, type Goal } from "./goal"
+import type { Goal } from "./goal"
 import type { AskQuestion, ModelFailure, ModelId, ModelProgress, ProviderPresentation, QueuedInput, SessionEvent, ToolResult } from "./rpc/protocol"
 
 export type TimelineRow =
@@ -56,17 +56,13 @@ export class Projection {
   private asks: Array<{ requestId: string; callId: string; questions: AskQuestion[] }> = []
   /** Messages the server holds in the queue: written, not yet adopted, not withdrawn. */
   private held = new Map<string, QueuedInput>()
-  /** The branch's goal, folded from its events (goal.ts). */
-  readonly goalFold = new GoalFold()
+  goal: Goal | undefined
+  private controlCursor = 0
+  private output: { requestId: string; textCharacters: number; thinkingCharacters: number } | undefined
   /** Requests whose text, thinking or tool row already showed. */
   private showedOutput = new Set<string>()
   /** The error of the model failure the latest turn end may repeat. */
   private shownFailure: string | undefined
-
-  /** The goal in force on this branch. */
-  get goal(): Goal | undefined {
-    return this.goalFold.goal()
-  }
 
   /** The messages still queued on this branch, oldest first. */
   queued(): readonly QueuedInput[] {
@@ -78,15 +74,47 @@ export class Projection {
     return this.asks
   }
 
-  /** Applies one event; false when it was already applied. */
-  apply(event: SessionEvent): boolean {
-    if (event.sequence <= this.cursor) return false
-    this.cursor = event.sequence
-    this.goalFold.apply(event)
+  restoreControls(inputs: readonly QueuedInput[], asks: typeof this.asks, through: number): void {
+    this.held = new Map(inputs.map(input => [input.id, input]))
+    this.asks = asks
+    this.controlCursor = through
+  }
+
+  applyControl(event: SessionEvent): void {
+    if (event.sequence <= this.controlCursor) return
+    this.controlCursor = event.sequence
     const content = event.content
     switch (content.kind) {
       case "input":
         if (content.user !== undefined) this.held.set(event.id, { id: event.id, text: content.text ?? "", skills: content.skills, user: content.user })
+        break
+      case "input-consumed":
+      case "input-deleted": this.held.delete(content.inputId); break
+      case "tool-call":
+        for (const ask of content.asks) this.asks.push({ requestId: content.requestId, callId: ask.callId, questions: ask.questions })
+        break
+      case "tool-result":
+        this.asks = this.asks.filter(ask => ask.requestId !== content.requestId || !content.results.some(result => result.callId === ask.callId))
+        break
+    }
+  }
+
+  activeOutput(output: { requestId: string; textCharacters: number; thinkingCharacters: number }): void {
+    this.output = output
+    const answer = this.answers.get(output.requestId)
+    const thought = this.thoughts.get(output.requestId)
+    if (answer !== undefined) answer.writtenChars = output.textCharacters
+    if (thought !== undefined) thought.writtenChars = output.thinkingCharacters
+  }
+
+  /** Applies one event; false when it was already applied. */
+  apply(event: SessionEvent): boolean {
+    if (event.sequence <= this.cursor) return false
+    this.cursor = event.sequence
+    this.applyControl(event)
+    const content = event.content
+    switch (content.kind) {
+      case "input":
         if (content.text !== undefined) {
           this.push({
             kind: "user",
@@ -100,8 +128,8 @@ export class Projection {
         }
         break
       case "input-applied":
+      case "input-consumed":
       case "input-deleted":
-        this.held.delete(content.inputId)
         break
       case "source-input": {
         const notice = branchNotice(content.text, content.mode)
@@ -163,14 +191,12 @@ export class Projection {
         this.tools.set(content.callId, this.push({ kind: "tool", key: `tool-${content.callId}`, callId: content.callId, name: content.name, input: content.input, pending: true }))
         break
       case "tool-call":
-        for (const ask of content.asks) this.asks.push({ requestId: content.requestId, callId: ask.callId, questions: ask.questions })
         break
       case "tool-completed":
         this.completeTool(content.callId, content.result)
         break
       case "tool-result":
         for (const result of content.results) this.completeTool(result.callId, result.result)
-        this.asks = this.asks.filter((ask) => ask.requestId !== content.requestId || !content.results.some((result) => result.callId === ask.callId))
         break
       case "model-end": {
         const incomplete = this.showedOutput.delete(content.requestId)
@@ -229,6 +255,14 @@ export class Projection {
     }
   }
 
+  prepend(rows: readonly TimelineRow[], prefix: string): void {
+    const count = rows.length
+    for (const stream of [...this.answers.values(), ...this.thoughts.values()]) stream.index += count
+    for (const [key, index] of this.tools) this.tools.set(key, index + count)
+    for (const [key, index] of this.lines) this.lines.set(key, index + count)
+    this.rows = rows.map(row => ({ ...row, key: `${prefix}:${row.key}`, ...((row.kind === "assistant" || row.kind === "thinking") ? { streaming: false } : {}) })).concat(this.rows)
+  }
+
   private push(row: TimelineRow): number {
     this.rows.push(row)
     return this.rows.length - 1
@@ -241,7 +275,7 @@ export class Projection {
   private openThinking(requestId: string): Stream {
     let thought = this.thoughts.get(requestId)
     if (thought === undefined) {
-      thought = { index: this.push({ kind: "thinking", key: `thinking-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: 0 }
+      thought = { index: this.push({ kind: "thinking", key: `thinking-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: this.output?.requestId === requestId ? this.output.thinkingCharacters : 0 }
       this.thoughts.set(requestId, thought)
     }
     return thought
@@ -250,7 +284,7 @@ export class Projection {
   private openAnswer(requestId: string): Stream {
     let answer = this.answers.get(requestId)
     if (answer === undefined) {
-      answer = { index: this.push({ kind: "assistant", key: `assistant-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: 0 }
+      answer = { index: this.push({ kind: "assistant", key: `assistant-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: this.output?.requestId === requestId ? this.output.textCharacters : 0 }
       this.answers.set(requestId, answer)
     }
     return answer

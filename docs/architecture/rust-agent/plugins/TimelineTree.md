@@ -8,6 +8,7 @@ creation prompt and end fact by position, and counts user inputs at the inherite
 cutoff with a scalar query. Ended prefixes use the tree's stored branch chain;
 this does not widen the public own-line-only `TreeCommands.query` contract.
 The App Server only maps these owner-produced properties into its wire fields.
+`TreeCommands.page_end` resolves a raw-event page endpoint using atomic-batch metadata through the live Timeline or the ended line’s store. It decodes no event body and has no wire binding.
 
 ## TimelineTree
 

@@ -28,6 +28,8 @@ export function lineStateLabel(t: Translate, state: LineState): string {
     case "main": return t("lines.state.main")
     case "working": return t("lines.state.working")
     case "waiting": return t("lines.state.waiting")
+    case "ending": return t("lines.state.ending")
+    case "ended": return t("lines.state.ended")
     case "ended-itself": return t("lines.state.endedItself")
     case "ended-by-operation": return t("lines.state.endedByOperation")
     case "ended-with": return t("lines.state.endedWith", { id: state.ancestor })

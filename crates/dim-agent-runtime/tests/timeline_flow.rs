@@ -114,6 +114,37 @@ impl TimelineStore for Reads {
     }
 }
 
+#[tokio::test]
+async fn store_pages_read_only_the_requested_complete_batches() {
+    let store = Arc::new(Reads::default());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let writer = Timeline::new(Ctx::root().unwrap(), key.clone(), vec![], store.clone());
+    writer
+        .append_batch_registered(vec![input("one"), input("two"), input("three")], |_| Ok(()))
+        .unwrap();
+    for n in 4..=1024 {
+        writer.append(input(&format!("message {n}"))).unwrap();
+    }
+    assert_eq!(store.batch_end_at(&key, 1).await.unwrap(), 3);
+    assert_eq!(store.batch_end_at(&key, 0).await.unwrap(), 0);
+    assert_eq!(store.read_page(&key, 0, 2, 1024).await.unwrap().len(), 3);
+    assert_eq!(store.read_page(&key, 3, 2, 1024).await.unwrap().len(), 2);
+    assert_eq!(
+        *store.segments.lock().unwrap(),
+        [("main".into(), 1..=3), ("main".into(), 4..=5)],
+        "reading five events must not copy the thousand-event suffix"
+    );
+    assert!(store.read_page(&key, 1, 2, 1024).await.is_err());
+    assert!(store.read_page(&key, 0, 2, 1).await.is_err());
+}
+
 /// Decodes a checkpoint whose resume is the sequence held in the snapshot
 /// state, on `main`, with an event id the store does not hold: the read keeps
 /// the recorded position.

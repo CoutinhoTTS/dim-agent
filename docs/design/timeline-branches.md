@@ -384,6 +384,15 @@ Refusals come back as error results (code in `structuredContent`) and write noth
 
 These refusals are the tool's own rules. `TreeCommands.end` itself checks only the target (§10). An `end` whose line already committed its own `branch/end` takes the `branch_ended` row and writes no second final message: the first call's message is the line's last word.
 
+### Activity page execution
+
+The `read` limit counts raw events and includes the complete final atomic batch. TimelineTree resolves
+that endpoint from batch metadata before any display read. BranchTool then requests only input/text,
+tool-start names, tool-call identities/names, result identities/error flags/effects and turn outcomes
+inside that range. Model requests, tool inputs and result content do not belong to this activity view.
+The cursor is the raw endpoint even when no event in the range produces a display item. Hidden events
+still break adjacent-text merging. No event cache or additional storage format is introduced.
+
 ## 12. Prompts
 
 ### 12.1 Context mapping
