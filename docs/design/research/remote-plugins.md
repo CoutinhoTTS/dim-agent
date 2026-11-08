@@ -359,7 +359,7 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 | --- | --- | --- |
 | 已经是 leaf | WorkflowSession | 本来就是 TypeScript，`workflowRuns` 是 `call: async` 数据面；把 runtime 连接换成远程即可 |
 | 纯逻辑 leaf（今天） | Questions | inject 可借，只用 dispatched 方法，且不提供宿主按类型查的服务；移植到 TS/Python 或 Rust leaf host |
-| 用了 skipped/私有 API，需数据面 | Goal（`Changes` 捕获、`TreeCommands::get`）、Recall（`get`、`branch.sequence/query`）、BranchTool（`get`、`branch.service::<BranchLine>()`）、TreeTimeline（私有 tree）、SessionBroadcast（内部状态）、SessionBroadcastEnd（`SessionIdentity.unloading` 是 `#[serde(skip)]`） | 先给 `tree.info`/`tree.query`、`branchLine`、Goal 的 change 写入、SessionBroadcastEnd 的 idle release 补数据面，或把这些部件留在宿主 |
+| 用了 skipped/私有 API，需数据面 | Goal（`Changes` 捕获、`TreeCommands::get`）、Recall（`get`、`branch.sequence/query`）、BranchTool（`get`、`branch.service::<BranchLine>()`）、TreeTimeline（私有 tree）、SessionBroadcast（内部状态）、SessionBroadcastEnd（`SessionIdentity.unloading` 是 `#[serde(skip)]`） | 先给 `tree.info`/`tree.query`、`branchLine`、Goal 的 change 写入、SessionBroadcastEnd 的 idle release 补数据面，或把这些部件留在宿主；GoalBranch 的 `settingsService` 换现有的 `settings` |
 | 提供类型服务，需操作面 | Wait（`wait` 返回 `WaitResult`、收 `CancellationToken`）、BranchLine（`branchLine`）、InputQueue（`inputQueue`）、InputMethods（`submitChecks`）、PrepareModelHost（`prepareModelHost`） | 宿主用 `branch.service::<T>()` 或 `Key<T>` 查；先加操作面/数据面，或改由宿主自己跑 |
 | 换现有数据面后可 leaf | SessionTitle（`settingsService` → `settings`，`sessionStore` → `sessionMetadata`，`auxiliaryModelHost` → `auxiliaryModel`）、SchedulerSession（`scheduleJobs`、`wakeups`）、Attachments（`sessionFilesHost`，目标名 `sessionFiles`）、PromptSuggestion（`modelHost`、`providerConnectionResolver`、`promptSuggestionSettingsHost`） | 把 Rust 类型键的注入换成已有数据面的名字；没有对应数据面的先加 |
 | 资源 leaf | HostPlatform、FileStorage、SqliteStorage、WorkspaceTools、ShellSession、SkillsCatalog、Mcp、Modality、ExternalAgent、PluginManager、RuntimeManager | 在资源所在机器上跑，本地 I/O，对外提供数据服务；现有 Rust 实现放进 Rust leaf host 复用 |
@@ -500,7 +500,9 @@ flowchart TB
 | 数据形 | `sessions`、`settings`、`treeCommands`、`timeline`、`toolRegistry`、`sessionMethods`、`sessionMetadata`、`auxiliaryModel`、`guideEntries`、`partRegistry`；`managementMethods` 也有 dispatcher | 直接代理，无工作 |
 | 数据内容、未标记 | `executionSettingsHost`、`toolchainSourceHost`、`sessionFilesHost`、`historyRenderer`、`selectableModelsHost` | 加 dispatcher；涉及 secret 的（provider/auth）先决定暴露面 |
 | 对象/句柄形 | `hostPlatform`、`fileStorage`、`sqliteStorage`、`timelineStore`、`toolHost`、`sessionLoader`、`mcpSession` | 拆成操作加句柄 id；实现留在所有者 |
-| 状态机/热路径 | `loopState`、`agentLoop`、`inputQueue`、`permission`、`approval`、`toolBinding`、`toolExecutor` | 不跨；需要时由所有者加数据面 |
+| 状态机/热路径 | `loopState`、`agentLoop`、`permission`、`approval`、`toolBinding`、`toolExecutor` | 不跨；需要时由所有者加数据面 |
+
+`inputQueue` 只有一种分类：操作面/类型面（§4.2），但它在每条输入的热路径上，不建议 leaf。这里不再把它列为“状态机/热路径”。
 
 中转规则（形状改不了时）：
 
