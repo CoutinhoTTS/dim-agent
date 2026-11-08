@@ -2626,6 +2626,7 @@
         "format",
         "json",
         "matches",
+        "tokio::select",
         "tracing::warn",
         "unreachable",
         "vec",
