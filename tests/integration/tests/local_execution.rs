@@ -2264,7 +2264,32 @@ async fn a_steered_event_ends_a_wait_without_a_task_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_event_does_not_end_a_wait_with_a_task_id() {
+async fn a_steered_event_ends_a_wait_with_a_task_id() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[("wait", json!({"taskId": "exec-other", "timeoutMs": 1500}))],
+        )
+        .await;
+    until(&session, "tool call", |events| {
+        count(events, "step/tool-call") == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    session
+        .input(event_input("im", "e5", InputMode::Steer), "main")
+        .await
+        .unwrap();
+    let events = until(&session, "event", |events| wait_texts(events).len() == 1).await;
+    assert_eq!(wait_texts(&events), vec!["wait ended: event im e5"]);
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queued_event_does_not_end_a_wait_with_a_task_id() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
     harness

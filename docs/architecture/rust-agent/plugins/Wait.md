@@ -82,12 +82,14 @@ Provides branch-local wait state recording eligible arrivals during an open turn
 Consumes `input/message`, `turn/start`, `turn/end`; produces no events directly.
 Tagged background notices, steer inputs and EventHub deliveries can end a wait;
 the input opening a turn does not. A delivery is recognised by its submission
-id's `eventhub:` prefix and its `queue` or `steer` mode, and it ends a wait only
-when the wait names no task; `append` deliveries and guide writes never end one. Turn end clears pending arrivals. It registers with
-`Dispatcher::consume` and rebuilds by reading the last `turn/start` or `turn/end`
-with its unpublished tail. Reload rebuilds only open-turn status, not old
-arrival notifications. Wait futures are caller-owned and use caller cancellation; the
-plugin does not spawn tasks. Only one wait can run per branch.
+id's `eventhub:` prefix and its `queue` or `steer` mode: a `steer` delivery ends
+every wait, as any steer does, and a `queue` delivery only one that names no
+task; `append` deliveries and guide writes never end one. Turn end clears
+pending arrivals. It registers with `Dispatcher::consume` and rebuilds by
+reading the last `turn/start` or `turn/end` with its unpublished tail. Reload
+rebuilds only open-turn status, not old arrival notifications. Wait futures are
+caller-owned and use caller cancellation; the plugin does not spawn tasks.
+Only one wait can run per branch.
 
 ### Tests
 
@@ -96,7 +98,8 @@ plugin does not spawn tasks. Only one wait can run per branch.
 `wait_ends_on_a_steer_or_a_stop_and_refuses_a_second_wait`,
 `a_queued_event_ends_a_wait_without_a_task_id`,
 `a_steered_event_ends_a_wait_without_a_task_id`,
-`an_event_does_not_end_a_wait_with_a_task_id`,
+`a_steered_event_ends_a_wait_with_a_task_id`,
+`a_queued_event_does_not_end_a_wait_with_a_task_id`,
 `an_append_event_does_not_end_a_wait`, `a_guide_input_does_not_end_a_wait`.
 The delivery end to end is
 [hub_flow.rs](../../../../crates/dim-event-hub/tests/hub_flow.rs):

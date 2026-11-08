@@ -166,16 +166,27 @@ impl Wait {
         }
     }
 
-    /// TS `takeMatchingInput`: any steer first, then a matching task or, for
-    /// a wait without one, an event; between those two the earlier wins.
+    /// TS `takeMatchingInput`: a steer first, a steered event included, then a
+    /// matching task or, for a wait without one, a queued event; between those
+    /// two the earlier wins.
     fn take(&self, task_id: Option<&str>) -> Option<Arrival> {
         let mut state = self.state.lock().unwrap();
         let index = state
             .pending
             .iter()
-            .position(|arrival| *arrival == Arrival::Steer)
+            .position(|arrival| {
+                matches!(
+                    arrival,
+                    Arrival::Steer
+                        | Arrival::Event {
+                            mode: InputMode::Steer,
+                            ..
+                        }
+                )
+            })
             .or_else(|| {
                 state.pending.iter().position(|arrival| match arrival {
+                    // A steered event was taken above, so this is a queued one.
                     Arrival::BackgroundTask(id) => task_id.is_none_or(|task_id| task_id == id),
                     Arrival::Event { .. } => task_id.is_none(),
                     Arrival::Steer => false,
