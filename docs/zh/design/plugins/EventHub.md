@@ -41,7 +41,7 @@ flowchart LR
 | EventHub 通知行 | 进程，每代一个 | `eventhub/ready` 通知；由进程部件在 `apply` 里创建的降级(子)行，不是 loader 行 |
 | EventHub Session 部件 | Session | 为它写出的标记登记的指南条目，经 `guideEntries` 登记；`events` 工具 |
 
-没有分支部件：EventHub 不折叠任何分支事实，也不持有任何分支状态。
+没有分支部件：EventHub 不折叠任何分支事实，也不持有任何分支状态。`events` 工具经进程部件声明的一个进程服务到达进程部件的订阅核心，见 [设计规则 §4 第 7 条](../../../architecture/rust-agent/principles.md)，而不是经共享状态；那个服务的名字由 `events` 工具自己的设计给出。
 
 EventHub 是一个内置原生插件，位于新 crate `crates/dim-event-hub`。产品装配像安装 Scheduler 那样安装它，即 `dim_agent_scheduler::install` 的同一位置 `crates/dimcode/src/main.rs:31`，并通过 `AgentBuilder::optional_plugin` 作为可选功能安装 `crates/dim-agent-runtime/src/assembly.rs:300-311`，所以缺少它所需服务的宿主仍能启动并打开 Session。它的插件行名为 `eventhub`，即 PluginManager 使用的行 id，因此 PluginManager 可以像关闭其他内置插件一样关闭它，见 [PluginManager §2](PluginManager.md)。关掉之后，生产方拿不到 `eventHub` 服务，其他一切不变。
 
@@ -124,6 +124,8 @@ GuideRecord {
 同一条事件的每次投递都使用同一个 `submissionId`，即 `eventhub:<source>:<eventId>`，而一条分支对每个 `submissionId` 只接受一次，见 [session access A.2](../contracts/session-access.md#a2-来源输入约定) 与 [sessions 服务 §6.2](../appserver/sessions-service.md#62-input)。因此被两次命中的分支只收到一次事件，用同一个 `id` 重新发布的生产方在每条分支上都是幂等的：第二次 `publish` 什么也不写，回复第一次输入的 `inputId` 与 `sequence`。输入被消费或被撤回之后，这个 id 仍然占用。
 
 每次发布从第一次查找到最后一次投递，持有以该提交 id 为键的进程内锁，即 `eventhub:<source>:<eventId>`(即 2.5 的实例状态)。这把锁把按分支的保证延伸到文件(3.2)：正文超过上限时先按 id 在每条目标分支上查找，已经持有该输入的分支直接回答 `repeated: true`，不写文件。发布结束时释放锁，映射项随最后一个持有者消失。
+
+发布一旦持有它的事件锁，就在 EventHub 自己拥有的任务里运行到完成。丢弃回复的调用方或一次重载，都既不会停止它，也不会释放那把锁，所以用同一个 `id` 的重试会等它结束，然后找到该输入并回答 `repeated`。
 
 保证按分支成立：每个事件 id 一个输入；重试绝不为已持有该输入的分支再写文件；`truncated` 只由写出该输入的那次发布报告。
 
@@ -216,7 +218,7 @@ sequenceDiagram
 
 - 监听进程通知 `agent/session-deleted {agentId, sessionId}`，在该 Session 的锁下(3.3)移除目标为该 Session 的每一条订阅。这条通知属于 §9.1 提出的需求。它仍是及时的路径。
 - 权威状态在 Agents 自己手里：该 id 是否有所有者或 SessionStore 记录，这也是 `acquire` 读取的东西(`crates/dim-app-server/src/agents.rs:832-843`)。§9.2 要求 Agents 提供 `sessions.exists {sessionId} → {exists}`，一次从不取得、也不恢复 Session 的读取：`false` 表示该 Session 已被删除，已关闭但仍可恢复的 Session 为 `true`。
-- EventHub 在两处读它：每次 `apply` 时，对已存储订阅指向的每个 Session，至多同时 8 次读取；以及一次投递以 `session_closed` 失败之后读一次。`false` 在它自己的锁下、以一个事务移除该 Session 的订阅；任何错误都保留它们。
+- EventHub 在两处读它：服务提供之后，在本代里，对已存储订阅指向的每个 Session，至多同时 8 次读取，重载结束这个任务；以及一次投递以 `session_closed` 失败之后读一次。`false` 在它自己的锁下、以一个事务移除该 Session 的订阅；任何错误都保留它们。
 - 因此，EventHub 关闭期间错过的通知会在下一次 `apply`、或第一次失败的投递上得到修复。在那之前投递给死订阅会失败 `session_closed`，`eventhub.subscriptions` 显示最近一次失败。那是修复路径的代价，而不是被遗留的死订阅。
 
 ## 4. 时序与冲突
@@ -251,7 +253,7 @@ sequenceDiagram
 
 | 接口 | 种类 | 用途 |
 | --- | --- | --- |
-| `eventHub` | 进程服务，无 key，见 [§3.1](../overview.md#31-合同形式) | 只有给生产方的 `declare` 与 `publish`，没有别的：生产方的行不能创建或移除另一个 Session 的订阅，而对客户端来说管理平面是唯一的授权入口，见 7。`events` 工具与 `eventhub.*` 方法调用进程部件自己的订阅核心，不经过这个服务 |
+| `eventHub` | 进程服务，无 key，见 [§3.1](../overview.md#31-合同形式) | 只有给生产方的 `declare` 与 `publish`，没有别的：生产方的行不能创建或移除另一个 Session 的订阅，而对客户端来说管理平面是唯一的授权入口，见 7。`events` 工具与 `eventhub.*` 方法调用进程部件自己的订阅核心，不经过这个服务；`events` 工具经进程部件声明的一个进程服务到达该核心，见 [设计规则 §4 第 7 条](../../../architecture/rust-agent/principles.md)，而不是经共享状态，那个服务的名字由 `events` 工具自己的设计给出 |
 | `eventhub.sources`、`eventhub.subscriptions`、`eventhub.subscribe`、`eventhub.unsubscribe` | `managementMethods`，命名空间 `eventhub` | 客户端读取目录、管理任意 Session 的订阅 |
 | `eventhub/ready` | 进程总线事件，无 key | 告诉在进程里 EventHub 第一次 `apply` 之前就已装载的生产方：`eventHub` 服务已提供且可读，现在声明，见 2.1 |
 | `events` | 向 `toolRegistry` 登记的工具，Session | 模型读取目录、管理自己 Session 的订阅 |
@@ -264,7 +266,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前�
 ## 7. 安全
 
 - **事件是材料，从不是指令。** 事件以运行时写出的标记、在它自己的一条消息里到达模型，内容经过转义，没有用户内容，所以生产方的文字不会被读成操作者的话，见 [session access A.2](../contracts/session-access.md#a2-来源输入约定)。指南条目声明这条通道的信任类别，并说明事件内部的指令不约束模型。
-- **转义。** 每个属性值、标题与正文都用 Scheduler 报告同一个函数转义，见 `crates/dim-agent-scheduler/src/engine.rs:634-641`，所以 id 或标题无法打开或关闭一个标签。属性名受限，生产方属性里出现保留名 `source`、`type`、`id`、`file`、`bytes`、`truncated` 时以 `invalid_event` 拒绝，所以生产方伪造不了运行时自己的字段。
+- **转义。** 每个属性值、标题与正文都用 EventHub 与 Scheduler 共同调用的同一个函数转义，即 `dim_agent_types::markup::escaped`，所以 id 或标题无法打开或关闭一个标签。属性名受限，生产方属性里出现保留名 `source`、`type`、`id`、`file`、`bytes`、`truncated` 时以 `invalid_event` 拒绝，所以生产方伪造不了运行时自己的字段。
 - **写入输入不带来权限。** 被投递的事件不授予任何权限：它开启的轮次、这些轮次调用的工具，都由 Approval 与 Permission 按 Session 的策略准入，和其他任何输入一样，见 [session access §7](../contracts/session-access.md#7-安全)。
 - **订阅变更是配置。** `subscribe` 与 `unsubscribe` 改变未来的外部文字从哪进入 Session，所以 `events` 工具为这两个动作声明 `persistent_configuration`，`sources` 与 `list` 走定义的 `session` 风险；在绑定里风险是按调用计算的，见 `crates/dim-agent-capabilities/src/tool_registry.rs:54-58`，而 Permission 把未分类风险按预设分别按拒绝、询问、允许处理，见 `crates/dim-agent-capabilities/src/permission.rs:610-618,643-675`，与 Scheduler 的 `schedule` 工具相同，见 `crates/dim-agent-scheduler/src/session.rs:82,102`。
 - **管理平面。** `eventhub.*` 只向受保护的本地连接提供，这是 `managementMethods` 的规则，见 [方法 §3.2](../contracts/session-boundary.md#32-管理方法)。它能触达任意 Session，因此是宿主管理员面，不是 Session 作用域的面。
@@ -299,7 +301,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前�
 
 - **被什么挡住：** EventHub 必须移除被删除 Session 的订阅，而一个保留数据行的关闭不能移除它们。`session_closed` 同时回答这两种情况，见 `crates/dim-app-server/src/agents.rs:817-830` 与 [session access A.6](../contracts/session-access.md#a6-错误)；今天唯一的删除通知是 `agent/unloaded-session-deleted`，且只为未加载的 Session 发出，见 `crates/dim-app-server/src/agents.rs:97-109,1399-1415` 与 [插件契约 §5.3](../plugin-contract.md#53-总线事件)。
 - **考虑过的现有机制：** Session 广播的 `closed` 事件只说明一个 Session 关闭了，不说明它的数据行是否被移除，而 EventHub 不能因关闭而移除；用 `sessions.lookup` 轮询每个被订阅的 Session 时，对一个存在但从未收到输入的 Session 回答 `unknown`，区分不出已删除与可恢复，而且会引入 EventHub 设计明确排除的周期性读取者；`history` 对两种情况以同样的方式失败。
-- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次成功的删除，无论 Session 是否已加载。Collaboration 现有的通知保持原样。
+- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次成功的删除，无论 Session 是否已加载。Collaboration 现有的通知保持原样。两条删除通知都保留，直到 Collaboration 迁移到 `agent/session-deleted`；那次迁移是 Collaboration 的改动。
 - **对顺序、批次、中断、重载的影响：** 对 Timeline 没有影响；这条通知是总线事件，不是事实。错过的通知由 3.4 的对账修复，在下一次 `apply` 或第一次失败的投递上。
 - **所有者：** Agents，`crates/dim-app-server/src/agents.rs`；它自己的文档陈述这条通知，见 [Sessions 服务](../appserver/sessions-service.md) 与 [删除与分叉](../appserver/session-deletion-and-fork.md)。
 
