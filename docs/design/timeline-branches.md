@@ -564,7 +564,7 @@ Three rules about `head` decide what a client may do with it:
 New public content:
 
 - two events;
-- two RPC methods;
+- three RPC methods: `session.branch_end`, `session.branches` and `session.branch.get`;
 - two TreeCommands methods: `end(id, source)` and `page(id, after, limit)`;
 - `TimelineInfo.source`, read by BranchLine and by Goal;
 - the `branch` tool's new input.

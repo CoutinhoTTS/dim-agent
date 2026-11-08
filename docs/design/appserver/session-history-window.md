@@ -186,7 +186,7 @@ the event and byte limits like any other window.
 | `through` | As today: the watermark this read is pinned to |
 | `nextAfter` | Forward: as today, the last returned sequence (raw, before filtering), or `after` when the page is empty; the client passes it back as `after`. Backward: the same last returned sequence, or `through` when the page is empty; a backward read pages with `nextBefore` |
 | `done` | The end of the read in its direction: forward, `nextAfter == through` (unchanged); backward, the page reached the window start |
-| `nextBefore?` | Backward reads: the sequence of the first returned event. Pass it back as `before` to continue, also after `done`, to read below the window. Absent when the page is empty |
+| `nextBefore?` | Backward reads: the sequence of the first raw event in the page, before filtering. Pass it back as `before` to continue, also after `done`, to read below the window. It can precede the first visible event and remains present when filtering hides the whole raw page. Absent when the raw page is empty |
 | `turnStart?` | `latestTurn` reads only: the sequence of the newest `turn/start` at or below `through`. Absent when the branch has none and when the request is not a window read |
 
 ### 4.4 Rules

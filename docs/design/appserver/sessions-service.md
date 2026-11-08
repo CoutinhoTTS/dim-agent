@@ -339,14 +339,11 @@ Keeping it in the event meets the constraint #32 set, and needs no new mechanism
 | A separate event in the input's batch | A new event that carries the id | It is still in the Timeline, and adds an event where a field is enough (rule 9) |
 | The id in the input's raw blocks | The writer puts the id in its marker block, and `input/message` loses the field | Lookup would have to parse raw blocks, which [session access A.2](../contracts/session-access.md#a2-source-input-conventions) reserves to the producing plugin. Rpc input has no marker block, and the event format still changes |
 | The caller chooses the event id | The Timeline accepts a caller's id for `input/message` | The Timeline allocates ids. Ids are unique within a Session, so a repeated id would be rejected instead of replying the first input's receipt |
-| An index derived from the event body | An expression index on `json_extract(body, '$.record.event.data.submission_id')` over `input/message` rows, as `timeline_tool_use_starts` does. The SQL changes, so it needs its own format decision | Deferred pending a separate storage format decision. Property queries remove the in-memory history index; measure submission lookup scans before adding a persistent index. The identity stays in the event |
 
-Revisit when any of these becomes true:
+Submission lookup uses the storage-owned [v35 submission identity index](native-storage-format.md#v35-submission-identity-index). The identity stays in the event; the index is derived state.
 
-1. Submission lookup scans too many input rows in measured workloads. Evaluate the derived index above under
-   its own storage format decision; the field stays where it is.
-2. Committed events can be removed (retention or truncation). `unknown` would then no longer mean "never written", and
-   a removed id could be accepted again, so that design must say what survives the removal.
+Revisit if committed events can be removed (retention or truncation). `unknown` would then no longer mean "never written", and
+a removed id could be accepted again, so that design must say what survives the removal.
 
 ### 6.4 idle
 

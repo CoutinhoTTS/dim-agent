@@ -184,8 +184,10 @@ The changes apply to every entry, not just the main TUI:
 | ACP `gateway.rs::read_history` | Load/resume returns only the window; model/configuration comes from attach and public current-state reads. A `forkAtTurn` lookup must resolve the requested terminal turn outside the window; full-history/export APIs keep their explicit full-prefix semantics. |
 
 Acceptance opens histories differing by at least ten times with the same visible
-tail. Initial transcript calls remain at most four and retained transcript rows
-at most 300. Include a turn longer than the page budget, an empty visible page,
+tail. Initial transcript calls remain at most four. Retained transcript rows
+target 300 by retaining whole wire pages; the newest page and at least one page
+with transcript rows, when found, remain whole even if an atomic page exceeds
+300 rows. Include a turn longer than the page budget, an empty visible page,
 a question/task/delegation/input started before the window, a terminal event while
 state is loading, member switching, reconnect and a transport-oversized batch.
 Also verify that `/lines` lists a branch created before the window, line-mode
