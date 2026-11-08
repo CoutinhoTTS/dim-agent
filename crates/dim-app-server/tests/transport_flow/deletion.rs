@@ -899,3 +899,166 @@ async fn a_delete_waits_for_a_building_session() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// One `agent/session-deleted` notice: who it names and whether the
+/// Session's rows were already gone when it arrived.
+struct DeleteNotice {
+    agent_id: String,
+    session_id: String,
+    rows_gone: bool,
+}
+
+/// Records every `agent/session-deleted` notice and reads SessionStore from
+/// inside the listener, so the test knows the rows went first.
+struct DeleteProbe {
+    notices: Arc<std::sync::Mutex<Vec<DeleteNotice>>>,
+    database: PathBuf,
+}
+
+impl DynPlugin for DeleteProbe {
+    fn name(&self) -> &str {
+        "SessionDeletedProbe"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        Vec::new()
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let notices = self.notices.clone();
+            let database = self.database.clone();
+            ctx.on::<dim_app_server::SessionDeleted>(move |event, _| {
+                let rows_gone = Connection::open(&database)
+                    .and_then(|connection| {
+                        connection.query_row(
+                            "SELECT COUNT(*) FROM session_owners WHERE session_id=?1",
+                            [&event.session_id],
+                            |row| row.get::<_, i64>(0),
+                        )
+                    })
+                    .map(|count| count == 0)
+                    .unwrap_or(false);
+                notices.lock().unwrap().push(DeleteNotice {
+                    agent_id: event.agent_id.clone(),
+                    session_id: event.session_id.clone(),
+                    rows_gone,
+                });
+                async { Ok(None) }
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// Unloads an idle Session through its instance, as the idle pass would.
+async fn release(agent: &dim_agent_runtime::Agent, session: &str) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(loaded) = agent.get_session(session)
+                && loaded.unload_if_idle().await.unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{session} unloads"));
+}
+
+/// EventHub §9.1: every successful delete announces `agent/session-deleted`
+/// after SessionStore removed the Session's rows, loaded or unloaded. A
+/// close keeps the rows, so it announces nothing, and the delete that then
+/// removes them does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_successful_delete_announces_the_session_and_a_close_does_not() {
+    let store = Store::new();
+    let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let probe = notices.clone();
+    let database = store.0.join("dimcode.sqlite");
+    let (server, agent) = launch_with(Arc::new(MockTools), store.config(), move |builder| {
+        let probe = probe.clone();
+        let database = database.clone();
+        builder.plugin(move |_names: &Names<'_>| {
+            Ok(Box::new(DeleteProbe {
+                notices: probe.clone(),
+                database: database.clone(),
+            }) as Box<dyn DynPlugin>)
+        });
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut other = Client::new_version(&server, false, 3).await;
+    let seen = || {
+        notices
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|notice| notice.session_id.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // Loaded: the delete closes it, removes the rows, then announces.
+    let loaded = session(&mut client).await;
+    assert!(agent.get_session(&loaded).is_some(), "it is loaded");
+    assert_ok(
+        &other
+            .rpc("session.delete", json!({"sessionId":loaded}))
+            .await,
+    );
+    assert_eq!(seen(), vec![loaded.clone()]);
+
+    // Unloaded: no close of it announces the end, and the delete still does.
+    let unloaded = session(&mut client).await;
+    release(&agent, &unloaded).await;
+    assert!(agent.get_session(&unloaded).is_none(), "it is unloaded");
+    assert_ok(
+        &other
+            .rpc("session.delete", json!({"sessionId":unloaded}))
+            .await,
+    );
+    assert_eq!(seen(), vec![loaded.clone(), unloaded.clone()]);
+
+    // A close keeps the rows and announces nothing; the delete that removes
+    // them announces.
+    let closed = session(&mut client).await;
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId":closed}))
+            .await,
+    );
+    assert_eq!(
+        seen(),
+        vec![loaded.clone(), unloaded.clone()],
+        "a close is not a delete"
+    );
+    assert_ok(
+        &other
+            .rpc("session.delete", json!({"sessionId":closed}))
+            .await,
+    );
+    assert_eq!(
+        seen(),
+        vec![loaded.clone(), unloaded.clone(), closed.clone()]
+    );
+
+    let recorded: Vec<(String, bool, String)> = notices
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|notice| {
+            (
+                notice.session_id.clone(),
+                notice.rows_gone,
+                notice.agent_id.clone(),
+            )
+        })
+        .collect();
+    for (session_id, rows_gone, agent_id) in recorded {
+        assert!(rows_gone, "{session_id} is announced after its rows went");
+        assert!(!agent_id.is_empty(), "{session_id}");
+    }
+
+    drop((client, other, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+}

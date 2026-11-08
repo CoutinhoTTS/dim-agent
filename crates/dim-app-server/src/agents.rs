@@ -107,6 +107,20 @@ impl Event for UnloadedSessionDeleted {
     const NAME: &'static str = "agent/unloaded-session-deleted";
     type Value = ();
 }
+/// The end of a Session a successful delete removed its stored rows for,
+/// whether it was loaded or not. Emitted on the process root after
+/// SessionStore removed the rows, so a listener can tell a delete from a
+/// close that keeps the rows ([EventHub §9.1](../design/plugins/EventHub.md),
+/// [sessions service](../design/appserver/sessions-service.md)).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionDeleted {
+    pub agent_id: String,
+    pub session_id: String,
+}
+impl Event for SessionDeleted {
+    const NAME: &'static str = "agent/session-deleted";
+    type Value = ();
+}
 
 /// Agent-scoped operations fail before any Session is involved.
 #[derive(Debug, thiserror::Error)]
@@ -1400,7 +1414,7 @@ impl AgentIndex {
             let agent_id = agent_id.clone();
             self.release_owned(&agent_id).await;
         }
-        if let Some((agent_id, _)) = owner.filter(|_| unloaded && stored) {
+        if let Some((agent_id, _)) = owner.clone().filter(|_| unloaded && stored) {
             let (_, root) = self
                 .loader
                 .get()
@@ -1411,6 +1425,22 @@ impl AgentIndex {
             });
             if let Err(error) = root.parallel(announcement).await {
                 tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
+            }
+        }
+        // Every successful delete announces itself, loaded or not: a listener
+        // that holds state for the Session removes it, and a close, which
+        // keeps the rows, does not ([EventHub §9.1]).
+        if let Some((agent_id, _)) = owner.filter(|_| deleted) {
+            let (_, root) = self
+                .loader
+                .get()
+                .expect("AgentsPlugin apply sets the loader");
+            let announcement = Arc::new(SessionDeleted {
+                agent_id,
+                session_id: id.to_owned(),
+            });
+            if let Err(error) = root.parallel(announcement).await {
+                tracing::warn!(%error, session_id = id, "A Session delete was not announced");
             }
         }
         Ok(deleted)
