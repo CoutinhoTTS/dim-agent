@@ -92,6 +92,12 @@ pub fn install(builder: &mut AgentBuilder) {
 /// model-prompts §8.1).
 pub fn install_with(builder: &mut AgentBuilder, texts: EventHubTexts) {
     dim_agent_runtime::names::register::<EventHub>(builder.catalog_mut(), None);
+    // Producers of every language read the service (design Appendix F): the
+    // shared name lets a row of another runtime be leased the dispatcher this
+    // part provides at `host_key("eventHub")`.
+    builder
+        .catalog_mut()
+        .register_shared(dim_agent_runtime::names::name_of::<EventHub>());
     let texts = Arc::new(texts);
     // One state for the install (design §2.1): the factory captures it, so the
     // catalog, the locks and the budget survive every reapply and every off

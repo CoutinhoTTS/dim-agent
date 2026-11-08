@@ -7,6 +7,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig, Names};
 use dim_agent_types::*;
+use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use dim_client::{Client, ConnectionConfig, Server};
 use dim_event_hub::{DeclareRequest, EventHub, EventHubError, PublishRequest};
@@ -211,11 +212,9 @@ impl DynPlugin for ProducerPart {
 fn with_producer(builder: &mut AgentBuilder, state: &Arc<ProducerState>) {
     let captured = state.clone();
     builder.plugin(move |names: &Names<'_>| {
-        let hub = if names.registered::<EventHub>() {
-            Some(names.key::<EventHub>()?)
-        } else {
-            None
-        };
+        // The name is shared across languages, so a host that registered it
+        // shows a key even before any provider loads; the read stays optional.
+        let hub = names.key::<EventHub>().ok();
         Ok(Box::new(ProducerPart {
             state: captured.clone(),
             hub,
@@ -240,6 +239,51 @@ pub async fn start_with(
     home: &Path,
     model: Arc<Script>,
     event_hub: bool,
+) -> (RunningServer, Arc<ProducerState>) {
+    start_full(home, model, event_hub, None).await
+}
+
+/// [`start`] with the TypeScript producer row loaded too: the bridge from
+/// another language to the `eventHub` service (design Appendix F).
+pub async fn start_typescript(
+    home: &Path,
+    model: Arc<Script>,
+) -> (RunningServer, Arc<ProducerState>) {
+    start_full(home, model, true, Some(typescript())).await
+}
+
+/// The TypeScript row of `runtime/fixtures/event-hub-producer.ts`, from the
+/// environment the Node-backed flows use (`.github/workflows/ci.yml`).
+pub fn typescript() -> SessionTypeScriptConfig {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    SessionTypeScriptConfig {
+        python: None,
+        acquire: None,
+        node: std::env::var_os("DIM_TEST_NODE")
+            .expect("DIM_TEST_NODE")
+            .into(),
+        js_runtime: std::env::var_os("DIM_TEST_JS_RUNTIME")
+            .expect("DIM_TEST_JS_RUNTIME")
+            .into(),
+        anchor: root.join("runtime/package.json"),
+        rows: vec![json!({
+            "id": "event-hub-producer",
+            "name": root.join("runtime/fixtures/event-hub-producer.ts"),
+            "inject": ["eventHub"],
+            "provides": {},
+            "config": {},
+        })],
+    }
+}
+
+async fn start_full(
+    home: &Path,
+    model: Arc<Script>,
+    event_hub: bool,
+    session_typescript: Option<SessionTypeScriptConfig>,
 ) -> (RunningServer, Arc<ProducerState>) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
@@ -267,6 +311,7 @@ pub async fn start_with(
             database_path: Some(home.join("dimcode.sqlite")),
             product_home: Some(home.to_owned()),
             unix_path: Some(home.join("native.sock")),
+            session_typescript,
             ..Default::default()
         },
     )

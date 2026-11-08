@@ -6,6 +6,7 @@ use dim_agent_types::ToolCall;
 use dim_event_hub::{PublishRequest, ToTarget};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::time::Duration;
 use support::*;
 
 fn event_to(id: &str, session: &str, mode: Option<&str>) -> PublishRequest {
@@ -763,6 +764,70 @@ async fn a_subscription_deleted_while_off_is_removed_at_the_next_apply() {
         sessions.contains(&closed.as_str()),
         "a closed, restorable Session keeps its subscription: {listed}"
     );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The `eventHub` service from another language: a TypeScript row declares a
+/// source and publishes through the bridge, and a subscribed branch receives
+/// the marker (design Appendix F, Appendix D item 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn a_typescript_row_declares_and_publishes_through_the_service() {
+    let home = home();
+    let (server, _producer) = start_typescript(home.path(), Arc::new(Script::default())).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path()).await;
+
+    // The row started once EventHub provided the service, then declared
+    // through it.
+    let mut sources = Vec::new();
+    for _ in 0..600 {
+        let reply: Value = client.rpc("eventhub.sources", json!({})).await.unwrap();
+        sources = reply["sources"].as_array().cloned().unwrap_or_default();
+        if sources
+            .iter()
+            .any(|source| source["source"] == json!("tsproducer"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        sources
+            .iter()
+            .any(|source| source["source"] == json!("tsproducer")),
+        "the TypeScript row declared its source: {sources:?}"
+    );
+
+    subscribe(&mut client, &session, vec!["tsproducer.*"], None).await;
+    // A fresh generation declares and publishes again, now that a subscriber
+    // exists.
+    client
+        .rpc("plugin.disable", json!({"name": "eventhub"}))
+        .await
+        .unwrap();
+    let enabled = client
+        .rpc("plugin.enable", json!({"name": "eventhub"}))
+        .await
+        .unwrap();
+    assert_eq!(enabled["status"], json!("running"), "{enabled}");
+
+    let events = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let events = history(&mut client, &session).await;
+            if !inputs(&events, "<dim-event source=\"tsproducer\"").is_empty() {
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the marker reaches the subscribed branch");
+    let marker = text_of(&inputs(&events, "<dim-event source=\"tsproducer\"")[0]);
+    assert!(marker.contains("hello from TypeScript"), "{marker}");
 
     drop(client);
     server.shutdown();
