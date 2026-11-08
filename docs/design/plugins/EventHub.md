@@ -171,7 +171,7 @@ A branch is delivered once however many targets reach it. Its mode is the `to` e
 
 A delivery to a subscribed branch first checks the guide it recorded for that branch and source against the current declaration (3.3). When they differ it writes the current guide as one keyed `append`, under the Session's lock, and then the event; a branch reached only through `to` has no record and gets no guide write.
 
-A delivery with `queue` or `steer` also ends a wait running on the target branch (9.3); an `append` delivery does not, because append never wakes work. A guide write never ends one.
+A delivery keeps its mode's meaning on the branch: a `steer` delivery reaches the running turn at its next step and, like every steer, ends a running `wait`; a `queue` delivery waits for the turn to end; an `append` delivery never wakes work. A subscriber that must be woken while its branch waits subscribes with `steer`.
 
 ### 3.2 A body over the marker limit
 
@@ -257,7 +257,7 @@ The marker is the only channel an event uses. Nothing is injected into a request
 | `events` | Tool registered with `toolRegistry` (Session) | The model reads the catalog and manages its own Session's subscriptions |
 | `dim-event`, `dim-event-guide` | Raw-block markers written by EventHub | The only model-visible form of an event and of a source's guide |
 
-Names EventHub owns: the marker elements, the key prefix `eventhub:guide:`, the submission ids `eventhub:<source>:<eventId>`, `eventhub-guide:<subscriptionId>:<source>`, `eventhub-guide-retire:<subscriptionId>:<source>` and `eventhub-guide-refresh:<source>:<uuid>`, the storage file `eventhub/subscriptions.json`, the Session file name `event.txt`, and the bus event `eventhub/ready`.
+Names EventHub owns: the marker elements, the key prefix `eventhub:guide:`, the id prefix `eventhub:`, the submission ids `eventhub:<source>:<eventId>`, `eventhub-guide:<subscriptionId>:<source>`, `eventhub-guide-retire:<subscriptionId>:<source>` and `eventhub-guide-refresh:<source>:<uuid>`, the storage file `eventhub/subscriptions.json`, the Session file name `event.txt`, and the bus event `eventhub/ready`.
 
 The `eventHub` service is the only name a producer needs. A Rust part reads it only if present with `ctx.get_at` and the process key, and a Cordis row does the same with `ctx.get`; neither injects it ([rutis usage §3.5](../rutis-usage.md#35-how-each-runtime-resolves-a-name), A.3). A row written with the TypeScript SDK's `definePlugin` injects it instead, because it cannot read a name it does not inject (2.1). EventHub depends on no producer.
 
@@ -310,18 +310,6 @@ The `eventHub` service is the only name a producer needs. A Rust part reads it o
 - **Effect on sequence, batch, interrupt and reload:** none on the Timeline; the read writes no event and acquires nothing, so it restores nothing. An Agents reload answers `reloading`, which EventHub treats as an error and keeps the subscriptions.
 - **Owner:** Agents, `crates/dim-app-server/src/agents/sessions.rs`; its own documents state the method ([Sessions service](../appserver/sessions-service.md), [session access](../contracts/session-access.md)).
 
-### 9.3 Wait ends on a delivered event
-
-- **Blocked by:** "subscribe, then wait for the next event" is the natural pattern once the `events` tool ships. A `queue` input delivered in an open turn is held until the turn ends (`crates/dim-agent-capabilities/src/input_queue.rs:183-186`), and Wait ends only on a tagged background task notice, a steer, a stop or its timeout (`crates/dim-agent-capabilities/src/wait.rs:116-140`), so the event would arrive only after the wait's timeout. Measured in the full evaluation: one `operator-asked-to-act` run slept twice for 300 seconds while the CI notice sat queued.
-- **Needed:** Wait treats an EventHub delivery on a branch in an open turn as an arrival.
-  - **Marking.** Wait matches the submission id's prefix `eventhub:`, a constant (`EVENT_SUBMISSION_PREFIX`) that EventHub's `submission_id` uses. A tag cannot carry it: the input's tags belong to the event, and `sessions.input` has no request field for one.
-  - **Which waits.** A `steer` delivery ends every wait, as any steer does. A `queue` delivery ends a wait without `taskId` and not one with a `taskId`. Steers come first, in arrival order; between a task and a queued event, the earlier arrival wins.
-  - **Modes.** A `queue` or `steer` delivery counts; an `append` delivery does not (3.3). A guide input's submission id starts `eventhub-guide`, so it never counts.
-  - **The result.** It says where the event is, because a queued input waits for the turn end: `wait ended: event <source> <id>; it is queued and arrives when this turn ends` for `queue`, and `wait ended: event <source> <id>` for `steer`. The structured result is `{"reason": "event", "source", "eventId", "waitedMs"}`.
-  - **The description.** The tool's description lists an event delivered to this branch among the ways a wait ends; that sentence is protocol (Wait.md, Model-facing texts), and the flow test asserts it.
-- **Effect on sequence, batch, interrupt and reload:** none on the Timeline. The arrival is an ordinary `input/message`; EventHub keeps no wait state and is not told a wait ended. A reload of Wait loses pending arrivals, as it does today.
-- **Owner:** Wait, `crates/dim-agent-capabilities/src/wait.rs`; its own document states the behaviour ([Wait.md](../../architecture/rust-agent/plugins/Wait.md)).
-
 Nothing else is asked of another owner. The guide entry uses Prompt's existing `guideEntries` contract, the tool uses `toolRegistry`, subscriptions use `pluginFiles` and `sessionFiles`, and clients use `managementMethods`.
 
 ## 10. Not in this design
@@ -333,6 +321,7 @@ Nothing else is asked of another owner. The guide entry uses Prompt's existing `
 - **Moving Collaboration's, Scheduler's or BackgroundExec's own inputs onto EventHub.** Each keeps its own path; a migration is its owner's decision.
 - **A client UI.** Clients read and manage subscriptions through the `eventhub` methods; how a client shows them is the client's own.
 - **`eventhub.publish` as a management method.** Publishing belongs to a producer row, which holds a source and receives the receipt. The management plane manages subscriptions, not producers.
+- **Waking a wait on a queued delivery.** A queued event that ended a wait would still arrive only after the turn ends, so a subscriber that must be woken uses `steer`. A generic arrival marker on the input contract would be the input owner's design, and EventHub would only set it.
 
 ## Appendix A. Interface details
 

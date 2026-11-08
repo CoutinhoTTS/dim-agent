@@ -171,7 +171,7 @@ sequenceDiagram
 
 投递给一条被订阅的分支时，先按该分支与来源取出记录的指南，与当前声明对比(3.3)。二者不同时，它先在该 Session 的锁下把当前指南作为一条带键的 `append` 写出，然后写事件；仅由 `to` 到达的分支没有记录，也不写指南。
 
-以 `queue` 或 `steer` 到达的投递还会结束目标分支上正在进行的 wait(9.3)；`append` 投递不会，因为 append 从不唤醒工作。指南写入从不结束 wait。
+投递在分支上保持它模式的含义：`steer` 投递在下一个步骤到达正在运行的回合，并像任何 steer 一样结束正在进行的 `wait`；`queue` 投递等到回合结束；`append` 投递从不唤醒工作。分支处于 wait 而必须被唤醒的订阅者用 `steer` 订阅。
 
 ### 3.2 正文超过标记上限
 
@@ -257,7 +257,7 @@ sequenceDiagram
 | `events` | 向 `toolRegistry` 登记的工具，Session | 模型读取目录、管理自己 Session 的订阅 |
 | `dim-event`、`dim-event-guide` | EventHub 写出的原始块标记 | 事件与来源指南唯一的模型可见形式 |
 
-EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 id `eventhub:<source>:<eventId>`、`eventhub-guide:<subscriptionId>:<source>`、`eventhub-guide-retire:<subscriptionId>:<source>` 与 `eventhub-guide-refresh:<source>:<uuid>`、存储文件 `eventhub/subscriptions.json`、Session 文件名 `event.txt`，以及总线事件 `eventhub/ready`。
+EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前缀 `eventhub:`、提交 id `eventhub:<source>:<eventId>`、`eventhub-guide:<subscriptionId>:<source>`、`eventhub-guide-retire:<subscriptionId>:<source>` 与 `eventhub-guide-refresh:<source>:<uuid>`、存储文件 `eventhub/subscriptions.json`、Session 文件名 `event.txt`，以及总线事件 `eventhub/ready`。
 
 `eventHub` 服务是生产方唯一需要的名字。Rust 部件只在它存在时用 `ctx.get_at` 与进程 key 读取，Cordis 行同样用 `ctx.get` 读取，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字) 与 A.3；两者都不 inject 它。用 TypeScript SDK 的 `definePlugin` 写成的行则 inject 它，因为它读不到没有 inject 的名字，见 2.1。EventHub 不依赖任何生产方。
 
@@ -310,18 +310,6 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 i
 - **对顺序、批次、中断与重载的影响：** 对 Timeline 没有影响；这次读取不写事件，也不取得任何东西，因此不恢复任何 Session。Agents 重载时回答 `reloading`，EventHub 把它当作错误并保留订阅。
 - **所有者：** Agents，`crates/dim-app-server/src/agents/sessions.rs`；它自己的文档陈述这个方法，见 [Sessions 服务](../appserver/sessions-service.md) 与 [session access](../contracts/session-access.md)。
 
-### 9.3 一条投递到达的事件会结束 wait
-
-- **被什么挡住：** 一旦 `events` 工具上线，“先订阅，再等下一条事件”就是自然的用法。在打开的回合里投递的 `queue` 输入会一直保留到回合结束(`crates/dim-agent-capabilities/src/input_queue.rs:183-186`)，而 Wait 只在带标签的后台任务通知、steer、stop 或超时时结束(`crates/dim-agent-capabilities/src/wait.rs:116-140`)，于是一条事件只会在 wait 超时之后才到达。完整评测实测：`operator-asked-to-act` 的一个 run 睡了两次 300 秒，而 CI 通知一直排队。
-- **需要什么：** Wait 把打开的回合里落到分支上的 EventHub 投递当作一次到达。
-  - **标记。** Wait 匹配 submission id 的前缀 `eventhub:`，这是由 Wait 持有的常量(`EVENT_SUBMISSION_PREFIX`)，EventHub 的 `submission_id` 使用它。标签无法承担这件事：输入的 tags 属于事件，而 `sessions.input` 没有承载它的请求字段。
-  - **哪些 wait。** `steer` 投递像任何 steer 一样结束每一个 wait。`queue` 投递结束不带 `taskId` 的 wait，不结束带 `taskId` 的。steer 排在最前，按到达顺序；任务与排队事件之间，先到的那个优先。
-  - **模式。** `queue` 或 `steer` 投递算数；`append` 投递不算(3.3)。指南输入的 submission id 以 `eventhub-guide` 开头，因此从不计数。
-  - **结果。** 结果要说明事件在哪里，因为排队的输入要等到回合结束：`queue` 为 `wait ended: event <source> <id>; it is queued and arrives when this turn ends`，`steer` 为 `wait ended: event <source> <id>`。结构化结果是 `{"reason": "event", "source", "eventId", "waitedMs"}`。
-  - **描述。** 工具描述把“一条事件投递到这条分支”列入 wait 结束的方式；该句子是协议(Wait.md 的 Model-facing texts)，流程测试断言它。
-- **对顺序、批次、中断与重载的影响：** 对 Timeline 没有影响。这次到达是一条普通的 `input/message`；EventHub 不保留 wait 状态，也不会被告知某个 wait 结束了。Wait 重载会像今天一样丢失尚未取走的到达。
-- **所有者：** Wait，`crates/dim-agent-capabilities/src/wait.rs`；它自己的文档陈述这个行为，见 [Wait.md](../../../architecture/rust-agent/plugins/Wait.md)。
-
 除此以外不向其他所有者提任何要求。指南条目使用 Prompt 已有的 `guideEntries` 合同，工具使用 `toolRegistry`，订阅使用 `pluginFiles` 与 `sessionFiles`，客户端使用 `managementMethods`。
 
 ## 10. 不在本设计内
@@ -333,6 +321,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 i
 - **把 Collaboration、Scheduler 或 BackgroundExec 自己的输入搬到 EventHub 上。** 它们各自保留自己的路径；迁移由各自的所有者决定。
 - **客户端 UI。** 客户端经 `eventhub` 的方法读取与管理订阅；如何展示属于客户端自己。
 - **把 `eventhub.publish` 作为管理方法。** 发布属于生产方行，由它持有来源并接收回执。管理平面管理订阅，不管理生产方。
+- **用排队投递唤醒 wait。** 结束 wait 的排队事件仍然只会在回合结束后到达，所以必须被唤醒的订阅者用 `steer`。输入合同上的通用到达标记会由输入的所有者设计，EventHub 只会设置它。
 
 ## 附录 A. 接口细节
 
