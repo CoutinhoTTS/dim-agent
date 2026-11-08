@@ -109,10 +109,13 @@ keeps the first reply's `through`. They stop after
 the page that reaches 100 transcript rows, after four pages, or at the branch
 start, whichever comes first. A transcript row is a user input, an assistant
 response or a tool call that the client actually renders, not a text delta or a
-hidden runtime input. Counting uses the projection's rules and stable identities. Atomic batches remain whole; the view
-targets 300 initial rows by retaining whole wire pages. It always keeps the newest
-page and at least one page with transcript rows when the read found any. It never
-invents a cursor inside a batch. An oversized batch follows the
+hidden runtime input. Counting uses the projection's rules and stable identities.
+After reading stops, the view applies a separate retention budget of 300 rows by
+dropping older whole wire pages. It always keeps the newest page and, when any
+transcript rows were found, the newest page containing them. These required pages
+remain whole even when they exceed 300 rows. The retention budget does not cause
+more pages to be read to reach 300 rows. Atomic batches remain whole; the view
+never invents a cursor inside a batch. An oversized batch follows the
 history protocol's byte limit and error contract.
 
 The pages progress backwards; events within each page remain ascending. Clients
@@ -184,10 +187,11 @@ The changes apply to every entry, not just the main TUI:
 | ACP `gateway.rs::read_history` | Load/resume returns only the window; model/configuration comes from attach and public current-state reads. A `forkAtTurn` lookup must resolve the requested terminal turn outside the window; full-history/export APIs keep their explicit full-prefix semantics. |
 
 Acceptance opens histories differing by at least ten times with the same visible
-tail. Initial transcript calls remain at most four. Retained transcript rows
-target 300 by retaining whole wire pages; the newest page and at least one page
-with transcript rows, when found, remain whole even if an atomic page exceeds
-300 rows. Include a turn longer than the page budget, an empty visible page,
+tail. Reading stops after the page reaching 100 transcript rows, after four
+pages, or at the branch start, whichever comes first. After that stop, the
+300-row retention budget drops only older whole pages, subject to the required
+newest-page and visible-page exceptions above. It never causes another read.
+Include a turn longer than the page budget, an empty visible page,
 a question/task/delegation/input started before the window, a terminal event while
 state is loading, member switching, reconnect and a transport-oversized batch.
 Also verify that `/lines` lists a branch created before the window, line-mode

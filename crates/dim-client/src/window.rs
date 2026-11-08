@@ -52,9 +52,10 @@ impl Window {
         Ok(self.before.is_none() || self.pages.len() >= 4 || rows.len() >= 100)
     }
 
-    /// Releases whole wire pages in forward order, targeting 300 transcript
-    /// identities and always retaining the newest page. The cursor remains at
-    /// a server-provided batch boundary for explicit earlier reads.
+    /// Releases whole wire pages in forward order under a 300-identity budget.
+    /// The newest page and, when found, the newest page with transcript rows
+    /// remain whole even above that budget. This does not read more pages.
+    /// The cursor remains at a server-provided batch boundary for earlier reads.
     pub fn take(&mut self) -> Vec<Event> {
         let mut rows = HashSet::new();
         let mut keep = 0;

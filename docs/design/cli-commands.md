@@ -2730,8 +2730,9 @@ the turn settled, while a result read before its call asks nothing.
 `/earlier` reads the next bounded older window for the shown branch, retaining its original
 cutoff and advancing its backward cursor. Fullscreen PageUp at the loaded top runs the same
 action. TUI prepends projected rows; line mode prints a labelled older segment. Neither changes
-live event/state cutoffs or resubmits an input. The initial 300-row bound applies on opening;
-additional rows are retained only when the user explicitly loads them. Raw pages are released
+live event/state cutoffs or resubmits an input. Opening uses the separate read-stop
+and whole-page retention budgets in the [client window contract](clients.md#opening-a-conversation-with-a-bounded-window);
+additional older rows are retained only when the user explicitly loads them. Raw pages are released
 after projection. Export remains a complete fixed-prefix read.
 
 ```text
