@@ -379,7 +379,7 @@ Targets by platform:
 
 `local/pp-ocr` is offered wherever the plugin's engine publishes a platform package and Node is available; a platform where the plugin is not installed, or its row is not serving, lists only `local/apple-vision`. `local/apple-vision` stays Apple Silicon only because its recognition path needs Apple Silicon I/O clients, and reports the `platform` reason elsewhere, as it does today. Modality reads only the `ocrHelper` service, so it cannot and does not tell "the plugin is not installed" from "its row is not serving": a persisted default naming `local/pp-ocr` while the target is not offered stays in the snapshot's options marked unavailable with the one `runtime` reason "the PP-OCR plugin is not running". `configure` accepts a target the snapshot currently offers and never answers `modality_unavailable`; an explicit model that is neither host target fails `model_unavailable`.
 
-Text mode differs between the targets: `local/apple-vision` prefers a PDF's embedded text layer through PDFKit and recognizes only the pages it must, while `local/pp-ocr` has no native-text path and rasterizes every page, so the same PDF can yield different text. Both obey the same limits and produce the same `result.json` shape.
+Text mode differs between the targets: `local/apple-vision` prefers a PDF's embedded text layer through PDFKit and recognizes only the pages it must, while `local/pp-ocr` has no native-text path and rasterizes every page, so the same PDF can yield different text. `text` joins page texts with one newline; `local/apple-vision` joins them with a blank line. Both obey the same limits and produce the same `result.json` shape.
 
 ### A.3 Methods
 
