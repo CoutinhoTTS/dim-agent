@@ -189,9 +189,11 @@
 //!   fails the run, for every trigger; a receipt with no deliveries fails
 //!   the run too, except for an `afterSubscribedSeconds` event, where the
 //!   model owns the subscription and missing the event is the run's
-//!   outcome. A run does not end while an event is still to be
-//!   published, the same as for a pending steer, and a delivery starts a
-//!   turn unless its mode is `append`. An
+//!   outcome. A run does not end while a steer is still to be sent or an
+//!   event is still to be published, except an `afterSubscribedSeconds`
+//!   event whose clock never started: a model that never subscribed cannot
+//!   make it fire, so it is never published and never holds the run open.
+//!   A delivery starts a turn unless its mode is `append`. An
 //!   `afterSubscribedSeconds` event's mode is the strongest effective mode
 //!   among the subscriptions its delivery lists, each one's own `mode` or
 //!   else the type's declared mode, read from `eventhub.subscriptions`
@@ -2450,8 +2452,18 @@ async fn drive(
             driven.error = Some(error);
             return driven;
         }
-        let pending =
-            steers.iter().any(|(_, fired)| !fired) || events.iter().any(|(_, fired)| !fired);
+        // An `afterSubscribedSeconds` event whose clock has not started is
+        // not pending: only a subscription of the model's can start it, so a
+        // model that never subscribed cannot make it fire, and the run ends
+        // idle with the event never published. The clock check above ran
+        // first in this pass, so a subscription the model made in its last
+        // turn has already started the clock and keeps the run open here
+        // (EventHub design A.4).
+        let pending = steers.iter().any(|(_, fired)| !fired)
+            || events.iter().any(|(event, fired)| {
+                !fired
+                    && (event.after_subscribed_seconds.is_none() || event.subscribed_at.is_some())
+            });
         if started.elapsed().as_secs_f64() >= scenario.budget.seconds {
             driven.stop = "seconds";
             break;
@@ -9393,6 +9405,60 @@ mod tests {
             receipt["deliveries"][0]["subscriptionIds"],
             json!([ids[1]]),
             "only the append subscription directed the delivery: {receipt}"
+        );
+    }
+
+    /// A model that never subscribes cannot make an `afterSubscribedSeconds`
+    /// event fire: the event is not pending, so the run ends idle with no
+    /// event published rather than on its seconds budget (EventHub design
+    /// A.4).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_whose_model_never_subscribed_ends_idle() {
+        /// The judge's verdict; the run's own answer is plain text, and the
+        /// model never calls the `events` tool.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text)
+        }
+        let fixture = Fixture::start(
+            "eventhub-tool-never-subscribed",
+            answers,
+            json!({
+                "message": "Say hello.",
+                "sources": [{
+                    "name": "ci",
+                    "guide": "CI publishes a failure notice when a build breaks.",
+                    "types": [{
+                        "type": "ci.failure",
+                        "description": "A failed build.",
+                        "mode": "queue"
+                    }]
+                }],
+                "events": [{
+                    "source": "ci",
+                    "type": "ci.failure",
+                    "id": "f-1",
+                    "title": "The build failed",
+                    "body": "The build failed on the release branch.",
+                    "afterSubscribedSeconds": 1
+                }],
+                "budget": {"turns": 4, "seconds": 30, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let record = run_arm(&fixture, &options, "current", &Overrides::default(), 0).await;
+        assert_eq!(record.error, None);
+        assert!(!record.failed);
+        assert_eq!(
+            record.stop, "idle",
+            "an unstarted event cannot hold the run open"
+        );
+        assert!(
+            record.events.is_empty(),
+            "the event was never published: {:?}",
+            record.events
         );
     }
 
