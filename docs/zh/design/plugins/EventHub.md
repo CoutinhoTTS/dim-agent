@@ -110,11 +110,11 @@ GuideRecord {
 | --- | --- | --- |
 | `delivered` | `{sessionId, branchId, subscriptionIds, inputId, sequence, truncated?, repeated?}` | 保留 |
 | `gone` | `{sessionId, branchId, subscriptionIds, code}`，`code` 为 `branch_missing` 或 `branch_ended` | 每条列出的订阅都被移除，因为该目标分支不会再接受输入；仅由 `to` 到达的分支，列表为空 |
-| `failed` | `{sessionId, branchId, subscriptionIds, code, message}`，`code` 为其他任何 `sessions` 错误：`session_closed`、`reloading`、`rejected`、`ambiguous`、`publication_unknown`、`failed` | 每条列出的订阅都保留，并由 `lastFailure` 记录该码 |
+| `failed` | `{sessionId, branchId, subscriptionIds, code, message}`，`code` 为其他任何 `sessions` 错误或 `transport`：`session_closed`、`reloading`、`rejected`、`ambiguous`、`publication_unknown`、`transport`、`failed` | 每条列出的订阅都保留，并由 `lastFailure` 记录该码 |
 
 - `subscriptionIds` 列出所有导致这条分支被投递的匹配订阅；仅由 `to` 到达的分支为空。表中的效果作用于每一条列出的订阅。
 - `repeated: true` 表示该分支已持有本进程内某次发布写入的同一事件输入；`inputId` 与 `sequence` 指向那个输入，且不含 `truncated`，见 2.4、3.2。
-- `failed` 不是拒绝：输入没有被写入，`publication_unknown` 除外，此时它已提交而发布情况未知。生产方用同一个 `id` 重试会得到同一份回执，见 2.4。
+- `failed` 不是拒绝：输入没有被写入，但有两种情况写入本身存疑：`publication_unknown`，此时它已提交而发布情况未知；以及 `transport`，此时 `sessions` 调用失败或其回复无法读取。生产方用同一个 `id` 重试会得到同一份回执，见 2.4。
 - 订阅的 `lastFailure` 只在发生变化时写入：设为一个新的码，或在一次已记录的失败之后清空。同一次发布的所有 `lastFailure` 变更在它的投递结束后合成一个事务。`eventhub.subscriptions` 会显示它，所以一条失效的订阅不必等生产方再发回执就能被看见。
 
 ### 2.4 一个事件，每条分支一个输入
@@ -383,7 +383,7 @@ publish { source: "im",
 | --- | --- | --- | --- |
 | `eventhub.sources` | `{}` | `{sources: [{source, guide, types: [{type, description, mode}]}]}` | `invalid_params` |
 | `eventhub.subscriptions` | `{sessionId?}` | `{subscriptions: [Subscription]}` | `invalid_params` |
-| `eventhub.subscribe` | `{types, match?, target: {sessionId, branchId?}, mode?}` | `{subscriptionId}` | `invalid_params`、`unknown_type`、`limit_reached`、`session_closed`、`branch_missing`、`branch_ended`、`reloading`、`rejected`、`ambiguous`、`failed`、`storage` |
+| `eventhub.subscribe` | `{types, match?, target: {sessionId, branchId?}, mode?}` | `{subscriptionId}` | `invalid_params`、`unknown_type`、`limit_reached`、`session_closed`、`branch_missing`、`branch_ended`、`reloading`、`rejected`、`ambiguous`、`failed`、`transport`、`storage` |
 | `eventhub.unsubscribe` | `{subscriptionId}` | `{}` | `invalid_params`、`subscription_unknown`、`storage` |
 
 - `subscribe` 记录 `origin: "client"`；工具记录 `"tool"`。
@@ -496,12 +496,14 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 | `invalid_params` | `eventhub.*`、工具 | 形状、类型或空字段 |
 | `session_closed`、`branch_missing`、`branch_ended`、`reloading`、`rejected`、`ambiguous`、`failed` | `subscribe` | 目标写不进指南输入；什么也不存 |
 | `publication_unknown` | `subscribe` | 指南输入已经提交，但发布情况未确认；订阅被存储 |
+| `transport` | `publish`、`subscribe` | `sessions` 调用失败或其回复无法读取，是否写入未知。`publish` 保留订阅并在 `lastFailure` 记录 `transport`；`subscribe` 什么也不存，并把存疑的指南与已写出的那些一起撤回 |
 | `storage` | `subscribe`、`unsubscribe` | 订阅文件写不进去；变更没有发生，内存中的集合不变。`subscribe` 在回答之前，为该分支上没有已存储订阅命名的每个来源撤回它写出的指南 |
 
 恢复：
 
 - **`subscribe` 的回复丢失** 意味着订阅可能已记录、也可能没有；调用方读 `eventhub.subscriptions` 确认。重复的 `subscribe` 是另一条新订阅，不是幂等的，所以不确定的客户端先读再写。
 - **`publish` 的回复丢失** 靠用同一个 `id` 重新发布解决：分支只接受一次，回复就是第一次输入的回执；已持有该输入的分支回答 `repeated: true`(2.4)。
+- **`transport` 回执** 靠用同一个 `id` 重新发布解决：投递在每条分支上幂等，所以重试要么写入输入，要么回答 `repeated: true`。
 - **`unknown_source` 的回答** 说明调用行没有声明：它在 EventHub 第一次 `apply` 之前装载，或者它从未声明。生产方沿 `eventhub/ready` 的路径再次声明，并用同一个 `id` 重试；没有声明的来源仍然是 `unknown_source`，见 2.1。
 - **`lastFailure` 写入失败** 只是诊断问题：投递已经发生，回执不变；内存集合保留旧值，下一次结果改变它的发布会再尝试写入。
 - **订阅文件写入失败** 时内存集合保持原样：变更没有发生，调用回答 `storage`。已经写出指南输入的 `subscribe` 会先按退订的形式撤回它，只为那些它命名、且该分支上没有已存储订阅命名的来源；写不出去的撤回会让那个块留下，由同一来源的下一次创建重写，见 3.3。
@@ -551,3 +553,4 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 - **投递。** `sessions.input` 就是在 `Key<dyn HostDispatch>` 上的一次 `invoke("input", json!([args]))`，见 `crates/dim-agent-scheduler/src/engine.rs:611-633`；回复是 `{inputId, sequence}`，错误码见 [session access A.6](../contracts/session-access.md#a6-错误)。
 - **存储。** 订阅文件使用 `PluginFileTransactions`，即 `dim_app_server::plugin_files::PluginFileTransactions`，见 `crates/dim-agent-scheduler/src/runs.rs:7,221-240`。
 - **Session 部件** 注入 `guideEntries` 与 `toolRegistry`，读取 `sessionIdentity` 与 `sessionConfig`，并在 `apply` 中登记条目，与 Scheduler 的部件相同，见 `crates/dim-agent-scheduler/src/session.rs:147-201`。
+- **TypeScript。** `npm/plugin.d.ts` 在 `sessions` 旁边声明这个服务：`EventHub`(`declare` 与 `publish`)、A.1 与 A.2 的请求和回复类型，以及列出附录 C 全部码的 `EventHubErrorThrown`。TypeScript 行用 `ctx.use<EventHub>('eventHub')` 读取服务，并通过它先声明、再发布。
