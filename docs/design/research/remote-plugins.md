@@ -31,7 +31,7 @@
 
 “远程”是相对客户端或控制面，不等于 daemon 必须在中心。两条拓扑：
 
-| | A 执行机器上跑 daemon | B 中心 daemon + 资源/工具 leaf |
+| | 执行机器上跑 daemon | 中心 daemon + 资源/工具 leaf |
 | --- | --- | --- |
 | exec/FS | 本地 | 跨链数据服务 |
 | 状态 | 中心 PG | 中心 PG |
@@ -39,7 +39,7 @@
 | 适合 | 用户自己的机器、云开发机、容器 | 手机、不能跑 daemon 的托管执行环境 |
 | 代价 | 每台执行机器一个 daemon；Session 由唯一 owner 服务 | 远程 FS 语义、facts 位置、工具形状改造 |
 
-推荐 A：R1/R2 在 A 下就是“在那台机器上执行”，不需要远程 exec/FS；只有执行环境跑不了 daemon 时才做 B 的 leaf。
+推荐执行机器上跑 daemon：R1/R2 就是“在那台机器上执行”，不需要远程 exec/FS；只有执行环境跑不了 daemon 时才做 B 的 leaf。这条拓扑依赖 #1298 的远程 PG；在 #1298 落地前，它不是一个可交付的拓扑。执行机器上每个 daemon 各自拥有自己的 Session；可以有多个 daemon，但一个 Session 只有一个 owner，不是多写者。
 
 ### 存储是独立里程碑（#1298）
 
@@ -51,10 +51,10 @@
 
 - rutis 已经提供“把另一个内核接进来”的机制：一条 `Channel` 上的 `Session`，对面的插件注册为 `<连接行>:<插件>`，两边的进程级服务互相可见，事件是一条总线。Dim 缺的只是连接行、`websocket` 特性、节点内核，以及“每次调用按名字取服务”的调用面。
 - 插件级远程化的单位是 leaf（§4.2）：对端不解析名字，宿主把 key 借给它。TS/Python 插件今天就能这样跑，远程只是把 pipe 换成 websocket；Rust 插件要变成 leaf，先要有 Rust leaf host，且它的依赖必须是可借的数据接口。
-- 跨链的边界很硬：只有**进程作用域**、在 `host_key(name)` 上提供 dispatcher、方法全是 serde、提供者不是平台插件的服务会过去。Session/branch 作用域的名字不过去，句柄、管道和进程树也不过去。因此“把插件整体搬过去”只对进程级插件成立。
+- 跨链的边界很硬：只有**进程作用域**、在 `host_key(name)` 上提供 dispatcher、值能被桥编码（数据、引用/回调、Definition）、提供者不是平台插件的服务会过去。Session/branch 作用域的名字不过去，句柄、管道和进程树也不过去。因此“把插件整体搬过去”只对进程级插件成立。
 - 四个目标：HostPlatform 先把接口改成 wire 形，然后可以搬；exec 同 HostPlatform，另加输出、后台和取消；基础工具是 Session 部件，单独搬不走——要么把操作推到节点，要么把整个 Session 建在节点（§4.1）。存储由 [#1298](https://github.com/arcships/dim/issues/1298) 单独交付（远程 PG），本文不把它作为插件路线的一部分。
 - 进程级服务能不能跨，取决于我们有没有按跨进程写接口（名字 + 数据），不取决于 rutis；实例内的名字能不能跨，取决于实例模型，换写法解决不了。要让部件在远端跑，单位是实例子树加依赖闭包：Session/branch 服务跟实例走，进程级依赖或一起搬、或必须是数据接口（§4.1）。实例级联邦（实例来自 A、子部件来自 B）不是 rutis 0.19 的能力（§4.3）。
-- 推荐拓扑：按状态介质放（§4.4）。DB 状态中心化（#1298），FS/OS 状态留在节点，实例内存随实例；执行位置由 A/B 决定（§4.5）。
+- 推荐拓扑：按状态介质放（§4.4）。DB 状态中心化（#1298），FS/OS 状态留在节点，实例内存随实例；执行位置由部署选择决定（§4.5）。
 - 默认形状（§4.8）：所有公开服务从第一天就是数据形（id + 操作 + 事件），`internal` 是显式例外。这样插件放到哪里是部署决定，不是重写；作者只写一份实现，本地调用仍是类型化直接调用。
 - “本机跑树、状态在服务器”是 §4.4 的组合；它的存储代价属于 #1298，不在这里重复。
 
@@ -112,10 +112,12 @@ flowchart LR
 | 大模块 | 默认 | 可远程形态 |
 | --- | --- | --- |
 | 实例核心（Loop、InputQueue、Permission、ToolExecutor、TimelineTree） | 宿主 | 不远程；热路径与顺序 |
-| 会话工具与方法（Goal、Questions、Recall、BranchTool） | 宿主或 leaf | leaf |
-| Wait | 宿主 | `wait` 有数据面后才可 leaf（§4.9） |
+| 会话工具与方法（Questions、SessionBroadcastEnd） | 宿主或 leaf | leaf |
+| WorkflowSession | leaf | 已经是 TS leaf |
+| Goal、Recall、BranchTool | 宿主 | 需 `tree.info`/`tree.query`、change 写入或 `branchLine` 数据面（§4.2） |
+| Wait | 宿主 | `wait` 有操作面后才可 leaf（§4.9） |
 | 资源（exec、fs、PTY、OCR、MCP） | 资源 leaf | 外部挂载 |
-| 状态（Timeline、目录、设置、授权、文件行） | PG | 远程 store |
+| 状态（Timeline、目录、设置、授权、文件行） | PG | 远程 PG（#1298） |
 | 模型 provider | 宿主或 leaf | 数据服务 |
 | 入口（RPC、Transport、UI） | 宿主/客户端 | 客户端平面 |
 | 插件管理（loader、PluginManager） | 宿主 | 不远程 |
@@ -137,7 +139,7 @@ rutis-bridge 的 `Session::new(channel)` 把一条 `Channel` 的对端接进本�
 | 条件 | 说明 |
 | --- | --- |
 | 进程作用域 | `host_key(name)` 且不在任何实例里；Session/branch 名字不导出 |
-| 有 dispatcher | 该名字上提供了 `dyn HostDispatch`，即方法能以 serde 调用；只有 Rust 类型键的服务不导出 |
+| 有 dispatcher | 该名字上提供了 `dyn HostDispatch`，且 `methods()` 声明了方法；参数/返回值必须是桥能编码的值：serde 数据、引用/回调、Definition。进程句柄、锁和未表示的对象不行 |
 | 提供者不是平台插件 | rutis 自己的桥插件不导出 |
 | 不回流 | 从同一个 session 进来的服务不再发回去 |
 
@@ -255,7 +257,7 @@ read/write/edit/glob/grep 是 WorkspaceTools 这个 Session 部件的代码，�
 
 ### 3.4 数据库/存储
 
-**判定：不适合做成远程服务；状态中心化应该换拓扑，而不是换存储位置。**
+**判定：不是把 SQLite 服务挂到链路上；远程 PG 由 [#1298](https://github.com/arcships/dim/issues/1298) 交付。**
 
 Timeline 不是一块可以搬走的存储：分支内的 `Timeline` 拥有 before 链、sequence、热窗口和发布水位，`TimelineStore` 只是它的下层端口（`crates/dim-agent-runtime/src/timeline_store.rs`）。写入是“一轮事务 + fsync，提交后推进发布水位”，`append` 还带一个同步 `PublishCallback`。
 
@@ -267,17 +269,14 @@ Timeline 不是一块可以搬走的存储：分支内的 `Timeline` 拥有 befo
 - `SessionStore` 不只是 Timeline：session 目录、grants、Session files、快照、fork/delete 的分块事务都在它后面。只把 Timeline 搬走会让状态分裂。
 - 同一个 Session 不存在多节点写：一个 owner、一个 writer。若将来要多写，需要新的所有权与租约，不属于当前设计，也不是插件远程化能回答的问题。
 
-所以：
-
-- 要“状态集中”，把 **App Server 放到存储旁边**，客户端变薄（CLI/TUI/Web 已经这么接）。
-- 要“本机跑树、历史在服务器”，那是**远程 store 端口**的独立设计：先把 `append` 的发布语义、离线语义、SessionStore 的边界写成 ADR，再谈实现。不要从“把 storage 插件挂到远程”开始。
+所以：远程 PG 是 #1298 的存储后端项目；它不是插件远程化的一部分，也不需要把 storage 插件挂到链路上。把 store 端口改成跨链数据接口（`append`/`read`/ack）是另一种做法，但不采用：它把发布语义和网络绑在一起，SessionStore 的其它表也要跟着跨。PG 后端用同一进程内的客户端，不新增链路调用。
 
 ## 4. 拓扑
 
 ```mermaid
 flowchart LR
-  subgraph A["A 中心 daemon"]
-    SA["App Server<br/>Timeline + Session + exec"]
+  subgraph A["A 执行机器上的 daemon"]
+    SA["App Server + exec<br/>连远程 PG"]
   end
   subgraph B["B 本地 daemon + 资源节点"]
     SB["App Server<br/>Timeline + Session"]
@@ -296,9 +295,9 @@ flowchart LR
 
 | 拓扑 | 状态在哪 | exec 在哪 | 需要什么 | 适合 |
 | --- | --- | --- | --- | --- |
-| A 中心 daemon | 服务器 | 服务器 | 今天已有（`dimcode serve` + 客户端） | 云端开发机、团队共享 |
+| A 执行机器上跑 daemon | 远程 PG（#1298） | 执行机器 | daemon + #1298 | 云端开发机、团队共享 |
 | B 本地 daemon + 资源节点 | 本机 | 另一台机器 | link + wire exec/FS + `resourceNode` | 本地历史 + 远端执行 |
-| C 中心 daemon + 本地资源节点 | 服务器 | 用户机器 | A + B | 状态集中 + 本机执行 |
+| C 中心 daemon + 本地资源节点 | 远程 PG（#1298） | 用户机器 | 中心 daemon + 资源 leaf | 状态集中 + 本机执行 |
 
 B/C 里“资源节点”不是“远程插件”的自由市场：每个节点是一个受信的 Dim 内核，按配置提供固定的几类进程级服务；Session 创建时绑定节点，之后每次调用按节点查服务。
 
@@ -326,10 +325,10 @@ B/C 里“资源节点”不是“远程插件”的自由市场：每个节点�
 | --- | --- | --- |
 | 客户端入口 | Rpc 在自己的 `AgentDirectory` 里查 Session | 远端 Session 不在表里；要么客户端直连那个内核，要么控制节点加一个通用调用门 `call(sessionId, namespace, method, args)` |
 | Session 方法 | `sessionMethods` 是实例内的表，按 Session 解析 | 跨内核调不到实例表，只能走上面的调用门 |
-| 状态 | Timeline 在 Session/branch 里 | 跟着实例到节点；要集中就把 `timelineStore` 换成远程 store（§3.4），这是闭包里唯一可以刻意留下的状态依赖 |
+| 状态 | Timeline 在 Session/branch 里 | 跟着实例到节点；要集中就用 #1298 的 PG 后端（§3.4），这是闭包里唯一可以刻意留下的状态依赖 |
 | 生命周期 | 控制节点创建/关闭 Session | 两个内核各自的创建、关闭、重连与恢复；客户端断开不等于 Session 关闭，跨内核同样成立 |
 
-结论：只让 exec/宿主资源在远端，就保留控制节点的 Session，把资源做成数据接口，代价小得多。要让部件在远端跑，就把实例子树连同依赖闭包一起搬，并接受节点是一个完整 daemon、状态跟着实例走；要状态集中，再单独做远程 store。两条路线不要在同一个 Session 上混用。
+结论：只让 exec/宿主资源在远端，就保留控制节点的 Session，把资源做成数据接口，代价小得多。要让部件在远端跑，就把实例子树连同依赖闭包一起搬，并接受节点是一个完整 daemon、状态跟着实例走；要状态集中，再单独做 #1298 的 PG 后端。两条路线不要在同一个 Session 上混用。
 
 ### 4.2 叶子：插件级远程化的单位
 
@@ -347,13 +346,21 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 
 判据除了 inject，还包括 provide：宿主按类型查的服务（`branch.service::<T>()`、`Key<T>`）也算消费者。一个部件提供的服务如果只有 Rust 类型键，leaf 副本无法满足宿主对它的查找。
 
-按依赖和资源位置，Dim 的部件分五档：
+按依赖和资源位置，Dim 的部件分六档。判据不是“inject 全是数据”：
+
+- 每个 `inject` 在 `host_key` 上有 dispatcher；宿主按类型查的服务（`branch.service::<T>()`、`Key<T>`）也算消费者。
+- 部件只能使用 dispatcher 上声明的方法。`#[service(skip)]` 的 `TreeCommands::get`、`branch.service::<BranchLine>()`、`TimelineTree` 的私有方法都不算。
+- 部件不能捕获进程内创建的非服务 Rust 状态（例如 `GoalSession` 的 `Changes`）。
+
+三条同时成立，才可能 leaf。
 
 | 档 | 部件 | 怎么 leaf |
 | --- | --- | --- |
-| 纯逻辑 leaf（今天） | GoalSession、Questions、Recall、BranchTool、SessionBroadcast、SessionBroadcastEnd、TreeTimeline | 依赖可借，且不提供宿主按类型查的服务；移植到 TS/Python 或 Rust leaf host |
-| 提供类型服务，需数据面 | Wait（`wait`）、BranchLine（`branchLine`）、InputQueue（`inputQueue`）、InputMethods（`submitChecks`）、PrepareModelHost（`prepareModelHost`） | 宿主代码用 `branch.service::<T>()` 或 `Key<T>` 查这些服务；先加数据面，或改由宿主自己跑 |
-| 改依赖后可 leaf | GoalBranch（`settingsService` → `settings`）、SessionTitle（`settingsService` → `settings`，`sessionStore` → `sessionMetadata`，`auxiliaryModelHost` → `auxiliaryModel`）、SchedulerSession（`scheduleJobs`）、WorkflowSession（`workflowRuns`）、Attachments（`sessionFiles`）、PromptSuggestion（`modelHost`） | 把 Rust 类型键的注入换成数据面的名字；没有数据面的先加 dispatcher |
+| 已经是 leaf | WorkflowSession | 本来就是 TypeScript，`workflowRuns` 是 `call: async` 数据面；把 runtime 连接换成远程即可 |
+| 纯逻辑 leaf（今天） | Questions、SessionBroadcastEnd | inject 可借，只用 dispatched 方法，且不提供宿主按类型查的服务；移植到 TS/Python 或 Rust leaf host |
+| 用了 skipped/私有 API，需数据面 | Goal（`Changes` 捕获、`TreeCommands::get`、`settings`）、Recall（`get`、`branch.sequence/query`）、BranchTool（`get`、`branch.service::<BranchLine>()`）、TreeTimeline（私有 tree）、SessionBroadcast（内部状态） | 先给 `tree.info`/`tree.query`、`branchLine`、Goal 的 change 写入补数据面，或把这些部件留在宿主 |
+| 提供类型服务，需操作面 | Wait（`wait` 返回 `WaitResult`、收 `CancellationToken`）、BranchLine（`branchLine`）、InputQueue（`inputQueue`）、InputMethods（`submitChecks`）、PrepareModelHost（`prepareModelHost`） | 宿主用 `branch.service::<T>()` 或 `Key<T>` 查；先加操作面/数据面，或改由宿主自己跑 |
+| 换现有数据面后可 leaf | SessionTitle（`settingsService` → `settings`，`sessionStore` → `sessionMetadata`，`auxiliaryModelHost` → `auxiliaryModel`）、SchedulerSession（`scheduleJobs`、`wakeups`）、Attachments（`sessionFilesHost`，目标名 `sessionFiles`）、PromptSuggestion（`modelHost`、`providerConnectionResolver`、`promptSuggestionSettingsHost`） | 把 Rust 类型键的注入换成已有数据面的名字；没有对应数据面的先加 |
 | 资源 leaf | HostPlatform、FileStorage、SqliteStorage、WorkspaceTools、ShellSession、SkillsCatalog、Mcp、Modality、ExternalAgent、PluginManager、RuntimeManager | 在资源所在机器上跑，本地 I/O，对外提供数据服务；现有 Rust 实现放进 Rust leaf host 复用 |
 | 不是 leaf | SessionScope、BranchScope、mounter、SessionLoader、Rpc、Transport、ServerControl、Connection | 它们定义实例和入口，是 leaf 被挂载、被服务的一方 |
 
@@ -361,7 +368,7 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 
 SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件注入 `SettingsService`、`SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）。这四个服务要的操作都已有数据面：`SettingsService` 的 `read_declared`/`register_declared` 是 `settings.read`/`settings.register`，`SessionStore` 的 `metadata`/`set_title` 是 `sessionMetadata.read`/`sessionMetadata.setTitle`，`AuxiliaryModelHost::complete` 是 `auxiliaryModel.complete`（`crates/dim-session-title/src/lib.rs:286`、`:297`、`:368`、`:441`–`:450`）；`PartRegistry::register` 对应跨语言的 `partRegistry.registerDefinition`，其余注入 `sessions`、`sessionIdentity`、`sessionConfig`、`sessionLifecycle`、`sessionMethods` 本来就跨语言。所以它不需要新 dispatcher，只要把这些类型键的调用换成数据面的名字——和 GoalBranch 的 `settingsService` → `settings` 是同一个动作。
 
-“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上依赖全可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。纯逻辑第一批选 Goal、Questions、Recall；Wait 要等 `wait` 有了数据面才能进这一批（§4.9），SessionTitle 要先做依赖替换（`settings`、`sessionMetadata`、`auxiliaryModel`），换完就只剩移植。
+“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。第一批选 Questions、SessionBroadcastEnd；WorkflowSession 已经是一个 TS leaf，可以直接作为第一个远程 leaf 验证；SessionTitle 换完三个名字后进下一批；Wait 要等操作面，Goal/Recall/BranchTool/TreeTimeline/SessionBroadcast 要先补数据面。
 
 ```mermaid
 flowchart LR
@@ -372,7 +379,7 @@ flowchart LR
     S --> M
   end
   subgraph LEAF["leaf 运行时（本机 pipe 或远端 websocket）"]
-    G["部件副本<br/>Goal · Questions · Recall ..."]
+    G["部件副本<br/>Questions · SessionBroadcastEnd<br/>WorkflowSession（TS）"]
     R["资源 leaf<br/>execHost · fsHost · db"]
   end
   M -->|"挂载副本，借 key"| G
@@ -384,17 +391,21 @@ flowchart LR
 ```mermaid
 flowchart TB
   ALL["Dim 部件"] --> KIND{"它需要什么？"}
-  KIND -->|"只依赖可借服务"| PURE["纯逻辑 leaf<br/>GoalSession · Questions · Recall<br/>BranchTool · SessionBroadcast · TreeTimeline"]
-  KIND -->|"提供宿主按类型查的服务"| TYPED["需数据面<br/>Wait · BranchLine · InputQueue<br/>InputMethods · PrepareModelHost"]
-  KIND -->|"一个 Rust-only 数据服务"| FIX["改数据接口后 leaf<br/>GoalBranch · SessionTitle · SchedulerSession<br/>WorkflowSession · Attachments · PromptSuggestion"]
+  KIND -->|"已经是 TS leaf"| ALREADY["已经是 leaf<br/>WorkflowSession<br/>workflowRuns 是数据面"]
+  KIND -->|"inject 可借且只用 dispatched 方法"| PURE["纯逻辑 leaf<br/>Questions · SessionBroadcastEnd"]
+  KIND -->|"用了 skipped/私有 API"| PRIV["需数据面<br/>Goal · Recall · BranchTool<br/>TreeTimeline · SessionBroadcast"]
+  KIND -->|"提供宿主按类型查的服务"| TYPED["需操作面<br/>Wait · BranchLine · InputQueue<br/>InputMethods · PrepareModelHost"]
+  KIND -->|"换现有数据面"| FIX["换名后可 leaf<br/>SessionTitle · SchedulerSession<br/>Attachments · PromptSuggestion"]
   KIND -->|"本机的 FS / 进程 / DB"| RES["资源 leaf<br/>HostPlatform · FileStorage · SqliteStorage<br/>WorkspaceTools · ShellSession · SkillsCatalog<br/>Mcp · Modality · PluginManager"]
   KIND -->|"定义实例或入口"| HOST["不是 leaf<br/>SessionScope · BranchScope · mounter<br/>Rpc · Transport · ServerControl"]
+  ALREADY --> REMOTE["连接换 websocket"]
   PURE --> PORT["移植到 TS/Python<br/>或 Rust leaf host"]
+  PRIV --> PORT
   FIX --> PORT
   RES --> RL["资源 leaf host<br/>本地执行，提供 execHost / fsHost"]
-  PORT --> REMOTE["连接换 websocket"]
+  PORT --> REMOTE
   RL --> REMOTE
-  PURE -.->|"InputQueue 也在这一档"| HOT["能搬，但在每条输入的热路径上<br/>不建议"]
+  TYPED -.->|"InputQueue 在每条输入的热路径上"| HOT["能搬，但不建议"]
 ```
 
 ### 4.3 实例级联邦：现在不支持
@@ -416,25 +427,25 @@ flowchart TB
 
 | 状态 | 例子 | 能否远程 | 放在哪 |
 | --- | --- | --- | --- |
-| DB（可寻址、单写者） | `agent_sessions`、`timeline_events`/`_content`/`_snapshots`/`_branches`、`session_owners`、`session_grants`、`session_metadata`、`session_files` 行（含 `node`）、`settings_documents`、providers、agents、worktree 关联、`session_catalog` | 能，一个写者 | 中央存储；实例的 store 端口按数据调用 |
+| DB（可寻址、单写者） | `agent_sessions`、`timeline_events`/`_content`/`_snapshots`/`_branches`、`session_owners`、`session_grants`、`session_metadata`、`session_files` 行（含 `node`）、`settings_documents`、providers、agents、worktree 关联、`session_catalog` | 能，一个写者 | 远程 PG；App Server 直接连（#1298） |
 | 节点 FS / OS | workspace 与项目文件、Session files 的字节、exec 输出、`pluginFiles`、Skills、provider auth、runtime 下载、PTY 与进程 | 不能（路径、句柄、进程） | 实例所在的节点；依赖它的部件随实例 |
 | 实例内存 | 热窗口、发布水位、InputQueue、Wait、Approval、BackgroundExec、Dispatcher 序列 | 不持久 | 实例所在内核；业务状态按规则从 Timeline 重建 |
 
 四条规则：
 
-1. 部件跑在它的状态介质的地上。DB 支持的部件可以在任何能连到 store 的地方；FS 支持的部件必须在节点；实例内存的部件必须跟实例。
-2. DB 只保留一个写者。远程化是把 store 端口改成数据接口（`append` 的发布回调换成 ack），不是换成多写者数据库。写入轮、fsync、发布水位都建立在单写者上；换成服务器数据库是另一件事。
+1. 部件跑在它的状态介质的地上。DB 状态由 App Server 通过 PG 后端读写，部件仍跟实例；FS 支持的部件必须在节点；实例内存的部件必须跟实例。
+2. DB 只保留一个写者。PG 后端替掉 SQLite 实现，写入轮、发布水位仍在实例内；不是把 store 端口变成跨链调用，也不是换成多写者数据库。
 3. FS 状态分两种：Session 自有（workspace、Session files、exec 输出）随 Session 的节点；Host 自有（插件包、runtime、auth、Skills）随 host。Session 用到 host FS 时，Session 必须在这个 host 上。
 4. 因此一个 Session 只能在它的节点打开。`session_files.node` 就是这个绑定的记录；跨节点打开要搬文件或共享挂载。
 
-结论：接受“FS 部件和实例对齐”，exec/FS 就不需要跨链，唯一跨链的是 DB。架构收敛成“计算节点跑完整实例 + 中央 DB”，比 §3 的远程 exec 数据接口简单。反过来，实例必须留在控制节点（共享一个中央 agent、用户只提供执行帮手）时，才需要 §3 的 wire exec/FS。
+结论：接受“FS 部件和实例对齐”，exec/FS 就不需要跨链；历史由 App Server 直接连 PG（#1298），不经过插件链路。架构收敛成“计算节点跑完整实例 + 远程 PG”。反过来，实例必须留在控制节点（共享一个中央 agent、用户只提供执行帮手）时，才需要 §3 的 wire exec/FS。
 
 远程 DB 必须付的代价：
 
 - 每轮写入一次网络往返；流式输出每秒最多 50 轮的节奏受 RTT 影响。
 - DB 不可达 = 不能提交，不是“该调用失败”。
 - fork/delete 同时改 DB 行和节点上的文件，跨机器后需要两阶段与失败恢复；今天是同一进程里做。
-- 读路径（`query`、`segments`、`page`、`snapshot`）都跨链，事件正文是大对象。
+- 读路径（`query`、`segments`、`page`、`snapshot`）都走网络，事件正文是大对象。
 - `Timeline` 的热窗口与发布水位仍在实例里，store 只搬持久化。
 
 ### 4.5 和“最小资源节点”的关系
@@ -445,11 +456,11 @@ flowchart TB
 | --- | --- | --- |
 | Session 在哪 | 控制节点 | FS 所在节点 |
 | exec/FS | 跨链数据接口 | 本地调用 |
-| DB | 控制节点 | 可远程，一个写者 |
+| DB | 本地 SQLite | 远程 PG（#1298） |
 | 依赖 FS 的部件 | 留在控制节点，调远端 | 随实例 |
 | 节点装配 | 最小内核 | 完整实例闭包 |
 
-两条路线都成立，但一个 Session 不能同时用。§4.4 更简单：不需要为 exec/文件设计跨链接口，只需要把 store 端口做成数据接口；代价是节点上跑完整实例，以及远程 DB 的 RTT 与离线语义。
+两条路线都成立，但一个 Session 不能同时用。§4.4 更简单：不需要为 exec/文件设计跨链接口，只需要把 App Server 连到远程 PG（#1298）；代价是节点上跑完整实例，以及远程 DB 的 RTT 与离线语义。
 
 ### 4.6 资源 leaf 的外部挂载
 
@@ -474,8 +485,8 @@ flowchart TB
 
 盘点对象是 catalog 里的 109 个名字，其中 84 个 Rust-only、25 个跨语言。每个名字按四个问题过：
 
-1. 它要不要跨边界？谁跨：leaf 消费、资源 leaf 提供、远程 store？
-2. 方法是否全是 serde 数据？
+1. 它要不要跨边界？谁跨：leaf 消费、资源 leaf 提供、PG 后端？
+2. 方法是否在 dispatcher 上，且参数/返回值是桥能编码的值（serde 数据、引用/回调、Definition）？
 3. 能不能改形状：拆成操作加 id，状态留在所有者？
 4. 改不了时，所有者是否提供一个数据面（中转）？
 
@@ -499,27 +510,32 @@ flowchart TB
 
 | 插件/部件 | 现状 | 动作 |
 | --- | --- | --- |
-| Goal | Session/branch 数据 | GoalSession 可移植；GoalBranch 的 `settingsService` 换 `settings` |
-| Questions、Recall、BranchTool、SessionBroadcast、TreeTimeline | 数据，且不提供宿主按类型查的服务 | 移植 |
-| SessionTitle | `settingsService`、`sessionStore`、`auxiliaryModelHost` 对象 | 换 `settings`、`sessionMetadata`、`auxiliaryModel`，三个数据面已存在 |
-| Wait、BranchLine、InputQueue、InputMethods、PrepareModelHost | 提供 `wait`/`branchLine`/`inputQueue`/`submitChecks`/`prepareModelHost`，宿主按类型查 | 先加数据面，或改由宿主自己跑 |
-| PromptSuggestion | `modelHost` 对象 | 换 `auxiliaryModel`，或给 model 加 `complete` 数据面 |
-| Scheduler/Workflow 的 Session 部分 | `scheduleJobs`/`workflowRuns` 对象 | 加数据面 |
-| Attachments | `sessionFiles` 对象 | 加数据面 |
-| Web | `managedProviders` 对象 | 加数据面，或留在宿主 |
+| WorkflowSession | 已经是 TypeScript leaf；`workflowRuns` 是 `call: async` 数据面 | 直接作为远程 leaf 验证；不做数据面 |
+| Questions、SessionBroadcastEnd | inject 可借，只用 dispatched 方法 | 移植 |
+| SessionTitle | 三个 Rust 类型键，数据面已存在 | 换 `settings`、`sessionMetadata`、`auxiliaryModel`，再移植 |
+| Goal | `GoalSession` 捕获 `Changes`、调 `TreeCommands::get`（skip）；`GoalBranch` 要 `settingsService` | 给 change 写入、`tree.info`/`tree.query`、`settings` 补数据面，或留宿主 |
+| Recall、BranchTool | `TreeCommands::get`、`branch.sequence/query`、`branch.service::<BranchLine>()` | 补 `tree.info`/`tree.query` 和 `branchLine` 数据面，或留宿主 |
+| TreeTimeline、SessionBroadcast | 私有 tree / 内部状态 | 留宿主，或先设计数据面 |
+| Wait、BranchLine、InputQueue、InputMethods、PrepareModelHost | 提供 `wait`/`branchLine`/`inputQueue`/`submitChecks`/`prepareModelHost`；Wait 收 `CancellationToken`、返回 `WaitResult` | 先加操作面/数据面，或留宿主 |
+| SchedulerSession | `scheduleJobs`、`wakeups` | 加两个数据面 |
+| PromptSuggestion | `modelHost`、`providerConnectionResolver`、`promptSuggestionSettingsHost` | 换 `auxiliaryModel`，其余加数据面或留宿主 |
+| Attachments | `sessionFilesHost`（当前名） | 加数据面；目标名 `sessionFiles` |
+| Web | `managedProviders` | 加数据面，或留在宿主 |
 | Skills、Hooks、ShellInput/ShellSession、WorkspaceTools、Mcp、Modality | 本机 FS/进程 | 资源 leaf |
 | HostPlatform、FileStorage、SqliteStorage | 对象 | 资源 leaf 的数据服务（`execHost`/`fsHost`/`dbHost`） |
 | Loop、ModelProvider、Prompt、ContextPreparation、Permission、Approval、ToolBinding、ToolExecutor、TimelineTree | 实例状态机 | 留宿主 |
 | PluginManager、RuntimeManager、Transport、RemoteGateway、UiHost | 入口/宿主 | 留宿主；客户端走 RPC |
 
-自身 `inject` 全是数据，不等于可 leaf；还要看它 `provide` 的服务能不能被宿主消费。宿主用 `branch.service::<T>()` 或 `Key<T>` 查的服务，不会因为 leaf 提供了同名服务就改用名字查。`wait`、`branchLine`、`inputQueue`、`submitChecks`、`prepareModelHost` 都是这一类：对应部件要先有数据面，或改由宿主自己跑。
+判据还包括只用 dispatched 方法：`TreeCommands::get` 是 `#[service(skip)]`，`BranchLine` 没有 `#[service]`，`TimelineTree` 的方法是私有的，`GoalSession` 的 `Changes` 不是服务。inject 可借不代表这些调用能跨。
 
 顺序：
 
-1. 先改有 leaf 消费者的形状：GoalBranch 的 `settings`、PromptSuggestion 的 model、Scheduler/Workflow、Attachments。
-2. 再定资源 leaf 的数据服务（`execHost`/`fsHost`/`dbHost`），新接口不继承对象形状。
-3. 最后动 store 端口（远程 DB）。
-4. 每改一个形状，catalog 里把它从 Rust-only 变成 `yes`，加对应的 flow 测试。存量可以按接触顺序迁移；新写或重写的服务必须按 §4.8 的默认形状。
+1. WorkflowSession 放到远程 runtime（它已经是 TS leaf，不需要形状改造）。
+2. 移植 Questions、SessionBroadcastEnd。
+3. SessionTitle 换 `settings`、`sessionMetadata`、`auxiliaryModel` 三个名字。
+4. Goal、Recall、BranchTool 补 tree/change 数据面；SchedulerSession、Attachments、PromptSuggestion 补各自数据面。
+5. 资源 leaf；存储见 #1298，不在本路线。
+6. 每改一个形状，catalog 里把它从 Rust-only 变成 `yes`，加对应的 flow 测试；新写或重写的服务必须按 §4.8 的默认形状。
 
 ### 4.8 默认形状：所有 Rust 插件
 
@@ -527,7 +543,7 @@ flowchart TB
 
 服务面的六条：
 
-1. 方法是数据：参数和返回值都是 serde 类型。不出现句柄、`Arc<dyn Trait>`、`&mut`、迭代器、通道、`PathBuf`/`OsString`；路径用字符串或专门的 wire 类型。
+1. 新服务默认是数据：参数和返回值都是 serde 类型。不出现句柄、`Arc<dyn Trait>`、`&mut`、迭代器、通道、`PathBuf`/`OsString`；路径用字符串或专门的 wire 类型。导出规则允许引用/回调（`pluginFiles.open`、`partRegistry.registerDefinition` 是例外），但新服务不要用。
 2. 身份是值：Session、branch、task、file、root、subscription 都是 id。id 由所有者发放，生命周期由所有者定，不能当授权（principles §4 rule 8）。
 3. 操作代替对象：进程是 `start`/`wait`/`kill`/`output`；PTY 是 `shell`/`write`/`resize`/`read`；文件是 `open`/`read`/`write`/`close`；store 是 `append`/`query`/`ack`。对象和句柄留在所有者内部。
 4. 流是事件或订阅：不把 channel 放进签名；大输出分页；回调可以按引用跨语言，但不在 commit 锁里。
@@ -551,7 +567,7 @@ flowchart TB
 - 模板和评审清单加一条：“公开服务的方法只有数据；句柄留在哪一层内部？”
 - `HostPlatform`、`FileStorage`、`SqliteStorage` 作为第一批参照：内部保留对象，公开面换成 id 加操作。
 
-收益：任何插件放到 leaf、资源 leaf 或远程 store，都不需要改契约，只改部署位置；不能搬的插件在 catalog 里是显式的 `internal`。
+收益：任何插件放到 leaf、资源 leaf 或 PG 后端，都不需要改契约，只改部署位置；不能搬的插件在 catalog 里是显式的 `internal`。
 
 ### 4.9 不能跨的，和要改形状的
 
@@ -570,7 +586,8 @@ flowchart TB
 
 | 类型 | 名字 | 改法 |
 | --- | --- | --- |
-| 数据内容、未标记 | `executionSettingsHost`、`toolchainSourceHost`、`sessionFilesHost`、`historyRenderer`、`selectableModelsHost`、`auxiliaryModelHost`、`promptSuggestionSettingsHost`、`worktreeAssociations`、`listenAddresses`、`sessionClientsHost`、`hooksService`、`mcpService`、`skillsCatalog`、`uiExtensions`、`loader`、`agentIndex`、`collaborationDirectory`、`credentialVariablesHost`、`reservedMethods`、`agentConfig`、`collaborationConfig`、`skillsConfig`、`initialPromptConfiguration`、`promptRegistry`、`toolSourcesView`、`faultReporter`、`branchOpening`、`configurationPublisher`、`configureControl`、`fileReads`、`wait`、`branchLine` | 定义 serde 类型加 `#[rutis::service]`，catalog 标 `data`。带回调的（`submitChecks`、`uiExtensions` 的部分方法）回调按引用跨，但不能在锁里同步调用 |
+| 数据内容、未标记 | `executionSettingsHost`、`toolchainSourceHost`、`sessionFilesHost`、`historyRenderer`、`selectableModelsHost`、`auxiliaryModelHost`、`promptSuggestionSettingsHost`、`worktreeAssociations`、`listenAddresses`、`sessionClientsHost`、`hooksService`、`mcpService`、`skillsCatalog`、`uiExtensions`、`loader`、`agentIndex`、`collaborationDirectory`、`credentialVariablesHost`、`reservedMethods`、`agentConfig`、`collaborationConfig`、`skillsConfig`、`initialPromptConfiguration`、`promptRegistry`、`toolSourcesView`、`faultReporter`、`branchOpening`、`configurationPublisher`、`configureControl`、`fileReads` | 定义 serde 类型加 `#[rutis::service]`，catalog 标 `data`。带回调的（`submitChecks`、`uiExtensions` 的部分方法）回调按引用跨，但不能在锁里同步调用 |
+| 操作服务 / 类型面 | `wait`、`branchLine`、`inputQueue`、`submitChecks`、`prepareModelHost` | 先设计操作面（`start`/`wait`/`result`）或留宿主；`wait` 收 `CancellationToken`、返回 `WaitResult`，不是 serde 数据 |
 | 对象→操作 | `hostPlatform`、`fileStorage`、`sqliteStorage`、`sessionStore`、`timelineStore`、`toolHost`、`sessionLoader`、`timelineFactory`、`mcpSession`、`collaborationSession`、`backgroundExec`、`approval`、`permission`、`inputQueue` | 发 id，拆成 `start`/`wait`/`kill`、`open`/`read`/`write`/`close`、`append`/`query`/`ack`、`decide`/`cancel`；实现留在所有者 |
 | 新接口直接按数据设计 | `execHost`、`fsHost`、`dbHost` | 资源 leaf 和远程 DB 不包旧对象，直接定义操作 |
 
@@ -628,7 +645,7 @@ flowchart TB
 ### 阶段 0b：远程 leaf
 
 - 把 Node/Python runtime row 的 `Launcher`（本机 pipe）换成 websocket 连接，或新增一条远程 runtime 行；同一个 Dim 插件在远端 leaf 里跑，它的 Session/branch 部件挂进宿主实例。
-- 先选依赖全是可借服务的插件（例如 Goal、Questions），不要选依赖 `HostPlatform` 或 `SettingsService` 的。
+- 先选 WorkflowSession（它已经是 TS leaf），或移植 Questions、SessionBroadcastEnd；不要选依赖 `HostPlatform` 或 `SettingsService` 的。
 - 这一步不需要 Rust leaf host；Rust 插件另说。
 
 ### 阶段 1：一次性 exec
@@ -674,7 +691,7 @@ flowchart TB
 2. 节点目录部件算不算 ADR 002 D2 禁止的 wiring；如果算，应该把节点配置放在哪个已有的 owner 里。
 3. 每节点服务名是否进 catalog；动态节点如何在“catalog 是契约”的规则下成立。
 4. 远程工具的审批、facts 与结果归属：审批在控制侧，路径语义在节点，谁对 `workspace` 负责。
-5. 是否接受“存储节点离线 = Session 不能提交”；如果不接受，远程 store 方向不成立。
+5. 是否接受“PG 不可达 = Session 不能提交”；#1298 的前提。
 6. 是否把 `spawn_confined` 作为第一个跨链服务（OCR 已经只需要它）。
 7. 是否把 §4.1（Session 建在节点）作为与资源节点并列的备选路线，以及通用 Session 调用门是否值得引入。
 
