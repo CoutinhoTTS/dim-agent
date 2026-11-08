@@ -288,7 +288,7 @@ PluginManager 除 `plugin` 工具外不向模型上下文加入任何自己的�
 - **路径。** 所有为插件动文件系统的操作都用同一条规则：安装（暂存、克隆、改名）、更新、移除和启动时的清理。在任何文件系统改动之前，PluginManager 检查两件事：id（无论是调用方给的，还是取自清单名字）符合 `[a-z0-9_-]{1,64}`，且不是 `builtin` 或 `default`；它将要创建、改名或删除的每个目录，解析后恰好是 `<home>/plugins/.staging/<random>`、`<home>/plugins/.python`、`<home>/plugins/<id>`、`<home>/plugins/<id>/<key>` 或 `<home>/plugins/<id>/<key>+<16 个小写十六进制字符>` 之一（`.staging` 和 `.python` 不可能是 id，因为 id 里没有点）。不带后缀的 `<key>` 只在作为现有记录指名的目录以及清理时才被接受。`.python` 中的 Python 链接只作为链接被替换或删除，从不改动它们指向的内容。检查不通过时，操作以 `invalid_id` 或 `path_outside_plugins` 被拒绝，什么都不改：不建目录、不写 `plugins.json`、不发 loader 命令。本地路径插件自己的目录从不被创建、改名或删除，所以这条规则不适用于它。
 - **进程运行期间不删除任何副本。** install、update、后台重新获取与 remove 都把被替换的目录留在原处；只有启动清理删除没有已安装条目引用的目录，且它在当次启动的任何获取之前运行（§3.1）。因此读过描述的任务所指名的目录会存在到进程退出，即使插件在任务开始后被更新或移除。代价是磁盘：被替换的副本留到下次启动。曾经考虑过来自 Modality 的租约，予以拒绝：Modality 将不得不寻址 PluginManager 的状态，而[原则 §4 第 7 条](../../../architecture/rust-agent/principles.md)禁止这样做；而且崩溃仍然会把副本留给启动清理。
 - 克隆先放到 `<home>/plugins/.staging/<random>`，只有在清单和路径检查通过后才改名放到正式位置。失败时删除暂存目录；启动时删除残留目录，以及没有条目引用的克隆或副本。
-- 插件的依赖只来自它自己的 `package-lock.json`，由 RuntimeManager 在暂存目录中以 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund` 安装，因此不会运行任何包的 lifecycle 脚本，也不会解析锁之外的依赖。registry 遵循 RuntimeManager 的规则（`DIMCODE_NPM_REGISTRY`，然后 `npmRegistries`，§9 R5）。随发行的可选目录从不就地安装，也从不被修改。
+- 插件的依赖只来自它自己的 `package-lock.json`，由 RuntimeManager 在暂存目录中以 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund --workspaces=false` 安装，因此不会运行任何包的 lifecycle 脚本，也不会解析锁之外的依赖。registry 遵循 RuntimeManager 的规则（`DIMCODE_NPM_REGISTRY`，然后 `npmRegistries`，§9 R5）。随发行的可选目录从不就地安装，也从不被修改。
 - 清单中的任何路径在跟随符号链接之后都不能离开插件目录；Git 克隆内指向克隆外部的符号链接被拒绝。
 - `plugins.json` 以原子方式写入（§2.2）。
 
@@ -366,7 +366,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | --- | --- |
 | 阻塞点 | `RuntimeService` 只提供 `list` 与 `install`：PluginManager 无法按插件的锁运行 npm，运行时请求目前只为 Python 的链接存在（[RuntimeManager](RuntimeManager.md) §4、§9 R1），调用方也没有办法在运行 npm 之前等待 Node 的获取。 |
 | 已考虑的现有机制 | PluginManager 自己运行 npm（重复 RuntimeManager 的 registry、包与失败规则；已拒绝）；要求用户先安装 Node（Python 路径已经会请求它的运行时）。 |
-| 通用能力 | 进程 `RuntimeService` 上的 `installPackages(dir, cancel)`：Node 关闭时打开 Node 并用 RuntimeManager 自己的状态等待其获取，然后在 `dir` 内用受管（或 `system`）Node 自带的 npm 按 `dir/package-lock.json` 运行 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund --registry <r>`，registry 依次取自 `DIMCODE_NPM_REGISTRY` 与 `npmRegistries`，npm 退出即返回。错误：Node 无法提供时是带获取原因的 `node_unavailable`，以及 `npm_unavailable`、`install_failed {reason}`、`cancelled`。Python 路径已有的 `install(name)` 请求扩展到 `node`，只用于在 Node 关闭时打开插件的客户端调用，以及可选插件的后台重新获取——从不在启动、所有者打开时的 reconcile、reload 或出厂状态的名字上使用。 |
+| 通用能力 | 进程 `RuntimeService` 上的 `installPackages(dir, cancel)`：Node 关闭时打开 Node 并用 RuntimeManager 自己的状态等待其获取，然后在 `dir` 内用受管（或 `system`）Node 自带的 npm 按 `dir/package-lock.json` 运行 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund --workspaces=false --registry <r>`，registry 依次取自 `DIMCODE_NPM_REGISTRY` 与 `npmRegistries`，npm 退出即返回。错误：Node 无法提供时是带获取原因的 `node_unavailable`，以及 `npm_unavailable`、`install_failed {reason}`、`cancelled`。Python 路径已有的 `install(name)` 请求扩展到 `node`，只用于在 Node 关闭时打开插件的客户端调用，以及可选插件的后台重新获取——从不在启动、所有者打开时的 reconcile、reload 或出厂状态的名字上使用。 |
 | 对顺序、批次、中断、重载的影响 | 对行没有影响：安装在目录改名到位之前完成，被取消或失败的安装会删除该目录。 |
 | 所有者与 issue | RuntimeManager（App Server）；随 #476。 |
 

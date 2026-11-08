@@ -1146,7 +1146,7 @@ async fn install_packages_installs_the_plugins_lock_with_the_nodes_own_npm() {
     let runs = fixture.runs();
     assert_eq!(runs.len(), 1, "npm ran once: {runs:?}");
     let prefix = format!(
-        "{} ci --ignore-scripts --omit=dev --no-audit --no-fund --registry ",
+        "{} ci --ignore-scripts --omit=dev --no-audit --no-fund --workspaces=false --registry ",
         dir.canonicalize().unwrap().display()
     );
     assert!(runs[0].starts_with(&prefix), "{runs:?}");

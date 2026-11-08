@@ -1636,9 +1636,11 @@ async fn npm_ci(plan: &Plan, packages: &Path) -> Result<(), String> {
 
 /// Runs `npm ci` inside `dir` with `plan`'s own npm over `dir`'s lock, trying
 /// each registry in the plan's order, and returns the failures joined when
-/// none succeeds. Both the runtime's own packages (`npm_ci`) and a plugin's
-/// locked dependencies (`RuntimeService::install_packages`) run here; the
-/// caller owns `dir` and `cache`.
+/// none succeeds. `--workspaces=false` keeps npm from walking up to an
+/// ancestor workspace root and making that root its project. Both the
+/// runtime's own packages (`npm_ci`) and a plugin's locked dependencies
+/// (`RuntimeService::install_packages`) run here; the caller owns `dir` and
+/// `cache`.
 async fn install_locked(plan: &Plan, dir: &Path, cache: &Path) -> Result<(), String> {
     let mut errors = Vec::new();
     for registry in &plan.indexes {
@@ -1651,6 +1653,7 @@ async fn install_locked(plan: &Plan, dir: &Path, cache: &Path) -> Result<(), Str
                 "--omit=dev",
                 "--no-audit",
                 "--no-fund",
+                "--workspaces=false",
                 "--registry",
                 registry,
             ])

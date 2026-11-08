@@ -141,7 +141,7 @@ CPU 路径已在 `HostPlatform::spawn_confined` 于 macOS arm64 构建的配置�
 
 ## 7. 安全
 
-- **信任锚。** 插件的 `package-lock.json` 是唯一的包来源，由 RuntimeManager 以 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund` 安装；npm 按 lock 的 `integrity` 校验每个包，且不运行任何 lifecycle 脚本（[RuntimeManager §3.2](RuntimeManager.md#32-获取)、§7）。registry 是 RuntimeManager 的规则；镜像不增加信任。随发行的插件目录从不被修改。
+- **信任锚。** 插件的 `package-lock.json` 是唯一的包来源，由 RuntimeManager 以 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund --workspaces=false` 安装；npm 按 lock 的 `integrity` 校验每个包，且不运行任何 lifecycle 脚本（[RuntimeManager §3.2](RuntimeManager.md#32-获取)、§7）。registry 是 RuntimeManager 的规则；镜像不增加信任。随发行的插件目录从不被修改。
 - **不可信输入。** 输入文档只在受限 helper 中解析。Modality 与 daemon 从不打开它、从不解析它，也从不把它的内容交给其他进程。这是 OCR 作为宿主任务而非适配器的原因（Modality §A.2）。
 - **隔离。** helper 在 `HostPlatform::spawn_confined` 下以 `SystemServices::None` 运行：Node 安装根目录、插件目录与输入可读；任务工作目录可写；无网络。已在 macOS arm64 与 CPU 提供方上测量：工作目录之外不写任何东西——每次运行后目录为空——也不创建 Core ML 缓存。在不提供任何隔离的平台上——Windows，以及没有 `bubblewrap` 的 Linux——helper 无隔离运行，Modality 在任务上记录 `confined: false`（Modality A14）；插件自己不作任何声明，也不做探测。
 - **运行时无下载。** helper 只加载磁盘上已锁定的包。它没有网络，也没有更新器；包缺失或损坏是 `local_runtime_unavailable`。
