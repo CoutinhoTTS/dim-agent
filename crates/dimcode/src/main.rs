@@ -29,6 +29,7 @@ const fn present(value: Option<&'static str>) -> Option<&'static str> {
 fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
     dim_session_title::install(builder);
     dim_agent_scheduler::install(builder);
+    dim_event_hub::install(builder);
     dim_goal::install(builder);
     // The adapter provides `modalityAdapter`; Modality reads it when it starts,
     // so it is added first.

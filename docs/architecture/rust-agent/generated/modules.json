@@ -18940,7 +18940,8 @@
         "path agents::group_row",
         "path agents::register",
         "use agents::AgentIndex",
-        "use agents::AgentsPlugin"
+        "use agents::AgentsPlugin",
+        "use agents::SessionDeleted"
       ]
     },
     {

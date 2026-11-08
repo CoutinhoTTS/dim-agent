@@ -518,6 +518,7 @@ pub fn run_with(
                 .or(config.plugin_files.as_ref())
             {
                 super::create_private_directory(&root.join("scheduler"))?;
+                super::create_private_directory(&root.join("eventhub"))?;
             }
             install(&mut builder);
         } else if mock_model {

@@ -24,6 +24,7 @@ dim-ocr.workspace = true
 dim-modality-aimux.workspace = true
 dim-oauth = { path = "../dim-oauth" }
 dim-agent-scheduler = { path = "../dim-agent-scheduler" }
+dim-event-hub = { path = "../dim-event-hub" }
 dim-agent-runtime.workspace = true
 
 [dev-dependencies]
