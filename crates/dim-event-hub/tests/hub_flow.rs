@@ -1,5 +1,5 @@
-//! The EventHub flows of design Appendix D items 1–6, 8, 9, 10's entry half
-//! and 11, over a real App Server.
+//! The EventHub flows of design Appendix D items 1–6, 8, 9, 10's entry and
+//! tool halves and 11, over a real App Server.
 mod support;
 
 use dim_agent_types::ToolCall;
@@ -719,6 +719,272 @@ async fn the_request_carries_the_marker_entry() {
     server.join().await.unwrap();
 }
 
+/// Appendix D item 10's tool half: the model subscribes through `events`, and
+/// the record names origin `tool`, its own Session and `main`; the guide input
+/// is written and a published event reaches the branch (design A.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_model_subscribes_through_the_tool() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_events_session(&mut client, home.path()).await;
+    producer
+        .declare(im_declaration("The IM guide."))
+        .await
+        .unwrap();
+    model.push(vec![ToolCall {
+        id: "events-1".into(),
+        name: "events".into(),
+        input: json!({"action": "subscribe", "types": ["im.*"], "mode": "steer"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "Follow IM events."}),
+        )
+        .await
+        .unwrap();
+    wait_for("the tool's turn", || model.count() >= 2).await;
+    let texts = model.texts();
+    assert!(texts.contains("subscriptionId"), "{texts}");
+
+    let subscriptions = listed(&mut client, &session).await;
+    assert_eq!(subscriptions.len(), 1, "{subscriptions:?}");
+    let subscription = &subscriptions[0];
+    assert_eq!(subscription["origin"], json!("tool"), "{subscription}");
+    assert_eq!(subscription["mode"], json!("steer"), "{subscription}");
+    assert_eq!(
+        subscription["target"]["sessionId"],
+        json!(session),
+        "{subscription}"
+    );
+    assert_eq!(
+        subscription["target"]["branchId"],
+        json!("main"),
+        "{subscription}"
+    );
+
+    let events = history(&mut client, &session).await;
+    assert!(
+        !inputs(&events, "<dim-event-guide").is_empty(),
+        "the guide input is written"
+    );
+
+    let receipt = producer.publish(im_event("tool-event")).await.unwrap();
+    assert_eq!(
+        delivery_for(&receipt, &session)["status"],
+        json!("delivered"),
+        "{receipt}"
+    );
+    let events = history(&mut client, &session).await;
+    assert!(
+        !inputs(&events, "<dim-event source=\"im\"").is_empty(),
+        "the event reaches the branch"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The tool acts on its own Session only: `list` in A shows none of B's
+/// subscriptions, and A's `unsubscribe` of B's id answers
+/// `subscription_unknown`, leaving B's subscription stored (design A.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_tool_acts_on_its_own_session_only() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let a = create_events_session(&mut client, home.path()).await;
+    let b = create_session(&mut client, home.path()).await;
+    producer
+        .declare(im_declaration("The IM guide."))
+        .await
+        .unwrap();
+    let b_subscription = subscribe(&mut client, &b, vec!["im.*"], None).await;
+
+    // Turn one lists A's subscriptions. A's list result carries no trace of
+    // B's, which no later request can hide.
+    model.push(vec![ToolCall {
+        id: "events-1".into(),
+        name: "events".into(),
+        input: json!({"action": "list"}).as_object().unwrap().clone(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": a, "branchId": "main", "text": "List them."}),
+        )
+        .await
+        .unwrap();
+    wait_for("the list result", || model.count() >= 2).await;
+    assert!(
+        !model.texts().contains(&b_subscription),
+        "A's list shows none of B's subscriptions: {}",
+        model.texts()
+    );
+
+    // Turn two unsubscribes B's id from A.
+    model.push(vec![ToolCall {
+        id: "events-2".into(),
+        name: "events".into(),
+        input: json!({"action": "unsubscribe", "subscriptionId": b_subscription})
+            .as_object()
+            .unwrap()
+            .clone(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": a, "branchId": "main", "text": "Remove it."}),
+        )
+        .await
+        .unwrap();
+    wait_for("the unsubscribe result", || model.count() >= 4).await;
+    let texts = model.texts();
+    assert!(texts.contains("subscription_unknown"), "{texts}");
+    assert_eq!(
+        listed(&mut client, &b).await.len(),
+        1,
+        "B keeps its subscription"
+    );
+    assert!(listed(&mut client, &a).await.is_empty(), "A stores nothing");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A branch the caller's Session never had refuses the subscribe with
+/// `branch_missing`, and nothing is stored (design A.3's creation order).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_the_session_lacks_is_refused() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_events_session(&mut client, home.path()).await;
+    producer
+        .declare(im_declaration("The IM guide."))
+        .await
+        .unwrap();
+    model.push(vec![ToolCall {
+        id: "events-1".into(),
+        name: "events".into(),
+        input: json!({"action": "subscribe", "types": ["im.*"], "branchId": "nope"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "Subscribe there."}),
+        )
+        .await
+        .unwrap();
+    wait_for("the refusal", || model.count() >= 2).await;
+    let texts = model.texts();
+    assert!(texts.contains("branch_missing: "), "{texts}");
+    assert!(
+        listed(&mut client, &session).await.is_empty(),
+        "nothing is stored"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The risk per action on Approval's path (design §7, Appendix D item 10):
+/// `sources` and `list` are admitted under `session`, while `subscribe` and
+/// `unsubscribe` are `persistent_configuration`, which the read-only preset
+/// denies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_tool_declares_its_risk_per_action() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({
+                "cwd": home.path(),
+                "tools": ["read", "branch", "events"],
+                "interactive": true,
+                "permissionPolicy": {
+                    "preset": "read-only",
+                    "allowedTools": [],
+                    "disallowedTools": []
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let session = created["sessionId"].as_str().unwrap().to_owned();
+    producer
+        .declare(im_declaration("The IM guide."))
+        .await
+        .unwrap();
+    for (id, input) in [
+        ("events-1", json!({"action": "sources"})),
+        ("events-2", json!({"action": "list"})),
+        (
+            "events-3",
+            json!({"action": "subscribe", "types": ["im.*"]}),
+        ),
+        (
+            "events-4",
+            json!({"action": "unsubscribe", "subscriptionId": "sub_denied"}),
+        ),
+    ] {
+        model.push(vec![ToolCall {
+            id: id.into(),
+            name: "events".into(),
+            input: input.as_object().unwrap().clone(),
+        }]);
+    }
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "Look around."}),
+        )
+        .await
+        .unwrap();
+    wait_for("the four results", || model.count() >= 5).await;
+    let texts = model.texts();
+    assert!(
+        texts.contains("im.message"),
+        "sources is admitted under session: {texts}"
+    );
+    assert!(
+        texts.contains(r#"{\"subscriptions\":[]}"#),
+        "list is admitted under session: {texts}"
+    );
+    assert!(
+        texts.contains("is not allowed by the read-only preset"),
+        "subscribe is refused under persistent_configuration: {texts}"
+    );
+    assert!(
+        !texts.contains("subscription_unknown"),
+        "unsubscribe is refused before the core: {texts}"
+    );
+    assert!(
+        listed(&mut client, &session).await.is_empty(),
+        "nothing is stored"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Appendix D item 11: without EventHub, a producer's optional read finds
 /// nothing, it publishes nothing, and the host and its Sessions behave as
 /// they do today.
@@ -742,6 +1008,11 @@ async fn the_host_without_event_hub_is_unchanged() {
         .await
         .unwrap();
     wait_for("the turn", || model.count() >= 1).await;
+    let tools = model.tools();
+    assert!(
+        !tools.iter().any(|name| name == "events"),
+        "no request offers an events tool: {tools:?}"
+    );
     let error = client.rpc("eventhub.sources", json!({})).await.unwrap_err();
     assert_eq!(dim_client::app_error(&error), Some("unknown_method"));
 
