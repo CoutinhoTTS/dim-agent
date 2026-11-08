@@ -563,7 +563,9 @@ flowchart TB
 5. 错误是数据：`{code, message}`；转发方原样抛。
 6. 取消是调用：显式 cancel，或调用方丢弃。
 
-例外：`internal` 服务可以保留类型键和对象形状，但不能被跨作用域、跨进程注入；catalog 必须写明原因。`Loop`、`InputQueue`、`Permission` 这种状态机默认 `internal`；将来有 leaf 消费者时，先加数据面，再改标记。
+例外：`internal` 不是“写个原因就行”，它的定义是**这个服务面不能跨语言、跨进程替换**：不能被另一个语言或进程实现，不能被 leaf 提供，也不能借给 leaf 或跨作用域注入。原因只是解释为什么这个面不能数据化（状态机、锁内回调、OS 对象、secret、热路径），是评审依据，不是运行时行为。
+
+它不表示功能不能重写：功能可以在 leaf 里重新实现，但那时它是一个新的数据服务，不是这个 `internal` 服务；同一个进程内也可以换一个 Rust 实现，只要类型契约不变。作用域与它无关：instance-scoped 的 `timeline`/`dispatcher` 是 `data`，process-scoped 的 `hostPlatform` 是 `internal`。`Loop`、`InputQueue`、`Permission` 这种状态机默认 `internal`；将来有 leaf 消费者时，先加数据面，再改标记。
 
 这不是“所有调用都走 JSON”：
 
