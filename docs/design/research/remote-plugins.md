@@ -351,15 +351,17 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 
 | 档 | 部件 | 怎么 leaf |
 | --- | --- | --- |
-| 纯逻辑 leaf（今天） | GoalSession、Questions、SessionTitle、Recall、BranchTool、SessionBroadcast、SessionBroadcastEnd、TreeTimeline | 依赖可借，且不提供宿主按类型查的服务；移植到 TS/Python 或 Rust leaf host |
+| 纯逻辑 leaf（今天） | GoalSession、Questions、Recall、BranchTool、SessionBroadcast、SessionBroadcastEnd、TreeTimeline | 依赖可借，且不提供宿主按类型查的服务；移植到 TS/Python 或 Rust leaf host |
 | 提供类型服务，需数据面 | Wait（`wait`）、BranchLine（`branchLine`）、InputQueue（`inputQueue`）、InputMethods（`submitChecks`）、PrepareModelHost（`prepareModelHost`） | 宿主代码用 `branch.service::<T>()` 或 `Key<T>` 查这些服务；先加数据面，或改由宿主自己跑 |
-| 改依赖后可 leaf | GoalBranch（`settingsService`）、SchedulerSession（`scheduleJobs`）、WorkflowSession（`workflowRuns`）、Attachments（`sessionFiles`）、PromptSuggestion（`modelHost`） | 把那个进程服务改成 `host_key` 上的 dispatcher |
+| 改依赖后可 leaf | GoalBranch（`settingsService`）、SessionTitle（`settingsService`、`sessionStore`、`auxiliaryModelHost`）、SchedulerSession（`scheduleJobs`）、WorkflowSession（`workflowRuns`）、Attachments（`sessionFiles`）、PromptSuggestion（`modelHost`） | 把那个进程服务改成 `host_key` 上的 dispatcher |
 | 资源 leaf | HostPlatform、FileStorage、SqliteStorage、WorkspaceTools、ShellSession、SkillsCatalog、Mcp、Modality、ExternalAgent、PluginManager、RuntimeManager | 在资源所在机器上跑，本地 I/O，对外提供数据服务；现有 Rust 实现放进 Rust leaf host 复用 |
 | 不是 leaf | SessionScope、BranchScope、mounter、SessionLoader、Rpc、Transport、ServerControl、Connection | 它们定义实例和入口，是 leaf 被挂载、被服务的一方 |
 
 之前把“不能借”说成“不能 leaf”是错的：宿主资源能 leaf，只是不能把现有的对象接口借过去。资源 leaf 的代价是它自己实现本地执行（TS/Python 重写，或 Rust leaf host 复用 `HostPlatform`），宿主侧的使用者改成调用它提供的数据服务。
 
-“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上依赖全可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。纯逻辑第一批选 Goal、Questions、SessionTitle、Recall；Wait 要等 `wait` 有了数据面才能进这一批（§4.9）。
+SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件还注入 `SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）；`settingsService`、`sessionStore`、`auxiliaryModelHost` 在 catalog 里都是 Rust-only。它的 `inject` 全是数据，但没有可借入口，所以和 GoalBranch 一起算“改依赖后可 leaf”。
+
+“可 leaf”和“应该 leaf”不是一回事：InputQueue 技术上依赖全可借，但它在每条输入的必经路径上，远程化只增加延迟和失败面。纯逻辑第一批选 Goal、Questions、Recall；Wait 要等 `wait` 有了数据面才能进这一批（§4.9），SessionTitle 要等它那三个进程服务有了 dispatcher。
 
 ```mermaid
 flowchart LR
@@ -370,7 +372,7 @@ flowchart LR
     S --> M
   end
   subgraph LEAF["leaf 运行时（本机 pipe 或远端 websocket）"]
-    G["部件副本<br/>Goal · Questions · SessionTitle<br/>Recall ..."]
+    G["部件副本<br/>Goal · Questions · Recall ..."]
     R["资源 leaf<br/>execHost · fsHost · db"]
   end
   M -->|"挂载副本，借 key"| G
@@ -382,9 +384,9 @@ flowchart LR
 ```mermaid
 flowchart TB
   ALL["Dim 部件"] --> KIND{"它需要什么？"}
-  KIND -->|"只依赖可借服务"| PURE["纯逻辑 leaf<br/>GoalSession · Questions · SessionTitle · Recall<br/>BranchTool · SessionBroadcast · TreeTimeline"]
+  KIND -->|"只依赖可借服务"| PURE["纯逻辑 leaf<br/>GoalSession · Questions · Recall<br/>BranchTool · SessionBroadcast · TreeTimeline"]
   KIND -->|"提供宿主按类型查的服务"| TYPED["需数据面<br/>Wait · BranchLine · InputQueue<br/>InputMethods · PrepareModelHost"]
-  KIND -->|"一个 Rust-only 数据服务"| FIX["改数据接口后 leaf<br/>GoalBranch · SchedulerSession · WorkflowSession<br/>Attachments · PromptSuggestion"]
+  KIND -->|"一个 Rust-only 数据服务"| FIX["改数据接口后 leaf<br/>GoalBranch · SessionTitle · SchedulerSession<br/>WorkflowSession · Attachments · PromptSuggestion"]
   KIND -->|"本机的 FS / 进程 / DB"| RES["资源 leaf<br/>HostPlatform · FileStorage · SqliteStorage<br/>WorkspaceTools · ShellSession · SkillsCatalog<br/>Mcp · Modality · PluginManager"]
   KIND -->|"定义实例或入口"| HOST["不是 leaf<br/>SessionScope · BranchScope · mounter<br/>Rpc · Transport · ServerControl"]
   PURE --> PORT["移植到 TS/Python<br/>或 Rust leaf host"]
@@ -470,7 +472,7 @@ flowchart TB
 
 ### 4.7 形状盘点与中转规则
 
-盘点对象是 catalog 里的 109 个名字，其中 78 个 Rust-only。每个名字按四个问题过：
+盘点对象是 catalog 里的 109 个名字，其中 84 个 Rust-only、25 个跨语言。每个名字按四个问题过：
 
 1. 它要不要跨边界？谁跨：leaf 消费、资源 leaf 提供、远程 store？
 2. 方法是否全是 serde 数据？
@@ -498,7 +500,8 @@ flowchart TB
 | 插件/部件 | 现状 | 动作 |
 | --- | --- | --- |
 | Goal | Session/branch 数据 | GoalSession 可移植；GoalBranch 的 `settingsService` 换 `settings` |
-| Questions、SessionTitle、Recall、BranchTool、SessionBroadcast、TreeTimeline | 数据，且不提供宿主按类型查的服务 | 移植 |
+| Questions、Recall、BranchTool、SessionBroadcast、TreeTimeline | 数据，且不提供宿主按类型查的服务 | 移植 |
+| SessionTitle | `settingsService`、`sessionStore`、`auxiliaryModelHost` 对象 | 换 `settings`，给 store 和 auxiliary model 加数据面 |
 | Wait、BranchLine、InputQueue、InputMethods、PrepareModelHost | 提供 `wait`/`branchLine`/`inputQueue`/`submitChecks`/`prepareModelHost`，宿主按类型查 | 先加数据面，或改由宿主自己跑 |
 | PromptSuggestion | `modelHost` 对象 | 换 `auxiliaryModel`，或给 model 加 `complete` 数据面 |
 | Scheduler/Workflow 的 Session 部分 | `scheduleJobs`/`workflowRuns` 对象 | 加数据面 |
@@ -625,7 +628,7 @@ flowchart TB
 ### 阶段 0b：远程 leaf
 
 - 把 Node/Python runtime row 的 `Launcher`（本机 pipe）换成 websocket 连接，或新增一条远程 runtime 行；同一个 Dim 插件在远端 leaf 里跑，它的 Session/branch 部件挂进宿主实例。
-- 先选依赖全是可借服务的插件（例如 Goal、SessionTitle），不要选依赖 `HostPlatform` 的。
+- 先选依赖全是可借服务的插件（例如 Goal、Questions），不要选依赖 `HostPlatform` 或 `SettingsService` 的。
 - 这一步不需要 Rust leaf host；Rust 插件另说。
 
 ### 阶段 1：一次性 exec
