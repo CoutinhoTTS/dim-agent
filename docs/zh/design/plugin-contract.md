@@ -175,6 +175,8 @@ Dispatcher 和 Timeline 内部使用的总线名字归它们自己；任何部�
 | `settings/projects` | App Server Settings | `{root, cwd}` | 某个项目根已授权 |
 | `skills/catalog` | SkillsCatalog | 目录版本 | Skill 目录已推进 |
 | `agent/session-restored`、`agent/unloaded-session-deleted` | Agents | id | 宿主内部，由 Collaboration 消费 |
+| `agent/session-deleted` | Agents | `{agentId, sessionId}` | 一次成功的删除移除了该 Session 的数据行，无论是否已加载；宿主内部，由 EventHub 消费，见 [EventHub §3.4](plugins/EventHub.md#34-删除一个被订阅的-session) |
+| `eventhub/ready` | EventHub | 无 | 本代的 `eventHub` 服务已提供；生产方据此声明，见 [EventHub §2.1](plugins/EventHub.md#21-来源与类型的目录) |
 
 *现状：*这些事件已按上表实现，TypeScript 行直接监听它们。
 

@@ -56,7 +56,11 @@ A producer declares a source before it publishes anything. The declaration is pr
 | `guide` | at most 4096 bytes: the source's manual for the model, saying what its events mean and how to act on one, for example which tool replies to an IM message |
 | `types` | 1 to 64 entries, each `{type, description, mode}`: `type` is `<source>.<name>` with `name` matching `[a-z][a-z0-9_-]{0,31}`, `description` is at most 512 bytes, and `mode` is the type's default delivery mode |
 
-Nothing about the catalog is stored. After a restart it is exactly the declarations the loaded rows make again, so a source that is not loaded has no types to subscribe to, and a stored subscription outlives its producer (2.2).
+The catalog belongs to the process part's plugin instance, not to one generation of it. A declaration ends only with its producer's row, through the effect registered when it was made, so an EventHub reapply — after a reload of Agents, `pluginFiles`, `managementMethods` or `partRegistry`, or after EventHub is turned off and on — keeps every declaration. A repeated declaration by the same row replaces the guide and types in place: it keeps the declaration's token and registers no second effect, so a producer may declare again on every notice. Another row's source is still `duplicate_source` (A.1).
+
+A producer declares without requiring EventHub. It registers a listener for `eventhub/ready` first and then reads the service; it declares whenever it finds the service, at its own `apply` or on that notice, and declares again when a `publish` answers `unknown_source`. Listening first means a notice emitted between the two steps is not missed; a missed notice only delays the declaration, because the `unknown_source` answer recovers it, as [plugin contract §5.3](../plugin-contract.md#53-bus-events) allows. `eventhub/ready` is announced once every `apply` has provided the service and that provision is readable: a row reads another row's service only while its provider is active, and a part becomes active when its `apply` returns, so the notice comes from a dependent row of the process part, which rutis loads the moment the service is readable (6).
+
+Nothing about the catalog is stored. After a process restart it is exactly the declarations the loaded rows make again, so a source that is not loaded has no types to subscribe to, and a stored subscription outlives its producer (2.2).
 
 ### 2.2 Subscriptions
 
@@ -158,11 +162,15 @@ A subscription is created through `eventhub.subscribe` or the `events` tool. Cre
 2. Writes one `append` input to the target branch for every source the subscription names, submission id `eventhub-guide:<subscriptionId>:<source>`, whose single raw block is `<dim-event-guide source="im">guide</dim-event-guide>` with the key `eventhub:guide:<source>` and `use: live`. The write validates the target: a missing or ended branch, a closed Session or any other `sessions` error refuses the creation and stores nothing; `publication_unknown` is the exception, because it says the input was committed, so the subscription is stored (A.3).
 3. Stores the subscription, with its `origin`: `tool` when the `events` tool asked, `client` when a management method did.
 
+Every `subscribe` and `unsubscribe` holds one EventHub-wide creation lock from its first check to its last guide write or retire. Without it, two changes of one source on one branch can interleave: a subscribe writes its guide, an unsubscribe of the older record removes that record while the new one is not stored yet, retires the key, and then the subscribe stores the new record — a live guide already retired. A creation is a management or tool operation, not a hot path, so one lock is enough. `gone` removals and the deletion notice do not take it, because their branch takes no more input.
+
 The keyed block is replayed after a compaction, so the source's manual stays in context while the branch is subscribed, even across a restart and while the producer is off. A later subscription for a source already live on the branch writes the same key again with the same text, which supersedes the block without changing what the model reads. `append` never starts a turn (`crates/dim-agent-capabilities/src/agent_loop.rs:149-157`, `crates/dim-agent-capabilities/src/input_queue.rs:167-180`).
 
 When the last subscription that names a source on a branch is removed, EventHub removes the record first and then writes one `append` input that retires the key, with the submission id `eventhub-guide-retire:<subscriptionId>:<source>`, the same `<dim-event-guide source="im">` element written with `use: retire` and an empty body, the way Goal retires `goal:state` ([session access A.1](../contracts/session-access.md#a1-the-sessions-service), [Goal](Goal.md) §2). A retire that cannot be written, because the branch or Session is gone, is skipped: the dead branch has no context to clean. A creation that crashes between the two writes leaves one guide block on the branch with no subscription, which the next creation of that source on that branch rewrites with the declaration's current text.
 
 If step 3 fails with `storage`, the process is still running, so EventHub retires the guide input it wrote for each source the failed subscription named that no stored subscription on that branch names, with the same retire form and the submission id `eventhub-guide-retire:<subscriptionId>:<source>` using the failed subscription's id, skips a retire that cannot be written, and then answers `storage` (Appendix C).
+
+A creation refused after it wrote some of its guides — because a later guide write answered another `sessions` error, or the store failed — retires each guide it wrote that no stored subscription on that branch names, with the same retire form and the failed subscription's id, and then answers the refusal. The `storage` case above is one instance of this rule; a two-source subscription whose second guide write fails is another.
 
 The marker entry and the source's guide are different texts. The entry is EventHub's, in the Session's guide, and explains the tag (Appendix A.6). The guide is the producer's, delivered as an input, and holds the source's own words.
 
@@ -206,14 +214,15 @@ The marker is the only channel an event uses. Nothing is injected into a request
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `eventHub` | Process service, no key ([§3.1](../overview.md#31-contract-form)) | `declare`, `publish` for producers; `sources`, `subscribe`, `unsubscribe`, `list` for the Session part and clients |
+| `eventHub` | Process service, no key ([§3.1](../overview.md#31-contract-form)) | `declare` and `publish`, for producers, and nothing else: a producer row must not create or remove another Session's subscriptions, and the management plane is the only authorization for clients (7). The `events` tool and the `eventhub.*` methods call the process part's own subscription core, not the service |
 | `eventhub.sources`, `eventhub.subscriptions`, `eventhub.subscribe`, `eventhub.unsubscribe` | `managementMethods`, namespace `eventhub` | Clients read the catalog and manage any Session's subscriptions |
+| `eventhub/ready` | Process bus event, no key | Tells producers that the `eventHub` service is provided and readable in this generation, so a row that applied before EventHub, or while it was off, declares now (2.1) |
 | `events` | Tool registered with `toolRegistry` (Session) | The model reads the catalog and manages its own Session's subscriptions |
 | `dim-event`, `dim-event-guide` | Raw-block markers written by EventHub | The only model-visible form of an event and of a source's guide |
 
-Names EventHub owns: the marker elements, the key prefix `eventhub:guide:`, the submission ids `eventhub:<source>:<eventId>`, `eventhub-guide:<subscriptionId>:<source>` and `eventhub-guide-retire:<subscriptionId>:<source>`, the storage file `eventhub/subscriptions.json` and the Session file name `event.txt`.
+Names EventHub owns: the marker elements, the key prefix `eventhub:guide:`, the submission ids `eventhub:<source>:<eventId>`, `eventhub-guide:<subscriptionId>:<source>` and `eventhub-guide-retire:<subscriptionId>:<source>`, the storage file `eventhub/subscriptions.json`, the Session file name `event.txt`, and the bus event `eventhub/ready`.
 
-The `eventHub` service is the only name a producer needs, and a producer reads it only if present: `ctx.get` in Node, `ctx.get_at` with the process key in Rust, never an injected dependency ([rutis usage §3.5](../rutis-usage.md#35-how-each-runtime-resolves-a-name), A.3). A producer never requires EventHub, and EventHub depends on no producer.
+The `eventHub` service is the only name a producer needs, and a producer reads it only if present: `ctx.get` in Node, `ctx.get_at` with the process key in Rust, never an injected dependency ([rutis usage §3.5](../rutis-usage.md#35-how-each-runtime-resolves-a-name), A.3). It listens for `eventhub/ready` to learn when to declare (2.1). A producer never requires EventHub, and EventHub depends on no producer.
 
 ## 7. Security
 
@@ -281,7 +290,7 @@ declare { source: "im",
           types: [ { type: "im.message", description: "…", mode: "queue" } ] } -> null
 ```
 
-- The calling row must be resolvable: the `ctx` of a Rust part, the calling row of a bridge call (Appendix F). Another row's source is `duplicate_source`; the same row declaring its source again replaces its own declaration.
+- The calling row must be resolvable: the `ctx` of a Rust part, the calling row of a bridge call (Appendix F). Another row's source is `duplicate_source`. The same row declaring its source again replaces its own declaration in place: it keeps the declaration's token and registers no second effect, so declaring on every `eventhub/ready` adds nothing to the row's effects (2.1).
 - `guide` is at most 4096 bytes; 1 to 64 types; the per-field bounds of 2.1 are `invalid_declaration` beyond them, as is a type outside `<source>.`.
 
 | Code | When |
@@ -386,7 +395,9 @@ The policy sentences are in the entry as registered. They are guidance about how
 | Subscription created while a publish is matching targets | publish matches < subscribe commits | The event is not delivered; the next one is | EventHub |
 | `unsubscribe` during a delivery | delivery admitted < unsubscribe | The input stands and the receipt lists it; the record is removed | EventHub |
 | Two subscriptions match one branch | — | One delivery; the strongest effective mode (`steer` over `queue` over `append`); `subscriptionIds` lists both | EventHub |
-| Two subscription changes at once | — | Both serialize under the file lock; each replaces the in-memory set after its write | EventHub |
+| Two subscription changes at once | — | `subscribe` and `unsubscribe` serialize under the creation lock (3.3); every store change serializes under the file lock and replaces the in-memory set after its write | EventHub |
+| A `subscribe` and an `unsubscribe` of one source on one branch | — | The creation lock makes them sequential: the unsubscribe's still-named check sees the stored subscription, so it does not retire the guide the subscribe wrote | EventHub |
+| A creation refused after some guide writes | — | It retires the guides it wrote that no stored subscription on that branch names, then answers the refusal; nothing is stored | EventHub |
 | A publish's `lastFailure` transaction fails | deliveries settle < transaction | The receipt stands, the in-memory set keeps its old `lastFailure`, and the next publish whose outcome changes it writes again | EventHub |
 | Publish to an ended branch | — | `gone: branch_ended`; each listed subscription is removed | EventHub |
 | Publish to a branch that does not exist | — | `gone: branch_missing`; each listed subscription is removed | EventHub |
@@ -400,8 +411,11 @@ The policy sentences are in the entry as registered. They are guidance about how
 | Delivered input withdrawn while held | input < `input/withdraw`, no `input/applied` | `input/deleted`; EventHub never learns; the receipt already said `delivered` | InputQueue |
 | Delivered input after apply | `input/applied` < withdraw | `notHeld`; the input is consumed normally | InputQueue |
 | Publish over many cold targets | — | At most eight deliveries run at a time; the rest wait | EventHub |
-| EventHub reloads during a publish | — | The call fails; an input already admitted is still written and its receipt is lost; a retry with the same `id` is idempotent; the next apply reads the subscription set from its file | EventHub |
-| EventHub is off | — | Producers read no service and publish nothing; stored subscriptions stay and deliver again once it is back | Producer, EventHub |
+| EventHub reloads during a publish | — | The call fails; an input already admitted is still written and its receipt is lost; a retry with the same `id` is idempotent; the next apply reads the subscription set from its file and keeps every declaration | EventHub |
+| EventHub reapplies after a dependency reload, or is turned off and on | — | The catalog belongs to the plugin instance, so every declaration stays; the service is provided again, and `eventhub/ready` is announced once it is readable | EventHub |
+| A producer applied before EventHub, or while it was off | — | It found no service; on `eventhub/ready` it declares, and its events arrive | Producer |
+| A repeated declaration by the same row | — | It replaces the guide and types in place and keeps its token, so the row gains no effect | EventHub |
+| EventHub is off | — | Producers read no service and publish nothing; stored subscriptions stay and deliver again once it is back, and its `eventhub/ready` tells producers to declare again | Producer, EventHub |
 | EventHub part fails to start | — | Producers read no service; the last `eventhub.*` calls report the row's status | EventHub |
 | Producer unloads with subscriptions live | — | The catalog loses its declaration; stored subscriptions stay, and their events stop arriving until a producer declares again | EventHub |
 | Two creators race the last subscription slot | — | One creation succeeds and one is `limit_reached`, decided under the store's lock | EventHub |
@@ -428,9 +442,10 @@ Recovery:
 
 - **A lost `subscribe` reply** leaves the subscription recorded or not; the caller reads `eventhub.subscriptions` to find out. A repeated `subscribe` is a new subscription, not an idempotent one, so a client that is unsure reads first.
 - **A lost `publish` reply** is resolved by republishing with the same `id`: the branch accepts it once and the reply is the first input's receipt.
+- **An `unknown_source` answer** means the calling row holds no declaration: it applied before EventHub, EventHub has reapplied since it declared, or it never declared. The producer declares again on the `eventhub/ready` path and retries with the same `id`; a source that is not declared stays `unknown_source` (2.1).
 - **A failed `lastFailure` write** is diagnostic only: the delivery already happened and the receipt is unchanged; the in-memory set keeps the old value, so the next publish whose outcome changes it attempts the write again.
 - **A failed subscription-file write** leaves the in-memory set as it was: the change did not happen and its call answers `storage`. A `subscribe` whose guide input was already written retires it first, for every source it named that no stored subscription on that branch names, with the unsubscribe form; a retire that cannot be written leaves its block for the next creation of that source to rewrite (3.3).
-- **An EventHub restart** rebuilds the catalog from the loaded rows and reads the subscriptions from its file when it applies. In-memory delivery state is gone with the process, which is why none is kept.
+- **An EventHub restart** rebuilds the catalog from the loaded rows and reads the subscriptions from its file when it applies; a reapply of the part keeps the catalog, because it belongs to the plugin instance (2.1). In-memory delivery state is gone with the process, which is why none is kept.
 - **A corrupt subscription file** fails the part and preserves the bytes; the operator repairs or removes the file, and EventHub reads again on its next load.
 
 ## Appendix D. Acceptance
@@ -443,11 +458,12 @@ The implementation's flow tests cover:
 4. A delivery to an unloaded Session restores it and is `delivered`; a delivery to an ended branch is `gone: branch_ended` and removes each listed subscription; a delivery to a Session closed with rows is `failed: session_closed` and keeps each listed subscription, with `lastFailure` visible in `eventhub.subscriptions`; one publish's `lastFailure` changes land in one transaction.
 5. A body over 5120 bytes stores one Session file per target Session, the marker carries `file` and `bytes`, the model's read of that path returns the whole body, and a host without `sessionFiles` reports `truncated: true`.
 6. Subscribing writes the guide input with the key `eventhub:guide:<source>`, the key survives compaction, the last unsubscribe of that source on that branch retires it with an empty guide, and a subscribe naming an ended branch is refused and stores nothing; a `subscribe` whose subscription-file write fails retires the guide it wrote before it answers `storage`.
-7. `eventhub.sources`, `eventhub.subscriptions`, `eventhub.subscribe` and `eventhub.unsubscribe` work over the management plane and are absent on a connection with a `deviceId`; the 32-per-Session and 1024 limits answer `limit_reached`.
+7. `eventhub.sources`, `eventhub.subscriptions`, `eventhub.subscribe` and `eventhub.unsubscribe` are management methods, reachable only through an entry that admits management methods: they are not in the web entry's `WEB_MANAGEMENT_METHODS` (`crates/dim-app-server/src/protocol.rs:194`), and a protected bare entry answers `local_transport_required` (`crates/dim-app-server/src/connection.rs:533-542`). The 32-per-Session and 1024 limits answer `limit_reached`.
 8. A declared type is required to subscribe and to publish (`unknown_type`); another row's source is `duplicate_source`; a source that unloads loses its types while stored subscriptions remain.
 9. Deleting a target Session removes its subscriptions through `agent/session-deleted` whether it was loaded or unloaded, and a missed notice leaves a subscription that fails `session_closed` and shows its failure.
 10. The `events` tool's `subscribe` and `unsubscribe` calls are admitted under `persistent_configuration` and `sources` and `list` under `session`; the tool refuses another Session's `subscriptionId`, and a request carrying the `dim-event` marker carries the order-130 entry with its trust-class, no-answer and reply-tool sentences ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)).
 11. With EventHub not installed, a producer's optional read finds nothing, it publishes nothing, and the host and its Sessions behave as they do today.
+12. An EventHub reload keeps the sources: a declared source is still delivered to after the `eventhub` row restarts, without a new declaration. A producer that applied before EventHub declares on `eventhub/ready`, and its events arrive.
 
 ## Appendix E. Assumptions and open questions
 
@@ -466,6 +482,7 @@ The contract is §6, A.1 to A.4; this section is its spelling ([rutis usage appe
 - **The service.** `EventHub` is a Rust type whose name is `eventHub` (`names::name_of`, `crates/dim-agent-runtime/src/names.rs:24-53`), registered at the process by its install function (`names::register::<EventHub>(builder.catalog_mut(), None)`, `crates/dim-agent-runtime/src/names.rs:63-89`, as Scheduler registers its names at `crates/dim-agent-scheduler/src/lib.rs:70-71`). The process part provides it at `names.key::<EventHub>()` for Rust callers and a `HostDispatch` at `host_key("eventHub")` for other languages, the form `guideEntries` uses (`crates/dim-agent-capabilities/src/prompt_guide.rs:376-382`).
 - **Identity.** `declare` and `publish` take the caller's `ctx`: `EventHub::declare(&self, ctx: &Ctx, request)`. The dispatch reads `rutis_bridge::session::caller_row()` inside `invoke` and uses that row's context, as `ForeignGuideEntries` does (`crates/dim-agent-capabilities/src/prompt_guide.rs:266-298`); a call with no row is `no_caller_row`. The declaration is registered as an effect of the caller's context, so it ends with that row.
 - **An optional read.** A producer keeps `Key<EventHub>` and reads it per call with `ctx.get_at(&key)`, which answers `None` while EventHub is not installed, Pending or reloading, so the dependency gates nothing ([rutis usage A.3](../rutis-usage.md#a3-settled-questions)). The same pattern reads `sessionFiles` (`Key<SessionFilesHost>`, `crates/dim-agent-capabilities/src/host.rs:1002-1038`) and `sessions` (`Key<dyn HostDispatch>` at `host_key("sessions")`, `crates/dim-agent-scheduler/src/methods.rs:44,56`).
+- **The declaration notice.** A producer listens before it reads: `ctx.listen::<dim_event_hub::Ready>()`, the public `Event` whose name is `eventhub/ready`, then `ctx.get_at(&key)`; on the notice it reads the key again and declares (2.1). The listener holds a type, not a running EventHub, so a producer that applied before EventHub still hears the first `apply` that provides it. The notice comes from a dependent row of the process part, not from inside its `apply`: a part's services are readable to other rows only while the part is active, and a part becomes active when its `apply` returns. Declaring on every notice adds no effect, because a repeated declaration replaces in place (A.1).
 - **Delivery.** `sessions.input` is one `invoke("input", json!([args]))` over `Key<dyn HostDispatch>` (`crates/dim-agent-scheduler/src/engine.rs:611-633`); the reply is `{inputId, sequence}` and the error codes are [session access A.6](../contracts/session-access.md#a6-errors).
 - **Storage.** The subscription file uses `PluginFileTransactions` (`dim_app_server::plugin_files::PluginFileTransactions`, `crates/dim-agent-scheduler/src/runs.rs:7,221-240`).
 - **The Session part** injects `guideEntries` and `toolRegistry` and reads `sessionIdentity` and `sessionConfig`, registering the entry from `apply` as Scheduler's part does (`crates/dim-agent-scheduler/src/session.rs:147-201`).
