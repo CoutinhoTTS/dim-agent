@@ -229,6 +229,9 @@ def parse_reply(text: str) -> dict:
     reply = json.loads(text[start:end + 1])
     if reply.get("category") not in CATEGORIES:
         raise ValueError(f"unknown category {reply.get('category')!r}")
+    for key in ("agent_gap", "improvement"):
+        value = reply.get(key)
+        reply[key] = value.strip() if isinstance(value, str) else ""
     return reply
 
 
@@ -311,7 +314,8 @@ def analyze(run_dir: Path, repo: Path, known: dict,
             gap = reply.get("agent_gap") or ""
             failure.agent_gap = gap
             failure.improvement = (
-                "" if gap.lower().startswith("not visible") else (reply.get("improvement") or "")
+                "" if not gap or gap.lower().startswith("not visible")
+                else (reply.get("improvement") or "")
             )
         failure.suspects = [s for s in reply.get("suspects") or [] if s.get("pr") in names]
         failure.known = bool(previous) and reply.get("same_as_known") is True

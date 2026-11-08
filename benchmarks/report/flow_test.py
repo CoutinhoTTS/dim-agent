@@ -326,6 +326,15 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertEqual(done, ["opened #1 (frontier/tracking)"])
         self.assertIn(issues.TRACKING_LABEL, self.github.issues[1]["labels"])
 
+    def test_non_string_agent_fields_do_not_break_the_night(self) -> None:
+        bad = {"category": "agent", "cause": "Wrong.", "evidence": "x",
+               "agent_gap": ["not", "a", "string"],
+               "improvement": {"also": "wrong"},
+               "same_as_known": False, "suspects": []}
+        failures, _, _, _ = self.night({"regex": 0.0}, {"regex": bad}, {})
+        self.assertEqual(failures[0].agent_gap, "")
+        self.assertEqual(failures[0].improvement, "")
+
     def test_the_issue_lives_for_one_window_of_tracked_failures(self) -> None:
         baseline = {"a": 1, "b": 1, "c": 1, "d": 1, "hard": 0}
         replies = {t: {"category": "agent", "cause": f"{t} broke.", "evidence": "x",
