@@ -9,6 +9,24 @@ const defaults = path.join(repo, 'runtime/default-plugins.json');
 const { plugins, optional = {} } = JSON.parse(readFileSync(defaults, 'utf8'));
 const collisions = Object.keys(optional).filter((name) => Object.hasOwn(plugins, name));
 assert.equal(collisions.length, 0, `A name cannot be in both "plugins" and "optional": ${collisions.join(', ')}`);
+/** True when `candidate` lies strictly inside `parent`. */
+const within = (parent, candidate) => {
+  const relative = path.relative(parent, candidate);
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+};
+const locations = [...Object.entries(plugins), ...Object.entries(optional)]
+  .map(([name, relative]) => {
+    const directory = path.resolve(path.join(path.dirname(defaults), relative));
+    return { name, relative, folded: directory.toLowerCase() };
+  });
+for (let first = 0; first < locations.length; first += 1) {
+  for (let second = first + 1; second < locations.length; second += 1) {
+    const a = locations[first];
+    const b = locations[second];
+    assert(!(a.folded === b.folded || within(a.folded, b.folded) || within(b.folded, a.folded)),
+    `Two plugins cannot stage into overlapping directories: ${a.name} (${a.relative}) and ${b.name} (${b.relative})`);
+  }
+}
 const shipped = { ...plugins, ...optional };
 const optionalNames = new Set(Object.keys(optional));
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -68,12 +86,6 @@ const assertPortable = () => {
       throw new Error(`The default plugin ${name} is not portable: package ${platform[0]}`);
     }
   }
-};
-
-/** True when `candidate` lies strictly inside `parent`. */
-const within = (parent, candidate) => {
-  const relative = path.relative(parent, candidate);
-  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 };
 
 /** True when a current plugin directory equals, sits inside, or contains `directory`. */
